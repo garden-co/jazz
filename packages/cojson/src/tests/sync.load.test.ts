@@ -681,48 +681,6 @@ describe("loading coValues from server", () => {
     vi.useRealTimers();
   });
 
-  test("should timeout when peer replies KNOWN header=true but never sends content", async () => {
-    vi.useFakeTimers();
-    TEST_NODE_CONFIG.withAsyncPeers = false; // Keep timing deterministic with fake timers
-
-    const client = setupTestNode();
-    const { peerOnServer } = client.connectToSyncServer({
-      persistent: true,
-    });
-
-    const group = jazzCloud.node.createGroup();
-    group.addMember("everyone", "writer");
-    const map = group.createMap({
-      test: "value",
-    });
-
-    const originalPush = peerOnServer.outgoing.push;
-    peerOnServer.outgoing.push = async (msg) => {
-      if (
-        typeof msg === "object" &&
-        msg.action === "content" &&
-        msg.id === map.id
-      ) {
-        const knownMsg: CojsonInternalTypes.KnownStateMessage = {
-          action: "known",
-          id: map.id,
-          header: true,
-          sessions: map.core.knownState().sessions,
-        };
-        return originalPush.call(peerOnServer.outgoing, knownMsg);
-      }
-
-      return originalPush.call(peerOnServer.outgoing, msg);
-    };
-
-    const loadPromise = client.node.load(map.id, true);
-    await vi.advanceTimersByTimeAsync(CO_VALUE_LOADING_CONFIG.TIMEOUT + 10);
-
-    await expect(loadPromise).resolves.toBe("unavailable");
-
-    vi.useRealTimers();
-  });
-
   test("should handle reconnections in the middle of a load with a persistent peer", async () => {
     TEST_NODE_CONFIG.withAsyncPeers = false; // To avoid flakiness
 

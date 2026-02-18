@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   CO_VALUE_LOADING_CONFIG,
+  GARBAGE_COLLECTOR_CONFIG,
+  setGarbageCollectorMaxAge,
   setMaxInFlightLoadsPerPeer,
 } from "../config.js";
 import {
@@ -19,6 +21,7 @@ let jazzCloud: ReturnType<typeof setupTestNode>;
 // Store original config values
 let originalMaxInFlightLoads: number;
 let originalTimeout: number;
+let originalGarbageCollectorMaxAge: number;
 
 beforeEach(async () => {
   // We want to simulate a real world communication that happens asynchronously
@@ -27,6 +30,7 @@ beforeEach(async () => {
   originalMaxInFlightLoads =
     CO_VALUE_LOADING_CONFIG.MAX_IN_FLIGHT_LOADS_PER_PEER;
   originalTimeout = CO_VALUE_LOADING_CONFIG.TIMEOUT;
+  originalGarbageCollectorMaxAge = GARBAGE_COLLECTOR_CONFIG.MAX_AGE;
 
   SyncMessagesLog.clear();
   jazzCloud = setupTestNode({ isSyncServer: true });
@@ -36,6 +40,7 @@ afterEach(() => {
   // Restore original config
   setMaxInFlightLoadsPerPeer(originalMaxInFlightLoads);
   CO_VALUE_LOADING_CONFIG.TIMEOUT = originalTimeout;
+  setGarbageCollectorMaxAge(originalGarbageCollectorMaxAge);
   vi.useRealTimers();
 });
 
@@ -728,5 +733,409 @@ describe("concurrent load", () => {
         "client -> server | KNOWN B sessions: header/1",
       ]
     `);
+  });
+
+  test("should consider garbageCollected load requests processed when server replies with KNOWN", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+    setGarbageCollectorMaxAge(-1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    client.addStorage({ ourName: "client" });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    const { peerState } = client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // Disconnect and GC so the node keeps only garbageCollected shells with cached knownState.
+    peerState.gracefulShutdown();
+    client.node.garbageCollector?.collect();
+    client.node.garbageCollector?.collect();
+
+    const gcGroup = client.node.getCoValue(group.id);
+    const gcMap1 = client.node.getCoValue(map1.id);
+    const gcMap2 = client.node.getCoValue(map2.id);
+
+    expect(gcGroup.loadingState).toBe("garbageCollected");
+    expect(gcMap1.loadingState).toBe("garbageCollected");
+    expect(gcMap2.loadingState).toBe("garbageCollected");
+
+    SyncMessagesLog.clear();
+
+    client.connectToSyncServer();
+
+    await waitFor(() => {
+      const messages = SyncMessagesLog.getMessages({
+        Group: gcGroup,
+        Map1: gcMap1,
+        Map2: gcMap2,
+      });
+
+      expect(messages).toMatchInlineSnapshot(`
+        [
+          "client -> server | LOAD Group sessions: header/4",
+          "server -> client | KNOWN Group sessions: header/4",
+          "client -> server | LOAD Map1 sessions: header/1",
+          "server -> client | KNOWN Map1 sessions: header/1",
+          "client -> server | LOAD Map2 sessions: header/1",
+          "server -> client | KNOWN Map2 sessions: header/1",
+        ]
+      `);
+      return true;
+    });
+
+    // Create a new group to test that the load queue is now empty
+    const groupToTestTheLoadQueue = await loadCoValueOrFail(
+      client.node,
+      jazzCloud.node.createGroup().id,
+    );
+    expect(groupToTestTheLoadQueue.core.isAvailable()).toBe(true);
+  });
+
+  test("should load garbageCollected CoValues when receiving KNOWN from a peer", async () => {
+    setGarbageCollectorMaxAge(-1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    client.addStorage({ ourName: "client" });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value", "trusting");
+
+    client.node.garbageCollector?.collect();
+    client.node.garbageCollector?.collect();
+
+    const gcMap = client.node.getCoValue(map.id);
+    expect(gcMap.loadingState).toBe("garbageCollected");
+
+    const { peerState } = client.connectToSyncServer({
+      skipReconciliation: true,
+    });
+
+    const loadSpy = vi.spyOn(client.node, "loadCoValueCore");
+
+    client.node.syncManager.handleKnownState(
+      {
+        action: "known",
+        id: map.id,
+        header: false,
+        sessions: {},
+      },
+      peerState,
+    );
+
+    expect(loadSpy).toHaveBeenCalledWith(map.id);
+
+    loadSpy.mockRestore();
+  });
+
+  test("should consider onlyKnownState load requests processed when server replies with KNOWN", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { storage } = client.addStorage({ ourName: "client" });
+
+    const group = client.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    const { peerState } = client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+    peerState.gracefulShutdown();
+
+    await client.restart();
+    client.addStorage({ storage });
+
+    const onlyKnownGroup = client.node.getCoValue(group.id);
+    const onlyKnownMap1 = client.node.getCoValue(map1.id);
+    const onlyKnownMap2 = client.node.getCoValue(map2.id);
+
+    await Promise.all([
+      new Promise<void>((resolve) =>
+        onlyKnownGroup.getKnownStateFromStorage(() => resolve()),
+      ),
+      new Promise<void>((resolve) =>
+        onlyKnownMap1.getKnownStateFromStorage(() => resolve()),
+      ),
+      new Promise<void>((resolve) =>
+        onlyKnownMap2.getKnownStateFromStorage(() => resolve()),
+      ),
+    ]);
+
+    expect(onlyKnownGroup.loadingState).toBe("onlyKnownState");
+    expect(onlyKnownMap1.loadingState).toBe("onlyKnownState");
+    expect(onlyKnownMap2.loadingState).toBe("onlyKnownState");
+
+    SyncMessagesLog.clear();
+
+    client.connectToSyncServer();
+
+    await waitFor(() => {
+      const messages = SyncMessagesLog.getMessages({
+        Group: onlyKnownGroup,
+        Map1: onlyKnownMap1,
+        Map2: onlyKnownMap2,
+      });
+
+      expect(messages).toMatchInlineSnapshot(`
+        [
+          "client -> server | LOAD Group sessions: header/4",
+          "server -> client | KNOWN Group sessions: header/4",
+          "client -> server | LOAD Map1 sessions: header/1",
+          "server -> client | KNOWN Map1 sessions: header/1",
+          "client -> server | LOAD Map2 sessions: header/1",
+          "server -> client | KNOWN Map2 sessions: header/1",
+        ]
+      `);
+      return true;
+    });
+
+    // Create a new group to test that the load queue is now empty
+    const groupToTestTheLoadQueue = await loadCoValueOrFail(
+      client.node,
+      jazzCloud.node.createGroup().id,
+    );
+    expect(groupToTestTheLoadQueue.core.isAvailable()).toBe(true);
+  });
+
+  test("should keep onlyKnownState while peer load is pending and KNOWN replies arrive", async () => {
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { storage } = client.addStorage({ ourName: "client" });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value", "trusting");
+
+    const initialConnection = client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+    initialConnection.peerState.gracefulShutdown();
+
+    await client.restart();
+    client.addStorage({ storage });
+
+    const onlyKnownMap = client.node.getCoValue(map.id);
+    await new Promise<void>((resolve) =>
+      onlyKnownMap.getKnownStateFromStorage(() => resolve()),
+    );
+    expect(onlyKnownMap.loadingState).toBe("onlyKnownState");
+
+    // Force explicit loads to use peers (not local full-content storage).
+    vi.spyOn(storage, "load").mockImplementation(
+      async (_id: unknown, _cb: unknown, done: (result: boolean) => void) =>
+        done(false),
+    );
+
+    const { peerState } = client.connectToSyncServer({
+      skipReconciliation: true,
+    });
+
+    SyncMessagesLog.clear();
+
+    onlyKnownMap.load([peerState]);
+
+    await waitFor(() => {
+      const messages = SyncMessagesLog.getMessages({
+        Group: client.node.getCoValue(group.id),
+        Map: onlyKnownMap,
+      });
+
+      expect(messages).toContain(
+        "client -> server | LOAD Map sessions: header/1",
+      );
+      expect(messages).toContain(
+        "server -> client | KNOWN Map sessions: header/1",
+      );
+      return true;
+    });
+
+    expect(onlyKnownMap.getLoadingStateForPeer(peerState.id)).toBe("pending");
+    expect(onlyKnownMap.loadingState).toBe("onlyKnownState");
+  });
+
+  /**
+   * This test covers the case where the client is streaming a value from storage and since the value is already on the server
+   * the server sends only a KNOWN message.
+   *
+   * Without a specialized logic the value results inStreaming and the "load" would be considered in-flight indefinitely.
+   */
+  test("should process queued loads when KNOWN arrives while first CoValue is streaming from storage", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: true,
+    });
+    const { storage } = await client.addAsyncStorage({ ourName: "client" });
+
+    const group = jazzCloud.node.createGroup();
+    const streamingMap = group.createMap();
+    fillCoMapWithLargeData(streamingMap);
+
+    const queuedMap = group.createMap();
+    queuedMap.set("key", "value", "trusting");
+
+    const mapOnClient = await loadCoValueOrFail(client.node, streamingMap.id);
+    await mapOnClient.core.waitForFullStreaming();
+
+    await client.restart();
+    client.addStorage({ storage });
+    client.connectToSyncServer();
+
+    SyncMessagesLog.clear();
+
+    const originalLoad = storage.load.bind(storage);
+    let firstChunk = true;
+    const pausedOps: (() => void)[] = [];
+
+    vi.spyOn(storage, "load").mockImplementation(async (id, callback, done) => {
+      if (id !== streamingMap.id) {
+        return originalLoad(id, callback, done);
+      }
+
+      return originalLoad(
+        id,
+        (chunk) => {
+          if (firstChunk) {
+            firstChunk = false;
+            callback(chunk);
+          } else {
+            pausedOps.push(() => callback(chunk));
+          }
+        },
+        (found) => {
+          pausedOps.push(() => done(found));
+        },
+      );
+    });
+
+    const streamingMapOnClientPromise = client.node.loadCoValueCore(
+      streamingMap.id,
+    );
+
+    await waitFor(() => {
+      expect(firstChunk).toBe(false);
+    });
+
+    const queuedMapOnClient = await client.node.loadCoValueCore(queuedMap.id);
+
+    expect(queuedMapOnClient.isAvailable()).toBe(true);
+
+    for (const op of pausedOps) {
+      op();
+    }
+
+    const streamingMapOnClient = await streamingMapOnClientPromise;
+    expect(streamingMapOnClient.isStreaming()).toBe(false);
+  });
+
+  test("should process queued loads when CoValue instance changes while in-flight", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { storage } = client.addStorage({ ourName: "client" });
+
+    const { peerOnServer } = client.connectToSyncServer();
+
+    const group = jazzCloud.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    // Prime map1 locally so GC leaves a shell with knownState.
+    await loadCoValueOrFail(client.node, map1.id);
+
+    // Force load attempts to go through peers instead of satisfying from storage.
+    vi.spyOn(storage, "load").mockImplementation(
+      async (_id: unknown, _cb: unknown, done: (result: boolean) => void) =>
+        done(false),
+    );
+
+    const unmounted = client.node.internalUnmountCoValue(map1.id);
+    expect(unmounted).toBe(true);
+    expect(client.node.getCoValue(map1.id).loadingState).toBe(
+      "garbageCollected",
+    );
+
+    const blockedKnown = blockMessageTypeOnOutgoingPeer(peerOnServer, "known", {
+      id: map1.id,
+    });
+
+    SyncMessagesLog.clear();
+
+    const map1LoadPromise = client.node.loadCoValueCore(map1.id);
+    const map2LoadPromise = client.node.loadCoValueCore(map2.id);
+
+    await waitFor(() => {
+      expect(
+        SyncMessagesLog.messages.some(
+          (m) => m.msg.action === "load" && m.msg.id === map1.id,
+        ),
+      ).toBe(true);
+      return true;
+    });
+
+    // Queue is saturated by map1 while KNOWN(Map1) is blocked.
+    expect(
+      SyncMessagesLog.messages.some(
+        (m) => m.msg.action === "load" && m.msg.id === map2.id,
+      ),
+    ).toBe(false);
+
+    // Replace the in-flight CoValue instance with a new one (same id).
+    const oldMap1Core = client.node.getCoValue(map1.id);
+    const oldMap1KnownState = oldMap1Core.knownState();
+    client.node.internalDeleteCoValue(map1.id);
+
+    const newMap1Core = client.node.getCoValue(map1.id);
+    expect(newMap1Core).not.toBe(oldMap1Core);
+    newMap1Core.setGarbageCollectedState(oldMap1KnownState);
+    expect(newMap1Core.loadingState).toBe("garbageCollected");
+
+    // Deliver KNOWN(Map1). With ID-based tracking, this should free the slot and send LOAD(Map2).
+    blockedKnown.unblock();
+    blockedKnown.sendBlockedMessages();
+
+    await waitFor(() => {
+      expect(
+        SyncMessagesLog.messages.some(
+          (m) => m.msg.action === "known" && m.msg.id === map1.id,
+        ),
+      ).toBe(true);
+      expect(
+        SyncMessagesLog.messages.some(
+          (m) => m.msg.action === "load" && m.msg.id === map2.id,
+        ),
+      ).toBe(true);
+      return true;
+    });
+
+    // The critical behavior is that map2 starts loading after KNOWN(map1).
+    const map2OnClient = await loadCoValueOrFail(client.node, map2.id);
+    expect(map2OnClient.get("key")).toBe("value2");
+
+    // Avoid unhandled promise rejection in case these earlier promises resolve later.
+    void map1LoadPromise;
+    void map2LoadPromise;
   });
 });

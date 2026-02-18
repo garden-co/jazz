@@ -553,6 +553,22 @@ describe("CoValueCore.loadFromStorage", () => {
 
       expect(loadSpy).toHaveBeenCalledTimes(1);
     });
+
+    test("should keep garbageCollected loadingState even when a peer is pending", () => {
+      const { state, node, id } = setup();
+      const storage = createMockStorage();
+      node.setStorage(storage);
+
+      state.setGarbageCollectedState({
+        id,
+        header: true,
+        sessions: {},
+      });
+      state.markPending("peer1");
+
+      expect(state.getLoadingStateForPeer("peer1")).toBe("pending");
+      expect(state.loadingState).toBe("garbageCollected");
+    });
   });
 
   describe("when state is onlyKnownState", () => {
@@ -610,6 +626,26 @@ describe("CoValueCore.loadFromStorage", () => {
       state.loadFromStorage();
 
       expect(loadSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test("should keep onlyKnownState loadingState even when a peer is pending", () => {
+      const { state, node, id } = setup();
+      const storage = createMockStorage({
+        loadKnownState: (id, callback) => {
+          callback({
+            id,
+            header: true,
+            sessions: { session1: 1 },
+          });
+        },
+      });
+      node.setStorage(storage);
+
+      state.getKnownStateFromStorage(() => {});
+      state.markPending("peer1");
+
+      expect(state.getLoadingStateForPeer("peer1")).toBe("pending");
+      expect(state.loadingState).toBe("onlyKnownState");
     });
   });
 

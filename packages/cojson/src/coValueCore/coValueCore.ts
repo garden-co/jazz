@@ -36,12 +36,7 @@ import {
   getDependenciesFromGroupRawTransactions,
   getDependenciesFromHeader,
 } from "./utils.js";
-import {
-  CoValueHeader,
-  Transaction,
-  Uniqueness,
-  VerifiedState,
-} from "./verifiedState.js";
+import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
 import {
   MergeCommit,
   BranchPointerCommit,
@@ -312,16 +307,16 @@ export class CoValueCore {
       return "available";
     }
 
+    // Check for lastKnownStateSource (garbageCollected or onlyKnownState)
+    if (this.#lastKnownStateSource) {
+      return this.#lastKnownStateSource;
+    }
+
     // Check for pending peers FIRST - loading takes priority over other states
     for (const peer of this.loadingStatuses.values()) {
       if (peer.type === "pending") {
         return "loading";
       }
-    }
-
-    // Check for lastKnownStateSource (garbageCollected or onlyKnownState)
-    if (this.#lastKnownStateSource) {
-      return this.#lastKnownStateSource;
     }
 
     if (this.loadingStatuses.size === 0) {
@@ -343,6 +338,14 @@ export class CoValueCore {
 
   isAvailable(): this is AvailableCoValueCore {
     return this.hasVerifiedContent();
+  }
+
+  isKnownStateAvailable(): boolean {
+    return (
+      this.loadingState === "available" ||
+      this.loadingState === "onlyKnownState" ||
+      this.loadingState === "garbageCollected"
+    );
   }
 
   isCompletelyDownloaded(): boolean {

@@ -11,6 +11,11 @@ interface PendingLoad {
   sendCallback: () => void;
 }
 
+interface InFlightLoad {
+  value: CoValueCore;
+  sentAt: number;
+}
+
 /**
  * Mode for enqueuing load requests:
  * - "high-priority" (default): high priority, processed in order
@@ -18,6 +23,7 @@ interface PendingLoad {
  * - "immediate": bypasses the queue entirely, executes immediately
  */
 export type LoadMode = "low-priority" | "immediate" | "high-priority";
+export type LoadCompletionSource = "content" | "known";
 
 /**
  * A queue that manages outgoing load requests with throttling.
@@ -29,7 +35,7 @@ export type LoadMode = "low-priority" | "immediate" | "high-priority";
  * - Manages timeouts for in-flight loads with a single timer
  */
 export class OutgoingLoadQueue {
-  private inFlightLoads: Map<CoValueCore, number> = new Map();
+  private inFlightLoads: Map<RawCoID, InFlightLoad> = new Map();
   private inFlightCounter: UpDownCounter;
   private highPriorityPending: LinkedList<PendingLoad> = meteredList(
     "load-requests-queue",
@@ -79,13 +85,13 @@ export class OutgoingLoadQueue {
    */
   private trackSent(coValue: CoValueCore): void {
     const now = performance.now();
-    this.inFlightLoads.set(coValue, now);
+    this.inFlightLoads.set(coValue.id, { value: coValue, sentAt: now });
     this.inFlightCounter.add(1);
     this.scheduleTimeoutCheck(CO_VALUE_LOADING_CONFIG.TIMEOUT);
   }
 
-  private untrackInFlight(coValue: CoValueCore): boolean {
-    if (!this.inFlightLoads.delete(coValue)) {
+  private untrackInFlight(id: RawCoID): boolean {
+    if (!this.inFlightLoads.delete(id)) {
       return false;
     }
 
@@ -115,7 +121,7 @@ export class OutgoingLoadQueue {
     const now = performance.now();
 
     let nextTimeout: number | undefined;
-    for (const [coValue, sentAt] of this.inFlightLoads.entries()) {
+    for (const { value: coValue, sentAt } of this.inFlightLoads.values()) {
       const timeout = sentAt + CO_VALUE_LOADING_CONFIG.TIMEOUT;
 
       if (now >= timeout) {
@@ -124,7 +130,8 @@ export class OutgoingLoadQueue {
             id: coValue.id,
             peerId: this.peerId,
           });
-          coValue.markNotFoundInPeer(this.peerId);
+          // Re-resolve by ID to avoid mutating a stale CoValue instance.
+          coValue.node.getCoValue(coValue.id).markNotFoundInPeer(this.peerId);
         } else if (coValue.isStreaming()) {
           logger.warn(
             "Content streaming is taking more than " +
@@ -139,7 +146,7 @@ export class OutgoingLoadQueue {
           );
         }
 
-        if (this.untrackInFlight(coValue)) {
+        if (this.untrackInFlight(coValue.id)) {
           this.processQueue();
         }
       } else {
@@ -154,29 +161,35 @@ export class OutgoingLoadQueue {
   }
 
   trackUpdate(coValue: CoValueCore): void {
-    if (!this.inFlightLoads.has(coValue)) {
+    if (!this.inFlightLoads.has(coValue.id)) {
       return;
     }
 
     // Refresh the timeout for the in-flight load
-    this.inFlightLoads.set(coValue, performance.now());
+    this.inFlightLoads.set(coValue.id, {
+      value: coValue,
+      sentAt: performance.now(),
+    });
   }
 
   /**
    * Track that a load request has completed.
    * Triggers processing of pending requests.
    */
-  trackComplete(coValue: CoValueCore): void {
-    if (!this.inFlightLoads.has(coValue)) {
+  trackComplete(
+    coValue: CoValueCore,
+    source: LoadCompletionSource = "content",
+  ): void {
+    if (!this.inFlightLoads.has(coValue.id)) {
       return;
     }
 
-    if (coValue.isStreaming()) {
+    if (source === "content" && coValue.isStreaming()) {
       // wait for the next chunk
       return;
     }
 
-    if (this.untrackInFlight(coValue)) {
+    if (this.untrackInFlight(coValue.id)) {
       this.processQueue();
     }
   }
@@ -195,7 +208,7 @@ export class OutgoingLoadQueue {
     sendCallback: () => void,
     mode: LoadMode = "high-priority",
   ): void {
-    if (this.inFlightLoads.has(value)) {
+    if (this.inFlightLoads.has(value.id)) {
       return;
     }
 

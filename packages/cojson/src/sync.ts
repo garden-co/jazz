@@ -951,7 +951,7 @@ export class SyncManager {
 
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
-    } else if (coValue.loadingState === "onlyKnownState") {
+    } else if (coValue.isKnownStateAvailable()) {
       // Validate if content is missing before loading it from storage
       if (!this.syncState.isSynced(peer, msg.id)) {
         this.local.loadCoValueCore(msg.id).then(() => {
@@ -960,12 +960,7 @@ export class SyncManager {
       }
     }
 
-    // KNOWN with header=true does not guarantee that content arrived.
-    // Keep the request in-flight until content (or a terminal state) lands,
-    // so queue timeout logic can mark this peer as unavailable if needed.
-    if (!availableOnPeer || coValue.isAvailable()) {
-      peer.trackLoadRequestComplete(coValue);
-    }
+    peer.trackLoadRequestComplete(coValue, "known");
   }
 
   handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
@@ -1342,7 +1337,7 @@ export class SyncManager {
       }
     }
 
-    peer?.trackLoadRequestComplete(coValue);
+    peer?.trackLoadRequestComplete(coValue, "content");
 
     for (const peer of this.getPeers(coValue.id)) {
       /**
