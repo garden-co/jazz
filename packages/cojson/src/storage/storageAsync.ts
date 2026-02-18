@@ -607,10 +607,6 @@ export class StorageApiAsync implements StorageAPI {
       }
     });
 
-    // // Update known states after successful commit
-    // for (const msg of messages) {
-    //   this.inMemoryCoValues.add(msg.id);
-    // }
   }
 
   close() {
