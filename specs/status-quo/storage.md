@@ -82,7 +82,7 @@ The browser case is the interesting one. We can't block the main thread on stora
 
 OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Workers — no need for async storage abstractions.
 
-> `crates/groove-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
+> `crates/jazz-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
 > `packages/jazz-tools/src/worker/groove-worker.ts` (worker entry point)
 
 ### Native (Node.js / Rust)
@@ -93,17 +93,17 @@ Single process, no worker needed. SurrealKvStorage backed by regular files.
 
 ## Platform Bindings
 
-### groove-napi (Node.js)
+### jazz-napi (Node.js)
 
 NAPI bindings exposing RuntimeCore to Node.js via TokioRuntime.
 
-> `crates/groove-napi/`
+> `crates/jazz-napi/`
 
-### groove-wasm (Browser)
+### jazz-wasm (Browser)
 
 WASM bindings exposing RuntimeCore via WasmRuntime. WasmScheduler uses `spawn_local`; JsSyncSender serializes messages to JSON for JS callbacks.
 
-> `crates/groove-wasm/`
+> `crates/jazz-wasm/`
 
 ## Design Decisions
 

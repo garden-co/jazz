@@ -1,16 +1,16 @@
-//! OPFS persistence integration tests for groove-wasm.
+//! OPFS persistence integration tests for jazz-wasm.
 //!
 //! Run with:
 //!   RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' \
-//!     wasm-pack test --headless --chrome crates/groove-wasm
+//!     wasm-pack test --headless --chrome crates/jazz-wasm
 
 #![cfg(target_arch = "wasm32")]
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
-use groove_wasm::types::WasmValue;
-use groove_wasm::WasmRuntime;
+use jazz_wasm::types::WasmValue;
+use jazz_wasm::WasmRuntime;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
