@@ -35,6 +35,7 @@ cli = [
   "dep:jsonwebtoken",
   "dep:base64",
   "dep:bytes",
+  "dep:reqwest",
 ]
 
 [dependencies]
