@@ -53,6 +53,10 @@ pub struct AuthConfig {
     pub jwks_url: Option<String>,
     /// Cached JWKS set fetched at server startup.
     pub jwks_set: Option<JwkSet>,
+    /// Whether anonymous local auth mode is allowed.
+    pub allow_anonymous: bool,
+    /// Whether demo local auth mode is allowed.
+    pub allow_demo: bool,
     /// Secret for backend session impersonation.
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
@@ -63,6 +67,13 @@ impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
         self.jwks_url.is_some() || self.backend_secret.is_some() || self.admin_secret.is_some()
+    }
+
+    pub fn is_local_mode_enabled(&self, mode: LocalAuthMode) -> bool {
+        match mode {
+            LocalAuthMode::Anonymous => self.allow_anonymous,
+            LocalAuthMode::Demo => self.allow_demo,
+        }
     }
 }
 
@@ -547,6 +558,13 @@ pub fn extract_session(
 
     // Priority 3: Local anonymous/demo token auth
     if let Some((mode, token)) = parse_local_auth_headers(headers)? {
+        if !config.is_local_mode_enabled(mode) {
+            return Err(match mode {
+                LocalAuthMode::Anonymous => (StatusCode::FORBIDDEN, "Anonymous auth disabled"),
+                LocalAuthMode::Demo => (StatusCode::FORBIDDEN, "Demo auth disabled"),
+            });
+        }
+
         let principal_id = derive_local_principal_id(app_id, mode, &token);
         return Ok(Some(Session {
             user_id: principal_id,
@@ -620,6 +638,8 @@ mod tests {
         AuthConfig {
             jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
             jwks_set: Some(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET)),
+            allow_anonymous: true,
+            allow_demo: true,
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
         }
@@ -912,5 +932,37 @@ mod tests {
         let result = extract_session(&headers, test_app_id(), &config, None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_extract_session_local_anonymous_disabled() {
+        let mut config = make_test_config();
+        config.allow_anonymous = false;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
+        headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
+
+        let result = extract_session(&headers, test_app_id(), &config, None);
+        assert!(result.is_err());
+        let (status, message) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(message, "Anonymous auth disabled");
+    }
+
+    #[test]
+    fn test_extract_session_local_demo_disabled() {
+        let mut config = make_test_config();
+        config.allow_demo = false;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
+        headers.insert(LOCAL_TOKEN_HEADER, "device-token-2".parse().unwrap());
+
+        let result = extract_session(&headers, test_app_id(), &config, None);
+        assert!(result.is_err());
+        let (status, message) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(message, "Demo auth disabled");
     }
 }

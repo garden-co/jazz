@@ -143,6 +143,16 @@ Defaults:
 
 If JWKS is unset, external auth is disabled for that app.
 
+### `jazz-tools server` CLI defaults
+
+- `NODE_ENV=production`
+  - anonymous/demo are disabled unless explicitly enabled with
+    `--allow-anonymous` / `--allow-demo`
+  - external auth remains opt-in via `--jwks-url`
+- non-production (`development`, unset, test, etc.)
+  - anonymous/demo enabled by default
+  - external auth still requires `--jwks-url`
+
 ## Client/SDK Model
 
 Add explicit local auth config in `AppContext`/`DbConfig`:
@@ -157,6 +167,12 @@ Transport behavior:
 - Header precedence should match server resolver priority where applicable
 
 Worker bridge auth updates should update the full auth state, not JWT-only.
+
+Developer UX helpers:
+
+- shared synthetic-user storage helpers (`localStorage`)
+- React `SyntheticUserSwitcher` component
+- vanilla JS `createSyntheticUserSwitcher(...)` helper reusing the same storage logic
 
 ## Runtime/Sync Implications
 

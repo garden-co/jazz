@@ -1,4 +1,10 @@
-import { createDb, type DbConfig, type Db } from "jazz-tools";
+import {
+  createDb,
+  createSyntheticUserSwitcher,
+  getActiveSyntheticAuth,
+  type DbConfig,
+  type Db,
+} from "jazz-tools";
 import { app, Todo } from "../schema/app.js";
 
 function readEnvAppId(): string | undefined {
@@ -51,16 +57,33 @@ export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  // #region context-setup-ts-client
-  const db = await createDb({
-    appId: readEnvAppId() ?? "todo-client-example",
+  const appId = config?.appId ?? readEnvAppId() ?? "todo-client-example";
+  const activeAuth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+  const resolvedConfig: DbConfig = {
+    appId,
     env: "dev",
     userBranch: "main",
+    localAuthMode: activeAuth.localAuthMode,
+    localAuthToken: activeAuth.localAuthToken,
     ...config,
-  });
+  };
+
+  // #region context-setup-ts-client
+  const db = await createDb(resolvedConfig);
   // #endregion context-setup-ts-client
 
   // Build DOM
+  const authControls = document.createElement("div");
+  authControls.id = "auth-controls";
+  container.appendChild(authControls);
+
+  const switcher = createSyntheticUserSwitcher({
+    appId: resolvedConfig.appId,
+    container: authControls,
+    defaultMode: "demo",
+  });
+
   const h1 = document.createElement("h1");
   h1.textContent = "Todos";
   container.appendChild(h1);
@@ -150,6 +173,7 @@ export async function startApp(
   return {
     db,
     destroy: async () => {
+      switcher.destroy();
       await db.shutdown();
       container.innerHTML = "";
     },

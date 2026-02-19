@@ -333,6 +333,18 @@ async fn link_external_handler(
         }
     };
 
+    if !state.auth_config.is_local_mode_enabled(local_mode) {
+        let message = match local_mode {
+            crate::middleware::auth::LocalAuthMode::Anonymous => "Anonymous auth disabled",
+            crate::middleware::auth::LocalAuthMode::Demo => "Demo auth disabled",
+        };
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::unauthorized(message)),
+        )
+            .into_response();
+    }
+
     let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         Some(value) => value,
         None => {
