@@ -54,6 +54,7 @@ web-time = "1.1"
 small-map = "0.1"
 bitvec = "1.0"
 ahash = "0.8"
+sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
 surrealkv = { version = "0.19", optional = true }

@@ -21,6 +21,8 @@ export interface WorkerBridgeOptions {
   serverUrl?: string;
   serverPathPrefix?: string;
   jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
   adminSecret?: string;
 }
 
@@ -82,6 +84,8 @@ export class WorkerBridge {
       serverUrl: options.serverUrl,
       serverPathPrefix: options.serverPathPrefix,
       jwtToken: options.jwtToken,
+      localAuthMode: options.localAuthMode,
+      localAuthToken: options.localAuthToken,
       adminSecret: options.adminSecret,
       clientId: "", // Worker generates its own client ID for main thread
     };
@@ -108,8 +112,12 @@ export class WorkerBridge {
   /**
    * Update auth credentials in the worker.
    */
-  updateAuth(jwtToken: string): void {
-    this.worker.postMessage({ type: "update-auth", jwtToken });
+  updateAuth(auth: {
+    jwtToken?: string;
+    localAuthMode?: "anonymous" | "demo";
+    localAuthToken?: string;
+  }): void {
+    this.worker.postMessage({ type: "update-auth", ...auth });
   }
 
   /**

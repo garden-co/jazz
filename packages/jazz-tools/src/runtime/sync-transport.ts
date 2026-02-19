@@ -9,6 +9,8 @@
 /** Auth and identity context for sync operations. */
 export interface SyncAuth {
   jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
   adminSecret?: string;
   clientId?: string;
   pathPrefix?: string;
@@ -72,6 +74,25 @@ export function buildEventsUrl(serverUrl: string, clientId: string, pathPrefix?:
 }
 
 /**
+ * Apply end-user auth headers with stable precedence.
+ *
+ * Precedence:
+ * 1. Authorization bearer token
+ * 2. Local anonymous/demo token headers
+ */
+export function applyUserAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
+  if (auth.jwtToken) {
+    headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+    return;
+  }
+
+  if (auth.localAuthMode && auth.localAuthToken) {
+    headers["X-Jazz-Local-Mode"] = auth.localAuthMode;
+    headers["X-Jazz-Local-Token"] = auth.localAuthToken;
+  }
+}
+
+/**
  * Check if a sync payload is for a catalogue object (schema or lens).
  * Catalogue payloads use admin-secret auth instead of JWT.
  */
@@ -103,8 +124,8 @@ export async function sendSyncPayload(
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
-  } else if (auth.jwtToken) {
-    headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+  } else {
+    applyUserAuthHeaders(headers, auth);
   }
 
   const body = JSON.stringify({

@@ -53,10 +53,6 @@ enum Commands {
         #[arg(short, long, default_value = "./data")]
         data_dir: String,
 
-        /// HMAC secret for JWT validation (development/testing)
-        #[arg(long, env = "JAZZ_JWT_SECRET")]
-        jwt_secret: Option<String>,
-
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
@@ -111,13 +107,12 @@ async fn main() {
             app_id,
             port,
             data_dir,
-            jwt_secret,
             jwks_url,
             backend_secret,
             admin_secret,
         } => {
             let auth_config = AuthConfig {
-                jwt_secret,
+                jwt_secret: None,
                 jwks_url,
                 backend_secret,
                 admin_secret,

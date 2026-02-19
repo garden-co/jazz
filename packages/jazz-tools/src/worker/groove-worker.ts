@@ -12,6 +12,7 @@ import {
   readBinaryFrames,
   generateClientId,
   buildEventsUrl,
+  applyUserAuthHeaders,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -25,6 +26,8 @@ declare const self: {
 let runtime: any = null; // WasmRuntime instance
 let mainClientId: string | null = null;
 let jwtToken: string | undefined;
+let localAuthMode: "anonymous" | "demo" | undefined;
+let localAuthToken: string | undefined;
 let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
 let serverClientId: string = generateClientId();
@@ -96,6 +99,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Store auth
     jwtToken = msg.jwtToken;
+    localAuthMode = msg.localAuthMode;
+    localAuthToken = msg.localAuthToken;
     adminSecret = msg.adminSecret;
 
     // Register main thread as a Peer client
@@ -151,7 +156,14 @@ async function sendToServer(serverUrl: string, payload: any): Promise<void> {
   await sendSyncPayload(
     serverUrl,
     payload,
-    { jwtToken, adminSecret, clientId: serverClientId, pathPrefix: activeServerPathPrefix },
+    {
+      jwtToken,
+      localAuthMode,
+      localAuthToken,
+      adminSecret,
+      clientId: serverClientId,
+      pathPrefix: activeServerPathPrefix,
+    },
     "[worker] ",
   );
 }
@@ -197,9 +209,7 @@ async function connectStream(): Promise<void> {
   const headers: Record<string, string> = {
     Accept: "application/octet-stream",
   };
-  if (jwtToken) {
-    headers["Authorization"] = `Bearer ${jwtToken}`;
-  }
+  applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
 
   streamAbortController = new AbortController();
 
@@ -271,6 +281,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "update-auth":
       jwtToken = msg.jwtToken;
+      localAuthMode = msg.localAuthMode;
+      localAuthToken = msg.localAuthToken;
       // Reconnect stream to bind the new token.
       if (streamAbortController) {
         streamAbortController.abort();

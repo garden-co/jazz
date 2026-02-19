@@ -36,6 +36,10 @@ export interface DbConfig {
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
+  /** Local auth mode for client-generated identities */
+  localAuthMode?: "anonymous" | "demo";
+  /** Client-generated auth token for anonymous/demo identity */
+  localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -193,6 +197,8 @@ export class Db {
         env: this.config.env,
         userBranch: this.config.userBranch,
         jwtToken: this.config.jwtToken,
+        localAuthMode: this.config.localAuthMode,
+        localAuthToken: this.config.localAuthToken,
         adminSecret: this.config.adminSecret,
       });
 
@@ -212,6 +218,8 @@ export class Db {
             serverUrl: this.config.serverUrl,
             serverPathPrefix: this.config.serverPathPrefix,
             jwtToken: this.config.jwtToken,
+            localAuthMode: this.config.localAuthMode,
+            localAuthToken: this.config.localAuthToken,
             adminSecret: this.config.adminSecret,
           })
           .then(() => undefined);
