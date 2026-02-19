@@ -702,17 +702,19 @@ export async function loadWasmModule(): Promise<WasmModule> {
   let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
     try {
-      const { readFileSync } = await import("node:fs");
-      const { fileURLToPath } = await import("node:url");
-      const { dirname, join } = await import("node:path");
+      const { existsSync, readFileSync } = await import("node:fs");
+      const { createRequire } = await import("node:module");
+      const { dirname, resolve } = await import("node:path");
 
-      const wasmPath = join(
-        dirname(fileURLToPath(import.meta.url)),
-        "../../node_modules/jazz-wasm/jazz_wasm_bg.wasm",
-      );
-      const wasmBytes = readFileSync(wasmPath);
-      wasmModule.initSync(wasmBytes);
-      nodeInitDone = true;
+      const require = createRequire(import.meta.url);
+      const packageJsonPath = require.resolve("jazz-wasm/package.json");
+      const packageDir = dirname(packageJsonPath);
+      const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+      if (existsSync(wasmPath)) {
+        wasmModule.initSync({ module: readFileSync(wasmPath) });
+        nodeInitDone = true;
+      }
     } catch {
       // Node modules unavailable (e.g. React Native with process polyfill)
     }
