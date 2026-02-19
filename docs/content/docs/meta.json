@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "setup",
+    "authentication",
     "schemas",
     "reading-data",
     "writing-data",

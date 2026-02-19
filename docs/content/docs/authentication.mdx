@@ -1,0 +1,110 @@
+---
+title: Authentication
+description: Anonymous, demo, and external JWT auth in Jazz 2, including upgrade/link flow and client setup.
+---
+
+Jazz 2 supports three auth methods:
+
+1. `anonymous`: one synthetic user token per device (default local-first onboarding)
+2. `demo`: multiple synthetic users per device to simulate multi-user flows
+3. `external`: bearer JWT validated via JWKS
+
+## Session Resolution Order
+
+For both `jazz-tools server` and `jazz-cloud-server`:
+
+1. Backend impersonation (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
+2. External JWT (`Authorization: Bearer <jwt>`)
+3. Local auth (`X-Jazz-Local-Mode` + `X-Jazz-Local-Token`)
+4. No session
+
+## Client Setup
+
+### Anonymous / Demo Local Auth
+
+```ts
+import { JazzClient } from "jazz-tools";
+
+const client = await JazzClient.connect({
+  appId: process.env.JAZZ_APP_ID!,
+  schema,
+  serverUrl: process.env.JAZZ_SERVER_URL!,
+  localAuthMode: "anonymous", // or "demo"
+  localAuthToken: "device-token-123",
+});
+```
+
+### External JWT Auth
+
+```ts
+import { JazzClient } from "jazz-tools";
+
+const client = await JazzClient.connect({
+  appId: process.env.JAZZ_APP_ID!,
+  schema,
+  serverUrl: process.env.JAZZ_SERVER_URL!,
+  jwtToken: userJwt,
+});
+```
+
+### Link Local -> External (Upgrade)
+
+Use the built-in client call path:
+
+```ts
+const result = await client.linkExternalIdentity({
+  jwtToken: userJwt,
+  localAuthMode: "anonymous",
+  localAuthToken: "device-token-123",
+});
+
+console.log(result.created, result.principal_id);
+```
+
+After linking, external JWT sessions resolve to the same principal.
+
+## Demo User Switcher UI
+
+React bindings now include a synthetic-user switcher backed by `localStorage`:
+
+```tsx
+import { SyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools/react";
+
+function AuthControls() {
+  return <SyntheticUserSwitcher appId={process.env.NEXT_PUBLIC_JAZZ_APP_ID!} />;
+}
+
+const active = getActiveSyntheticAuth(process.env.NEXT_PUBLIC_JAZZ_APP_ID!);
+// use active.localAuthMode + active.localAuthToken in your AppContext
+```
+
+Switching profiles persists locally; by default the component refreshes the page after a switch.
+
+## Server Setup
+
+### `jazz-tools server` (single app)
+
+- Supports local auth headers out of the box.
+- Supports external JWT when `--jwks-url` is configured.
+- Supports external identity mapping persistence via `external_identities`.
+
+Example:
+
+```bash
+jazz-tools server "$JAZZ_APP_ID" \
+  --port 1625 \
+  --data-dir ./data \
+  --jwks-url https://auth.example.com/.well-known/jwks.json \
+  --backend-secret "$JAZZ_BACKEND_SECRET" \
+  --admin-secret "$JAZZ_ADMIN_SECRET"
+```
+
+### `jazz-cloud-server` (multi-tenant)
+
+Per app config supports:
+
+- `jwks_endpoint` (optional; if unset, external JWT auth is disabled)
+- `allow_anonymous` (default `true`)
+- `allow_demo` (default `true`)
+
+And a persistent `external_identities` mapping table for upgrade/link fallback.
