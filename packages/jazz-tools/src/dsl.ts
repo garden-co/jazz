@@ -206,11 +206,21 @@ let collectedTables: Table[] = [];
 let collectedMigrations: TableMigration[] = [];
 
 export function table(name: string, columns: Record<string, ColumnBuilder>): void {
+  if (arguments.length > 2) {
+    throw new Error(
+      "Inline table permissions are no longer supported in current.ts. " +
+        "Define policies in schema/permissions.ts with definePermissions(...).",
+    );
+  }
+
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns)) {
     cols.push(builder._build(colName));
   }
-  collectedTables.push({ name, columns: cols });
+  collectedTables.push({
+    name,
+    columns: cols,
+  });
 }
 
 export function migrate(tableName: string, ops: Record<string, MigrationOp>): void {

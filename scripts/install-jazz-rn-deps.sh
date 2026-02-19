@@ -6,6 +6,7 @@ export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 JAZZ_SKIP_RN_DEPS="${JAZZ_SKIP_RN_DEPS:-0}"
+RUST_TOOLCHAIN="${JAZZ_RUST_TOOLCHAIN:-1.93.1}"
 
 is_truthy() {
   case "$1" in
@@ -34,12 +35,12 @@ if [[ -n "${CARGO_BUILD_RUSTC_WRAPPER:-}" ]]; then
 fi
 
 if ! command -v rustup >/dev/null 2>&1; then
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
 fi
 
-rustup toolchain install stable
-rustup default stable
-rustup target add wasm32-unknown-unknown
+rustup toolchain install "$RUST_TOOLCHAIN"
+rustup default "$RUST_TOOLCHAIN"
+rustup target add wasm32-unknown-unknown --toolchain "$RUST_TOOLCHAIN"
 
 if is_truthy "$JAZZ_SKIP_RN_DEPS"; then
   echo "Skipping React Native dependency bootstrap (JAZZ_SKIP_RN_DEPS=$JAZZ_SKIP_RN_DEPS)."
@@ -51,7 +52,8 @@ rustup target add \
   aarch64-linux-android \
   armv7-linux-androideabi \
   i686-linux-android \
-  x86_64-linux-android
+  x86_64-linux-android \
+  --toolchain "$RUST_TOOLCHAIN"
 
 if ! command -v cargo-ndk >/dev/null 2>&1; then
   cargo install cargo-ndk --locked
@@ -72,7 +74,7 @@ case "$(uname -s)" in
       exit 1
     fi
 
-    rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+    rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios --toolchain "$RUST_TOOLCHAIN"
     ;;
   Linux)
     if command -v apt-get >/dev/null 2>&1; then

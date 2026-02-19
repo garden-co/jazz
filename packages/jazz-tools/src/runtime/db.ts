@@ -255,19 +255,19 @@ export class Db {
   }
 
   /**
-   * Insert a new row and wait for persistence at the specified tier.
+   * Insert a new row and wait for acknowledgement at the specified tier.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @param tier Persistence tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acks
+   * @param tier Acknowledgement tier to wait for
+   * @returns Promise resolving to the new row's ID when the tier acknowledges
    *
    * @example
    * ```typescript
-   * const id = await db.insertPersisted(app.todos, { title: "Buy milk", done: false }, "edge");
+   * const id = await db.insertWithAck(app.todos, { title: "Buy milk", done: false }, "edge");
    * ```
    */
-  async insertPersisted<T, Init>(
+  async insertWithAck<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
     tier: PersistenceTier,
@@ -275,7 +275,18 @@ export class Db {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.createPersisted(table._table, values, tier);
+    return client.createWithAck(table._table, values, tier);
+  }
+
+  /**
+   * @deprecated Use insertWithAck().
+   */
+  async insertPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    tier: PersistenceTier,
+  ): Promise<string> {
+    return this.insertWithAck(table, data, tier);
   }
 
   /**
@@ -300,14 +311,14 @@ export class Db {
   }
 
   /**
-   * Update an existing row and wait for persistence at the specified tier.
+   * Update an existing row and wait for acknowledgement at the specified tier.
    *
    * @param table Table proxy from generated app module
    * @param id Row ID to update
    * @param data Partial object with fields to update
-   * @param tier Persistence tier to wait for
+   * @param tier Acknowledgement tier to wait for
    */
-  async updatePersisted<T, Init>(
+  async updateWithAck<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
@@ -316,7 +327,19 @@ export class Db {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    await client.updatePersisted(id, updates, tier);
+    await client.updateWithAck(id, updates, tier);
+  }
+
+  /**
+   * @deprecated Use updateWithAck().
+   */
+  async updatePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    await this.updateWithAck(table, id, data, tier);
   }
 
   /**
@@ -339,20 +362,31 @@ export class Db {
   }
 
   /**
-   * Delete a row and wait for persistence at the specified tier.
+   * Delete a row and wait for acknowledgement at the specified tier.
    *
    * @param table Table proxy from generated app module
    * @param id Row ID to delete
-   * @param tier Persistence tier to wait for
+   * @param tier Acknowledgement tier to wait for
    */
-  async deleteFromPersisted<T, Init>(
+  async deleteFromWithAck<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     tier: PersistenceTier,
   ): Promise<void> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
-    await client.deletePersisted(id, tier);
+    await client.deleteWithAck(id, tier);
+  }
+
+  /**
+   * @deprecated Use deleteFromWithAck().
+   */
+  async deleteFromPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    await this.deleteFromWithAck(table, id, tier);
   }
 
   /**

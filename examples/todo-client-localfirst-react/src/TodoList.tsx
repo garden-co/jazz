@@ -3,10 +3,8 @@ import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema/app.js";
 
 export function TodoList() {
-  // #region reading-reactive-hooks-react
   const db = useDb();
   const todos = useAll(app.todos);
-  // #endregion reading-reactive-hooks-react
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {

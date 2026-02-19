@@ -167,6 +167,40 @@ describe("schemaToSql", () => {
 );
 `);
   });
+
+  it("generates CREATE POLICY statements from table permissions", () => {
+    resetCollectedState();
+    table("todos", {
+      title: col.string(),
+      owner_id: col.string(),
+    });
+    const schema = getCollectedSchema();
+    const ownerMatchesSession: import("./schema.js").PolicyExpr = {
+      type: "Cmp",
+      column: "owner_id",
+      op: "Eq",
+      value: { type: "SessionRef", path: ["user_id"] },
+    };
+
+    schema.tables[0]!.policies = {
+      select: { using: ownerMatchesSession },
+      insert: { with_check: ownerMatchesSession },
+      update: { using: ownerMatchesSession, with_check: ownerMatchesSession },
+      delete: { using: ownerMatchesSession },
+    };
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toBe(`CREATE TABLE todos (
+    title TEXT NOT NULL,
+    owner_id TEXT NOT NULL
+);
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
+CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session.user_id) WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
+`);
+  });
 });
 
 describe("lensToSql", () => {
