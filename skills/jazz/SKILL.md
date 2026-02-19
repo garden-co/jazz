@@ -1,6 +1,6 @@
 ---
 name: jazz
-description: Spec-first engineering workflow for the Jazz distributed, local-first relational database (Rust core, TypeScript client layers, WASM and NAPI bindings). Use when implementing, refactoring, or testing features in this repository, especially when changes must preserve relational semantics, follow red-then-green TDD, and emphasize end-to-end integration behavior.
+description: Spec-first engineering workflow for the Jazz distributed, local-first relational database (Rust core in `crates/jazz-tools`, TypeScript client layers, WASM, RN and NAPI bindings). Use when implementing, refactoring, or testing features in this repository, especially when changes must preserve relational semantics, follow red-then-green TDD, and emphasize end-to-end integration behavior.
 ---
 
 # Jazz
@@ -13,11 +13,16 @@ Read relevant files in `specs/` before coding:
 
 - Use status-quo specs for current behavior.
 - Use todo specs for upcoming behavior in `specs/todo/`:
-  - `a_week_YYYY_MM_DD/` for current-week tasks
-  - `b_mvp/` for first-adopter requirements
-  - `c_launch/` for launch readiness
-  - `d_later/` for post-launch work
+  - `a_mvp/` for MVP and first-adopter requirements
+  - `b_launch/` for launch readiness
+  - `c_later/` for post-launch work
 - Scan filenames first to map scope quickly, then open only relevant topics.
+
+## Canonical Naming
+
+Use `jazz` naming consistently across docs, comments, and user-facing text.
+
+- Rust core crate path: `crates/jazz-tools/`
 
 ## Design and Change Strategy
 
