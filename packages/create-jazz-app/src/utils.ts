@@ -29,3 +29,5 @@ export function getFrameworkSpecificDocsUrl(framework: Framework) {
   if (!frameworkForDocs) throw new Error("An invalid framework was specified.");
   return `https://jazz.tools/${frameworkForDocs}/llms-full.txt`;
 }
+
+export const AGENTS_MD_URL = "https://jazz.tools/AGENTS.md";

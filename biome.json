@@ -21,6 +21,7 @@
       "!**/examples/server-worker-inbox/src/routeTree.gen.ts",
       "!**/homepage/homepage/**",
       "!**/.cursor/skills/**",
+      "!**/.skills/**",
       "!**/package.json",
       "!**/*svelte*/**"
     ]
