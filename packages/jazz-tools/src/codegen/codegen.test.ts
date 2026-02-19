@@ -601,6 +601,15 @@ describe("generateWhereInputTypes", () => {
 
     expect(output).toContain("owner_id?: string | { eq?: string; ne?: string };");
   });
+
+  it("generates array filters with eq and contains", () => {
+    table("todos", { tags: col.array(col.string()) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("tags?: string[] | { eq?: string[]; contains?: string };");
+  });
 });
 
 describe("generateQueryBuilderClasses", () => {

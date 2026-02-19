@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::query_manager::encoding::encode_value;
+use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
@@ -45,6 +45,8 @@ pub enum Condition {
         min: Value,
         max: Value,
     },
+    /// Array column contains value.
+    Contains { column: String, value: Value },
     /// Column is null.
     IsNull { column: String },
     /// Column is not null.
@@ -62,6 +64,7 @@ impl Condition {
             Condition::Gt { column, .. } => column,
             Condition::Ge { column, .. } => column,
             Condition::Between { column, .. } => column,
+            Condition::Contains { column, .. } => column,
             Condition::IsNull { column } => column,
             Condition::IsNotNull { column } => column,
         }
@@ -83,42 +86,47 @@ impl Condition {
     /// Convert to a Predicate for filter evaluation.
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Option<Predicate> {
         let col_index = descriptor.column_index(self.column())?;
+        let col_type = &descriptor.columns[col_index].column_type;
 
         Some(match self {
             Condition::Eq { value, .. } => Predicate::Eq {
                 col_index,
-                value: encode_value(value),
+                value: encode_value_with_type(value, col_type),
             },
             Condition::Ne { value, .. } => Predicate::Ne {
                 col_index,
-                value: encode_value(value),
+                value: encode_value_with_type(value, col_type),
             },
             Condition::Lt { value, .. } => Predicate::Lt {
                 col_index,
-                value: encode_value(value),
+                value: encode_value_with_type(value, col_type),
             },
             Condition::Le { value, .. } => Predicate::Le {
                 col_index,
-                value: encode_value(value),
+                value: encode_value_with_type(value, col_type),
             },
             Condition::Gt { value, .. } => Predicate::Gt {
                 col_index,
-                value: encode_value(value),
+                value: encode_value_with_type(value, col_type),
             },
             Condition::Ge { value, .. } => Predicate::Ge {
                 col_index,
-                value: encode_value(value),
+                value: encode_value_with_type(value, col_type),
             },
             Condition::Between { min, max, .. } => Predicate::And(vec![
                 Predicate::Ge {
                     col_index,
-                    value: encode_value(min),
+                    value: encode_value_with_type(min, col_type),
                 },
                 Predicate::Le {
                     col_index,
-                    value: encode_value(max),
+                    value: encode_value_with_type(max, col_type),
                 },
             ]),
+            Condition::Contains { value, .. } => Predicate::Contains {
+                col_index,
+                value: value.clone(),
+            },
             Condition::IsNull { .. } => Predicate::IsNull { col_index },
             Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
         })
@@ -517,6 +525,16 @@ impl QueryBuilder {
         self
     }
 
+    /// Add an array contains filter condition.
+    pub fn filter_contains(mut self, column: impl Into<String>, value: Value) -> Self {
+        let current = self.query.disjuncts.last_mut().unwrap();
+        current.add(Condition::Contains {
+            column: column.into(),
+            value,
+        });
+        self
+    }
+
     /// Start a new OR branch.
     pub fn or(mut self) -> Self {
         self.query.disjuncts.push(Conjunction::new());
@@ -808,6 +826,13 @@ mod tests {
         ])
     }
 
+    fn test_descriptor_with_array() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+        ])
+    }
+
     #[test]
     fn query_builder_simple_eq() {
         let query = QueryBuilder::new("users")
@@ -906,6 +931,20 @@ mod tests {
 
         let predicate = query.to_predicate(&descriptor);
         assert!(matches!(predicate, Predicate::Or(_)));
+    }
+
+    #[test]
+    fn query_to_predicate_contains() {
+        let descriptor = test_descriptor_with_array();
+        let query = QueryBuilder::new("users")
+            .filter_contains("tags", Value::Text("rust".into()))
+            .build();
+
+        let predicate = query.to_predicate(&descriptor);
+        assert!(matches!(
+            predicate,
+            Predicate::Contains { col_index: 1, .. }
+        ));
     }
 
     #[test]
