@@ -1,116 +1,219 @@
-import { COLOURS, type PlayerMode } from "./constants.js";
-import type { DbStats } from "../Game.js";
+import { useEffect, useRef } from "react";
+import { COLOURS, type FuelType, type PlayerMode } from "./constants.js";
+import { getDepositSprite } from "./sprites.js";
+import type { RemotePlayerView } from "./types.js";
 
 interface HudProps {
   mode: PlayerMode;
-  positionX: number;
-  positionY: number;
-  velocityX: number;
-  velocityY: number;
   fuel: number;
-  landerX: number;
-  requiredFuelType: string;
+  requiredFuelType: FuelType;
   inventory: string[];
-  dbStats?: DbStats;
+  remotePlayers: RemotePlayerView[];
+  localPlayerName: string;
+  localPlayerColor: string;
 }
+
+// Shared panel style: hard pixel border, no rounded corners
+const panelStyle: React.CSSProperties = {
+  position: "absolute",
+  fontFamily: "monospace",
+  color: COLOURS.cyan,
+  background: "rgba(10, 4, 20, 0.85)",
+  border: `1px solid ${COLOURS.pink}`,
+  boxShadow: `0 0 8px rgba(255, 0, 255, 0.3), inset 0 0 12px rgba(255, 0, 255, 0.05)`,
+  padding: "6px 10px",
+  pointerEvents: "none",
+  imageRendering: "pixelated",
+};
+
+// Renders the actual deposit sprite into a tiny canvas
+function DepositIcon({ type, dim }: { type: string; dim?: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, 12, 12);
+    if (dim) ctx.globalAlpha = 0.3;
+    else ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = false;
+    const sprite = getDepositSprite(type as FuelType);
+    ctx.drawImage(sprite, 0, 0, 12, 12);
+  }, [type, dim]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={12}
+      height={12}
+      style={{
+        display: "inline-block",
+        width: 12,
+        height: 12,
+        verticalAlign: "middle",
+        marginLeft: 4,
+        imageRendering: "pixelated",
+      }}
+    />
+  );
+}
+
+// Fuel bar: chunky segmented gauge
+function FuelBar({ fuel }: { fuel: number }) {
+  const segments = 10;
+  const filled = Math.ceil((fuel / 100) * segments);
+  const barColour = fuel > 30 ? COLOURS.green : fuel > 10 ? COLOURS.orange : "#ff3333";
+
+  return (
+    <div style={{ display: "flex", gap: 2, alignItems: "center" }}>
+      <span
+        style={{
+          color: COLOURS.pink,
+          fontSize: 10,
+          marginRight: 4,
+          textTransform: "uppercase",
+          letterSpacing: 1,
+        }}
+      >
+        fuel
+      </span>
+      {Array.from({ length: segments }, (_, i) => (
+        <span
+          key={i}
+          style={{
+            display: "inline-block",
+            width: 6,
+            height: 10,
+            background: i < filled ? barColour : "rgba(255, 255, 255, 0.08)",
+            boxShadow: i < filled ? `0 0 4px ${barColour}` : "none",
+          }}
+        />
+      ))}
+      <span style={{ color: barColour, fontSize: 10, marginLeft: 4 }}>{Math.round(fuel)}</span>
+    </div>
+  );
+}
+
+const HIDDEN_MODES = new Set<PlayerMode>(["start", "launched", "crashed"]);
 
 export function Hud({
   mode,
-  positionX,
-  positionY,
-  velocityX,
-  velocityY,
   fuel,
-  landerX,
   requiredFuelType,
   inventory,
-  dbStats,
+  remotePlayers,
+  localPlayerName,
+  localPlayerColor,
 }: HudProps) {
+  if (HIDDEN_MODES.has(mode)) return null;
+
+  const hasRequired = inventory.includes(requiredFuelType);
+
   return (
     <>
-      {/* Debug overlay */}
+      {/* Left panel */}
       <div
         style={{
-          position: "absolute",
-          top: 12,
-          left: 12,
-          fontFamily: "monospace",
-          fontSize: 13,
-          color: COLOURS.cyan,
-          background: "rgba(10, 10, 15, 0.7)",
-          padding: "8px 12px",
-          borderRadius: 4,
-          lineHeight: 1.6,
-          pointerEvents: "none",
+          ...panelStyle,
+          top: 10,
+          left: 10,
+          fontSize: 11,
+          lineHeight: 1.8,
         }}
       >
-        <div>
-          mode: <span style={{ color: COLOURS.pink }}>{mode}</span>
-        </div>
-        <div>
-          pos: {Math.floor(positionX)}, {Math.floor(positionY)}
-        </div>
-        <div>
-          vel: {velocityX.toFixed(1)}, {velocityY.toFixed(1)}
-        </div>
-        <div>
-          fuel:{" "}
+        <FuelBar fuel={fuel} />
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <span
-            style={{ color: fuel > 10 ? COLOURS.green : COLOURS.orange }}
+            style={{
+              color: COLOURS.pink,
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              fontSize: 10,
+            }}
           >
-            {Math.round(fuel)}
+            need
           </span>
-        </div>
-        <div>
-          need:{" "}
-          <span style={{ color: inventory.includes(requiredFuelType) ? COLOURS.green : COLOURS.orange }}>
+          <DepositIcon type={requiredFuelType} dim={!hasRequired} />
+          <span style={{ color: hasRequired ? COLOURS.green : COLOURS.orange, fontSize: 11 }}>
             {requiredFuelType}
           </span>
-          {inventory.includes(requiredFuelType) ? " ✓" : ""}
+          {hasRequired && <span style={{ color: COLOURS.green }}>{"\u2713"}</span>}
         </div>
         {inventory.length > 0 && (
-          <div>
-            bag: {inventory.join(", ")}
-          </div>
-        )}
-        {mode === "walking" && (
-          <div>
-            lander: {Math.floor(landerX)} (dist:{" "}
-            {Math.floor(Math.abs(positionX - landerX))})
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+            <span
+              style={{
+                color: COLOURS.pink,
+                textTransform: "uppercase",
+                letterSpacing: 1,
+                fontSize: 10,
+              }}
+            >
+              bag
+            </span>
+            {inventory.map((ft, i) => (
+              <DepositIcon key={i} type={ft} />
+            ))}
           </div>
         )}
       </div>
 
-      {/* DB world-state panel (right side) */}
-      {dbStats && (
+      {/* Right panel */}
+      {remotePlayers.length > 0 && (
         <div
           style={{
-            position: "absolute",
-            top: 12,
-            right: 12,
-            fontFamily: "monospace",
-            fontSize: 13,
-            color: COLOURS.cyan,
-            background: "rgba(10, 10, 15, 0.7)",
-            padding: "8px 12px",
-            borderRadius: 4,
-            lineHeight: 1.6,
-            pointerEvents: "none",
+            ...panelStyle,
+            top: 10,
+            right: 10,
+            fontSize: 11,
+            lineHeight: 1.9,
+            minWidth: 90,
           }}
         >
-          <div style={{ color: COLOURS.pink, marginBottom: 2 }}>db deposits</div>
-          <div>
-            total: <span style={{ color: COLOURS.orange }}>{dbStats.total}</span>
+          <div
+            style={{
+              color: COLOURS.pink,
+              fontSize: 10,
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              marginBottom: 2,
+            }}
+          >
+            players
           </div>
-          <div>
-            displayed: <span style={{ color: COLOURS.green }}>{dbStats.uncollected}</span>
+          {/* Local player */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span
+              style={{
+                display: "inline-block",
+                width: 6,
+                height: 6,
+                background: localPlayerColor || COLOURS.cyan,
+                boxShadow: `0 0 5px ${localPlayerColor || COLOURS.cyan}`,
+              }}
+            />
+            <span style={{ color: localPlayerColor || COLOURS.cyan }}>
+              {localPlayerName || "you"}
+            </span>
+            <DepositIcon type={requiredFuelType} />
           </div>
-          <div>
-            my inv: <span style={{ color: COLOURS.yellow }}>{dbStats.collectedByMe}</span>
-          </div>
-          <div>
-            others: <span style={{ color: "#888" }}>{dbStats.collectedByOthers}</span>
-          </div>
+          {/* Remote players */}
+          {remotePlayers.map((rp) => (
+            <div key={rp.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 6,
+                  height: 6,
+                  background: rp.color || COLOURS.cyan,
+                  boxShadow: `0 0 5px ${rp.color || COLOURS.cyan}`,
+                }}
+              />
+              <span style={{ color: rp.color || COLOURS.cyan }}>{rp.name}</span>
+              {rp.requiredFuelType && <DepositIcon type={rp.requiredFuelType} />}
+            </div>
+          ))}
         </div>
       )}
 
@@ -118,19 +221,24 @@ export function Hud({
       <div
         style={{
           position: "absolute",
-          bottom: 12,
+          bottom: 10,
           left: "50%",
           transform: "translateX(-50%)",
           fontFamily: "monospace",
-          fontSize: 12,
-          color: "rgba(255, 255, 255, 0.4)",
+          fontSize: 11,
+          color: "rgba(255, 0, 255, 0.35)",
+          textTransform: "uppercase",
+          letterSpacing: 2,
           pointerEvents: "none",
         }}
       >
-        {mode === "descending" && "Arrow keys / WASD — thrust"}
-        {mode === "landed" && "E — exit lander | Enter — chat"}
-        {mode === "in_lander" && (fuel >= 100 ? "Space — launch | E — exit | Enter — chat" : "E — exit lander | Enter — chat")}
-        {mode === "walking" && "A/D — walk | E — enter lander | Enter — chat"}
+        {mode === "descending" && "arrows / WASD \u2014 thrust"}
+        {mode === "landed" && "E \u2014 exit lander | Enter \u2014 chat"}
+        {mode === "in_lander" &&
+          (fuel >= 100
+            ? "Space \u2014 launch | E \u2014 exit | Enter \u2014 chat"
+            : "E \u2014 exit lander | Enter \u2014 chat")}
+        {mode === "walking" && "A/D \u2014 walk | E \u2014 enter lander | Enter \u2014 chat"}
       </div>
     </>
   );

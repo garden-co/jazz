@@ -1,14 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { FuelType, PlayerMode } from "./game/constants.js";
 import type { Deposit, RemotePlayerView } from "./game/engine.js";
 import { useGameEngine } from "./game/engine.js";
 import { Hud } from "./game/Hud.js";
 import { derivePlayerProps, getOrCreatePlayerId } from "./game/player.js";
-import type {
-  ChatMessage,
-  GameState,
-  RemotePlayer,
-} from "./game/types.js";
+import type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
 
 export type { PlayerMode, FuelType };
 export type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
@@ -17,13 +13,6 @@ export type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
 // Game component
 // ---------------------------------------------------------------------------
 
-export interface DbStats {
-  total: number;
-  uncollected: number;
-  collectedByMe: number;
-  collectedByOthers: number;
-}
-
 interface GameProps {
   playerId?: string;
   physicsSpeed?: number;
@@ -31,7 +20,6 @@ interface GameProps {
   deposits?: Deposit[];
   inventory?: FuelType[];
   chatMessages?: ChatMessage[];
-  dbStats?: DbStats;
   onCollectDeposit?: (id: string) => void;
   onRefuel?: (fuelType: FuelType) => void;
   onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
@@ -40,14 +28,13 @@ interface GameProps {
   onStateChange?: (state: GameState) => void;
 }
 
-export function Game({
+export const Game = memo(function Game({
   playerId: externalPlayerId,
   physicsSpeed,
   remotePlayers,
   deposits,
   inventory,
   chatMessages,
-  dbStats,
   onCollectDeposit,
   onRefuel,
   onShareFuel,
@@ -174,22 +161,15 @@ export function Game({
       data-chat-open={chatOpen ? "true" : "false"}
       style={{ position: "relative", width: "100vw", height: "100vh" }}
     >
-      <canvas
-        ref={canvasRef}
-        data-testid="game-canvas"
-        style={{ display: "block" }}
-      />
+      <canvas ref={canvasRef} data-testid="game-canvas" style={{ display: "block" }} />
       <Hud
         mode={engine.mode}
-        positionX={engine.positionX}
-        positionY={engine.positionY}
-        velocityX={engine.velocityX}
-        velocityY={engine.velocityY}
         fuel={engine.fuel}
-        landerX={engine.landerX}
         requiredFuelType={playerProps.requiredFuelType}
         inventory={engine.inventory}
-        dbStats={dbStats}
+        remotePlayers={activeRemotes}
+        localPlayerName={playerProps.name}
+        localPlayerColor={playerProps.color}
       />
       {chatOpen && (
         <input
@@ -216,29 +196,6 @@ export function Game({
           placeholder="Type a message..."
         />
       )}
-      {engine.mode === "crashed" && (
-        <button
-          onClick={() => window.location.reload()}
-          style={{
-            position: "absolute",
-            top: "60%",
-            left: "50%",
-            transform: "translateX(-50%)",
-            fontFamily: "monospace",
-            fontSize: 16,
-            color: "#ff3333",
-            background: "rgba(10, 10, 15, 0.8)",
-            border: "2px solid #ff3333",
-            borderRadius: 6,
-            padding: "10px 32px",
-            cursor: "pointer",
-            letterSpacing: 2,
-            textTransform: "uppercase",
-          }}
-        >
-          try again
-        </button>
-      )}
     </div>
   );
-}
+});
