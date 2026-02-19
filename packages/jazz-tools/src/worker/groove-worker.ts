@@ -42,7 +42,7 @@ function post(msg: WorkerToMainMessage): void {
 
 async function startup(): Promise<void> {
   try {
-    const wasmModule: any = await import("groove-wasm");
+    const wasmModule: any = await import("jazz-wasm");
     // With vite-plugin-wasm, init happens at import time and default is not a function.
     // Without it, default is the init function that must be called.
     if (typeof wasmModule.default === "function") {
@@ -60,7 +60,7 @@ async function startup(): Promise<void> {
 
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
-    const wasmModule: any = await import("groove-wasm");
+    const wasmModule: any = await import("jazz-wasm");
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;

@@ -1004,45 +1004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "groove-napi"
-version = "0.1.0"
-dependencies = [
- "futures",
- "jazz-tools",
- "napi",
- "napi-build",
- "napi-derive",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "groove-wasm"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "jazz-tools",
- "jazz-wasm-tracing",
- "js-sys",
- "serde",
- "serde-wasm-bindgen 0.6.5",
- "serde_bytes",
- "serde_json",
- "smallvec",
- "tracing",
- "tsify",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "web-sys",
- "web-time",
-]
-
-[[package]]
 name = "guardian"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1483,6 +1444,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
+name = "jazz-napi"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "jazz-tools",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-tools"
 version = "2.0.0-alpha.0"
 dependencies = [
@@ -1514,6 +1489,31 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "jazz-wasm"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "jazz-tools",
+ "jazz-wasm-tracing",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "serde_bytes",
+ "serde_json",
+ "smallvec",
+ "tracing",
+ "tsify",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
  "web-time",
 ]
 

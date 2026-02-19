@@ -11,7 +11,7 @@ More generally: as the system grows, we need a way to understand what's happenin
 ## Current state
 
 - **groove crate**: zero tracing
-- **groove-wasm**: zero tracing/logging
+- **jazz-wasm**: zero tracing/logging
 - **jazz-cli**: `tracing` + `tracing-subscriber` with `env-filter`; ~5 ad-hoc `info!`/`warn!`/`error!` calls in routes
 - **jazz-tools client module**: `tracing` available but instrumentation coverage is uneven
 - **opfs-btree**: trace points available in the storage crate, not fully wired into end-to-end spans yet
@@ -72,7 +72,7 @@ RuntimeCore::batched_tick
   └─ flush outbox → event: messages sent
 ```
 
-**groove-wasm — WASM bindings**
+**jazz-wasm — WASM bindings**
 
 ```
 WasmRuntime::new        → span: app_id, schema summary
@@ -146,14 +146,14 @@ Or just hardcode TRACE during development — the browser console has its own le
 
 ## Implementation steps
 
-1. Ensure `tracing` dependency coverage in unified `crates/jazz-cli/Cargo.toml` for core + client modules
-2. Add `tracing-wasm` dependency to `groove-wasm` Cargo.toml
+1. Ensure `tracing` dependency coverage in unified `crates/jazz-tools/Cargo.toml` for core + client modules
+2. Add `tracing-wasm` dependency to `jazz-wasm` Cargo.toml
 3. Initialize `tracing-wasm` in `WasmRuntime::new()`
 4. Instrument groove core: SchemaManager write path (insert/update/delete)
 5. Instrument groove core: QueryManager subscribe + settle path
 6. Instrument groove core: SyncManager message handling + outbox
 7. Instrument groove core: RuntimeCore::batched_tick
-8. Instrument groove-wasm: all public `WasmRuntime` methods
+8. Instrument jazz-wasm: all public `WasmRuntime` methods
 9. Add/expand `opfs-btree` tracing hooks used by groove storage adapters
 10. Instrument jazz-cli routes (expand existing sparse tracing)
 11. Add `[main]`/`[worker]` prefixes to TypeScript console calls

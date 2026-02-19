@@ -3,8 +3,8 @@ packages:
   - packages/*
   - examples/*
   - crates
-  - crates/groove-wasm
-  - crates/groove-napi
+  - crates/jazz-wasm
+  - crates/jazz-napi
 
 ignoredBuiltDependencies:
   - blake3
