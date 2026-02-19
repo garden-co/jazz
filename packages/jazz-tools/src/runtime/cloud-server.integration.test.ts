@@ -33,11 +33,11 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-type MultiServerConfig = {
+type CloudServerConfig = {
   dataRoot: string;
 };
 
-type MultiServerHandle = {
+type CloudServerHandle = {
   child: ChildProcess;
   port: number;
   baseUrl: string;
@@ -89,7 +89,7 @@ function makeSyncPayload() {
   };
 }
 
-function findMultiServerBinary(): string | null {
+function findCloudServerBinary(): string | null {
   const runtimeDir = dirname(fileURLToPath(import.meta.url));
   const basePath = join(runtimeDir, "../../../../target/debug/jazz-cloud-server");
   if (existsSync(basePath)) return basePath;
@@ -99,7 +99,7 @@ function findMultiServerBinary(): string | null {
 
 function assertIntegrationPrerequisites(): void {
   const hasWasm = hasGrooveWasmBuild();
-  const binaryPath = findMultiServerBinary();
+  const binaryPath = findCloudServerBinary();
   if (hasWasm && binaryPath) return;
 
   const missing: string[] = [];
@@ -112,7 +112,7 @@ function assertIntegrationPrerequisites(): void {
 
   throw new Error(
     [
-      "Multi-server TS integration prerequisites are missing:",
+      "Cloud-server TS integration prerequisites are missing:",
       ...missing.map((entry) => `- ${entry}`),
       "Build prerequisites, then rerun tests:",
       "1. pnpm --filter @jazz/rust build:crates",
@@ -151,11 +151,11 @@ async function waitForHealth(baseUrl: string): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`multi-server failed health check at ${healthUrl}`);
+  throw new Error(`cloud-server failed health check at ${healthUrl}`);
 }
 
-async function startMultiServer(config: MultiServerConfig): Promise<MultiServerHandle> {
-  const binary = findMultiServerBinary();
+async function startCloudServer(config: CloudServerConfig): Promise<CloudServerHandle> {
+  const binary = findCloudServerBinary();
   if (!binary) {
     throw new Error("jazz-cloud-server binary not found");
   }
@@ -211,7 +211,7 @@ async function createApp(baseUrl: string, jwksEndpoint: string): Promise<Created
       "X-Jazz-Internal-Secret": INTERNAL_API_SECRET,
     },
     body: JSON.stringify({
-      app_name: "jazz-ts-multi-server-test",
+      app_name: "jazz-ts-cloud-server-test",
       jwks_endpoint: jwksEndpoint,
       backend_secret: BACKEND_SECRET,
       admin_secret: ADMIN_SECRET,
@@ -342,15 +342,15 @@ afterEach(() => {
   }
 });
 
-describe("multi-server integration (Jazz TS)", () => {
+describe("cloud-server integration (Jazz TS)", () => {
   beforeAll(() => {
     assertIntegrationPrerequisites();
   });
 
   it("routes sync requests through serverPathPrefix with JWT auth", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
-    const dataRoot = allocTempDir("jazz-ts-multi-server-");
-    const server = await startMultiServer({ dataRoot });
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-");
+    const server = await startCloudServer({ dataRoot });
 
     try {
       const app = await createApp(server.baseUrl, jwks.url);
@@ -379,8 +379,8 @@ describe("multi-server integration (Jazz TS)", () => {
 
   it("resolves empty settled-tier query snapshots", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
-    const dataRoot = allocTempDir("jazz-ts-multi-server-empty-query-");
-    const server = await startMultiServer({ dataRoot });
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-empty-query-");
+    const server = await startCloudServer({ dataRoot });
     const queryAllTodos = translateQuery(
       JSON.stringify({
         table: "todos",
@@ -414,10 +414,10 @@ describe("multi-server integration (Jazz TS)", () => {
     }
   }, 30000);
 
-  it("syncs queries and mutations between two TS clients via multi-server", async () => {
+  it("syncs queries and mutations between two TS clients via cloud-server", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
-    const dataRoot = allocTempDir("jazz-ts-multi-server-");
-    const server = await startMultiServer({ dataRoot });
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-");
+    const server = await startCloudServer({ dataRoot });
 
     const queryAllTodos = translateQuery(
       JSON.stringify({
@@ -475,9 +475,9 @@ describe("multi-server integration (Jazz TS)", () => {
     }
   }, 30000);
 
-  it("resyncs data from multi-server after server restart", async () => {
+  it("resyncs data from cloud-server after server restart", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
-    const dataRoot = allocTempDir("jazz-ts-multi-server-restart-");
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-restart-");
     const queryAllTodos = translateQuery(
       JSON.stringify({
         table: "todos",
@@ -490,7 +490,7 @@ describe("multi-server integration (Jazz TS)", () => {
     );
 
     const appId = await (async () => {
-      const server = await startMultiServer({ dataRoot });
+      const server = await startCloudServer({ dataRoot });
       let writer: JazzClient | null = null;
       try {
         const app = await createApp(server.baseUrl, jwks.url);
@@ -513,7 +513,7 @@ describe("multi-server integration (Jazz TS)", () => {
       }
     })();
 
-    const restarted = await startMultiServer({ dataRoot });
+    const restarted = await startCloudServer({ dataRoot });
     let reader: JazzClient | null = null;
     try {
       reader = await connectClient(

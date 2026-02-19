@@ -188,8 +188,8 @@ pulumi up
 
 This repo also includes workflows for image publish + PR-based stack tag updates:
 
-- `.github/workflows/publish-multi-server-image.yml`
-- `.github/workflows/deploy-multi-server-image.yml`
+- `.github/workflows/publish-cloud-server-image.yml`
+- `.github/workflows/deploy-cloud-server-image.yml`
 
 In that model:
 
