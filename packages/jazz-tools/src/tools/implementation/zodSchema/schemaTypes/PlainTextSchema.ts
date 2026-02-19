@@ -130,7 +130,9 @@ export class PlainTextSchema implements CorePlainTextSchema {
   /**
    * Configure permissions to be used when creating or composing CoValues
    */
-  withPermissions(permissions: SchemaPermissions): PlainTextSchema {
+  withPermissions(
+    permissions: Omit<SchemaPermissions, "writer">,
+  ): PlainTextSchema {
     const copy = new PlainTextSchema(this.coValueClass);
     copy.#permissions = permissions;
     return copy;

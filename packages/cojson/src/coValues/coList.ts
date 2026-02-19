@@ -92,6 +92,8 @@ export class RawCoList<
   lastValidTransaction: number | undefined;
   totalValidTransactions: number = 0;
 
+  #isDeletionRestricted: boolean;
+
   private resetInternalState() {
     this.afterStart = [];
     this.beforeEnd = [];
@@ -114,6 +116,10 @@ export class RawCoList<
     this.beforeEnd = [];
     this.knownTransactions = { [core.id]: 0 };
     this.atTimeFilter = atTimeFilter;
+
+    const ruleset = this.core.verified.header.ruleset;
+    this.#isDeletionRestricted =
+      ruleset.type === "ownedByGroup" && ruleset.restrictDeletion === true;
 
     this._processNewTransactions();
   }
@@ -208,6 +214,10 @@ export class RawCoList<
     this._processNewTransactions();
   }
 
+  private transactionContainsDeletion(changes: ListOpPayload<Item>[]) {
+    return changes.some((change) => change.op === "del");
+  }
+
   private _processNewTransactions() {
     // Get all transactions including invalid ones, so that items referencing
     // entries from invalid init transactions can still find their references.
@@ -228,6 +238,19 @@ export class RawCoList<
     for (const { txID, changes, madeAt, isValid } of transactions) {
       if (this.isFilteredOut(madeAt)) {
         continue;
+      }
+
+      if (
+        isValid &&
+        this.#isDeletionRestricted &&
+        this.transactionContainsDeletion(changes as ListOpPayload<Item>[])
+      ) {
+        const author = accountOrAgentIDfromSessionID(txID.sessionID);
+        const role = this.group.atTime(madeAt).roleOfInternal(author);
+
+        if (role !== "admin" && role !== "manager") {
+          continue;
+        }
       }
 
       // Only track valid transactions for the lastValidTransaction/oldestValidTransaction

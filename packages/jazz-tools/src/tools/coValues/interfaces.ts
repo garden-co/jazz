@@ -496,6 +496,7 @@ export type CoValueCreateOptionsInternal = CoValueCreateOptions<
   {
     onCreate?: OnCreateCallback;
     firstComesWins?: boolean;
+    restrictDeletion?: boolean;
   },
   Account | Group
 >;
@@ -506,6 +507,7 @@ export function parseCoValueCreateOptions(
   owner: Group;
   uniqueness?: CoValueUniqueness;
   firstComesWins: boolean;
+  restrictDeletion?: boolean;
 } {
   const onCreate =
     options && "onCreate" in options ? options.onCreate : undefined;
@@ -513,17 +515,32 @@ export function parseCoValueCreateOptions(
   if (!options) {
     const owner = Group.create();
     onCreate?.(owner);
-    return { owner, uniqueness: undefined, firstComesWins: false };
+    return {
+      owner,
+      uniqueness: undefined,
+      firstComesWins: false,
+      restrictDeletion: undefined,
+    };
   }
 
   if (TypeSym in options) {
     if (options[TypeSym] === "Account") {
       const owner = accountOrGroupToGroup(options);
       onCreate?.(owner);
-      return { owner, uniqueness: undefined, firstComesWins: false };
+      return {
+        owner,
+        uniqueness: undefined,
+        firstComesWins: false,
+        restrictDeletion: undefined,
+      };
     } else if (options[TypeSym] === "Group") {
       onCreate?.(options);
-      return { owner: options, uniqueness: undefined, firstComesWins: false };
+      return {
+        owner: options,
+        uniqueness: undefined,
+        firstComesWins: false,
+        restrictDeletion: undefined,
+      };
     }
   }
 
@@ -543,6 +560,7 @@ export function parseCoValueCreateOptions(
     owner,
     uniqueness,
     firstComesWins,
+    restrictDeletion: options.restrictDeletion,
   };
   return opts;
 }

@@ -494,7 +494,7 @@ export class CoMapSchema<
    * Configure permissions to be used when creating or composing CoValues
    */
   withPermissions(
-    permissions: SchemaPermissions,
+    permissions: Omit<SchemaPermissions, "writer">,
   ): CoMapSchema<Shape, CatchAll, Owner, DefaultResolveQuery> {
     return this.copy({ permissions });
   }

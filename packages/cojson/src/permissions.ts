@@ -22,7 +22,7 @@ import { expectGroup } from "./typeUtils/expectGroup.js";
 
 export type PermissionsDef =
   | { type: "group"; initialAdmin: RawAccountID | AgentID }
-  | { type: "ownedByGroup"; group: RawCoID }
+  | { type: "ownedByGroup"; group: RawCoID; restrictDeletion?: boolean }
   | { type: "unsafeAllowAll" };
 
 export type AccountRole =

@@ -155,10 +155,16 @@ pub enum RulesetGroupType {
     Group,
 }
 
-/// {"group": "...", "type": "ownedByGroup"} - fields in alphabetical order
+/// {"group": "...", "restrictDeletion": true, "type": "ownedByGroup"} - fields in alphabetical order
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RulesetOwnedByGroup {
     pub group: String,
+    #[serde(
+        rename = "restrictDeletion",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub restrict_deletion: Option<bool>,
     #[serde(rename = "type")]
     pub ruleset_type: RulesetOwnedByGroupType,
 }
@@ -194,6 +200,7 @@ impl RulesetDef {
     pub fn owned_by_group(group: impl Into<String>) -> Self {
         RulesetDef::OwnedByGroup(RulesetOwnedByGroup {
             group: group.into(),
+            restrict_deletion: None,
             ruleset_type: RulesetOwnedByGroupType::OwnedByGroup,
         })
     }
@@ -935,6 +942,18 @@ mod tests {
         let json = serde_json::to_string(&ruleset).unwrap();
         // Fields should be in alphabetical order: group, type
         assert_eq!(json, r#"{"group":"co_group123","type":"ownedByGroup"}"#);
+
+        let restricted_ruleset = RulesetDef::OwnedByGroup(RulesetOwnedByGroup {
+            group: "co_group123".to_string(),
+            restrict_deletion: Some(true),
+            ruleset_type: RulesetOwnedByGroupType::OwnedByGroup,
+        });
+        let restricted_json = serde_json::to_string(&restricted_ruleset).unwrap();
+        // Fields should be in alphabetical order: group, restrictDeletion, type
+        assert_eq!(
+            restricted_json,
+            r#"{"group":"co_group123","restrictDeletion":true,"type":"ownedByGroup"}"#
+        );
     }
 
     #[test]
@@ -1073,6 +1092,20 @@ mod tests {
     #[test]
     fn test_serde_roundtrip_with_owned_by_group_ruleset() {
         let ts_json = r#"{"meta":null,"ruleset":{"group":"co_zgroup123","type":"ownedByGroup"},"type":"colist","uniqueness":"zXYZ789"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_owned_by_group_restricted_deletion_ruleset() {
+        let ts_json = r#"{"meta":null,"ruleset":{"group":"co_zgroup123","restrictDeletion":true,"type":"ownedByGroup"},"type":"colist","uniqueness":"zXYZ789"}"#;
 
         let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
         let rust_json = serde_json::to_string(&header).unwrap();

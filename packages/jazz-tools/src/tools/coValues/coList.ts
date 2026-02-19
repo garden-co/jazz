@@ -159,7 +159,7 @@ export class CoList<out Item = any>
     }
 
     const instance = new this();
-    const { owner, uniqueness, firstComesWins } =
+    const { owner, uniqueness, firstComesWins, restrictDeletion } =
       parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
@@ -186,6 +186,7 @@ export class CoList<out Item = any>
       "private",
       uniqueness,
       initMeta,
+      restrictDeletion ? { restrictDeletion: true } : undefined,
     );
 
     return instance;

@@ -1537,6 +1537,108 @@ describe("co.list schema", () => {
     expect(keywords[0]?.toString()).toEqual("hello");
     expect(keywords[1]?.toString()).toEqual("world");
   });
+
+  test("supports writer: 'appendOnly' in schema definition and writes it to header", () => {
+    const RestrictedList = co
+      .list(z.string())
+      .withPermissions({ writer: "appendOnly" });
+    const list = RestrictedList.create(["seed"]);
+
+    expect(list.$jazz.raw.core.verified.header.ruleset).toMatchObject({
+      type: "ownedByGroup",
+      restrictDeletion: true,
+    });
+  });
+
+  test("writers can append but cannot delete or replace when writer: 'appendOnly' is enabled", async () => {
+    const { clientAccount: alice, serverAccount: bob } = await setupTwoNodes();
+
+    const ownerGroup = Group.create(alice);
+    ownerGroup.addMember(bob, "writer");
+
+    const RestrictedList = co
+      .list(z.string())
+      .withPermissions({ writer: "appendOnly" });
+    const list = RestrictedList.create(["seed"], { owner: ownerGroup });
+    const loadedAsBob = await RestrictedList.load(list.$jazz.id, {
+      loadAs: bob,
+    });
+
+    assertLoaded(loadedAsBob);
+
+    loadedAsBob.$jazz.push("writer-append");
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["seed", "writer-append"]);
+    });
+
+    loadedAsBob.$jazz.remove(0);
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["seed", "writer-append"]);
+    });
+
+    loadedAsBob.$jazz.set(1, "writer-replace-attempt");
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["seed", "writer-append"]);
+    });
+  });
+
+  test("managers can always remove and mutate when writer: 'appendOnly' is enabled", async () => {
+    const { clientAccount: alice, serverAccount: bob } = await setupTwoNodes();
+
+    const ownerGroup = Group.create(alice);
+    ownerGroup.addMember(bob, "manager");
+
+    const RestrictedList = co
+      .list(z.string())
+      .withPermissions({ writer: "appendOnly" });
+    const list = RestrictedList.create(["seed", "second"], {
+      owner: ownerGroup,
+    });
+    const loadedAsBob = await RestrictedList.load(list.$jazz.id, {
+      loadAs: bob,
+    });
+
+    assertLoaded(loadedAsBob);
+
+    loadedAsBob.$jazz.remove(0);
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["second"]);
+    });
+
+    loadedAsBob.$jazz.set(0, "manager-updated");
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["manager-updated"]);
+    });
+  });
+
+  test("admins can always remove and mutate when writer: 'appendOnly' is enabled", async () => {
+    const { clientAccount: alice, serverAccount: bob } = await setupTwoNodes();
+
+    const ownerGroup = Group.create(alice);
+    ownerGroup.addMember(bob, "admin");
+
+    const RestrictedList = co
+      .list(z.string())
+      .withPermissions({ writer: "appendOnly" });
+    const list = RestrictedList.create(["seed", "second"], {
+      owner: ownerGroup,
+    });
+    const loadedAsBob = await RestrictedList.load(list.$jazz.id, {
+      loadAs: bob,
+    });
+
+    assertLoaded(loadedAsBob);
+
+    loadedAsBob.$jazz.remove(0);
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["second"]);
+    });
+
+    loadedAsBob.$jazz.set(0, "admin-updated");
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["admin-updated"]);
+    });
+  });
 });
 
 describe("lastUpdatedAt", () => {

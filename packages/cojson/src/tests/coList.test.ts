@@ -5,6 +5,7 @@ import {
   hotSleep,
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
+  setupTestAccount,
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
@@ -1022,6 +1023,143 @@ test("the list should rebuild when the group permissions change", async () => {
 
   expect(listOnBob.version).toEqual(1);
   expect(listOnBob.totalValidTransactions).toEqual(1);
+});
+
+describe("CoList restricted deletion", () => {
+  test("default ownedByGroup behavior is unchanged (writers can delete)", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    group.addMember(bob.account, "writer");
+
+    const listCore = alice.node.createCoValue({
+      type: "colist",
+      ruleset: { type: "ownedByGroup", group: group.id },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+    const list = expectList(listCore.getCurrentContent());
+    list.append("item");
+
+    const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+    listOnBob.delete(0);
+
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual([]);
+    });
+  });
+
+  test("with restrictDeletion enabled, writers can append but cannot delete or replace", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    group.addMember(bob.account, "writer");
+
+    const listCore = alice.node.createCoValue({
+      type: "colist",
+      ruleset: {
+        type: "ownedByGroup",
+        group: group.id,
+        restrictDeletion: true,
+      },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+    const list = expectList(listCore.getCurrentContent());
+    list.append("seed");
+
+    const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+
+    listOnBob.append("writer-append");
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["seed", "writer-append"]);
+    });
+
+    listOnBob.delete(0);
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["seed", "writer-append"]);
+    });
+
+    listOnBob.replace(1, "writer-replace-attempt");
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["seed", "writer-append"]);
+    });
+  });
+
+  test("with restrictDeletion enabled, managers and admins can delete", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    group.addMember(bob.account, "manager");
+
+    const listCore = alice.node.createCoValue({
+      type: "colist",
+      ruleset: {
+        type: "ownedByGroup",
+        group: group.id,
+        restrictDeletion: true,
+      },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+    const list = expectList(listCore.getCurrentContent());
+    list.appendItems(["first", "second", "third"]);
+
+    const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+    listOnBob.delete(1);
+
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["first", "third"]);
+    });
+
+    list.delete(0);
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["third"]);
+    });
+  });
+
+  test("deletions made while writer stay blocked after promotion", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    group.addMember(bob.account, "writer");
+
+    const listCore = alice.node.createCoValue({
+      type: "colist",
+      ruleset: {
+        type: "ownedByGroup",
+        group: group.id,
+        restrictDeletion: true,
+      },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+    const list = expectList(listCore.getCurrentContent());
+    list.append("item");
+
+    const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+    listOnBob.delete(0);
+
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["item"]);
+    });
+
+    group.addMember(bob.account, "manager");
+
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual(["item"]);
+      expect(listOnBob.toJSON()).toEqual(["item"]);
+    });
+
+    listOnBob.delete(0);
+    await waitFor(() => {
+      expect(list.toJSON()).toEqual([]);
+    });
+  });
 });
 
 test("items appended after a losing init transaction are preserved", async () => {

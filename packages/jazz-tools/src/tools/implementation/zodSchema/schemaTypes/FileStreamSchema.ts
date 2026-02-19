@@ -172,7 +172,7 @@ export class FileStreamSchema implements CoreFileStreamSchema {
    * Configure permissions to be used when creating or composing CoValues
    */
   withPermissions(
-    permissions: Omit<SchemaPermissions, "onInlineCreate">,
+    permissions: Omit<SchemaPermissions, "onInlineCreate" | "writer">,
   ): FileStreamSchema {
     const copy = new FileStreamSchema(this.coValueClass);
     copy.#permissions = permissions;
