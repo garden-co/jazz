@@ -23,8 +23,12 @@
 
 use std::collections::HashMap;
 
-use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
+use crate::query_manager::{
+    policy::{CmpOp, Operation, PolicyExpr, PolicyValue},
+    types::{
+        ColumnDescriptor, ColumnName, ColumnType, OperationPolicy, RowDescriptor, Schema,
+        TableName, TablePolicies, TableSchema, Value,
+    },
 };
 
 use super::lens::{LensOp, LensTransform};
@@ -70,6 +74,23 @@ enum Token {
     // Keywords
     Create,
     Table,
+    Policy,
+    On,
+    For,
+    Using,
+    With,
+    Check,
+    Session,
+    Inherits,
+    Via,
+    Select,
+    Insert,
+    Update,
+    Delete,
+    And,
+    Or,
+    In,
+    Is,
     Alter,
     Add,
     Drop,
@@ -87,6 +108,14 @@ enum Token {
     RParen,
     Comma,
     Semicolon,
+    Dot,
+    At,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
     // Literals
     Ident(String),
     Number(String),
@@ -209,6 +238,41 @@ impl<'a> Tokenizer<'a> {
                 self.advance();
                 Token::Semicolon
             }
+            '.' => {
+                self.advance();
+                Token::Dot
+            }
+            '@' => {
+                self.advance();
+                Token::At
+            }
+            '=' => {
+                self.advance();
+                Token::Eq
+            }
+            '!' if self.input[self.pos..].starts_with("!=") => {
+                self.advance();
+                self.advance();
+                Token::Ne
+            }
+            '<' if self.input[self.pos..].starts_with("<=") => {
+                self.advance();
+                self.advance();
+                Token::Le
+            }
+            '>' if self.input[self.pos..].starts_with(">=") => {
+                self.advance();
+                self.advance();
+                Token::Ge
+            }
+            '<' => {
+                self.advance();
+                Token::Lt
+            }
+            '>' => {
+                self.advance();
+                Token::Gt
+            }
             '\'' | '"' => Token::StringLit(self.read_string()?),
             '-' if self.input[self.pos..].starts_with("-") && {
                 let next = self.input[self.pos + 1..].chars().next();
@@ -223,6 +287,23 @@ impl<'a> Tokenizer<'a> {
                 match ident.to_uppercase().as_str() {
                     "CREATE" => Token::Create,
                     "TABLE" => Token::Table,
+                    "POLICY" => Token::Policy,
+                    "ON" => Token::On,
+                    "FOR" => Token::For,
+                    "USING" => Token::Using,
+                    "WITH" => Token::With,
+                    "CHECK" => Token::Check,
+                    "SESSION" => Token::Session,
+                    "INHERITS" => Token::Inherits,
+                    "VIA" => Token::Via,
+                    "SELECT" => Token::Select,
+                    "INSERT" => Token::Insert,
+                    "UPDATE" => Token::Update,
+                    "DELETE" => Token::Delete,
+                    "AND" => Token::And,
+                    "OR" => Token::Or,
+                    "IN" => Token::In,
+                    "IS" => Token::Is,
                     "ALTER" => Token::Alter,
                     "ADD" => Token::Add,
                     "DROP" => Token::Drop,
@@ -324,6 +405,211 @@ impl Parser {
             "TIMESTAMP" => Ok(ColumnType::Timestamp),
             "UUID" => Ok(ColumnType::Uuid),
             _ => Err(SqlParseError::UnsupportedType(type_name)),
+        }
+    }
+
+    fn parse_policy_operation(&mut self) -> Result<Operation, SqlParseError> {
+        match self.advance() {
+            Some(Token::Select) => Ok(Operation::Select),
+            Some(Token::Insert) => Ok(Operation::Insert),
+            Some(Token::Update) => Ok(Operation::Update),
+            Some(Token::Delete) => Ok(Operation::Delete),
+            Some(t) => Err(SqlParseError::Expected(format!(
+                "SELECT, INSERT, UPDATE, or DELETE, got {:?}",
+                t
+            ))),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_session_path(&mut self) -> Result<Vec<String>, SqlParseError> {
+        self.expect(&Token::At)?;
+        match self.advance() {
+            Some(Token::Session) => {}
+            Some(Token::Ident(name)) if name.eq_ignore_ascii_case("session") => {}
+            Some(t) => {
+                return Err(SqlParseError::Expected(format!(
+                    "session reference, got {:?}",
+                    t
+                )));
+            }
+            None => return Err(SqlParseError::UnexpectedEnd),
+        }
+
+        self.expect(&Token::Dot)?;
+        let mut path = vec![self.expect_ident()?];
+        while self.peek() == Some(&Token::Dot) {
+            self.advance();
+            path.push(self.expect_ident()?);
+        }
+        Ok(path)
+    }
+
+    fn parse_policy_value(&mut self) -> Result<PolicyValue, SqlParseError> {
+        if self.peek() == Some(&Token::At) {
+            return Ok(PolicyValue::SessionRef(self.parse_session_path()?));
+        }
+
+        Ok(PolicyValue::Literal(self.parse_value()?))
+    }
+
+    fn parse_policy_expr(&mut self) -> Result<PolicyExpr, SqlParseError> {
+        self.parse_policy_or()
+    }
+
+    fn parse_policy_or(&mut self) -> Result<PolicyExpr, SqlParseError> {
+        let mut exprs = vec![self.parse_policy_and()?];
+
+        while self.peek() == Some(&Token::Or) {
+            self.advance();
+            exprs.push(self.parse_policy_and()?);
+        }
+
+        if exprs.len() == 1 {
+            Ok(exprs.pop().unwrap())
+        } else {
+            Ok(PolicyExpr::Or(exprs))
+        }
+    }
+
+    fn parse_policy_and(&mut self) -> Result<PolicyExpr, SqlParseError> {
+        let mut exprs = vec![self.parse_policy_primary()?];
+
+        while self.peek() == Some(&Token::And) {
+            self.advance();
+            exprs.push(self.parse_policy_primary()?);
+        }
+
+        if exprs.len() == 1 {
+            Ok(exprs.pop().unwrap())
+        } else {
+            Ok(PolicyExpr::And(exprs))
+        }
+    }
+
+    fn parse_policy_primary(&mut self) -> Result<PolicyExpr, SqlParseError> {
+        match self.peek() {
+            Some(Token::LParen) => {
+                self.advance();
+                let expr = self.parse_policy_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(expr)
+            }
+            Some(Token::Not) => {
+                self.advance();
+                Ok(PolicyExpr::Not(Box::new(self.parse_policy_primary()?)))
+            }
+            Some(Token::True) => {
+                self.advance();
+                Ok(PolicyExpr::True)
+            }
+            Some(Token::False) => {
+                self.advance();
+                Ok(PolicyExpr::False)
+            }
+            Some(Token::Inherits) => {
+                self.advance();
+                let operation = self.parse_policy_operation()?;
+                self.expect(&Token::Via)?;
+                let via_column = self.expect_ident()?;
+                Ok(PolicyExpr::Inherits {
+                    operation,
+                    via_column,
+                })
+            }
+            Some(Token::Ident(_)) => {
+                let column = self.expect_ident()?;
+
+                match self.peek() {
+                    Some(Token::Eq) => {
+                        self.advance();
+                        Ok(PolicyExpr::Cmp {
+                            column,
+                            op: CmpOp::Eq,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
+                    Some(Token::Ne) => {
+                        self.advance();
+                        Ok(PolicyExpr::Cmp {
+                            column,
+                            op: CmpOp::Ne,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
+                    Some(Token::Lt) => {
+                        self.advance();
+                        Ok(PolicyExpr::Cmp {
+                            column,
+                            op: CmpOp::Lt,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
+                    Some(Token::Le) => {
+                        self.advance();
+                        Ok(PolicyExpr::Cmp {
+                            column,
+                            op: CmpOp::Le,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
+                    Some(Token::Gt) => {
+                        self.advance();
+                        Ok(PolicyExpr::Cmp {
+                            column,
+                            op: CmpOp::Gt,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
+                    Some(Token::Ge) => {
+                        self.advance();
+                        Ok(PolicyExpr::Cmp {
+                            column,
+                            op: CmpOp::Ge,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
+                    Some(Token::In) => {
+                        self.advance();
+                        Ok(PolicyExpr::In {
+                            column,
+                            session_path: self.parse_session_path()?,
+                        })
+                    }
+                    Some(Token::Is) => {
+                        self.advance();
+                        if self.peek() == Some(&Token::Not) {
+                            self.advance();
+                            self.expect(&Token::Null)?;
+                            Ok(PolicyExpr::IsNotNull { column })
+                        } else {
+                            self.expect(&Token::Null)?;
+                            Ok(PolicyExpr::IsNull { column })
+                        }
+                    }
+                    Some(t) => Err(SqlParseError::Expected(format!(
+                        "policy operator after column, got {:?}",
+                        t
+                    ))),
+                    None => Err(SqlParseError::UnexpectedEnd),
+                }
+            }
+            Some(t) => Err(SqlParseError::Expected(format!(
+                "policy expression, got {:?}",
+                t
+            ))),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_policy_clause_expr(&mut self) -> Result<PolicyExpr, SqlParseError> {
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            let expr = self.parse_policy_expr()?;
+            self.expect(&Token::RParen)?;
+            Ok(expr)
+        } else {
+            self.parse_policy_expr()
         }
     }
 
@@ -461,6 +747,43 @@ impl Parser {
         Ok((table_name, TableSchema::new(RowDescriptor::new(columns))))
     }
 
+    fn parse_create_policy(
+        &mut self,
+    ) -> Result<(String, Operation, OperationPolicy), SqlParseError> {
+        self.expect(&Token::Policy)?;
+        // Policy name is currently informational only.
+        let _policy_name = self.expect_ident()?;
+        self.expect(&Token::On)?;
+        let table_name = self.expect_ident()?;
+        self.expect(&Token::For)?;
+        let operation = self.parse_policy_operation()?;
+
+        let mut using = None;
+        let mut with_check = None;
+
+        loop {
+            match self.peek() {
+                Some(Token::Using) => {
+                    self.advance();
+                    using = Some(self.parse_policy_clause_expr()?);
+                }
+                Some(Token::With) => {
+                    self.advance();
+                    self.expect(&Token::Check)?;
+                    with_check = Some(self.parse_policy_clause_expr()?);
+                }
+                _ => break,
+            }
+        }
+
+        // Optional semicolon
+        if self.peek() == Some(&Token::Semicolon) {
+            self.advance();
+        }
+
+        Ok((table_name, operation, OperationPolicy { using, with_check }))
+    }
+
     fn parse_alter_table(&mut self) -> Result<(LensOp, bool), SqlParseError> {
         self.expect(&Token::Table)?;
         let table_name = self.expect_ident()?;
@@ -558,16 +881,55 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
     let mut parser = Parser::new(tokens);
     let mut schema = HashMap::new();
 
+    fn apply_policy(
+        schema: &mut Schema,
+        table_name: String,
+        operation: Operation,
+        policy: OperationPolicy,
+    ) -> Result<(), SqlParseError> {
+        let table_key = TableName::new(table_name.clone());
+        let table_schema = schema.get_mut(&table_key).ok_or_else(|| {
+            SqlParseError::SyntaxError(format!(
+                "CREATE POLICY references unknown table '{}'",
+                table_name
+            ))
+        })?;
+
+        match operation {
+            Operation::Select => table_schema.policies.select = policy,
+            Operation::Insert => table_schema.policies.insert = policy,
+            Operation::Update => table_schema.policies.update = policy,
+            Operation::Delete => table_schema.policies.delete = policy,
+        }
+
+        Ok(())
+    }
+
     while parser.peek().is_some() {
         match parser.peek() {
             Some(Token::Create) => {
                 parser.advance();
-                let (name, table_schema) = parser.parse_create_table()?;
-                schema.insert(TableName::new(name), table_schema);
+                match parser.peek() {
+                    Some(Token::Table) => {
+                        let (name, table_schema) = parser.parse_create_table()?;
+                        schema.insert(TableName::new(name), table_schema);
+                    }
+                    Some(Token::Policy) => {
+                        let (table_name, operation, policy) = parser.parse_create_policy()?;
+                        apply_policy(&mut schema, table_name, operation, policy)?;
+                    }
+                    Some(t) => {
+                        return Err(SqlParseError::UnsupportedStatement(format!(
+                            "Only CREATE TABLE and CREATE POLICY allowed in schema files, got {:?}",
+                            t
+                        )));
+                    }
+                    None => return Err(SqlParseError::UnexpectedEnd),
+                }
             }
             Some(t) => {
                 return Err(SqlParseError::UnsupportedStatement(format!(
-                    "Only CREATE TABLE allowed in schema files, got {:?}",
+                    "Only CREATE TABLE and CREATE POLICY allowed in schema files, got {:?}",
                     t
                 )));
             }
@@ -628,7 +990,7 @@ pub fn parse_lens(sql: &str) -> Result<LensTransform, SqlParseError> {
 
 /// Generate SQL CREATE TABLE statements from a Schema.
 pub fn schema_to_sql(schema: &Schema) -> String {
-    let mut lines = Vec::new();
+    let mut blocks = Vec::new();
 
     // Sort tables for deterministic output
     let mut table_names: Vec<_> = schema.keys().collect();
@@ -636,10 +998,15 @@ pub fn schema_to_sql(schema: &Schema) -> String {
 
     for table_name in table_names {
         let table_schema = &schema[table_name];
-        lines.push(table_schema_to_sql(table_name.as_str(), table_schema));
+        let mut block = vec![table_schema_to_sql(table_name.as_str(), table_schema)];
+        block.extend(table_policies_to_sql(
+            table_name.as_str(),
+            &table_schema.policies,
+        ));
+        blocks.push(block.join("\n"));
     }
 
-    lines.join("\n\n")
+    blocks.join("\n\n")
 }
 
 fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
@@ -651,6 +1018,119 @@ fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
     }
 
     format!("CREATE TABLE {} (\n{}\n);", table_name, columns.join(",\n"))
+}
+
+fn table_policies_to_sql(table_name: &str, policies: &TablePolicies) -> Vec<String> {
+    let mut statements = Vec::new();
+
+    let ops = [
+        ("select", "SELECT", &policies.select),
+        ("insert", "INSERT", &policies.insert),
+        ("update", "UPDATE", &policies.update),
+        ("delete", "DELETE", &policies.delete),
+    ];
+
+    for (name, sql_op, policy) in ops {
+        let clauses = operation_policy_to_sql(policy);
+        if clauses.is_empty() {
+            continue;
+        }
+        statements.push(format!(
+            "CREATE POLICY {}_{}_policy ON {} FOR {} {};",
+            table_name,
+            name,
+            table_name,
+            sql_op,
+            clauses.join(" ")
+        ));
+    }
+
+    statements
+}
+
+fn operation_policy_to_sql(policy: &OperationPolicy) -> Vec<String> {
+    let mut clauses = Vec::new();
+    if let Some(expr) = &policy.using {
+        clauses.push(format!("USING ({})", policy_expr_to_sql(expr)));
+    }
+    if let Some(expr) = &policy.with_check {
+        clauses.push(format!("WITH CHECK ({})", policy_expr_to_sql(expr)));
+    }
+    clauses
+}
+
+fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
+    match expr {
+        PolicyExpr::Cmp { column, op, value } => {
+            format!(
+                "{} {} {}",
+                column,
+                cmp_op_to_sql(op),
+                policy_value_to_sql(value)
+            )
+        }
+        PolicyExpr::IsNull { column } => format!("{} IS NULL", column),
+        PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", column),
+        PolicyExpr::In {
+            column,
+            session_path,
+        } => format!("{} IN @session.{}", column, session_path.join(".")),
+        PolicyExpr::Exists { table, condition } => {
+            format!(
+                "EXISTS (SELECT FROM {} WHERE {})",
+                table,
+                policy_expr_to_sql(condition)
+            )
+        }
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+        } => format!(
+            "INHERITS {} VIA {}",
+            operation_to_sql(*operation),
+            via_column
+        ),
+        PolicyExpr::And(exprs) => exprs
+            .iter()
+            .map(|e| format!("({})", policy_expr_to_sql(e)))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+        PolicyExpr::Or(exprs) => exprs
+            .iter()
+            .map(|e| format!("({})", policy_expr_to_sql(e)))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+        PolicyExpr::Not(expr) => format!("NOT ({})", policy_expr_to_sql(expr)),
+        PolicyExpr::True => "TRUE".to_string(),
+        PolicyExpr::False => "FALSE".to_string(),
+    }
+}
+
+fn policy_value_to_sql(value: &PolicyValue) -> String {
+    match value {
+        PolicyValue::Literal(value) => value_to_sql(value),
+        PolicyValue::SessionRef(path) => format!("@session.{}", path.join(".")),
+    }
+}
+
+fn cmp_op_to_sql(op: &CmpOp) -> &'static str {
+    match op {
+        CmpOp::Eq => "=",
+        CmpOp::Ne => "!=",
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Gt => ">",
+        CmpOp::Ge => ">=",
+    }
+}
+
+fn operation_to_sql(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Select => "SELECT",
+        Operation::Insert => "INSERT",
+        Operation::Update => "UPDATE",
+        Operation::Delete => "DELETE",
+    }
 }
 
 fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
@@ -817,6 +1297,46 @@ mod tests {
         assert_eq!(schema.len(), 2);
         assert!(schema.contains_key(&TableName::new("users")));
         assert!(schema.contains_key(&TableName::new("posts")));
+    }
+
+    #[test]
+    fn parse_create_policy_statements() {
+        let sql = r#"
+            CREATE TABLE todos (
+                title TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                project_id UUID REFERENCES projects
+            );
+
+            CREATE POLICY todos_select_policy ON todos FOR SELECT
+                USING (owner_id = @session.user_id OR INHERITS SELECT VIA project_id);
+            CREATE POLICY todos_insert_policy ON todos FOR INSERT
+                WITH CHECK (owner_id = @session.user_id);
+            CREATE POLICY todos_update_policy ON todos FOR UPDATE
+                USING (owner_id = @session.user_id)
+                WITH CHECK (owner_id = @session.user_id);
+            CREATE POLICY todos_delete_policy ON todos FOR DELETE
+                USING (owner_id = @session.user_id);
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("todos")).unwrap();
+
+        match &table.policies.select.using {
+            Some(PolicyExpr::Or(exprs)) => {
+                assert_eq!(exprs.len(), 2);
+            }
+            other => panic!("expected SELECT OR policy, got {:?}", other),
+        }
+
+        match &table.policies.insert.with_check {
+            Some(PolicyExpr::Cmp { column, .. }) => assert_eq!(column, "owner_id"),
+            other => panic!("expected INSERT CHECK policy, got {:?}", other),
+        }
+
+        assert!(table.policies.update.using.is_some());
+        assert!(table.policies.update.with_check.is_some());
+        assert!(table.policies.delete.using.is_some());
     }
 
     #[test]
@@ -1154,6 +1674,35 @@ mod tests {
     }
 
     #[test]
+    fn schema_to_sql_includes_policies() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::with_policies(
+                RowDescriptor::new(vec![ColumnDescriptor::new(
+                    ColumnName::new("owner_id"),
+                    ColumnType::Text,
+                )]),
+                TablePolicies::new()
+                    .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                    .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                    .with_update(
+                        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                    )
+                    .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            ),
+        );
+
+        let sql = schema_to_sql(&schema);
+
+        assert!(sql.contains("CREATE POLICY todos_select_policy ON todos FOR SELECT"));
+        assert!(sql.contains("CREATE POLICY todos_insert_policy ON todos FOR INSERT"));
+        assert!(sql.contains("CREATE POLICY todos_update_policy ON todos FOR UPDATE"));
+        assert!(sql.contains("CREATE POLICY todos_delete_policy ON todos FOR DELETE"));
+    }
+
+    #[test]
     fn schema_to_sql_nullable_with_references() {
         let mut schema = HashMap::new();
         schema.insert(
@@ -1188,6 +1737,22 @@ mod tests {
             .columns[0];
         assert_eq!(col.references, Some(TableName::new("users")));
         assert!(!col.nullable);
+    }
+
+    #[test]
+    fn sql_round_trip_with_policies() {
+        let sql = r#"
+            CREATE TABLE todos (
+                owner_id TEXT NOT NULL
+            );
+            CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
+        "#;
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let table = reparsed.get(&TableName::new("todos")).unwrap();
+        assert!(table.policies.select.using.is_some());
     }
 
     #[test]

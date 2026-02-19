@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
-import { app, type Todo } from "../schema/app.js";
+import { app } from "../schema/app.js";
 
 export function TodoList() {
   // #region reading-reactive-hooks-react
@@ -10,9 +10,6 @@ export function TodoList() {
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
   const [title, setTitle] = useState("");
-
-  const canMutateTodo = (todo: Todo): boolean =>
-    sessionUserId !== null && todo.owner_id === sessionUserId;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,23 +38,12 @@ export function TodoList() {
             <input
               type="checkbox"
               checked={todo.done}
-              disabled={!canMutateTodo(todo)}
-              onChange={() => {
-                if (!canMutateTodo(todo)) return;
-                db.update(app.todos, todo.id, { done: !todo.done });
-              }}
+              onChange={() => db.update(app.todos, todo.id, { done: !todo.done })}
               className="toggle"
             />
             <span>{todo.title}</span>
             {todo.description && <small>{todo.description}</small>}
-            <button
-              className="delete-btn"
-              disabled={!canMutateTodo(todo)}
-              onClick={() => {
-                if (!canMutateTodo(todo)) return;
-                db.deleteFrom(app.todos, todo.id);
-              }}
-            >
+            <button className="delete-btn" onClick={() => db.deleteFrom(app.todos, todo.id)}>
               &times;
             </button>
           </li>

@@ -9,11 +9,13 @@ use std::collections::HashSet;
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{column_is_null, decode_column};
-use crate::query_manager::policy::{Operation, PolicyExpr, evaluate_expr_recursive};
+use crate::query_manager::policy::{
+    Operation, PolicyExpr, bind_outer_row_refs, evaluate_expr_recursive,
+};
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement, Value,
+    Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement, Value,
 };
 
 use crate::storage::Storage;
@@ -38,11 +40,11 @@ pub struct PolicyFilterNode {
     /// Current tuples that pass the policy.
     current_tuples: AHashSet<Tuple>,
     dirty: bool,
-    /// Whether the policy contains INHERITS clauses that need context for evaluation.
+    /// Whether the policy contains clauses that need graph-backed context evaluation.
     has_inherits: bool,
-    /// Tables referenced by INHERITS clauses (for dirty tracking).
+    /// Tables referenced by INHERITS / EXISTS clauses (for dirty tracking).
     inherits_tables: HashSet<String>,
-    /// Whether any INHERITS-referenced table has changed.
+    /// Whether any dependency table has changed.
     inherits_dirty: bool,
 }
 
@@ -85,17 +87,17 @@ impl PolicyFilterNode {
         }
     }
 
-    /// Returns true if this policy contains INHERITS clauses.
+    /// Returns true if this policy contains clauses requiring context evaluation.
     pub fn has_inherits(&self) -> bool {
         self.has_inherits
     }
 
-    /// Returns the tables referenced by INHERITS clauses.
+    /// Returns the tables referenced by INHERITS / EXISTS clauses.
     pub fn inherits_tables(&self) -> &HashSet<String> {
         &self.inherits_tables
     }
 
-    /// Mark that an INHERITS-referenced table has changed.
+    /// Mark that a dependency table has changed.
     pub fn mark_inherits_dirty(&mut self) {
         self.inherits_dirty = true;
     }
@@ -129,9 +131,11 @@ impl PolicyFilterNode {
 
         // Process added tuples
         for tuple in input.added {
-            if let Some(row) = tuple_to_row(&tuple)
-                && self.evaluate_with_context(&row, io, &mut row_loader)
-            {
+            let Some(row) = tuple_to_row(&tuple) else {
+                continue;
+            };
+
+            if self.evaluate_with_context(&row, io, &mut row_loader) {
                 self.current_tuples.insert(tuple.clone());
                 result.added.push(tuple);
             }
@@ -230,6 +234,9 @@ impl PolicyFilterNode {
                 via_column,
             } => self
                 .evaluate_inherits_with_context(*operation, via_column, row, io, row_loader, depth),
+            PolicyExpr::Exists { table, condition } => {
+                self.evaluate_exists_with_context(table, condition, row, io, row_loader, depth)
+            }
             PolicyExpr::And(exprs) => exprs
                 .iter()
                 .all(|e| self.evaluate_expr_with_context(e, row, io, row_loader, depth)),
@@ -336,6 +343,47 @@ impl PolicyFilterNode {
         graph.result()
     }
 
+    /// Evaluate EXISTS by creating and settling a PolicyGraph for the target table.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_exists_with_context(
+        &self,
+        table: &str,
+        condition: &PolicyExpr,
+        row: &Row,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        depth: usize,
+    ) -> bool {
+        if depth >= 32 {
+            return false;
+        }
+
+        let bound_condition = match bind_outer_row_refs(condition, &row.data, &self.descriptor) {
+            Some(expr) => expr,
+            None => return false,
+        };
+
+        let table_name = TableName::new(table);
+        let mut graph = match PolicyGraph::for_exists(
+            &table_name,
+            &bound_condition,
+            &self.session,
+            &self.schema,
+            &self.branch,
+        ) {
+            Some(g) => g,
+            None => return false,
+        };
+
+        for _ in 0..100 {
+            if graph.settle(io, row_loader) {
+                break;
+            }
+        }
+
+        graph.result()
+    }
+
     /// Evaluate the policy expression against a row.
     pub fn evaluate(&self, row: &Row) -> bool {
         self.evaluate_expr(&self.policy, row, 0)
@@ -357,6 +405,7 @@ impl PolicyFilterNode {
                 operation,
                 via_column,
             } => self.evaluate_inherits(*operation, via_column, row, depth),
+            PolicyExpr::Exists { .. } => false, // Without context, fail closed.
 
             // And/Or/Not need to recurse through this method for INHERITS support
             PolicyExpr::And(exprs) => exprs.iter().all(|e| self.evaluate_expr(e, row, depth)),
@@ -407,9 +456,11 @@ impl PolicyFilterNode {
     }
 }
 
-/// Collect all tables referenced by INHERITS clauses in a policy expression.
-/// Traverses the policy tree recursively to find all INHERITS via_column references
-/// and resolves them to their target tables through the descriptor's FK references.
+/// Collect all tables referenced by policy clauses that require contextual re-evaluation.
+///
+/// Includes:
+/// - INHERITS target tables (resolved from FK metadata)
+/// - EXISTS target tables (explicit in the expression)
 fn collect_inherits_tables(policy: &PolicyExpr, descriptor: &RowDescriptor) -> HashSet<String> {
     let mut tables = HashSet::new();
     collect_inherits_tables_recursive(policy, descriptor, &mut tables);
@@ -424,9 +475,10 @@ fn collect_inherits_tables_recursive(
     match policy {
         PolicyExpr::Inherits { via_column, .. } => {
             // Look up the FK column to find the referenced table
-            if let Some(col_index) = descriptor.column_index(via_column)
-                && let Some(ref references) = descriptor.columns[col_index].references
-            {
+            let Some(col_index) = descriptor.column_index(via_column) else {
+                return;
+            };
+            if let Some(ref references) = descriptor.columns[col_index].references {
                 tables.insert(references.as_str().to_string());
             }
         }
@@ -434,6 +486,10 @@ fn collect_inherits_tables_recursive(
             for expr in exprs {
                 collect_inherits_tables_recursive(expr, descriptor, tables);
             }
+        }
+        PolicyExpr::Exists { table, condition } => {
+            tables.insert(table.clone());
+            collect_inherits_tables_recursive(condition, descriptor, tables);
         }
         PolicyExpr::Not(inner) => {
             collect_inherits_tables_recursive(inner, descriptor, tables);
@@ -460,9 +516,10 @@ impl RowNode for PolicyFilterNode {
 
         // Process added tuples
         for tuple in input.added {
-            if let Some(row) = tuple_to_row(&tuple)
-                && self.evaluate(&row)
-            {
+            let Some(row) = tuple_to_row(&tuple) else {
+                continue;
+            };
+            if self.evaluate(&row) {
                 self.current_tuples.insert(tuple.clone());
                 result.added.push(tuple);
             }
@@ -715,5 +772,43 @@ mod tests {
         // Only in team
         let row3 = make_row("user2", "eng", "Doc 3");
         assert!(!node.evaluate(&row3));
+    }
+
+    #[test]
+    fn test_policy_exists_fails_closed_without_context() {
+        let session = Session::new("user1");
+        let policy = PolicyExpr::Exists {
+            table: "memberships".into(),
+            condition: Box::new(PolicyExpr::True),
+        };
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            policy,
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        let row = make_row("user1", "eng", "Doc 1");
+        assert!(!node.evaluate(&row));
+    }
+
+    #[test]
+    fn test_policy_exists_registers_dependency_table() {
+        let session = Session::new("user1");
+        let policy = PolicyExpr::Exists {
+            table: "memberships".into(),
+            condition: Box::new(PolicyExpr::True),
+        };
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            policy,
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        assert!(node.has_inherits());
+        assert!(node.inherits_tables().contains("memberships"));
     }
 }

@@ -1,56 +1,85 @@
 ---
 title: Permissions
-description: Fast RLS (ReBAC), simple policies, and INHERITS policies.
+description: Fast RLS (ReBAC), simple policies, and inherited access policies.
 ---
 
-## Fast RLS (ReBAC)
+## Schema Policy Syntax
 
-Jazz permissions use relationship-based policy evaluation with requester session context.
+Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly in SQL.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
-      ../examples/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    Assuming the following schema:
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
     </include>
+
+    We can define permissions in a file called `schema/permissions.ts`:
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/schema/permissions.ts
+    </include>
+
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
-      ../examples/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/schema/current.sql
     </include>
   </Tab>
 </Tabs>
+
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.allow()` / `USING (TRUE)`).
 
 ## Simple Policies
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
-      ../examples/todo-server-ts/src/request-context.ts#permissions-simple-ts
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
-      ../examples/todo-server-rs/src/docs_snippets.rs#permissions-simple-rust
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-simple-sql
     </include>
   </Tab>
 </Tabs>
 
-## INHERITS Policies
+## Inherited Access Policies (`allowedTo.*`)
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete(...)`, which compiles to `INHERITS` policy expressions.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
-      ../examples/todo-server-ts/src/request-context.ts#permissions-inherits-ts
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
-      ../examples/todo-server-rs/src/docs_snippets.rs#permissions-inherits-rust
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-inherits-sql
     </include>
   </Tab>
 </Tabs>
 
-## Backend Request Context Reminder
+## Policy enforcement and request context
 
-Backend endpoints must extract requester identity and use a user-scoped client/session before reads and writes.
+Jazz permissions use relationship-based policy evaluation with requester session context.
+Backend endpoints should scope a client/session per request before reads and writes.
+Frontend clients are evaluated with the auth/session identity used to initialize context at the server boundary.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
+    </include>
+  </Tab>
+</Tabs>
+
 See [Setup](/docs/setup) for context setup details.

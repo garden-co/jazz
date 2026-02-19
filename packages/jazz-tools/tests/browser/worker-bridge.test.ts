@@ -267,9 +267,9 @@ describe("Worker Bridge with OPFS", () => {
 
     const db1 = await createDb({ appId: "test-app", dbName });
 
-    // insertPersisted ensures data is in OPFS WAL before we crash
-    await db1.insertPersisted(todos, { title: "Crash-proof", done: false }, "worker");
-    await db1.insertPersisted(todos, { title: "Also survives", done: true }, "worker");
+    // insertWithAck ensures data is in OPFS WAL before we crash
+    await db1.insertWithAck(todos, { title: "Crash-proof", done: false }, "worker");
+    await db1.insertWithAck(todos, { title: "Also survives", done: true }, "worker");
 
     // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
     // WAL has the data, but snapshot is stale. Recovery must replay WAL.
@@ -310,14 +310,14 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 5. Persisted insert resolves at worker tier
+  // 5. Acknowledged insert resolves at worker tier
   // -------------------------------------------------------------------------
 
-  it("insertPersisted resolves when worker acks", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("persisted") }));
+  it("insertWithAck resolves when worker acks", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("with-ack") }));
 
-    // insertPersisted("worker") should resolve once the worker's OPFS has it
-    const id = await db.insertPersisted(todos, { title: "Durable", done: false }, "worker");
+    // insertWithAck("worker") should resolve once the worker's OPFS has it
+    const id = await db.insertWithAck(todos, { title: "Durable", done: false }, "worker");
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
@@ -405,8 +405,8 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // Insert and wait for server-tier persistence ack
-    const id = await db1.insertPersisted(todos, { title: "Server-synced", done: false }, "edge");
+    // Insert and wait for server-tier acknowledgement
+    const id = await db1.insertWithAck(todos, { title: "Server-synced", done: false }, "edge");
     expect(id).toBeTruthy();
 
     // Query back from the server (edge-tier settlement)

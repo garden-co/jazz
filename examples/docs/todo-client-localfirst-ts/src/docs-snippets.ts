@@ -22,22 +22,32 @@ export async function readTodosSettledAtEdge(db: Db) {
 }
 // #endregion reading-settled-tier-ts
 
-// #region reading-query-shaping-ts
-export async function readTodosWithQueryShaping(db: Db) {
+// #region reading-filters-ts
+export async function readTodosWithFilters(db: Db) {
+  return db.all(app.todos.where({ done: false, title: { contains: "docs" } }));
+}
+// #endregion reading-filters-ts
+
+// #region reading-sorting-ts
+export async function readTodosSortedByTitle(db: Db) {
+  return db.all(app.todos.where({ done: false }).orderBy("title", "asc"));
+}
+// #endregion reading-sorting-ts
+
+// #region reading-pagination-ts
+export async function readTodoPage(db: Db, page: number, pageSize = 20) {
+  const offset = Math.max(0, (page - 1) * pageSize);
   return db.all(
-    app.todos
-      .where({ done: false, title: { contains: "docs" } })
-      .orderBy("title", "asc")
-      .limit(20)
-      .offset(0)
-      .include({ project: true, parent: true }),
+    app.todos.where({ done: false }).orderBy("title", "asc").limit(pageSize).offset(offset),
   );
 }
-// #endregion reading-query-shaping-ts
+// #endregion reading-pagination-ts
 
 // #region reading-includes-ts
 export async function readTodosWithIncludes(db: Db) {
-  return db.all(app.todos.where({ done: false }).include({ project: true, parent: true }));
+  return db.all(
+    app.todos.where({ done: false }).include({ project: true, parent: { project: true } }),
+  );
 }
 // #endregion reading-includes-ts
 
@@ -56,7 +66,7 @@ export function writeTodoCrud(db: Db, todoId: string) {
 
 // #region writing-ack-tier-ts
 export async function writeTodoWithAckTiers(db: Db) {
-  const id = await db.insertPersisted(
+  const id = await db.insertWithAck(
     app.todos,
     {
       title: "Write docs with ack",
@@ -67,7 +77,7 @@ export async function writeTodoWithAckTiers(db: Db) {
     "edge",
   );
 
-  await db.updatePersisted(app.todos, id, { done: true }, "core");
-  await db.deleteFromPersisted(app.todos, id, "core");
+  await db.updateWithAck(app.todos, id, { done: true }, "core");
+  await db.deleteFromWithAck(app.todos, id, "core");
 }
 // #endregion writing-ack-tier-ts

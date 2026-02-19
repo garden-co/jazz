@@ -7,5 +7,6 @@ members = [
   "crates/jazz-napi",
   "crates/wasm-tracing",
   "examples/todo-server-rs",
+  "examples/docs/todo-server-rs",
   "crates/opfs-btree",
 ]

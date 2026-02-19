@@ -120,16 +120,13 @@ export async function startApp(
   const list = document.createElement("ul");
   list.id = "todo-list";
   container.appendChild(list);
-  const todosById = new Map<string, Todo>();
   // Subscribe to the project & all its todos
   const query = app.todos.where({ project: selectedProjectId });
   db.subscribeAll(query, ({ all: todos }) => {
     const ordered = orderTodosWithDepth(todos);
-    todosById.clear();
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);
     for (const todo of todos) {
-      todosById.set(todo.id, todo);
       const option = document.createElement("option");
       option.value = todo.id;
       option.textContent = todo.title;
@@ -140,11 +137,10 @@ export async function startApp(
       .map(
         ({ todo, depth }) => `
       <li class="${todo.done ? "done" : ""}" data-depth="${depth}" style="padding-left: ${depth * 20}px;">
-        <input type="checkbox" ${todo.done ? "checked" : ""}
-               data-id="${todo.id}" class="toggle" ${todo.owner_id === sessionUserId ? "" : "disabled"}>
+        <input type="checkbox" ${todo.done ? "checked" : ""} data-id="${todo.id}" class="toggle">
         <span>${todo.title}</span>
         ${todo.description ? `<small>${todo.description}</small>` : ""}
-        <button data-id="${todo.id}" class="delete-btn" ${todo.owner_id === sessionUserId ? "" : "disabled"}>&times;</button>
+        <button data-id="${todo.id}" class="delete-btn">&times;</button>
       </li>
     `,
       )
@@ -172,8 +168,6 @@ export async function startApp(
     const target = e.target as HTMLElement;
     const id = target.dataset.id;
     if (!id) return;
-    const todo = todosById.get(id);
-    if (!todo || !sessionUserId || todo.owner_id !== sessionUserId) return;
 
     if (target.classList.contains("toggle")) {
       const checkbox = target as HTMLInputElement;

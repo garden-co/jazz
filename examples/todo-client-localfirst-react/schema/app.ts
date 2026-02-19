@@ -153,6 +153,55 @@ export const wasmSchema: WasmSchema = {
           references: "projects",
         },
       ],
+      policies: {
+        select: {
+          using: {
+            type: "True",
+          },
+        },
+        insert: {
+          with_check: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+        update: {
+          using: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+          with_check: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+        delete: {
+          using: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+      },
     },
   },
 };

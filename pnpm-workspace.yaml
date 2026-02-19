@@ -2,6 +2,7 @@ packages:
   - docs
   - packages/*
   - examples/*
+  - examples/docs/*
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
