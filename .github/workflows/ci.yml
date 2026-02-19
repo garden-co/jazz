@@ -60,7 +60,7 @@ jobs:
         run: sccache --show-stats || true
 
       - run: pnpm format:check
-      - run: pnpm oxlint . --exclude crates/jazz-rn/src/**
+      - run: pnpm lint
       - run: pnpm build
       - name: Show sccache stats (after pnpm build)
         run: sccache --show-stats || true
