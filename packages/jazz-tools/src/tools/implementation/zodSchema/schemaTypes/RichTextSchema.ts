@@ -126,7 +126,7 @@ export class RichTextSchema implements CoreRichTextSchema {
    * Configure permissions to be used when creating or composing CoValues
    */
   withPermissions(
-    permissions: Omit<SchemaPermissions, "restrictDeletion">,
+    permissions: Omit<SchemaPermissions, "writer">,
   ): RichTextSchema {
     const copy = new RichTextSchema(this.coValueClass);
     copy.#permissions = permissions;

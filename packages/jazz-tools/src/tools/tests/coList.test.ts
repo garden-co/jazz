@@ -1538,10 +1538,10 @@ describe("co.list schema", () => {
     expect(keywords[1]?.toString()).toEqual("world");
   });
 
-  test("supports restrictDeletion in schema definition and writes it to header", () => {
+  test("supports writer: 'appendOnly' in schema definition and writes it to header", () => {
     const RestrictedList = co
       .list(z.string())
-      .withPermissions({ restrictDeletion: true });
+      .withPermissions({ writer: "appendOnly" });
     const list = RestrictedList.create(["seed"]);
 
     expect(list.$jazz.raw.core.verified.header.ruleset).toMatchObject({
@@ -1550,7 +1550,7 @@ describe("co.list schema", () => {
     });
   });
 
-  test("writers can append but cannot delete or replace when restrictDeletion is enabled", async () => {
+  test("writers can append but cannot delete or replace when writer: 'appendOnly' is enabled", async () => {
     const { clientAccount: alice, serverAccount: bob } = await setupTwoNodes();
 
     const ownerGroup = Group.create(alice);
@@ -1558,7 +1558,7 @@ describe("co.list schema", () => {
 
     const RestrictedList = co
       .list(z.string())
-      .withPermissions({ restrictDeletion: true });
+      .withPermissions({ writer: "appendOnly" });
     const list = RestrictedList.create(["seed"], { owner: ownerGroup });
     const loadedAsBob = await RestrictedList.load(list.$jazz.id, {
       loadAs: bob,
@@ -1582,7 +1582,7 @@ describe("co.list schema", () => {
     });
   });
 
-  test("managers can always remove and mutate when restrictDeletion is enabled", async () => {
+  test("managers can always remove and mutate when writer: 'appendOnly' is enabled", async () => {
     const { clientAccount: alice, serverAccount: bob } = await setupTwoNodes();
 
     const ownerGroup = Group.create(alice);
@@ -1590,7 +1590,7 @@ describe("co.list schema", () => {
 
     const RestrictedList = co
       .list(z.string())
-      .withPermissions({ restrictDeletion: true });
+      .withPermissions({ writer: "appendOnly" });
     const list = RestrictedList.create(["seed", "second"], {
       owner: ownerGroup,
     });
@@ -1611,7 +1611,7 @@ describe("co.list schema", () => {
     });
   });
 
-  test("admins can always remove and mutate when restrictDeletion is enabled", async () => {
+  test("admins can always remove and mutate when writer: 'appendOnly' is enabled", async () => {
     const { clientAccount: alice, serverAccount: bob } = await setupTwoNodes();
 
     const ownerGroup = Group.create(alice);
@@ -1619,7 +1619,7 @@ describe("co.list schema", () => {
 
     const RestrictedList = co
       .list(z.string())
-      .withPermissions({ restrictDeletion: true });
+      .withPermissions({ writer: "appendOnly" });
     const list = RestrictedList.create(["seed", "second"], {
       owner: ownerGroup,
     });

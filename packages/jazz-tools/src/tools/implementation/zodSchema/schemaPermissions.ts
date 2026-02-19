@@ -74,7 +74,7 @@ export type SchemaPermissions = {
   /**
    * Restrict deletion operations on CoList values to manager/admin roles.
    */
-  restrictDeletion?: boolean;
+  writer?: "appendOnly";
 };
 
 export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
@@ -178,9 +178,9 @@ export function getDefaultRefPermissions(): RefPermissions {
 export function withSchemaPermissions<T extends { owner?: Account | Group }>(
   options?: T | Account | Group,
   schemaPermissions?: SchemaPermissions,
-): T & { onCreate?: OnCreateCallback } {
+): T & { onCreate?: OnCreateCallback; restrictDeletion?: boolean } {
   const onCreate = schemaPermissions?.onCreate;
-  const schemaRestrictDeletion = schemaPermissions?.restrictDeletion === true;
+  const schemaRestrictDeletion = schemaPermissions?.writer === "appendOnly";
   if (!options) {
     const owner = schemaPermissions?.default?.() ?? Group.create();
     return {
@@ -200,7 +200,7 @@ export function withSchemaPermissions<T extends { owner?: Account | Group }>(
   }
   const owner =
     options.owner ?? schemaPermissions?.default?.() ?? Group.create();
-  const optionRestrictDeletion = schemaPermissions?.restrictDeletion === true;
+  const optionRestrictDeletion = schemaPermissions?.writer === "appendOnly";
   return {
     ...options,
     owner,

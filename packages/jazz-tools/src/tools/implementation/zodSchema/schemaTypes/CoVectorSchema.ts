@@ -141,7 +141,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    * Configure permissions to be used when creating or composing CoValues
    */
   withPermissions(
-    permissions: Omit<SchemaPermissions, "restrictDeletion">,
+    permissions: Omit<SchemaPermissions, "writer">,
   ): CoVectorSchema {
     const copy = new CoVectorSchema(this.dimensions, this.coValueClass);
     copy.#permissions = permissions;
