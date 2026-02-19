@@ -2,8 +2,12 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use groove::query_manager::query::QueryBuilder;
+use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
 use groove::runtime_tokio::TokioRuntime;
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::SurrealKvStorage;
@@ -14,6 +18,171 @@ use tracing::info;
 
 use crate::middleware::AuthConfig;
 use crate::routes;
+
+const EXTERNAL_IDENTITIES_TABLE: &str = "external_identities";
+
+#[derive(Debug, Clone)]
+pub struct ExternalIdentityRow {
+    pub issuer: String,
+    pub subject: String,
+    pub principal_id: String,
+}
+
+/// Persistent storage for external identity -> principal mappings.
+pub struct ExternalIdentityStore {
+    runtime: TokioRuntime<SurrealKvStorage>,
+}
+
+impl ExternalIdentityStore {
+    pub fn new(data_dir: &str) -> Result<Self, String> {
+        let meta_dir = Path::new(data_dir).join("meta");
+        std::fs::create_dir_all(&meta_dir)
+            .map_err(|e| format!("failed to create meta dir '{}': {e}", meta_dir.display()))?;
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder(EXTERNAL_IDENTITIES_TABLE)
+                    .column("app_id", ColumnType::Uuid)
+                    .column("issuer", ColumnType::Text)
+                    .column("subject", ColumnType::Text)
+                    .column("principal_id", ColumnType::Text)
+                    .column("created_at", ColumnType::Timestamp)
+                    .column("updated_at", ColumnType::Timestamp),
+            )
+            .build();
+
+        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let schema_manager = SchemaManager::new(
+            sync_manager,
+            schema,
+            AppId::from_name("jazz-tools-meta"),
+            "meta",
+            "main",
+        )
+        .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
+
+        let db_path = meta_dir.join("groove.surrealkv");
+        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+            .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
+
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        Ok(Self { runtime })
+    }
+
+    pub async fn list_external_identities(
+        &self,
+        app_id: AppId,
+    ) -> Result<Vec<ExternalIdentityRow>, String> {
+        let query = QueryBuilder::new(EXTERNAL_IDENTITIES_TABLE)
+            .filter_eq("app_id", Value::Uuid(app_id.as_object_id()))
+            .build();
+
+        let future = self
+            .runtime
+            .query(query, None, None)
+            .map_err(|e| format!("external identity query error: {e}"))?;
+        let rows = future
+            .await
+            .map_err(|e| format!("external identity query await error: {e}"))?;
+
+        rows.into_iter()
+            .map(|(_, values)| Self::decode_external_identity_row(&values))
+            .collect()
+    }
+
+    pub async fn get_external_identity(
+        &self,
+        app_id: AppId,
+        issuer: &str,
+        subject: &str,
+    ) -> Result<Option<ExternalIdentityRow>, String> {
+        let query = QueryBuilder::new(EXTERNAL_IDENTITIES_TABLE)
+            .filter_eq("app_id", Value::Uuid(app_id.as_object_id()))
+            .filter_eq("issuer", Value::Text(issuer.to_string()))
+            .filter_eq("subject", Value::Text(subject.to_string()))
+            .build();
+
+        let future = self
+            .runtime
+            .query(query, None, None)
+            .map_err(|e| format!("external identity query error: {e}"))?;
+        let mut rows = future
+            .await
+            .map_err(|e| format!("external identity query await error: {e}"))?;
+
+        if let Some((_object_id, values)) = rows.pop() {
+            Ok(Some(Self::decode_external_identity_row(&values)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn create_external_identity(
+        &self,
+        app_id: AppId,
+        issuer: &str,
+        subject: &str,
+        principal_id: &str,
+    ) -> Result<(), String> {
+        let now = now_timestamp_us();
+        let values = vec![
+            Value::Uuid(app_id.as_object_id()),
+            Value::Text(issuer.to_string()),
+            Value::Text(subject.to_string()),
+            Value::Text(principal_id.to_string()),
+            Value::Timestamp(now),
+            Value::Timestamp(now),
+        ];
+
+        self.runtime
+            .insert(EXTERNAL_IDENTITIES_TABLE, values, None)
+            .map_err(|e| format!("failed to insert external identity: {e}"))?;
+        Ok(())
+    }
+
+    fn decode_external_identity_row(values: &[Value]) -> Result<ExternalIdentityRow, String> {
+        if values.len() < 6 {
+            return Err(format!(
+                "external identity row has invalid column count: expected at least 6, got {}",
+                values.len()
+            ));
+        }
+
+        let issuer = match &values[1] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "external identity field issuer expected text, got {other:?}"
+                ));
+            }
+        };
+
+        let subject = match &values[2] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "external identity field subject expected text, got {other:?}"
+                ));
+            }
+        };
+
+        let principal_id = match &values[3] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "external identity field principal_id expected text, got {other:?}"
+                ));
+            }
+        };
+
+        Ok(ExternalIdentityRow {
+            issuer,
+            subject,
+            principal_id,
+        })
+    }
+}
 
 /// Server state shared across request handlers.
 pub struct ServerState {
@@ -26,6 +195,10 @@ pub struct ServerState {
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
     /// Authentication configuration
     pub auth_config: AuthConfig,
+    /// Persistent external identity mapping store.
+    pub external_identity_store: Arc<ExternalIdentityStore>,
+    /// In-memory cache: (issuer, subject) -> principal_id.
+    pub external_identities: RwLock<HashMap<(String, String), String>>,
 }
 
 /// State for a single SSE connection.
@@ -94,6 +267,19 @@ pub async fn run(
         info!("Auth not configured - all endpoints are public");
     }
 
+    let external_identity_store = Arc::new(
+        ExternalIdentityStore::new(data_dir)
+            .map_err(|e| format!("failed to initialize external identity store: {e}"))?,
+    );
+    let external_identity_rows = external_identity_store
+        .list_external_identities(app_id)
+        .await
+        .map_err(|e| format!("failed to load external identities: {e}"))?;
+    let mut external_identities = HashMap::with_capacity(external_identity_rows.len());
+    for row in external_identity_rows {
+        external_identities.insert((row.issuer, row.subject), row.principal_id);
+    }
+
     // Build server state
     let state = Arc::new(ServerState {
         runtime,
@@ -102,6 +288,8 @@ pub async fn run(
         next_connection_id: std::sync::atomic::AtomicU64::new(1),
         sync_broadcast: sync_tx,
         auth_config,
+        external_identity_store,
+        external_identities: RwLock::new(external_identities),
     });
 
     // Build router
@@ -115,4 +303,11 @@ pub async fn run(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn now_timestamp_us() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_micros().min(u128::from(u64::MAX)) as u64,
+        Err(_) => 0,
+    }
 }

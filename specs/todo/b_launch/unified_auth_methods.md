@@ -26,6 +26,8 @@ Jazz1 had a beloved anonymous-first onboarding loop. Jazz2 should preserve that 
 - No token minting service for anonymous/demo mode
 - No full account merge workflow when two existing principals collide
 - No policy language redesign
+- No configurable principal-claim name beyond `jazz_principal_id` (defer)
+- No automatic subscription/session rebinding on auth upgrades (defer)
 
 ## Core Terms
 
@@ -165,6 +167,8 @@ Requirement:
 - server-side `QuerySubscription` handling should use the currently bound client session for user clients, not blindly trust stale session payloads
 - when a client session changes, server subscriptions for that client must be re-evaluated
 
+Status: deferred post-MVP.
+
 ## Jazz Tools / Cloud Server Unification
 
 - Keep one auth method matrix and one resolution order
@@ -199,3 +203,4 @@ Requirement:
 - Should linking be a dedicated endpoint or implicit when both auth forms appear together?
 - Should anonymous and demo use separate per-app quotas/rate limits?
 - Should we expose principal inspection/debug endpoints for developer tooling?
+- Should principal claim name be configurable per app/provider (instead of fixed `jazz_principal_id`)?
