@@ -34,9 +34,8 @@ export declare class NapiRuntime {
   insertPersisted(table: string, values: any, tier: string): Promise<string>;
   updatePersisted(objectId: string, values: any, tier: string): Promise<void>;
   deletePersisted(objectId: string, tier: string): Promise<void>;
-  onSyncMessageReceived(messageJson: string): void;
-  /** Called by JS when a sync message arrives from a client (not a server). */
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
+  onSyncMessageReceived(messageBytes: Array<number>): void;
+  onSyncMessageReceivedFromClient(clientId: string, messageBytes: Array<number>): void;
   onSyncMessageToSend(callback: (...args: any[]) => any): void;
   addServer(): void;
   removeServer(): void;

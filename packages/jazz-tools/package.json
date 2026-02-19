@@ -46,6 +46,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "flatbuffers": "^25.9.23",
     "jazz-wasm": "workspace:*",
     "tsx": "^4.0.0"
   },
