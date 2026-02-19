@@ -51,14 +51,12 @@ export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  // #region context-setup-ts-client
   const db = await createDb({
     appId: readEnvAppId() ?? "todo-client-example",
     env: "dev",
     userBranch: "main",
     ...config,
   });
-  // #endregion context-setup-ts-client
 
   // Build DOM
   const h1 = document.createElement("h1");

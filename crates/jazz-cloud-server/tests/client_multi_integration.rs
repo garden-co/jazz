@@ -342,6 +342,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
 
 #[tokio::test]
 async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data() {
+    let user_id = "resync-user";
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let app = {
@@ -354,10 +355,13 @@ async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data(
             app_id,
             server.base_url(),
             writer_dir.path().to_path_buf(),
-            make_jwt("writer"),
+            make_jwt(user_id),
         ))
         .await
         .expect("connect writer");
+
+        // Allow initial schema/catalogue sync to settle before sending table data.
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         writer
             .create(
@@ -389,12 +393,21 @@ async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data(
         app_id,
         restarted.base_url(),
         reader_dir.path().to_path_buf(),
-        make_jwt("reader"),
+        make_jwt(user_id),
     ))
     .await
     .expect("connect reader");
 
-    let rows = wait_for_todos_count(&reader, 1, Duration::from_secs(20), None).await;
+    // Wait for the event stream connection before issuing one-shot query subscriptions.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let rows = wait_for_todos_count(
+        &reader,
+        1,
+        Duration::from_secs(20),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
     assert_eq!(rows[0].1[0], Value::Text("persisted-on-server".to_string()));
     reader.shutdown().await.expect("shutdown reader");
 }

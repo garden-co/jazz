@@ -3,6 +3,8 @@ export {
   SessionClient,
   loadWasmModule,
   type PersistenceTier,
+  type QueryInput,
+  type RequestLike,
   type Row,
   type Runtime,
   type SubscriptionCallback,

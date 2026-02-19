@@ -9,3 +9,7 @@ CREATE TABLE todos (
     parent UUID REFERENCES todos,
     project UUID REFERENCES projects
 );
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (TRUE);
+CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (TRUE);
+CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (TRUE) WITH CHECK (TRUE);
+CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);

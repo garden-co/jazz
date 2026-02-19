@@ -14,6 +14,12 @@ export type {
   Schema,
   Table,
   Column,
+  PolicyExpr,
+  PolicyOperation,
+  PolicyCmpOp,
+  PolicyValue,
+  OperationPolicy,
+  TablePolicies,
   Lens,
   LensOp,
   SqlType,
@@ -32,3 +38,6 @@ export * from "./drivers/index.js";
 
 // Runtime client
 export * from "./runtime/index.js";
+
+// Permissions DSL
+export * from "./permissions/index.js";

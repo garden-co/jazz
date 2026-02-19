@@ -1,4 +1,5 @@
 //! Documentation snippet sources compiled with the example crate.
+#![allow(dead_code)]
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use groove::query_manager::policy::{Operation, PolicyExpr};
@@ -12,7 +13,6 @@ fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
 }
 
 // #region backend-request-session-rust
-#[allow(dead_code)]
 pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, StatusCode> {
     let auth = headers
         .get(AUTHORIZATION)
@@ -29,7 +29,6 @@ pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, St
 // #endregion backend-request-session-rust
 
 // #region backend-request-scoped-client-rust
-#[allow(dead_code)]
 pub fn scoped_client_for_session<'a>(
     client: &'a JazzClient,
     session: Session,
@@ -39,7 +38,6 @@ pub fn scoped_client_for_session<'a>(
 // #endregion backend-request-scoped-client-rust
 
 // #region backend-request-handler-rust
-#[allow(dead_code)]
 pub async fn list_todos_for_request(
     headers: &HeaderMap,
     client: &JazzClient,
@@ -55,7 +53,6 @@ pub async fn list_todos_for_request(
 // #endregion backend-request-handler-rust
 
 // #region permissions-simple-rust
-#[allow(dead_code)]
 pub fn simple_owner_policies() -> TablePolicies {
     TablePolicies::new()
         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
@@ -68,7 +65,6 @@ pub fn simple_owner_policies() -> TablePolicies {
 // #endregion permissions-simple-rust
 
 // #region permissions-inherits-rust
-#[allow(dead_code)]
 pub fn inherits_select_policy() -> TablePolicies {
     TablePolicies::new().with_select(PolicyExpr::or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
@@ -78,7 +74,6 @@ pub fn inherits_select_policy() -> TablePolicies {
 // #endregion permissions-inherits-rust
 
 // #region reading-oneshot-rust
-#[allow(dead_code)]
 pub async fn read_todos_oneshot(client: &JazzClient) -> groove::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client.query(query, None).await?;
@@ -87,7 +82,6 @@ pub async fn read_todos_oneshot(client: &JazzClient) -> groove::Result<usize> {
 // #endregion reading-oneshot-rust
 
 // #region reading-subscriptions-rust
-#[allow(dead_code)]
 pub async fn subscribe_todos(client: &JazzClient) -> groove::Result<groove::SubscriptionStream> {
     let query = QueryBuilder::new("todos").build();
     client.subscribe(query).await
@@ -95,7 +89,6 @@ pub async fn subscribe_todos(client: &JazzClient) -> groove::Result<groove::Subs
 // #endregion reading-subscriptions-rust
 
 // #region reading-settled-tier-rust
-#[allow(dead_code)]
 pub async fn read_todos_settled_edge(client: &JazzClient) -> groove::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client
@@ -105,23 +98,49 @@ pub async fn read_todos_settled_edge(client: &JazzClient) -> groove::Result<usiz
 }
 // #endregion reading-settled-tier-rust
 
-// #region reading-query-shaping-rust
-#[allow(dead_code)]
-pub async fn read_todos_with_query_shaping(client: &JazzClient) -> groove::Result<usize> {
+// #region reading-filters-rust
+pub async fn read_todos_with_filters(client: &JazzClient) -> groove::Result<usize> {
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
-        .order_by("title")
-        .limit(20)
-        .offset(0)
         .build();
 
     let rows = client.query(query, None).await?;
     Ok(rows.len())
 }
-// #endregion reading-query-shaping-rust
+// #endregion reading-filters-rust
+
+// #region reading-sorting-rust
+pub async fn read_todos_sorted(client: &JazzClient) -> groove::Result<usize> {
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by("title")
+        .build();
+
+    let rows = client.query(query, None).await?;
+    Ok(rows.len())
+}
+// #endregion reading-sorting-rust
+
+// #region reading-pagination-rust
+pub async fn read_todo_page(
+    client: &JazzClient,
+    page_size: usize,
+    page: usize,
+) -> groove::Result<usize> {
+    let offset = page.saturating_sub(1) * page_size;
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by("title")
+        .limit(page_size)
+        .offset(offset)
+        .build();
+
+    let rows = client.query(query, None).await?;
+    Ok(rows.len())
+}
+// #endregion reading-pagination-rust
 
 // #region reading-includes-rust
-#[allow(dead_code)]
 pub async fn read_todos_with_related_rows(client: &JazzClient) -> groove::Result<usize> {
     // Rust currently composes related data using additional queries.
     // If rows carry foreign keys, query related tables and join in application code.
@@ -133,7 +152,6 @@ pub async fn read_todos_with_related_rows(client: &JazzClient) -> groove::Result
 // #endregion reading-includes-rust
 
 // #region writing-crud-rust
-#[allow(dead_code)]
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> groove::Result<()> {
     let values = vec![
         Value::Text("Write docs".to_string()),
@@ -156,7 +174,6 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> groo
 // #endregion writing-crud-rust
 
 // #region writing-ack-tier-rust
-#[allow(dead_code)]
 pub async fn write_todo_with_default_ack(client: &JazzClient) -> groove::Result<ObjectId> {
     let id = client
         .create(

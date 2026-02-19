@@ -39,9 +39,84 @@ export interface Column {
   references?: string; // Target table name for foreign key
 }
 
+export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
+export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
+
+export type PolicyValue =
+  | {
+      type: "Literal";
+      value: unknown;
+    }
+  | {
+      type: "SessionRef";
+      path: string[];
+    };
+
+export type PolicyExpr =
+  | {
+      type: "Cmp";
+      column: string;
+      op: PolicyCmpOp;
+      value: PolicyValue;
+    }
+  | {
+      type: "IsNull";
+      column: string;
+    }
+  | {
+      type: "IsNotNull";
+      column: string;
+    }
+  | {
+      type: "In";
+      column: string;
+      session_path: string[];
+    }
+  | {
+      type: "Exists";
+      table: string;
+      condition: PolicyExpr;
+    }
+  | {
+      type: "Inherits";
+      operation: PolicyOperation;
+      via_column: string;
+    }
+  | {
+      type: "And";
+      exprs: PolicyExpr[];
+    }
+  | {
+      type: "Or";
+      exprs: PolicyExpr[];
+    }
+  | {
+      type: "Not";
+      expr: PolicyExpr;
+    }
+  | {
+      type: "True";
+    }
+  | {
+      type: "False";
+    };
+
+export interface OperationPolicy {
+  using?: PolicyExpr;
+  with_check?: PolicyExpr;
+}
+
+export interface TablePolicies {
+  select?: OperationPolicy;
+  insert?: OperationPolicy;
+  update?: OperationPolicy;
+  delete?: OperationPolicy;
+}
+
 export interface Table {
   name: string;
   columns: Column[];
+  policies?: TablePolicies;
 }
 
 export interface Schema {

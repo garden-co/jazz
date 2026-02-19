@@ -26,6 +26,14 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./permissions": {
+      "types": "./dist/permissions/index.d.ts",
+      "default": "./dist/permissions/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
       "react-native": "./dist/react-native/index.js",

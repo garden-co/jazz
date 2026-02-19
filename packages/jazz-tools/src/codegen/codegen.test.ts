@@ -146,6 +146,67 @@ describe("schemaToWasm", () => {
     expect(wasm.tables.users.columns).toHaveLength(1);
     expect(wasm.tables.todos.columns).toHaveLength(2);
   });
+
+  it("carries table permissions into wasm schema", () => {
+    table("todos", { owner_id: col.string(), title: col.string() });
+    const schema = getCollectedSchema();
+    const ownerMatchesSession: import("../schema.js").PolicyExpr = {
+      type: "Cmp",
+      column: "owner_id",
+      op: "Eq",
+      value: { type: "SessionRef", path: ["user_id"] },
+    };
+
+    schema.tables[0]!.policies = {
+      select: { using: ownerMatchesSession },
+      insert: { with_check: ownerMatchesSession },
+      update: { using: ownerMatchesSession, with_check: ownerMatchesSession },
+      delete: { using: ownerMatchesSession },
+    };
+
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.todos.policies).toEqual({
+      select: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+    });
+  });
 });
 
 describe("generateTypes", () => {
@@ -624,7 +685,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export class TodoQueryBuilder<I extends Record<string, never> = {}>");
-    expect(output).toContain("declare _rowType!: Todo;");
+    expect(output).toContain("declare readonly _rowType: Todo;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
     expect(output).toContain("orderBy(column: keyof Todo");

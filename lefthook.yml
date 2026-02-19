@@ -6,8 +6,7 @@ pre-commit:
       stage_fixed: true
     clippy:
       glob: "*.rs"
-      run: cargo clippy --workspace --fix --allow-dirty --allow-staged -- -D warnings
-      stage_fixed: true
+      run: cargo clippy --workspace -- -D warnings
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md}"
       exclude: "crates/jazz-rn/src/**"

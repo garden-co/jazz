@@ -27,6 +27,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
           components: clippy, rustfmt
 
