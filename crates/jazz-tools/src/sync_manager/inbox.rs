@@ -26,6 +26,7 @@ impl SyncManager {
         server_id: ServerId,
         payload: SyncPayload,
     ) {
+        let _span = tracing::debug_span!("process_from_server", %server_id, payload = payload.variant_name()).entered();
         match payload {
             SyncPayload::ObjectUpdated {
                 object_id,
@@ -140,6 +141,7 @@ impl SyncManager {
         client_id: ClientId,
         payload: SyncPayload,
     ) {
+        let _span = tracing::debug_span!("process_from_client", %client_id, payload = payload.variant_name()).entered();
         let Some(client) = self.clients.get(&client_id) else {
             tracing::warn!(%client_id, "message from unknown client, ignoring");
             return;

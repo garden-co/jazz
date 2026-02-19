@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 impl SyncManager {
     /// Queue all existing objects to sync to a new server.
     pub(super) fn queue_full_sync_to_server(&mut self, server_id: ServerId) {
+        let _span = tracing::debug_span!("queue_full_sync_to_server", %server_id).entered();
         // Collect all object/branch/tips we need to sync
         let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
@@ -35,6 +36,7 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
+        let _span = tracing::debug_span!("queue_tips_to_server", %server_id, %object_id, %branch_name, tips = tips.len()).entered();
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())

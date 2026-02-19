@@ -424,7 +424,9 @@ impl WasmRuntime {
             .insert(table, groove_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
 
-        Ok(result.uuid().to_string())
+        let object_id = result.uuid().to_string();
+        tracing::debug!(object_id = %object_id, "inserted");
+        Ok(object_id)
     }
 
     /// Execute a query and return results as a Promise.
@@ -504,6 +506,7 @@ impl WasmRuntime {
         core.update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
 
+        tracing::debug!(object_id, "updated");
         Ok(())
     }
 
@@ -519,6 +522,7 @@ impl WasmRuntime {
         core.delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
 
+        tracing::debug!(object_id, "deleted");
         Ok(())
     }
 
@@ -685,16 +689,20 @@ impl WasmRuntime {
             .subscribe_with_settled_tier(query, callback, session, tier)
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
-        Ok(handle.0 as f64)
+        let subscription_id = handle.0;
+        tracing::debug!(subscription_id, "subscribed");
+        Ok(subscription_id as f64)
     }
 
     /// Unsubscribe from a query.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
     pub fn unsubscribe(&self, handle: f64) {
+        let sub_id = handle as u64;
+        let _span = tracing::debug_span!("wasm::unsubscribe", sub_id).entered();
         self.core
             .borrow_mut()
-            .unsubscribe(SubscriptionHandle(handle as u64));
+            .unsubscribe(SubscriptionHandle(sub_id));
     }
 
     // =========================================================================
