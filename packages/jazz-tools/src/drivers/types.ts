@@ -15,7 +15,7 @@ export type {
   WasmColumnDescriptor as ColumnDescriptor,
   WasmTableSchema as TableSchema,
   WasmSchema,
-} from "groove-wasm";
+} from "jazz-wasm";
 
 // ============================================================================
 // Storage Driver Interface

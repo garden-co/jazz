@@ -2,7 +2,7 @@
  * Browser integration tests for Worker Bridge + OPFS persistence.
  *
  * Runs in a real Chromium browser via @vitest/browser + playwright.
- * Uses real groove-wasm, real dedicated Workers, real OPFS storage.
+ * Uses real jazz-wasm, real dedicated Workers, real OPFS storage.
  *
  * Server sync tests use a real jazz-tools server spawned by global-setup.
  */
