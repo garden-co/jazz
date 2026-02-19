@@ -185,6 +185,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::get", key_len = key.len()).entered();
         let leaf_page_id = match self.find_leaf_page_id(key)? {
             Some(id) => id,
             None => return Ok(None),
@@ -206,6 +207,12 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BTreeError> {
+        let _span = tracing::trace_span!(
+            "OpfsBTree::put",
+            key_len = key.len(),
+            value_len = value.len()
+        )
+        .entered();
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
             let value_cell = self.build_value_cell(value)?;
@@ -235,6 +242,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -272,6 +280,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<KvPair>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::range", limit).entered();
         if limit == 0 || start >= end {
             return Ok(Vec::new());
         }
@@ -335,6 +344,12 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
+        let _span = tracing::debug_span!(
+            "OpfsBTree::checkpoint",
+            dirty_pages = self.dirty_pages.len(),
+            total_pages = self.total_pages
+        )
+        .entered();
         let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
         dirty_page_ids.sort_unstable();
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
@@ -1317,12 +1332,14 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn alloc_page(&mut self) -> PageId {
         while let Some(page_id) = self.free_pages.pop() {
             if self.free_set.remove(&page_id) {
+                tracing::trace!(page_id, reused = true, "alloc_page");
                 return page_id;
             }
         }
 
         let page_id = self.total_pages;
         self.total_pages = self.total_pages.saturating_add(1);
+        tracing::trace!(page_id, reused = false, "alloc_page");
         page_id
     }
 
@@ -1360,6 +1377,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                     })?;
                     self.free_set.remove(&page_id);
                 }
+                tracing::trace!(
+                    head_page_id = run_start,
+                    page_count,
+                    reused = true,
+                    "alloc_extent_pages"
+                );
                 return Ok(run_start);
             }
         }
@@ -1371,6 +1394,12 @@ impl<F: SyncFile> OpfsBTree<F> {
             .ok_or_else(|| {
                 BTreeError::Io("total_pages overflow while allocating extent".to_string())
             })?;
+        tracing::trace!(
+            head_page_id = start,
+            page_count,
+            reused = false,
+            "alloc_extent_pages"
+        );
         Ok(start)
     }
 

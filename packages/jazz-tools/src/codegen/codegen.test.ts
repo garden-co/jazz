@@ -96,6 +96,46 @@ describe("schemaToWasm", () => {
     });
   });
 
+  it("converts TEXT[] to Array<Text>", () => {
+    table("items", { tags: col.array(col.string()) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "tags",
+      column_type: { type: "Array", element: { type: "Text" } },
+      nullable: false,
+    });
+  });
+
+  it("converts nested arrays (INTEGER[][])", () => {
+    table("items", { matrix: col.array(col.array(col.int())) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "matrix",
+      column_type: {
+        type: "Array",
+        element: { type: "Array", element: { type: "Integer" } },
+      },
+      nullable: false,
+    });
+  });
+
+  it("preserves references for UUID[] from array(ref)", () => {
+    table("items", { owner_ids: col.array(col.ref("users")) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "owner_ids",
+      column_type: { type: "Array", element: { type: "Uuid" } },
+      nullable: false,
+      references: "users",
+    });
+  });
+
   it("converts multiple tables", () => {
     table("users", { name: col.string() });
     table("todos", { title: col.string(), user_id: col.ref("users") });
@@ -105,6 +145,67 @@ describe("schemaToWasm", () => {
     expect(Object.keys(wasm.tables)).toEqual(["users", "todos"]);
     expect(wasm.tables.users.columns).toHaveLength(1);
     expect(wasm.tables.todos.columns).toHaveLength(2);
+  });
+
+  it("carries table permissions into wasm schema", () => {
+    table("todos", { owner_id: col.string(), title: col.string() });
+    const schema = getCollectedSchema();
+    const ownerMatchesSession: import("../schema.js").PolicyExpr = {
+      type: "Cmp",
+      column: "owner_id",
+      op: "Eq",
+      value: { type: "SessionRef", path: ["user_id"] },
+    };
+
+    schema.tables[0]!.policies = {
+      select: { using: ownerMatchesSession },
+      insert: { with_check: ownerMatchesSession },
+      update: { using: ownerMatchesSession, with_check: ownerMatchesSession },
+      delete: { using: ownerMatchesSession },
+    };
+
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.todos.policies).toEqual({
+      select: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+    });
   });
 });
 
@@ -197,6 +298,19 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("  owner_id: string;");
+  });
+
+  it("maps array columns recursively", () => {
+    table("items", {
+      tags: col.array(col.string()),
+      matrix: col.array(col.array(col.int())),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("  tags: string[];");
+    expect(output).toContain("  matrix: number[][];");
   });
 
   it("exports wasmSchema constant", () => {
@@ -547,6 +661,15 @@ describe("generateWhereInputTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("owner_id?: string | { eq?: string; ne?: string };");
+  });
+
+  it("generates array filters with eq and contains", () => {
+    table("todos", { tags: col.array(col.string()) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("tags?: string[] | { eq?: string[]; contains?: string };");
   });
 });
 

@@ -3,6 +3,7 @@ import {
   buildEndpointUrl,
   buildEventsUrl,
   generateClientId,
+  linkExternalIdentity,
   normalizePathPrefix,
   sendSyncPayload,
 } from "./sync-transport.js";
@@ -86,6 +87,39 @@ describe("sync-transport", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
+  });
+
+  it("posts link-external with bearer and local auth headers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        principal_id: "local:abc",
+        issuer: "https://issuer.example",
+        subject: "user-1",
+        created: true,
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await linkExternalIdentity("http://localhost:3000/", {
+      jwtToken: "jwt-token",
+      localAuthMode: "anonymous",
+      localAuthToken: "device-token",
+      pathPrefix: "apps/app-123/",
+    });
+
+    expect(result.created).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://localhost:3000/apps/app-123/auth/link-external",
+    );
+    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      Authorization: "Bearer jwt-token",
+      "X-Jazz-Local-Mode": "anonymous",
+      "X-Jazz-Local-Token": "device-token",
+    });
   });
 
   it("normalizes route prefixes and endpoint URLs", () => {

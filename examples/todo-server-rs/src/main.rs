@@ -24,7 +24,6 @@
 //! | `/todos/:id` | DELETE | Delete item |
 //! | `/updates` | GET | SSE stream of add/remove events |
 
-mod docs_snippets;
 mod routes;
 
 use std::net::SocketAddr;
@@ -83,7 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create Jazz client
-    // #region context-setup-rust-backend
     let context = AppContext {
         app_id: AppId::from_name(&app_id),
         client_id: None,
@@ -94,7 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend_secret: None,
         admin_secret: None,
     };
-    // #endregion context-setup-rust-backend
 
     let client = JazzClient::connect(context).await?;
     info!("Connected to Jazz");

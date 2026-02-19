@@ -13,7 +13,22 @@ import {
   generateClientId,
   buildEventsUrl,
   buildEndpointUrl,
+  applyUserAuthHeaders,
+  linkExternalIdentity as sendLinkExternalIdentityRequest,
+  type LinkExternalResponse,
 } from "./sync-transport.js";
+import { resolveLocalAuthDefaults } from "./local-auth.js";
+
+/**
+ * Minimal request shape supported by `JazzClient.forRequest()`.
+ *
+ * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
+ * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ */
+export interface RequestLike {
+  header?: (name: string) => string | undefined;
+  headers?: Headers | Record<string, string | string[] | undefined>;
+}
 
 /**
  * Common interface for WASM and NAPI runtimes.
@@ -73,6 +88,102 @@ export interface Row {
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
+
+export interface LinkExternalIdentityOptions {
+  jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
+}
+
+export type LinkExternalIdentityResult = LinkExternalResponse;
+
+/**
+ * QueryBuilder-compatible input accepted by query and subscribe APIs.
+ */
+export interface QueryInput {
+  _build(): string;
+}
+
+function resolveQueryJson(query: string | QueryInput): string {
+  return typeof query === "string" ? query : query._build();
+}
+
+function readHeader(request: RequestLike, name: string): string | undefined {
+  const lower = name.toLowerCase();
+
+  const fromMethod = request.header?.(name) ?? request.header?.(lower);
+  if (typeof fromMethod === "string") {
+    return fromMethod;
+  }
+
+  const headers = request.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    return headers.get(name) ?? headers.get(lower) ?? undefined;
+  }
+
+  const record = headers as Record<string, string | string[] | undefined>;
+  const raw = record[name] ?? record[lower];
+  if (Array.isArray(raw)) {
+    return raw[0];
+  }
+  return raw;
+}
+
+function decodeBase64Url(value: string): string {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+
+  if (typeof atob === "function") {
+    return atob(padded);
+  }
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(padded, "base64").toString("utf8");
+  }
+
+  throw new Error("No base64 decoder available in this runtime");
+}
+
+function sessionFromRequest(request: RequestLike): Session {
+  const authHeader = readHeader(request, "authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    throw new Error("Missing or invalid Authorization header");
+  }
+
+  const token = authHeader.slice("Bearer ".length).trim();
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    throw new Error("Invalid JWT format");
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(decodeBase64Url(parts[1]));
+  } catch {
+    throw new Error("Invalid JWT payload");
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Invalid JWT payload");
+  }
+
+  const typedPayload = payload as { sub?: unknown; claims?: unknown };
+  if (typeof typedPayload.sub !== "string" || typedPayload.sub.length === 0) {
+    throw new Error("JWT payload missing sub");
+  }
+
+  const claims =
+    typedPayload.claims &&
+    typeof typedPayload.claims === "object" &&
+    !Array.isArray(typedPayload.claims)
+      ? (typedPayload.claims as Record<string, unknown>)
+      : {};
+
+  return { user_id: typedPayload.sub, claims };
+}
 
 /**
  * Session-scoped client for backend operations.
@@ -169,15 +280,15 @@ export class SessionClient {
   /**
    * Query as this session's user.
    */
-  async query(queryJson: string): Promise<Row[]> {
-    return this.client.queryInternal(queryJson, this.session);
+  async query(query: string | QueryInput): Promise<Row[]> {
+    return this.client.queryInternal(resolveQueryJson(query), this.session);
   }
 
   /**
    * Subscribe to a query as this session's user.
    */
-  subscribe(queryJson: string, callback: SubscriptionCallback): number {
-    return this.client.subscribeInternal(queryJson, callback, this.session);
+  subscribe(query: string | QueryInput, callback: SubscriptionCallback): number {
+    return this.client.subscribeInternal(query, callback, this.session);
   }
 }
 
@@ -209,24 +320,26 @@ export class JazzClient {
    * @returns Connected JazzClient instance
    */
   static async connect(context: AppContext): Promise<JazzClient> {
+    const resolvedContext = resolveLocalAuthDefaults(context);
+
     // Load WASM module dynamically
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(context.schema);
+    const schemaJson = JSON.stringify(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      context.tier,
+      resolvedContext.appId,
+      resolvedContext.env ?? "dev",
+      resolvedContext.userBranch ?? "main",
+      resolvedContext.tier,
     );
 
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, resolvedContext);
 
     // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
+    if (resolvedContext.serverUrl) {
+      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
     }
 
     return client;
@@ -243,21 +356,23 @@ export class JazzClient {
    * @returns Connected JazzClient instance (created synchronously)
    */
   static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+    const resolvedContext = resolveLocalAuthDefaults(context);
+
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(context.schema);
+    const schemaJson = JSON.stringify(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      context.tier,
+      resolvedContext.appId,
+      resolvedContext.env ?? "dev",
+      resolvedContext.userBranch ?? "main",
+      resolvedContext.tier,
     );
 
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, resolvedContext);
 
     // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
+    if (resolvedContext.serverUrl) {
+      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
     }
 
     return client;
@@ -312,6 +427,20 @@ export class JazzClient {
   }
 
   /**
+   * Create a session-scoped client from an authenticated HTTP request.
+   *
+   * Extracts `Authorization: Bearer <jwt>` and maps payload fields:
+   * - `sub` -> `session.user_id`
+   * - `claims` -> `session.claims` (defaults to `{}`)
+   *
+   * This helper only extracts payload fields and does not validate JWT signatures.
+   * JWT verification should happen in your auth middleware before request handling.
+   */
+  forRequest(request: RequestLike): SessionClient {
+    return this.forSession(sessionFromRequest(request));
+  }
+
+  /**
    * Insert a new row into a table (sync, fire-and-forget).
    *
    * @param table Table name
@@ -323,26 +452,33 @@ export class JazzClient {
   }
 
   /**
-   * Insert a row and wait for persistence at the specified tier.
+   * Insert a row and wait for acknowledgement at the specified tier.
    *
    * @param table Table name
    * @param values Array of column values
-   * @param tier Persistence tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acks
+   * @param tier Acknowledgement tier to wait for
+   * @returns Promise resolving to the new row's ID when the tier acknowledges
+   */
+  async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
+    return this.runtime.insertPersisted(table, values, tier);
+  }
+
+  /**
+   * @deprecated Use createWithAck().
    */
   async createPersisted(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertPersisted(table, values, tier);
+    return this.createWithAck(table, values, tier);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
-   * @param queryJson JSON-encoded query specification
+   * @param query Query builder or JSON-encoded query specification
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns Array of matching rows
    */
-  async query(queryJson: string, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(queryJson, undefined, settledTier);
+  async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
+    return this.queryInternal(resolveQueryJson(query), undefined, settledTier);
   }
 
   /**
@@ -370,14 +506,25 @@ export class JazzClient {
   }
 
   /**
-   * Update a row and wait for persistence at the specified tier.
+   * Update a row and wait for acknowledgement at the specified tier.
+   */
+  async updateWithAck(
+    objectId: string,
+    updates: Record<string, Value>,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    await this.runtime.updatePersisted(objectId, updates, tier);
+  }
+
+  /**
+   * @deprecated Use updateWithAck().
    */
   async updatePersisted(
     objectId: string,
     updates: Record<string, Value>,
     tier: PersistenceTier,
   ): Promise<void> {
-    await this.runtime.updatePersisted(objectId, updates, tier);
+    await this.updateWithAck(objectId, updates, tier);
   }
 
   /**
@@ -390,26 +537,33 @@ export class JazzClient {
   }
 
   /**
-   * Delete a row and wait for persistence at the specified tier.
+   * Delete a row and wait for acknowledgement at the specified tier.
+   */
+  async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
+    await this.runtime.deletePersisted(objectId, tier);
+  }
+
+  /**
+   * @deprecated Use deleteWithAck().
    */
   async deletePersisted(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deletePersisted(objectId, tier);
+    await this.deleteWithAck(objectId, tier);
   }
 
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param queryJson JSON-encoded query specification
+   * @param query Query builder or JSON-encoded query specification
    * @param callback Called with delta whenever results change
    * @param settledTier Optional tier to hold initial delivery until confirmed
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
-    queryJson: string,
+    query: string | QueryInput,
     callback: SubscriptionCallback,
     settledTier?: PersistenceTier,
   ): number {
-    return this.subscribeInternal(queryJson, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, undefined, settledTier);
   }
 
   /**
@@ -417,12 +571,13 @@ export class JazzClient {
    * @internal
    */
   subscribeInternal(
-    queryJson: string,
+    query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
     settledTier?: PersistenceTier,
   ): number {
     const sessionJson = session ? JSON.stringify(session) : undefined;
+    const queryJson = resolveQueryJson(query);
     const subId = this.runtime.subscribe(
       queryJson,
       (deltaJsonOrObject: RowDelta | string) => {
@@ -513,9 +668,13 @@ export class JazzClient {
       headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
       headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
     }
-    // Priority 2: Frontend JWT auth
-    else if (this.context.jwtToken) {
-      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
+    // Priority 2: frontend auth (JWT or local anonymous/demo token headers)
+    else {
+      applyUserAuthHeaders(headers, {
+        jwtToken: this.context.jwtToken,
+        localAuthMode: this.context.localAuthMode,
+        localAuthToken: this.context.localAuthToken,
+      });
     }
 
     return fetch(url, {
@@ -523,6 +682,49 @@ export class JazzClient {
       headers,
       body: JSON.stringify(body),
     });
+  }
+
+  /**
+   * Link an anonymous/demo local principal to an external JWT identity.
+   *
+   * Requires all three auth fields:
+   * - `jwtToken`
+   * - `localAuthMode`
+   * - `localAuthToken`
+   *
+   * Values default to the current AppContext auth fields unless overridden.
+   */
+  async linkExternalIdentity(
+    options: LinkExternalIdentityOptions = {},
+  ): Promise<LinkExternalIdentityResult> {
+    if (!this.context.serverUrl) {
+      throw new Error("No server connection");
+    }
+
+    const jwtToken = options.jwtToken ?? this.context.jwtToken;
+    const localAuthMode = options.localAuthMode ?? this.context.localAuthMode;
+    const localAuthToken = options.localAuthToken ?? this.context.localAuthToken;
+
+    if (!jwtToken) {
+      throw new Error("linkExternalIdentity requires jwtToken");
+    }
+    if (!localAuthMode) {
+      throw new Error("linkExternalIdentity requires localAuthMode");
+    }
+    if (!localAuthToken) {
+      throw new Error("linkExternalIdentity requires localAuthToken");
+    }
+
+    return sendLinkExternalIdentityRequest(
+      this.context.serverUrl,
+      {
+        jwtToken,
+        localAuthMode,
+        localAuthToken,
+        pathPrefix: this.context.serverPathPrefix,
+      },
+      "[client] ",
+    );
   }
 
   /**
@@ -580,6 +782,8 @@ export class JazzClient {
   private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
       clientId: this.serverClientId,
       pathPrefix: this.activeServerPathPrefix,
@@ -632,9 +836,11 @@ export class JazzClient {
     const headers: Record<string, string> = {
       Accept: "application/octet-stream",
     };
-    if (this.context.jwtToken) {
-      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
-    }
+    applyUserAuthHeaders(headers, {
+      jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+    });
 
     this.streamAbortController = new AbortController();
 
@@ -696,23 +902,30 @@ export async function loadWasmModule(): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
 
-  // In Node.js, we need to read the .wasm file and use initSync
-  // In browsers, the default fetch-based init works
+  // In Node.js, we need to read the .wasm file and use initSync.
+  // In browsers/React Native, the default fetch-based init works (or default()).
+  // Use try/catch so we skip the Node path when node:* modules are unavailable (e.g. RN).
+  let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
-    const { readFileSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-    const { dirname, join } = await import("node:path");
+    try {
+      const { existsSync, readFileSync } = await import("node:fs");
+      const { createRequire } = await import("node:module");
+      const { dirname, resolve } = await import("node:path");
 
-    // Find the .wasm file relative to the jazz-wasm package
-    const wasmPath = join(
-      dirname(fileURLToPath(import.meta.url)),
-      "../../node_modules/jazz-wasm/pkg/jazz_wasm_bg.wasm",
-    );
-    const wasmBytes = readFileSync(wasmPath);
-    wasmModule.initSync(wasmBytes);
-  } else if (typeof wasmModule.default === "function") {
-    // In browsers without a bundler WASM plugin, call the init function.
-    // With vite-plugin-wasm, init happens at import time and default is not a function.
+      const require = createRequire(import.meta.url);
+      const packageJsonPath = require.resolve("jazz-wasm/package.json");
+      const packageDir = dirname(packageJsonPath);
+      const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+      if (existsSync(wasmPath)) {
+        wasmModule.initSync({ module: readFileSync(wasmPath) });
+        nodeInitDone = true;
+      }
+    } catch {
+      // Node modules unavailable (e.g. React Native with process polyfill)
+    }
+  }
+  if (!nodeInitDone && typeof wasmModule.default === "function") {
     await wasmModule.default();
   }
 

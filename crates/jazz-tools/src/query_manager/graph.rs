@@ -1034,7 +1034,7 @@ impl QueryGraph {
             self.mark_downstream_dirty(node_id);
         }
 
-        // Mark PolicyFilter nodes whose INHERITS-referenced tables changed
+        // Mark PolicyFilter nodes whose policy dependency tables changed
         let affected_policy_filters: Vec<NodeId> = self
             .policy_filter_tables
             .iter()
@@ -1049,7 +1049,7 @@ impl QueryGraph {
 
         for node_id in affected_policy_filters {
             self.mark_dirty(node_id);
-            // Mark the node as needing INHERITS re-evaluation
+            // Mark the node as needing policy re-evaluation
             if let Some(GraphNode::PolicyFilter(node)) = self.get_node_mut(node_id) {
                 node.mark_inherits_dirty();
             }
@@ -1194,10 +1194,34 @@ impl QueryGraph {
         let ctx = SourceContext { storage };
 
         for node_id in order {
+            let node_type = match self.get_node(node_id) {
+                Some(GraphNode::IndexScan(_)) => "IndexScan",
+                Some(GraphNode::Union(_)) => "Union",
+                Some(GraphNode::Alias(_)) => "Alias",
+                Some(GraphNode::Join(_)) => "Join",
+                Some(GraphNode::Project(_)) => "Project",
+                Some(GraphNode::Materialize(_)) => "Materialize",
+                Some(GraphNode::Filter(_)) => "Filter",
+                Some(GraphNode::PolicyFilter(_)) => "PolicyFilter",
+                Some(GraphNode::Sort(_)) => "Sort",
+                Some(GraphNode::LimitOffset(_)) => "LimitOffset",
+                Some(GraphNode::ArraySubquery(_)) => "ArraySubquery",
+                Some(GraphNode::Output(_)) => "Output",
+                Some(GraphNode::ExistsOutput(_)) => "ExistsOutput",
+                None => "Unknown",
+            };
+
             match self.get_node(node_id) {
                 Some(GraphNode::IndexScan(_)) => {
                     if let Some(GraphNode::IndexScan(scan_node)) = self.get_node_mut(node_id) {
                         let delta = SourceNode::scan(scan_node, &ctx);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1206,6 +1230,13 @@ impl QueryGraph {
                     if let Some(GraphNode::Union(union_node)) = self.get_node_mut(node_id) {
                         let input_refs: Vec<_> = inputs.iter().collect();
                         let delta = TransformNode::process(union_node, &input_refs);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1218,6 +1249,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Alias(alias_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(alias_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1245,6 +1283,13 @@ impl QueryGraph {
                         merged.removed.extend(left_result.removed);
                         merged.removed.extend(right_result.removed);
 
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = merged.added.len(),
+                            removed = merged.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, merged);
                     }
                 }
@@ -1257,6 +1302,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Project(project_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(project_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1279,6 +1331,13 @@ impl QueryGraph {
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
 
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = merged.added.len(),
+                            removed = merged.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, merged);
                     }
                 }
@@ -1291,6 +1350,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Filter(filter_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(filter_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1310,6 +1376,13 @@ impl QueryGraph {
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1322,6 +1395,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Sort(sort_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(sort_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1334,6 +1414,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(lo_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1363,6 +1450,13 @@ impl QueryGraph {
 
                         // Merge outer delta into combined delta
                         delta.merge(outer_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1375,6 +1469,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Output(output_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(output_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1387,6 +1488,13 @@ impl QueryGraph {
 
                     if let Some(GraphNode::ExistsOutput(exists_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(exists_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
                         tuple_deltas.insert(node_id, delta);
                     }
                 }

@@ -15,6 +15,11 @@ describe("translateQuery", () => {
           { name: "done", column_type: { type: "Boolean" }, nullable: false },
           { name: "priority", column_type: { type: "Integer" }, nullable: true },
           { name: "project", column_type: { type: "Uuid" }, nullable: true },
+          {
+            name: "tags",
+            column_type: { type: "Array", element: { type: "Text" } },
+            nullable: false,
+          },
           { name: "created_at", column_type: { type: "Timestamp" }, nullable: true },
         ],
       },
@@ -150,6 +155,60 @@ describe("translateQuery", () => {
 
       expect(result.disjuncts[0].conditions).toEqual([
         { Eq: { column: "created_at", value: { Timestamp: 1712345678 } } },
+      ]);
+    });
+
+    it("translates eq condition with array value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [
+          {
+            column: "tags",
+            op: "eq",
+            value: ["tag1", "tag2"],
+          },
+        ],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+
+      expect(result.disjuncts[0].conditions).toEqual([
+        {
+          Eq: {
+            column: "tags",
+            value: {
+              Array: [{ Text: "tag1" }, { Text: "tag2" }],
+            },
+          },
+        },
+      ]);
+    });
+
+    it("translates contains condition with array element value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [
+          {
+            column: "tags",
+            op: "contains",
+            value: "tag1",
+          },
+        ],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+
+      expect(result.disjuncts[0].conditions).toEqual([
+        {
+          Contains: {
+            column: "tags",
+            value: { Text: "tag1" },
+          },
+        },
       ]);
     });
 
@@ -653,6 +712,30 @@ describe("translateQuery", () => {
         ],
         joins: [],
       });
+    });
+  });
+
+  describe("error handling", () => {
+    it("throws for unknown column", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "unknown", op: "eq", value: "test" }],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow(
+        'Unknown column "unknown" in table "todos"',
+      );
+    });
+
+    it("throws for array value in scalar column", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: ["test"] }],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow(
+        "Unexpected array value for scalar column",
+      );
     });
   });
 });

@@ -11,6 +11,7 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
   parent?: string;
   project?: string;
 }
@@ -23,6 +24,7 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
   parent?: string;
   project?: string;
 }
@@ -37,6 +39,7 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
+  owner_id?: string | { eq?: string; ne?: string; contains?: string };
   parent?: string | { eq?: string; ne?: string; isNull?: boolean };
   project?: string | { eq?: string; ne?: string; isNull?: boolean };
 }
@@ -91,60 +94,116 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  "tables": {
-    "projects": {
-      "columns": [
+  tables: {
+    projects: {
+      columns: [
         {
-          "name": "name",
-          "column_type": {
-            "type": "Text"
+          name: "name",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
-        }
-      ]
+          nullable: false,
+        },
+      ],
     },
-    "todos": {
-      "columns": [
+    todos: {
+      columns: [
         {
-          "name": "title",
-          "column_type": {
-            "type": "Text"
+          name: "title",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "done",
-          "column_type": {
-            "type": "Boolean"
+          name: "done",
+          column_type: {
+            type: "Boolean",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "description",
-          "column_type": {
-            "type": "Text"
+          name: "description",
+          column_type: {
+            type: "Text",
           },
-          "nullable": true
+          nullable: true,
         },
         {
-          "name": "parent",
-          "column_type": {
-            "type": "Uuid"
+          name: "owner_id",
+          column_type: {
+            type: "Text",
           },
-          "nullable": true,
-          "references": "todos"
+          nullable: false,
         },
         {
-          "name": "project",
-          "column_type": {
-            "type": "Uuid"
+          name: "parent",
+          column_type: {
+            type: "Uuid",
           },
-          "nullable": true,
-          "references": "projects"
-        }
-      ]
-    }
-  }
+          nullable: true,
+          references: "todos",
+        },
+        {
+          name: "project",
+          column_type: {
+            type: "Uuid",
+          },
+          nullable: true,
+          references: "projects",
+        },
+      ],
+      policies: {
+        select: {
+          using: {
+            type: "True",
+          },
+        },
+        insert: {
+          with_check: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+        update: {
+          using: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+          with_check: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+        delete: {
+          using: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+      },
+    },
+  },
 };
 
 export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {

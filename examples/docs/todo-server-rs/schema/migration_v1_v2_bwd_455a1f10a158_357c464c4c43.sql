@@ -1,0 +1,1 @@
+ALTER TABLE todos DROP COLUMN description;

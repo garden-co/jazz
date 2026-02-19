@@ -1,6 +1,36 @@
 // Schema type definitions
 
-export type SqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export interface ArraySqlType {
+  kind: "ARRAY";
+  element: SqlType;
+}
+export type SqlType = ScalarSqlType | ArraySqlType;
+
+export function sqlTypeToString(sqlType: SqlType): string {
+  if (typeof sqlType === "string") {
+    return sqlType;
+  }
+  return `${sqlTypeToString(sqlType.element)}[]`;
+}
+
+type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
+  ? string
+  : T extends "BOOLEAN"
+    ? boolean
+    : T extends "INTEGER"
+      ? number
+      : T extends "REAL"
+        ? number
+        : T extends "UUID"
+          ? string
+          : never;
+
+export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
+  ? TSTypeFromScalarSqlType<T>
+  : T extends ArraySqlType
+    ? TSTypeFromSqlType<T["element"]>[]
+    : never;
 
 export interface Column {
   name: string;
@@ -9,9 +39,84 @@ export interface Column {
   references?: string; // Target table name for foreign key
 }
 
+export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
+export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
+
+export type PolicyValue =
+  | {
+      type: "Literal";
+      value: unknown;
+    }
+  | {
+      type: "SessionRef";
+      path: string[];
+    };
+
+export type PolicyExpr =
+  | {
+      type: "Cmp";
+      column: string;
+      op: PolicyCmpOp;
+      value: PolicyValue;
+    }
+  | {
+      type: "IsNull";
+      column: string;
+    }
+  | {
+      type: "IsNotNull";
+      column: string;
+    }
+  | {
+      type: "In";
+      column: string;
+      session_path: string[];
+    }
+  | {
+      type: "Exists";
+      table: string;
+      condition: PolicyExpr;
+    }
+  | {
+      type: "Inherits";
+      operation: PolicyOperation;
+      via_column: string;
+    }
+  | {
+      type: "And";
+      exprs: PolicyExpr[];
+    }
+  | {
+      type: "Or";
+      exprs: PolicyExpr[];
+    }
+  | {
+      type: "Not";
+      expr: PolicyExpr;
+    }
+  | {
+      type: "True";
+    }
+  | {
+      type: "False";
+    };
+
+export interface OperationPolicy {
+  using?: PolicyExpr;
+  with_check?: PolicyExpr;
+}
+
+export interface TablePolicies {
+  select?: OperationPolicy;
+  insert?: OperationPolicy;
+  update?: OperationPolicy;
+  delete?: OperationPolicy;
+}
+
 export interface Table {
   name: string;
   columns: Column[];
+  policies?: TablePolicies;
 }
 
 export interface Schema {
@@ -50,13 +155,29 @@ export interface MigrationOpEntry {
 }
 
 // Lens format for SQL generation
-export type LensOpType = "introduce" | "drop" | "rename";
-
-export interface LensOp {
-  type: LensOpType;
+export interface IntroduceLensOp {
+  type: "introduce";
   column: string;
+  sqlType: SqlType;
   value: unknown;
 }
+
+export interface DropLensOp {
+  type: "drop";
+  column: string;
+  sqlType: SqlType;
+  value: unknown;
+}
+
+export interface RenameLensOp {
+  type: "rename";
+  column: string;
+  value: string;
+}
+
+export type LensOp = IntroduceLensOp | DropLensOp | RenameLensOp;
+
+export type LensOpType = LensOp["type"];
 
 export interface Lens {
   table: string;

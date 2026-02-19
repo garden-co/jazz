@@ -6,7 +6,55 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use axum::{Json, Router, extract::State, routing::get};
+use base64::Engine;
+use serde_json::{Value, json};
 use tempfile::TempDir;
+
+const JWT_SECRET: &str = "test-jwt-secret-for-integration";
+const JWT_KID: &str = "test-jwks-kid";
+
+#[derive(Clone)]
+struct JwksState {
+    kid: String,
+    secret_b64: String,
+}
+
+struct JwksServer {
+    task: tokio::task::JoinHandle<()>,
+    url: String,
+}
+
+impl JwksServer {
+    async fn start(kid: &str, secret: &str) -> Self {
+        let state = JwksState {
+            kid: kid.to_string(),
+            secret_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes()),
+        };
+
+        let app = Router::new()
+            .route("/jwks", get(jwks_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind JWKS server");
+        let addr = listener.local_addr().expect("JWKS local addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve JWKS");
+        });
+
+        Self {
+            task,
+            url: format!("http://{addr}/jwks"),
+        }
+    }
+}
+
+impl Drop for JwksServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 /// Test server handle - kills process on drop.
 pub struct TestServer {
@@ -14,6 +62,8 @@ pub struct TestServer {
     pub port: u16,
     #[allow(dead_code)]
     data_dir: TempDir,
+    #[allow(dead_code)]
+    jwks_server: JwksServer,
 }
 
 impl TestServer {
@@ -26,6 +76,7 @@ impl TestServer {
     /// Start a test server on the given port.
     pub async fn start_on_port(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
 
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
@@ -41,12 +92,12 @@ impl TestServer {
                 "--data-dir",
                 data_dir.path().to_str().unwrap(),
             ])
-            .env("JAZZ_JWT_SECRET", "test-jwt-secret-for-integration")
             .env(
                 "JAZZ_BACKEND_SECRET",
                 "backend-secret-for-integration-tests",
             )
             .env("JAZZ_ADMIN_SECRET", "admin-secret-for-integration-tests")
+            .env("JAZZ_JWKS_URL", &jwks_server.url)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -56,6 +107,7 @@ impl TestServer {
             process,
             port,
             data_dir,
+            jwks_server,
         };
 
         // Wait for server to be ready
@@ -121,4 +173,17 @@ impl Drop for TestServer {
 fn get_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to port 0");
     listener.local_addr().unwrap().port()
+}
+
+async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
+    Json(json!({
+        "keys": [
+            {
+                "kty": "oct",
+                "kid": state.kid,
+                "alg": "HS256",
+                "k": state.secret_b64,
+            }
+        ]
+    }))
 }
