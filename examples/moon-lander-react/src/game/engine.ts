@@ -51,7 +51,7 @@ export function useGameEngine(
     posY: INITIAL_ALTITUDE,
     velX: 0,
     velY: 0,
-    mode: "descending",
+    mode: "start",
     landerX: 0,
     landerY: 0,
     fuel: INITIAL_FUEL,
@@ -107,8 +107,15 @@ export function useGameEngine(
   const shareHintRef = useRef(false);
   const thrustingRef = useRef(false);
 
-  // Merge Jazz inventory into the working set each render (connected mode)
-  if (options?.inventory !== undefined) {
+  // Merge Jazz inventory into the working set each render (connected mode).
+  // Skip during start/descending/crashed — the player has no inventory in those modes
+  // and merging would re-add stale DB items before the burst flush clears them.
+  const canHoldInventory =
+    worldRef.current.mode === "walking" ||
+    worldRef.current.mode === "landed" ||
+    worldRef.current.mode === "in_lander" ||
+    worldRef.current.mode === "launched";
+  if (options?.inventory !== undefined && canHoldInventory) {
     const result = mergeInventory({
       jazzInventory: options.inventory,
       optimistic: optimisticInventoryRef.current,
@@ -129,7 +136,7 @@ export function useGameEngine(
 
   // Mirrored into state for external consumption (HUD, data attributes, Jazz)
   const [state, setState] = useState<EngineState>({
-    mode: "descending",
+    mode: "start",
     positionX: CANVAS_WIDTH / 2,
     positionY: INITIAL_ALTITUDE,
     velocityX: 0,
@@ -222,7 +229,11 @@ export function useGameEngine(
       };
 
       // --- Physics ---
-      const collectEffects: Array<{ x: number; fuelType: import("./constants.js").FuelType; isRequired: boolean }> = [];
+      const collectEffects: Array<{
+        x: number;
+        fuelType: import("./constants.js").FuelType;
+        isRequired: boolean;
+      }> = [];
       const { thrusting, thrustLeft, thrustRight } = updatePhysics(world, input, {
         dt,
         requiredFuelType,
@@ -249,22 +260,26 @@ export function useGameEngine(
       const cameraX = Math.floor(world.posX - w / 2);
       const GROUND_MARGIN = 80;
 
+      const groundCamY = GROUND_LEVEL - h + GROUND_MARGIN;
       let targetCamY: number;
       if (world.mode === "launched") {
-        // Track the lander upward, centred on screen. Never pan downward.
         targetCamY = world.posY - h / 2;
         targetCamY = Math.min(targetCamY, smoothCamYRef.current);
-      } else if (world.mode === "descending") {
+      } else if (world.mode === "descending" || world.mode === "start") {
         targetCamY = world.posY - h / 2;
       } else {
-        // Ground modes — lock ground near bottom
-        targetCamY = GROUND_LEVEL - h + GROUND_MARGIN;
+        targetCamY = groundCamY;
       }
+      // Never show more ground than the landed/walking view.
+      targetCamY = Math.min(targetCamY, groundCamY);
 
       if (isNaN(smoothCamYRef.current)) {
         smoothCamYRef.current = targetCamY;
       }
-      const camLerp = world.mode === "launched" ? 3 : 5;
+      // During launch, camera gradually stops following so the lander flies off
+      // the top of the viewport before the success splash appears.
+      const camLerp =
+        world.mode === "launched" ? 3 * Math.max(0, 1 - world.launchElapsed / 1.5) : 5;
       smoothCamYRef.current += (targetCamY - smoothCamYRef.current) * Math.min(1, camLerp * dt);
       const cameraY = Math.floor(smoothCamYRef.current);
 

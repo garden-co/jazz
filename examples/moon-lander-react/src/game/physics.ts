@@ -1,4 +1,5 @@
 import {
+  CANVAS_WIDTH,
   GRAVITY,
   THRUST_POWER,
   THRUST_POWER_X,
@@ -12,6 +13,8 @@ import {
   ASTRONAUT_WIDTH,
   SHARE_PROXIMITY_RADIUS,
   GROUND_LEVEL,
+  INITIAL_ALTITUDE,
+  INITIAL_FUEL,
   JUMP_VELOCITY,
   JUMP_GRAVITY,
   type FuelType,
@@ -72,6 +75,18 @@ export function updatePhysics(
     callbacks,
     collectEffects,
   } = ctx;
+
+  // Start screen: wait for Space to begin
+  if (world.mode === "start") {
+    inventory.clear();
+    optimisticInventory.clear();
+    sharedOut.clear();
+    collectedIds.clear();
+    if (input.launch) {
+      world.mode = "descending";
+    }
+    return { thrusting: false, thrustLeft: false, thrustRight: false };
+  }
 
   const hasFuelForThrust = world.mode === "descending" && world.fuel > 0;
   const thrusting = hasFuelForThrust && input.up;
@@ -145,10 +160,7 @@ export function updatePhysics(
     const pickupRange = ASTRONAUT_WIDTH;
     for (const d of deposits) {
       if (collectedIds.has(d.id)) continue;
-      if (
-        wrapDistance(d.x, world.posX) < pickupRange &&
-        !inventory.has(d.type)
-      ) {
+      if (wrapDistance(d.x, world.posX) < pickupRange && !inventory.has(d.type)) {
         inventory.add(d.type);
         optimisticInventory.add(d.type);
         collectedIds.add(d.id);
@@ -219,8 +231,37 @@ export function updatePhysics(
       world.posY = -100000;
       world.velY = 0;
     }
+    // Restart after success splash
+    if (input.launch && world.launchElapsed > 5) {
+      inventory.clear();
+      optimisticInventory.clear();
+      sharedOut.clear();
+      collectedIds.clear();
+      world.mode = "descending";
+      world.posX = CANVAS_WIDTH / 2;
+      world.posY = INITIAL_ALTITUDE;
+      world.velX = 0;
+      world.velY = 0;
+      world.fuel = INITIAL_FUEL;
+      world.launchElapsed = 0;
+      world.crashElapsed = 0;
+    }
   } else if (world.mode === "crashed") {
     world.crashElapsed += dt;
+    if (input.launch && world.crashElapsed > 1) {
+      inventory.clear();
+      optimisticInventory.clear();
+      sharedOut.clear();
+      collectedIds.clear();
+      world.mode = "descending";
+      world.posX = CANVAS_WIDTH / 2;
+      world.posY = INITIAL_ALTITUDE;
+      world.velX = 0;
+      world.velY = 0;
+      world.fuel = INITIAL_FUEL;
+      world.launchElapsed = 0;
+      world.crashElapsed = 0;
+    }
   }
 
   return { thrusting, thrustLeft, thrustRight };
