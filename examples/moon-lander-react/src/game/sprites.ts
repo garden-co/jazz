@@ -1,7 +1,4 @@
-import {
-  COLOURS,
-  type FuelType,
-} from "./constants.js";
+import { COLOURS, type FuelType } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Pixel-art sprite system — OffscreenCanvas cache with palette colouring
@@ -51,9 +48,15 @@ function darken(hex: string, amount = 0.3): string {
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
   const f = 1 - amount;
-  const tr = Math.round(r * f).toString(16).padStart(2, "0");
-  const tg = Math.round(g * f).toString(16).padStart(2, "0");
-  const tb = Math.round(b * f).toString(16).padStart(2, "0");
+  const tr = Math.round(r * f)
+    .toString(16)
+    .padStart(2, "0");
+  const tg = Math.round(g * f)
+    .toString(16)
+    .padStart(2, "0");
+  const tb = Math.round(b * f)
+    .toString(16)
+    .padStart(2, "0");
   return `#${tr}${tg}${tb}`;
 }
 
@@ -61,9 +64,15 @@ function lighten(hex: string, amount = 0.4): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
-  const tr = Math.min(255, Math.round(r + (255 - r) * amount)).toString(16).padStart(2, "0");
-  const tg = Math.min(255, Math.round(g + (255 - g) * amount)).toString(16).padStart(2, "0");
-  const tb = Math.min(255, Math.round(b + (255 - b) * amount)).toString(16).padStart(2, "0");
+  const tr = Math.min(255, Math.round(r + (255 - r) * amount))
+    .toString(16)
+    .padStart(2, "0");
+  const tg = Math.min(255, Math.round(g + (255 - g) * amount))
+    .toString(16)
+    .padStart(2, "0");
+  const tb = Math.min(255, Math.round(b + (255 - b) * amount))
+    .toString(16)
+    .padStart(2, "0");
   return `#${tr}${tg}${tb}`;
 }
 
@@ -105,112 +114,121 @@ function stampSprite(grid: string[], palette: Palette): OffscreenCanvas {
 // splayed landing skids, central thruster glow
 // ---------------------------------------------------------------------------
 
-const LANDER_BODY = padGrid([
-  // antenna / sensor mast (rows 0–2)
-  "...........OO",
-  "..........ONNO",
-  ".........OWBBWO",
-  // cockpit (rows 3–8)
-  "........OXXXXXXO",
-  ".......OXXZZZZXXO",
-  "......OXXXZZZZXXXO",
-  ".....OXZZWWWWWWZZXO",
-  ".....OXZWWRWWWRWZXO",
-  ".....OXXZZZZZZZZXXO",
-  // hull (rows 9–17, 16 px wide)
-  "....OBXXXXXXXXXXXXBO",
-  "....OXXXXXXVVXXXXXXO",
-  "....OXXVXXXXXXXXVXXO",
-  "....OXXXXXXVVXXXXXXO",
-  "....OBBBBBBBBBBBBBBO",
-  "....OXXXXXXVVXXXXXXO",
-  "....OXXVXXXXXXXXVXXO",
-  "....OXXXXXXVVXXXXXXO",
-  "....OXXKKKKKKKKKKXXO",
-  // engine section (rows 18–23)
-  ".....OXXXXXXXXXXXXO",
-  ".....OXTTTTTTTTTTXO",
-  ".....OXXXXXXXXXXXXO",
-  "....OWXXXXXXXXXXXXWO",
-  "....OXXXXXXUUXXXXXXO",
-  "....OXXXXUUUUUUXXXXO",
-  // landing gear + nozzle (rows 24–31)
-  "..OXO.OXXUUUUUUXXO.OXO",
-  ".OXO..OXXUUUUUUXXO..OXO",
-  "OXO....OWWUUUUWWO....OXO",
-  "OXO.....OLLLLLLO.....OXO",
-  "OXO.....OLLLLLLO.....OXO",
-  ".........OLLLLO",
-  "..........OLLO",
-  "...........OO",
-], 24);
+const LANDER_BODY = padGrid(
+  [
+    // antenna / sensor mast (rows 0–2)
+    "...........OO",
+    "..........ONNO",
+    ".........OWBBWO",
+    // cockpit (rows 3–8)
+    "........OXXXXXXO",
+    ".......OXXZZZZXXO",
+    "......OXXXZZZZXXXO",
+    ".....OXZZWWWWWWZZXO",
+    ".....OXZWWRWWWRWZXO",
+    ".....OXXZZZZZZZZXXO",
+    // hull (rows 9–17, 16 px wide)
+    "....OBXXXXXXXXXXXXBO",
+    "....OXXXXXXVVXXXXXXO",
+    "....OXXVXXXXXXXXVXXO",
+    "....OXXXXXXVVXXXXXXO",
+    "....OBBBBBBBBBBBBBBO",
+    "....OXXXXXXVVXXXXXXO",
+    "....OXXVXXXXXXXXVXXO",
+    "....OXXXXXXVVXXXXXXO",
+    "....OXXKKKKKKKKKKXXO",
+    // engine section (rows 18–23)
+    ".....OXXXXXXXXXXXXO",
+    ".....OXTTTTTTTTTTXO",
+    ".....OXXXXXXXXXXXXO",
+    "....OWXXXXXXXXXXXXWO",
+    "....OXXXXXXUUXXXXXXO",
+    "....OXXXXUUUUUUXXXXO",
+    // landing gear + nozzle (rows 24–31)
+    "..OXO.OXXUUUUUUXXO.OXO",
+    ".OXO..OXXUUUUUUXXO..OXO",
+    "OXO....OWWUUUUWWO....OXO",
+    "OXO.....OLLLLLLO.....OXO",
+    "OXO.....OLLLLLLO.....OXO",
+    ".........OLLLLO",
+    "..........OLLO",
+    "...........OO",
+  ],
+  24,
+);
 
 // ---------------------------------------------------------------------------
 // Astronaut sprite grid (16×24)
 // Cyberpunk armoured suit — plated bodysuit, neon visor, idle stance facing right
 // ---------------------------------------------------------------------------
 
-const ASTRO_FRAME_0 = padGrid([
-  // helmet (rows 0–6) — angular, top-lit player colour, visor on right
-  ".....OOOO",
-  "....OHHHHO",
-  "...OHBDDBHO",
-  "...OBDWWWWO",
-  "...OBDWWRWO",
-  "...OBDDDDBO",
-  "....OBDDBO",
-  // neck (row 7)
-  ".....OSSO",
-  // shoulders + torso (rows 8–15) — pauldrons, bodysuit at joints
-  "....OBDSSDBO",
-  "...OBHDSSDHBO",
-  "...OBDDSSDDBO",
-  "...ODDDBBBDDO",
-  "...ODDDSSSDDO",
-  "....ODDSSSDO",
-  "....ODDSSDDO",
-  "....ODDDDDDO",
-  // legs + boots (rows 16–23) — left foot forward, right foot behind
-  "...ODDO.ODDO",
-  "...ODDO.ODDO",
-  "...ODDO.ODDO",
-  "...ODDO.ODDO",
-  ".OBDDDO.ODDO",
-  ".OBDDDO.ODDO",
-  "........ODDBO",
-  "........ODDBO",
-], 16);
+const ASTRO_FRAME_0 = padGrid(
+  [
+    // helmet (rows 0–6) — angular, top-lit player colour, visor on right
+    ".....OOOO",
+    "....OHHHHO",
+    "...OHBDDBHO",
+    "...OBDWWWWO",
+    "...OBDWWRWO",
+    "...OBDDDDBO",
+    "....OBDDBO",
+    // neck (row 7)
+    ".....OSSO",
+    // shoulders + torso (rows 8–15) — pauldrons, bodysuit at joints
+    "....OBDSSDBO",
+    "...OBHDSSDHBO",
+    "...OBDDSSDDBO",
+    "...ODDDBBBDDO",
+    "...ODDDSSSDDO",
+    "....ODDSSSDO",
+    "....ODDSSDDO",
+    "....ODDDDDDO",
+    // legs + boots (rows 16–23) — left foot forward, right foot behind
+    "...ODDO.ODDO",
+    "...ODDO.ODDO",
+    "...ODDO.ODDO",
+    "...ODDO.ODDO",
+    ".OBDDDO.ODDO",
+    ".OBDDDO.ODDO",
+    "........ODDBO",
+    "........ODDBO",
+  ],
+  16,
+);
 
-const ASTRO_FRAME_1 = padGrid([
-  // helmet (same)
-  ".....OOOO",
-  "....OHHHHO",
-  "...OHBDDBHO",
-  "...OBDWWWWO",
-  "...OBDWWRWO",
-  "...OBDDDDBO",
-  "....OBDDBO",
-  // neck (same)
-  ".....OSSO",
-  // shoulders + torso (same)
-  "....OBDSSDBO",
-  "...OBHDSSDHBO",
-  "...OBDDSSDDBO",
-  "...ODDDBBBDDO",
-  "...ODDDSSSDDO",
-  "....ODDSSSDO",
-  "....ODDSSDDO",
-  "....ODDDDDDO",
-  // legs + boots (mirrored stride — right foot forward, left foot behind)
-  "...ODDO.ODDO",
-  "...ODDO.ODDO",
-  "...ODDO.ODDO",
-  "...ODDO.ODDO",
-  "...ODDO.ODDDBO",
-  "...ODDO.ODDDBO",
-  ".OBDDDO",
-  ".OBDDDO",
-], 16);
+const ASTRO_FRAME_1 = padGrid(
+  [
+    // helmet (same)
+    ".....OOOO",
+    "....OHHHHO",
+    "...OHBDDBHO",
+    "...OBDWWWWO",
+    "...OBDWWRWO",
+    "...OBDDDDBO",
+    "....OBDDBO",
+    // neck (same)
+    ".....OSSO",
+    // shoulders + torso (same)
+    "....OBDSSDBO",
+    "...OBHDSSDHBO",
+    "...OBDDSSDDBO",
+    "...ODDDBBBDDO",
+    "...ODDDSSSDDO",
+    "....ODDSSSDO",
+    "....ODDSSDDO",
+    "....ODDDDDDO",
+    // legs + boots (mirrored stride — right foot forward, left foot behind)
+    "...ODDO.ODDO",
+    "...ODDO.ODDO",
+    "...ODDO.ODDO",
+    "...ODDO.ODDO",
+    "...ODDO.ODDDBO",
+    "...ODDO.ODDDBO",
+    ".OBDDDO",
+    ".OBDDDO",
+  ],
+  16,
+);
 
 // ---------------------------------------------------------------------------
 // Deposit sprite grids (16×16)
@@ -218,138 +236,138 @@ const ASTRO_FRAME_1 = padGrid([
 // ---------------------------------------------------------------------------
 
 const DEPOSIT_GRIDS: Record<FuelType, string[]> = {
-  // Circle: bold outline, concentric rings
+  // Circle: beveled gem with inner facet ring
   circle: [
-    "......DDDD......",
-    "....DHHHHHHD....",
-    "...DHCCCCCCHD...",
-    "..DHC.CIIC.CHD..",
-    "..DC..ICCCI.CD..",
-    ".DC...ICCCI..CD.",
-    ".DC...CIIC...CD.",
-    ".DC...CCCC...CD.",
-    ".DC...CCCC...CD.",
-    ".DC...CIIC...CD.",
-    ".DC...ICCCI..CD.",
-    "..DC..ICCCI.CD..",
-    "..DHC.CIIC.CHD..",
-    "...DHCCCCCCHD...",
-    "....DHHHHHHD....",
-    "......DDDD......",
+    "................",
+    ".....DDDDDD.....",
+    "....DIIIIIID....",
+    "...DIHHCCCCID...",
+    "..DIHCCCCCCCID..",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    "..DICCCCCCCCID..",
+    "...DICCCCCCID...",
+    "....DIIIIIID....",
+    ".....DDDDDD.....",
+    "................",
   ],
-  // Triangle: bold outline, inner triangle
+  // Triangle: upward-pointing with facet edges
   triangle: [
     ".......DD.......",
     "......DHHD......",
-    "......DCCD......",
-    ".....DCCCCDD....",
-    ".....DCICCD.....",
-    "....DCCIICCDD...",
-    "....DCCIICCD....",
-    "...DCCCIICCCDD..",
-    "...DCCCCCCCCD...",
-    "..DCCICCCCICCD..",
-    "..DCCIIIIIICCD..",
-    ".DCCCCCCCCCCCCDD",
-    ".DCCCCCCCCCCCCDD",
-    "DCCCCCCCCCCCCCCDD",
-    "DHHHHHHHHHHHHHHDD",
-    "DDDDDDDDDDDDDDDDD",
+    ".....DIHHID.....",
+    ".....DICCID.....",
+    "....DICCCCID....",
+    "....DICCCCID....",
+    "...DICCCCCCID...",
+    "...DICCCCCCID...",
+    "..DICCCCCCCCID..",
+    "..DICCCCCCCCID..",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DIIIIIIIIIIIIIID",
+    "DDDDDDDDDDDDDDDD",
   ],
-  // Square: bold outline, crosshatch windows
+  // Square: beveled block with facet border
   square: [
     "DDDDDDDDDDDDDDDD",
-    "DHHHHHHHHHHHHHHHD",
-    "DHCICCCCCCCICCHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHIIIIIIIIIIIICHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHCICCCCCCCICCHD",
-    "DHCICCCCCCCICCHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHIIIIIIIIIIIICHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHCICCCCCCCICCHD",
-    "DHHHHHHHHHHHHHHHD",
+    "DIIIIIIIIIIIIIID",
+    "DIHHCCCCCCCCCCID",
+    "DIHCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DIIIIIIIIIIIIIID",
     "DDDDDDDDDDDDDDDD",
   ],
-  // Pentagon: bold outline, radial spokes
+  // Pentagon: pointed top, wide shoulders, narrower flat base
   pentagon: [
-    "......DDDD......",
-    ".....DHHHHHD....",
-    "....DHCCIICCDD..",
-    "...DHCCCIICCCDD.",
-    "..DHCCCCIICCCCDD",
-    ".DHCCCCCIICCCCDD",
-    "DHCCIICCCCCCIICDD",
-    "DHCCCIICCCCIICCDD",
-    "DHCCCCCIIIICCCCDD",
-    ".DHCCCCCCCCCCCHD",
-    "..DHCCCCCCCCCHD.",
-    "...DHCCCCCCHD...",
-    "....DHCCCCHD....",
-    ".....DHCCHD.....",
-    "......DHHD......",
     ".......DD.......",
+    "......DHHD......",
+    ".....DIHHID.....",
+    "....DICCCCID....",
+    "...DICCCCCCID...",
+    "..DICCCCCCCCID..",
+    ".DICCCCCCCCCCID.",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    ".DICCCCCCCCCCID.",
+    ".DICCCCCCCCCCID.",
+    "..DICCCCCCCCID..",
+    "..DICCCCCCCCID..",
+    "..DICCCCCCCCID..",
+    "..DIIIIIIIIIID..",
+    "..DDDDDDDDDDDD..",
   ],
-  // Hexagon: bold outline, inner hex
+  // Hexagon: flat top and bottom, bulges in middle
   hexagon: [
     "....DDDDDDDD....",
-    "...DHHHHHHHHDD..",
-    "..DHCCCCCCCCCHD.",
-    ".DHCCDIIIIDCCHD.",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    "DHCCDICCCCICCCHD",
-    ".DHCCDIIIIDCCHD.",
-    "..DHCCCCCCCCCHD.",
-    "...DHHHHHHHHDD..",
+    "...DIIIIIIIID...",
+    "..DIHCCCCCCCID..",
+    ".DICCCCCCCCCCID.",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    ".DICCCCCCCCCCID.",
+    "..DICCCCCCCCID..",
+    "...DIIIIIIIID...",
     "....DDDDDDDD....",
   ],
-  // Heptagon: bold outline, star spokes
-  heptagon: [
-    "......DDDD......",
-    ".....DHHHHHD....",
-    "....DHCCICCCDD..",
-    "...DHCCCICCCDD..",
-    "..DHCCCCICCCCCDD",
-    ".DHCCIIIICIIICCDD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHCCCDIIIIICCCHD",
-    "DHCCCCCCCCCCCCCHD",
-    "DHCCCCCCCCCCCCCHD",
-    ".DHCCIIIICIIICCDD",
-    "..DHCCCCICCCCCDD",
-    "..DHCCCCICCCCHD.",
-    "...DHCCCICCHD...",
-    "....DHCCIDHD....",
-    ".....DDDDDD.....",
+  // Diamond: pointed top and bottom, widest at centre
+  diamond: [
+    ".......DD.......",
+    "......DIID......",
+    ".....DIHHID.....",
+    "....DIHCCCID....",
+    "...DICCCCCCID...",
+    "..DICCCCCCCCID..",
+    ".DICCCCCCCCCCID.",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    ".DICCCCCCCCCCID.",
+    "..DICCCCCCCCID..",
+    "...DICCCCCCID...",
+    "....DICCCCID....",
+    ".....DICCID.....",
+    "......DIID......",
+    ".......DD.......",
   ],
-  // Octagon: bold outline, inner octagon
+  // Octagon: stop-sign with clipped corners
   octagon: [
-    "....DDDDDDDD....",
-    "...DHHHHHHHHDD..",
-    "..DHCCCIIIICCCHD",
-    ".DHCCCICCCCICCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    "DHCCCICCCCCICCCHD",
-    ".DHCCCICCCCICCHD",
-    "..DHCCCIIIICCCHD",
-    "...DHHHHHHHHDD..",
-    "....DDDDDDDD....",
+    "...DDDDDDDDDD...",
+    "..DIIIIIIIIIID..",
+    ".DIHCCCCCCCCCID.",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    "DICCCCCCCCCCCCID",
+    ".DICCCCCCCCCCID.",
+    "..DIIIIIIIIIID..",
+    "...DDDDDDDDDD...",
   ],
 };
 
@@ -361,31 +379,31 @@ const cache = new Map<string, OffscreenCanvas>();
 
 function makeLanderPalette(colour: string): Palette {
   return {
-    O: "#000000",            // hard black outline
-    X: "#8080a0",            // mid steel (main hull)
-    Z: "#a0a0bc",            // light steel (cockpit frame)
-    K: "#c0c0d8",            // bright steel (worn metal highlight)
-    V: "#606080",            // panel seam shadow
-    T: "#505068",            // intake grille
-    B: colour,               // player body colour (trim / accents)
-    H: lighten(colour),      // highlight (lighter body)
+    O: "#000000", // hard black outline
+    X: "#8080a0", // mid steel (main hull)
+    Z: "#a0a0bc", // light steel (cockpit frame)
+    K: "#c0c0d8", // bright steel (worn metal highlight)
+    V: "#606080", // panel seam shadow
+    T: "#505068", // intake grille
+    B: colour, // player body colour (trim / accents)
+    H: lighten(colour), // highlight (lighter body)
     N: lighten(colour, 0.7), // bright beacon glow
-    W: COLOURS.pink,         // hot pink neon
-    R: "#ffffff",             // white reflection
-    L: "#00ffff",            // cyan thruster glow
-    U: "#cc00cc",            // magenta underlight
+    W: COLOURS.pink, // hot pink neon
+    R: "#ffffff", // white reflection
+    L: "#00ffff", // cyan thruster glow
+    U: "#cc00cc", // magenta underlight
   };
 }
 
 function makeAstroPalette(colour: string): Palette {
   return {
-    O: "#000000",            // hard black outline
-    H: lighten(colour),      // bright edge highlight (top-lit)
-    B: colour,               // player colour (plate highlights)
+    O: "#000000", // hard black outline
+    H: lighten(colour), // bright edge highlight (top-lit)
+    B: colour, // player colour (plate highlights)
     D: darken(colour, 0.45), // dark player colour (armour base)
-    S: "#303048",            // bodysuit (visible at joints)
-    W: COLOURS.pink,         // neon visor glow
-    R: "#ffffff",             // visor reflection
+    S: "#303048", // bodysuit (visible at joints)
+    W: COLOURS.pink, // neon visor glow
+    R: "#ffffff", // visor reflection
   };
 }
 
@@ -396,7 +414,7 @@ const SPRITE_DEPOSIT_COLOURS: Record<FuelType, string> = {
   square: COLOURS.yellow,
   pentagon: COLOURS.green,
   hexagon: COLOURS.orange,
-  heptagon: COLOURS.softPink,
+  diamond: COLOURS.softPink,
   octagon: COLOURS.purple,
 };
 
@@ -424,7 +442,6 @@ export function getLanderSprite(colour?: string): OffscreenCanvas {
   }
   return s;
 }
-
 
 export function getAstronautSprite(colour: string | undefined, frame: number): OffscreenCanvas {
   const c = colour ?? COLOURS.cyan;

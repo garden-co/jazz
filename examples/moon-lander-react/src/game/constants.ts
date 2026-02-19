@@ -48,7 +48,7 @@ export const FUEL_TYPES = [
   "square",
   "pentagon",
   "hexagon",
-  "heptagon",
+  "diamond",
   "octagon",
 ] as const;
 
@@ -56,6 +56,7 @@ export type FuelType = (typeof FUEL_TYPES)[number];
 
 // Player modes
 export type PlayerMode =
+  | "start"
   | "descending"
   | "landed"
   | "walking"
@@ -92,7 +93,7 @@ export function leanAngle(screenX: number, screenW: number): number {
 
 // Particles
 export const MAX_PARTICLES = 200;
-export const THRUST_EMIT_RATE = 3;  // particles per frame while thrusting
+export const THRUST_EMIT_RATE = 3; // particles per frame while thrusting
 export const SPARKLE_BURST_COUNT = 10; // particles on deposit pickup
 export const PARTICLE_THRUST_LIFE = 0.4; // seconds
 export const PARTICLE_SPARKLE_LIFE = 0.5;
