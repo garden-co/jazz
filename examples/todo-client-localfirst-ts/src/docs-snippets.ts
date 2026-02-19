@@ -2,6 +2,7 @@ import type { Db } from "jazz-tools";
 import { app } from "../schema/app.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
+const EXAMPLE_OWNER_ID = "local:example-owner";
 
 // #region reading-oneshot-ts
 export async function readTodosOneshot(db: Db) {
@@ -45,6 +46,7 @@ export function writeTodoCrud(db: Db, todoId: string) {
   db.insert(app.todos, {
     title: "Write docs",
     done: false,
+    owner_id: EXAMPLE_OWNER_ID,
     project: EXAMPLE_PROJECT_ID,
   });
   db.update(app.todos, todoId, { done: true });
@@ -59,6 +61,7 @@ export async function writeTodoWithAckTiers(db: Db) {
     {
       title: "Write docs with ack",
       done: false,
+      owner_id: EXAMPLE_OWNER_ID,
       project: EXAMPLE_PROJECT_ID,
     },
     "edge",

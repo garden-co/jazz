@@ -11,6 +11,7 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
   parent?: string;
   project?: string;
 }
@@ -23,6 +24,7 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
   parent?: string;
   project?: string;
 }
@@ -37,6 +39,7 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
+  owner_id?: string | { eq?: string; ne?: string; contains?: string };
   parent?: string | { eq?: string; ne?: string; isNull?: boolean };
   project?: string | { eq?: string; ne?: string; isNull?: boolean };
 }
@@ -125,6 +128,13 @@ export const wasmSchema: WasmSchema = {
             type: "Text",
           },
           nullable: true,
+        },
+        {
+          name: "owner_id",
+          column_type: {
+            type: "Text",
+          },
+          nullable: false,
         },
         {
           name: "parent",

@@ -2,6 +2,7 @@ import {
   createDb,
   createSyntheticUserSwitcher,
   getActiveSyntheticAuth,
+  resolveClientSession,
   type DbConfig,
   type Db,
 } from "jazz-tools";
@@ -70,8 +71,12 @@ export async function startApp(
   };
 
   // #region context-setup-ts-client
-  const db = await createDb(resolvedConfig);
+  const [db, session] = await Promise.all([
+    createDb(resolvedConfig),
+    resolveClientSession(resolvedConfig),
+  ]);
   // #endregion context-setup-ts-client
+  const sessionUserId = session?.user_id ?? null;
 
   // Build DOM
   const authControls = document.createElement("div");
@@ -98,6 +103,7 @@ export async function startApp(
   const btn = document.createElement("button");
   btn.type = "submit";
   btn.textContent = "Add";
+  btn.disabled = !sessionUserId;
   const parentSelect = document.createElement("select");
   parentSelect.id = "parent-select";
   const noParentOption = document.createElement("option");
@@ -114,13 +120,16 @@ export async function startApp(
   const list = document.createElement("ul");
   list.id = "todo-list";
   container.appendChild(list);
+  const todosById = new Map<string, Todo>();
   // Subscribe to the project & all its todos
   const query = app.todos.where({ project: selectedProjectId });
   db.subscribeAll(query, ({ all: todos }) => {
     const ordered = orderTodosWithDepth(todos);
+    todosById.clear();
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);
     for (const todo of todos) {
+      todosById.set(todo.id, todo);
       const option = document.createElement("option");
       option.value = todo.id;
       option.textContent = todo.title;
@@ -132,10 +141,10 @@ export async function startApp(
         ({ todo, depth }) => `
       <li class="${todo.done ? "done" : ""}" data-depth="${depth}" style="padding-left: ${depth * 20}px;">
         <input type="checkbox" ${todo.done ? "checked" : ""}
-               data-id="${todo.id}" class="toggle">
+               data-id="${todo.id}" class="toggle" ${todo.owner_id === sessionUserId ? "" : "disabled"}>
         <span>${todo.title}</span>
         ${todo.description ? `<small>${todo.description}</small>` : ""}
-        <button data-id="${todo.id}" class="delete-btn">&times;</button>
+        <button data-id="${todo.id}" class="delete-btn" ${todo.owner_id === sessionUserId ? "" : "disabled"}>&times;</button>
       </li>
     `,
       )
@@ -145,10 +154,12 @@ export async function startApp(
   // Add todo form
   form.addEventListener("submit", (e) => {
     e.preventDefault();
+    if (!sessionUserId) return;
     const selectedParentId = parentSelect.value;
     db.insert(app.todos, {
       title: input.value,
       done: false,
+      owner_id: sessionUserId,
       project: selectedProjectId,
       ...(selectedParentId ? { parent: selectedParentId } : {}),
     });
@@ -161,6 +172,8 @@ export async function startApp(
     const target = e.target as HTMLElement;
     const id = target.dataset.id;
     if (!id) return;
+    const todo = todosById.get(id);
+    if (!todo || !sessionUserId || todo.owner_id !== sessionUserId) return;
 
     if (target.classList.contains("toggle")) {
       const checkbox = target as HTMLInputElement;
