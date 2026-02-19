@@ -16,11 +16,22 @@ import {
   drawSplash,
   drawCrashSplash,
   drawBubbles,
+  drawStartScreen,
+  drawInventoryBar,
+  drawVelocityWarning,
   DEPOSIT_COLOURS,
 } from "./render.js";
 import { wrapScreenX, wrapDistance, wrapLerp } from "./world.js";
 import { tickSpriteAnimation } from "./sprites.js";
-import { updateParticles, drawParticles, emitThrust, emitSideThrust, emitSparkle, emitBurstUpward, emitTrail } from "./particles.js";
+import {
+  updateParticles,
+  drawParticles,
+  emitThrust,
+  emitSideThrust,
+  emitSparkle,
+  emitBurstUpward,
+  emitTrail,
+} from "./particles.js";
 import type { SceneContext } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -33,12 +44,29 @@ export interface SceneResult {
 
 export function renderScene(scene: SceneContext): SceneResult {
   const {
-    ctx, w, h, cameraX, cameraY, groundScreenY, dt, now,
-    world, thrusting, thrustLeft, thrustRight,
-    localPlayerName, localPlayerColor,
-    deposits, collectedIds, requiredFuelType, inventory,
-    arcs, remotePlayers, smoothedRemotes,
-    chatMessages, localPlayerId,
+    ctx,
+    w,
+    h,
+    cameraX,
+    cameraY,
+    groundScreenY,
+    dt,
+    now,
+    world,
+    thrusting,
+    thrustLeft,
+    thrustRight,
+    localPlayerName,
+    localPlayerColor,
+    deposits,
+    collectedIds,
+    requiredFuelType,
+    inventory,
+    arcs,
+    remotePlayers,
+    smoothedRemotes,
+    chatMessages,
+    localPlayerId,
     particles,
   } = scene;
 
@@ -53,6 +81,12 @@ export function renderScene(scene: SceneContext): SceneResult {
 
   // --- Background ---
   drawBackground(ctx, cameraX, cameraY, w, h, now);
+
+  // --- Start screen ---
+  if (world.mode === "start") {
+    drawStartScreen(ctx, w, h, now);
+    return { shareHint: false };
+  }
 
   // --- Fuel deposits ---
   const DEPOSIT_FADE_IN = 0.5; // seconds
@@ -253,7 +287,15 @@ export function renderScene(scene: SceneContext): SceneResult {
     ctx.save();
     ctx.translate(screenX, walkScreenY);
     ctx.rotate(localLean);
-    drawAstronaut(ctx, 0, 0, localPlayerColor || undefined, localPlayerName || undefined, localMoving);
+    drawAstronaut(
+      ctx,
+      0,
+      0,
+      localPlayerColor || undefined,
+      localPlayerName || undefined,
+      localMoving,
+    );
+    drawInventoryBar(ctx, 0, -ASTRONAUT_HEIGHT - 26, inventory, requiredFuelType);
     ctx.restore();
   } else if (world.mode === "launched") {
     const screenY = world.posY - cameraY + localCurve;
@@ -265,12 +307,15 @@ export function renderScene(scene: SceneContext): SceneResult {
   // --- Draw particles ---
   drawParticles(ctx, particles, cameraX, cameraY, w);
 
+  // --- Velocity warning (descent only) ---
+  if (world.mode === "descending") {
+    drawVelocityWarning(ctx, w, h, world.velX, world.velY, now);
+  }
+
   // --- Speech bubbles ---
   const nowS = Math.floor(Date.now() / 1000);
   const BUBBLE_EXPIRY_S = 15;
-  const recentMsgs = chatMessages.filter(
-    (m) => nowS - m.createdAt < BUBBLE_EXPIRY_S,
-  );
+  const recentMsgs = chatMessages.filter((m) => nowS - m.createdAt < BUBBLE_EXPIRY_S);
   if (recentMsgs.length > 0) {
     const byPlayer = new Map<string, string[]>();
     for (const m of recentMsgs) {
@@ -283,9 +328,11 @@ export function renderScene(scene: SceneContext): SceneResult {
     }
     const localMsgs = byPlayer.get(localPlayerId);
     if (localMsgs) {
-      const localBubbleY = (world.mode === "walking" ? world.posY - cameraY : groundScreenY) + localCurve;
+      const localBubbleY =
+        (world.mode === "walking" ? world.posY - cameraY : groundScreenY) + localCurve;
       // Lean the bubble along with the player — offset x by the lean at sprite top height
-      const spriteH = ASTRONAUT_HEIGHT + 16;
+      // Extra height accounts for inventory bar above the name label
+      const spriteH = ASTRONAUT_HEIGHT + 30;
       const bubbleDx = Math.sin(localLean) * spriteH;
       const spriteTop = localBubbleY - spriteH * Math.cos(localLean);
       drawBubbles(ctx, screenX - bubbleDx, spriteTop, localMsgs);
@@ -307,9 +354,9 @@ export function renderScene(scene: SceneContext): SceneResult {
     }
   }
 
-  // --- Success splash ---
-  if (world.mode === "launched" && world.launchElapsed > 6) {
-    const splashT = world.launchElapsed - 6;
+  // --- Success splash (after lander has left the viewport) ---
+  if (world.mode === "launched" && world.launchElapsed > 3.5) {
+    const splashT = world.launchElapsed - 3.5;
     const splashAlpha = Math.min(1, splashT * 0.8);
     drawSplash(ctx, w, h, splashAlpha, splashT);
   }

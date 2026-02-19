@@ -6,6 +6,7 @@ import {
   ASTRONAUT_WIDTH,
   ASTRONAUT_HEIGHT,
   COLOURS,
+  FUEL_TYPES,
   curveOffset,
   type FuelType,
 } from "./constants.js";
@@ -193,8 +194,7 @@ function evalCliffHeight(worldX: number, scales: CliffScale[]): number {
     const pos = worldX / s.tileSize;
     const tileIdx = Math.floor(pos);
     const frac = pos - tileIdx;
-    const idx0 =
-      ((tileIdx % tilesPerWorld) + tilesPerWorld) % tilesPerWorld;
+    const idx0 = ((tileIdx % tilesPerWorld) + tilesPerWorld) % tilesPerWorld;
     const idx1 = (idx0 + 1) % tilesPerWorld;
     const h0 = terrainHash(idx0 * 127 + s.seed);
     const h1 = terrainHash(idx1 * 127 + s.seed);
@@ -219,7 +219,7 @@ const CLIFF_LAYERS: CliffLayerConfig[] = [
     threshold: 0.15,
     outlineColour: "#1a1520",
   },
-  // Mid — angular ridges (outline + strata)
+  // Mid — angular ridges
   {
     parallax: 0.35,
     maxHeight: 70,
@@ -232,11 +232,9 @@ const CLIFF_LAYERS: CliffLayerConfig[] = [
     ],
     threshold: 0.25,
     outlineColour: "#2e2438",
-    strataColour: "#211a2c",
-    strataSpacing: 11,
     shadowColour: "#120e18",
   },
-  // Near — jagged cliff faces (full detail)
+  // Near — jagged cliff faces
   {
     parallax: 0.6,
     maxHeight: 55,
@@ -251,10 +249,6 @@ const CLIFF_LAYERS: CliffLayerConfig[] = [
     step: 1,
     outlineColour: "#3a2d48",
     outlineWidth: 2,
-    strataColour: "#2e2538",
-    strataSpacing: 7,
-    creviceColour: "#1a1428",
-    creviceSeed: 500,
     shadowColour: "#1a1428",
     shadowHeight: 0.35,
   },
@@ -280,8 +274,7 @@ function drawCliffLayer(
   };
 
   // Ground Y at a given screen X, including sphere curvature
-  const baseY = (sx: number) =>
-    Math.round(screenGroundY + curveOffset(sx, w));
+  const baseY = (sx: number) => Math.round(screenGroundY + curveOffset(sx, w));
 
   // --- Base fill ---
   ctx.fillStyle = config.colour;
@@ -352,9 +345,7 @@ function drawCliffLayer(
       const by = baseY(sx);
       const peakY = Math.round(by - h);
       const crevLen = h * (0.25 + terrainHash(crevIdx * 163 + 7) * 0.5);
-      const xOff = Math.floor(
-        (terrainHash(crevIdx * 173 + 13) - 0.5) * 4,
-      );
+      const xOff = Math.floor((terrainHash(crevIdx * 173 + 13) - 0.5) * 4);
 
       ctx.beginPath();
       ctx.moveTo(sx, peakY + 1);
@@ -404,7 +395,7 @@ function drawMountainLayers(
   w: number,
   screenGroundY: number,
 ) {
-  trackUnwrappedCamera(cameraX);
+  // trackUnwrappedCamera is now called in drawBackground, before the starfield
   for (const layer of CLIFF_LAYERS) {
     drawCliffLayer(ctx, unwrappedCameraX, screenGroundY, w, layer);
   }
@@ -425,10 +416,7 @@ function evalSineHeight(worldX: number, sines: SineTerm[]): number {
   let ampSum = 0;
   for (const s of sines) {
     const angle = (worldX * s.freq * TWO_PI) / W + s.phase;
-    const val =
-      s.fn === "abs"
-        ? Math.abs(Math.sin(angle))
-        : (Math.sin(angle) + 1) * 0.5;
+    const val = s.fn === "abs" ? Math.abs(Math.sin(angle)) : (Math.sin(angle) + 1) * 0.5;
     total += val * s.amp;
     ampSum += s.amp;
   }
@@ -506,8 +494,7 @@ function drawSurfaceMarks(
 
   for (let i = 0; i < craterCount; i++) {
     const tile =
-      ((craterFirst + i) % CRATER_TILES_TOTAL + CRATER_TILES_TOTAL) %
-      CRATER_TILES_TOTAL;
+      (((craterFirst + i) % CRATER_TILES_TOTAL) + CRATER_TILES_TOTAL) % CRATER_TILES_TOTAL;
     const h0 = terrainHash(tile * 83 + 53);
     if (h0 > 0.45) continue;
 
@@ -517,7 +504,11 @@ function drawSurfaceMarks(
     if (sx > w + CRATER_TILE) continue;
 
     const cx = Math.floor(sx);
-    const cy = screenGroundY + curveOffset(cx, w) + 3 + Math.floor(terrainHash(tile * 97 + 61) * Math.min(groundH - 14, 18));
+    const cy =
+      screenGroundY +
+      curveOffset(cx, w) +
+      3 +
+      Math.floor(terrainHash(tile * 97 + 61) * Math.min(groundH - 14, 18));
     const radius = 5 + Math.floor(terrainHash(tile * 101 + 67) * 10);
     const rimW = radius * 1.3;
     const rimH = radius * 0.55;
@@ -568,9 +559,7 @@ function drawSurfaceMarks(
   const tileCount = Math.ceil(w / TILE) + 2;
 
   for (let i = 0; i < tileCount; i++) {
-    const tile =
-      ((firstTile + i) % CRACK_TILES_TOTAL + CRACK_TILES_TOTAL) %
-      CRACK_TILES_TOTAL;
+    const tile = (((firstTile + i) % CRACK_TILES_TOTAL) + CRACK_TILES_TOTAL) % CRACK_TILES_TOTAL;
     const h0 = terrainHash(tile * 59 + 29);
     if (h0 > 0.35) continue;
 
@@ -579,7 +568,11 @@ function drawSurfaceMarks(
     if (sx < -TILE) sx += MOON_SURFACE_WIDTH;
 
     const markSx = Math.floor(sx);
-    const markY = screenGroundY + curveOffset(markSx, w) + 3 + Math.floor(terrainHash(tile * 67 + 37) * Math.min(groundH - 4, 20));
+    const markY =
+      screenGroundY +
+      curveOffset(markSx, w) +
+      3 +
+      Math.floor(terrainHash(tile * 67 + 37) * Math.min(groundH - 4, 20));
     const markLen = 2 + Math.floor(terrainHash(tile * 71 + 41) * 6);
 
     // Horizontal crack / scuff (single pixel height)
@@ -667,7 +660,10 @@ export function drawBackground(
 ) {
   ctx.fillStyle = COLOURS.background;
   ctx.fillRect(0, 0, w, h);
-  drawStarfield(ctx, cameraX, cameraY, w, h, now ?? 0);
+  // Track unwrapped camera before both starfield and ground so parallax
+  // doesn't jump when cameraX wraps at the world meridian.
+  trackUnwrappedCamera(cameraX);
+  drawStarfield(ctx, unwrappedCameraX, cameraY, w, h, now ?? 0);
   drawGround(ctx, cameraX, cameraY, w, h);
 }
 
@@ -795,7 +791,7 @@ export const DEPOSIT_COLOURS: Record<FuelType, string> = {
   square: COLOURS.yellow,
   pentagon: COLOURS.green,
   hexagon: COLOURS.orange,
-  heptagon: COLOURS.softPink,
+  diamond: COLOURS.softPink,
   octagon: COLOURS.purple,
 };
 
@@ -927,7 +923,49 @@ export function drawBubbles(
 }
 
 // ---------------------------------------------------------------------------
-// Success splash — neon glow text
+// Full-screen overlays (arcade style)
+// ---------------------------------------------------------------------------
+
+/** Scanline overlay across the full screen. */
+function drawScanlines(ctx: CanvasRenderingContext2D, w: number, h: number, alpha: number) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#000";
+  for (let sy = 0; sy < h; sy += 4) {
+    ctx.fillRect(0, sy, w, 2);
+  }
+  ctx.restore();
+}
+
+/** Radiating starburst lines from a centre point. */
+function drawStarburst(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  radius: number,
+  lineCount: number,
+  colour: string,
+  alpha: number,
+  rotation: number,
+) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 1;
+  for (let i = 0; i < lineCount; i++) {
+    const angle = rotation + (i / lineCount) * Math.PI * 2;
+    const r0 = radius * 0.3;
+    const r1 = radius;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(angle) * r0, cy + Math.sin(angle) * r0);
+    ctx.lineTo(cx + Math.cos(angle) * r1, cy + Math.sin(angle) * r1);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// Success splash — full-screen celebration
 // ---------------------------------------------------------------------------
 
 export function drawSplash(
@@ -938,102 +976,84 @@ export function drawSplash(
   elapsed: number,
 ) {
   const a = Math.min(1, Math.max(0, alpha));
-  const t = elapsed; // seconds since splash started
+  const t = elapsed;
+  const cx = w / 2;
+  const cy = h / 2 - 30;
 
-  // Overlay — deepens over time
-  ctx.fillStyle = `rgba(10, 10, 15, ${a * 0.7})`;
+  // Dark backdrop
+  ctx.fillStyle = `rgba(5, 2, 10, ${a * 0.7})`;
   ctx.fillRect(0, 0, w, h);
 
-  // Radiating starburst lines from centre
-  const cx = w / 2;
-  const cy = h / 2;
-  const burstCount = 24;
-  const burstRadius = Math.min(w, h) * 0.6;
-  ctx.save();
-  ctx.globalAlpha = a * 0.15;
-  for (let i = 0; i < burstCount; i++) {
-    const angle = (i / burstCount) * Math.PI * 2 + t * 0.3;
+  // Expanding concentric rings
+  for (let i = 0; i < 3; i++) {
+    const ringT = (t * 0.4 + i * 0.33) % 1;
+    const ringR = 40 + ringT * 300;
+    const ringA = a * (1 - ringT) * 0.25;
     ctx.strokeStyle = i % 2 === 0 ? COLOURS.pink : COLOURS.cyan;
+    ctx.globalAlpha = ringA;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + Math.cos(angle) * burstRadius, cy + Math.sin(angle) * burstRadius);
+    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
     ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Starburst lines rotating slowly
+  drawStarburst(ctx, cx, cy, 280, 16, COLOURS.pink, a * 0.12, t * 0.3);
+  drawStarburst(ctx, cx, cy, 240, 12, COLOURS.cyan, a * 0.08, -t * 0.2);
+
+  // Sparkles scattered across the screen
+  ctx.save();
+  for (let i = 0; i < 20; i++) {
+    const sx = seededRandom(i * 73 + 11) * w;
+    const sy = seededRandom(i * 97 + 23) * h;
+    const sparkA = a * (0.2 + 0.6 * Math.abs(Math.sin(t * 3 + i * 1.7)));
+    ctx.globalAlpha = sparkA;
+    ctx.fillStyle = i % 3 === 0 ? COLOURS.yellow : i % 3 === 1 ? COLOURS.pink : COLOURS.cyan;
+    const sz = i % 4 === 0 ? 3 : 2;
+    ctx.fillRect(Math.floor(sx), Math.floor(sy), sz, sz);
   }
   ctx.restore();
 
-  // Pulsing ring
-  const ringPulse = 1 + 0.15 * Math.sin(t * 4);
-  const ringRadius = 120 * ringPulse * Math.min(1, t * 0.5);
-  ctx.save();
-  ctx.globalAlpha = a * 0.4;
-  ctx.strokeStyle = COLOURS.pink;
-  ctx.lineWidth = 3;
-  ctx.shadowColor = COLOURS.pink;
-  ctx.shadowBlur = 20;
-  ctx.beginPath();
-  ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.strokeStyle = COLOURS.cyan;
-  ctx.shadowColor = COLOURS.cyan;
-  ctx.beginPath();
-  ctx.arc(cx, cy, ringRadius * 0.6, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-  ctx.shadowBlur = 0;
+  // Scanlines
+  drawScanlines(ctx, w, h, a * 0.03);
 
   ctx.textAlign = "center";
 
-  // Title — scale bounce on entry
-  const titleScale = Math.min(1, t * 2) * (1 + 0.03 * Math.sin(t * 6));
+  // Title with glow pulse
+  const titlePulse = 1 + 0.03 * Math.sin(t * 5);
   ctx.save();
-  ctx.translate(cx, cy - 30);
-  ctx.scale(titleScale, titleScale);
-  withGlow(ctx, COLOURS.pink, 25 + 10 * Math.sin(t * 3), () => {
-    ctx.font = "bold 48px monospace";
+  ctx.translate(cx, cy);
+  ctx.scale(titlePulse, titlePulse);
+  withGlow(ctx, COLOURS.pink, 20 + 8 * Math.sin(t * 3), () => {
+    ctx.font = "bold 42px monospace";
     ctx.fillStyle = `rgba(255, 0, 255, ${a})`;
     ctx.fillText("MISSION COMPLETE", 0, 0);
   });
   ctx.restore();
 
-  // Subtitle — fades in after title
-  const subAlpha = Math.max(0, Math.min(1, (t - 0.5) * 2));
-  withGlow(ctx, COLOURS.cyan, 12, () => {
+  // Subtitle fades in
+  const subAlpha = Math.max(0, Math.min(1, (t - 0.3) * 2));
+  withGlow(ctx, COLOURS.cyan, 8, () => {
     ctx.font = "16px monospace";
     ctx.fillStyle = `rgba(0, 255, 255, ${a * subAlpha * 0.9})`;
-    ctx.fillText("you escaped the moon", cx, cy + 20);
+    ctx.fillText("you escaped the moon", cx, cy + 50);
   });
 
-  // Floating sparkle dots
-  const sparkleCount = 16;
-  ctx.save();
-  for (let i = 0; i < sparkleCount; i++) {
-    const seed = i * 7919;
-    const angle = ((seed % 360) / 360) * Math.PI * 2 + t * (0.2 + (i % 3) * 0.1);
-    const dist = 60 + (seed % 100) + 20 * Math.sin(t * 2 + i);
-    const sx = cx + Math.cos(angle) * dist;
-    const sy = cy + Math.sin(angle) * dist;
-    const sparkleAlpha = a * (0.4 + 0.6 * Math.abs(Math.sin(t * 3 + i * 1.7)));
-    ctx.globalAlpha = sparkleAlpha;
-    ctx.fillStyle = i % 3 === 0 ? COLOURS.yellow : i % 3 === 1 ? COLOURS.pink : COLOURS.cyan;
-    ctx.fillRect(Math.floor(sx) - 1, Math.floor(sy) - 1, 3, 3);
-  }
-  ctx.restore();
-
-  // Scanline overlay for retro feel
-  ctx.save();
-  ctx.globalAlpha = a * 0.04;
-  ctx.fillStyle = "#000";
-  for (let y = 0; y < h; y += 4) {
-    ctx.fillRect(0, y, w, 2);
-  }
-  ctx.restore();
+  // Prompt at bottom
+  const promptAlpha = Math.max(0, Math.min(1, (t - 1) * 1.5));
+  const blinkAlpha = 0.4 + 0.6 * Math.abs(Math.sin(t * 2.5));
+  withGlow(ctx, COLOURS.pink, 8, () => {
+    ctx.font = "14px monospace";
+    ctx.fillStyle = `rgba(255, 0, 255, ${a * promptAlpha * blinkAlpha})`;
+    ctx.fillText("PRESS SPACE TO PLAY AGAIN", cx, h - 80);
+  });
 
   ctx.textAlign = "start";
 }
 
 // ---------------------------------------------------------------------------
-// Crash splash — red-toned failure screen
+// Crash splash — full-screen red-tinted with glitch
 // ---------------------------------------------------------------------------
 
 export function drawCrashSplash(
@@ -1045,89 +1065,315 @@ export function drawCrashSplash(
 ) {
   const a = Math.min(1, Math.max(0, alpha));
   const t = elapsed;
+  const cx = w / 2;
+  const cy = h / 2 - 30;
 
-  // Dark overlay
-  ctx.fillStyle = `rgba(15, 5, 5, ${a * 0.75})`;
+  // Red-tinted dark backdrop
+  ctx.fillStyle = `rgba(20, 2, 2, ${a * 0.7})`;
   ctx.fillRect(0, 0, w, h);
 
-  const cx = w / 2;
-  const cy = h / 2;
-
-  // Flickering static lines (interference / damage effect)
+  // VHS glitch: horizontal static lines flickering across the screen
   ctx.save();
-  ctx.globalAlpha = a * 0.08;
-  const lineCount = 12;
-  for (let i = 0; i < lineCount; i++) {
-    const ly = (Math.sin(t * 11 + i * 2.7) * 0.5 + 0.5) * h;
-    ctx.fillStyle = i % 2 === 0 ? "#ff3333" : "#ff00ff";
-    ctx.fillRect(0, Math.floor(ly), w, 1);
+  for (let i = 0; i < 12; i++) {
+    const ly = (Math.sin(t * 13 + i * 2.7) * 0.5 + 0.5) * h;
+    const lw = 50 + seededRandom(i * 41 + Math.floor(t * 7)) * (w - 100);
+    const lx = seededRandom(i * 53 + Math.floor(t * 11)) * (w - lw);
+    ctx.globalAlpha = a * (0.03 + 0.04 * Math.abs(Math.sin(t * 17 + i)));
+    ctx.fillStyle = i % 3 === 0 ? "#ff3333" : i % 3 === 1 ? "#ff00ff" : "#ff6600";
+    ctx.fillRect(Math.floor(lx), Math.floor(ly), Math.floor(lw), 1);
   }
   ctx.restore();
 
-  // Pulsing warning ring
-  const ringPulse = 1 + 0.2 * Math.sin(t * 6);
-  const ringRadius = 100 * ringPulse * Math.min(1, t * 0.6);
-  ctx.save();
-  ctx.globalAlpha = a * 0.4;
+  // Red warning ring pulsing
+  const ringPulse = 60 + 20 * Math.sin(t * 4);
   ctx.strokeStyle = "#ff3333";
+  ctx.globalAlpha = a * (0.15 + 0.1 * Math.sin(t * 6));
   ctx.lineWidth = 3;
-  ctx.shadowColor = "#ff3333";
-  ctx.shadowBlur = 20;
   ctx.beginPath();
-  ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+  ctx.arc(cx, cy, ringPulse, 0, Math.PI * 2);
   ctx.stroke();
-  ctx.restore();
-  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+
+  // Scanlines
+  drawScanlines(ctx, w, h, a * 0.04);
 
   ctx.textAlign = "center";
 
-  // Title — screen shake on entry
-  const shakeX = t < 0.5 ? (Math.random() - 0.5) * 8 * (1 - t * 2) : 0;
-  const shakeY = t < 0.5 ? (Math.random() - 0.5) * 8 * (1 - t * 2) : 0;
+  // Title with screen shake on entry
+  const shakeFade = Math.max(0, 1 - t * 2);
+  const shakeX = shakeFade > 0 ? (seededRandom(Math.floor(t * 60) * 7) - 0.5) * 8 * shakeFade : 0;
+  const shakeY = shakeFade > 0 ? (seededRandom(Math.floor(t * 60) * 13) - 0.5) * 8 * shakeFade : 0;
   const titleScale = Math.min(1, t * 3);
   ctx.save();
-  ctx.translate(cx + shakeX, cy - 30 + shakeY);
+  ctx.translate(cx + shakeX, cy + shakeY);
   ctx.scale(titleScale, titleScale);
-  withGlow(ctx, "#ff3333", 25 + 10 * Math.sin(t * 5), () => {
-    ctx.font = "bold 48px monospace";
+  withGlow(ctx, "#ff3333", 16 + 8 * Math.sin(t * 5), () => {
+    ctx.font = "bold 42px monospace";
     ctx.fillStyle = `rgba(255, 50, 50, ${a})`;
-    ctx.fillText("YOU CRASHED", 0, 0);
+    ctx.fillText("CRASH LANDING", 0, 0);
   });
   ctx.restore();
 
   // Subtitle
-  const subAlpha = Math.max(0, Math.min(1, (t - 0.5) * 2));
-  withGlow(ctx, COLOURS.pink, 10, () => {
+  const subAlpha = Math.max(0, Math.min(1, (t - 0.4) * 2));
+  withGlow(ctx, "#ff6644", 6, () => {
     ctx.font = "16px monospace";
-    ctx.fillStyle = `rgba(255, 100, 100, ${a * subAlpha * 0.9})`;
-    ctx.fillText("the lander couldn't handle the impact", cx, cy + 20);
+    ctx.fillStyle = `rgba(255, 100, 100, ${a * subAlpha * 0.85})`;
+    ctx.fillText("the lander couldn't take it", cx, cy + 50);
   });
 
-  // Falling debris dots
-  const debrisCount = 12;
+  // Debris pixels drifting downward
   ctx.save();
-  for (let i = 0; i < debrisCount; i++) {
-    const seed = i * 3571;
-    const dx = ((seed % 300) - 150);
-    const dy = t * (40 + (seed % 60)) - 20;
-    const sx = cx + dx + Math.sin(t * 2 + i) * 10;
-    const sy = cy + dy;
-    if (sy > h + 10) continue;
-    const debrisAlpha = a * Math.max(0, 1 - dy / 200);
-    ctx.globalAlpha = debrisAlpha;
+  for (let i = 0; i < 10; i++) {
+    const baseX = seededRandom(i * 71 + 3) * w;
+    const baseY = seededRandom(i * 83 + 7) * h;
+    const driftY = (baseY + t * (30 + i * 10)) % h;
+    ctx.globalAlpha = a * 0.4;
     ctx.fillStyle = i % 3 === 0 ? "#ff3333" : i % 3 === 1 ? "#ff8844" : "#ffaa00";
-    ctx.fillRect(Math.floor(sx) - 1, Math.floor(sy) - 1, 3, 2);
+    ctx.fillRect(Math.floor(baseX), Math.floor(driftY), 2, 2);
   }
   ctx.restore();
 
-  // Scanlines
-  ctx.save();
-  ctx.globalAlpha = a * 0.06;
-  ctx.fillStyle = "#000";
-  for (let y = 0; y < h; y += 4) {
-    ctx.fillRect(0, y, w, 2);
-  }
-  ctx.restore();
+  // Prompt
+  const promptAlpha = Math.max(0, Math.min(1, (t - 0.8) * 1.5));
+  const blinkAlpha = 0.4 + 0.6 * Math.abs(Math.sin(t * 2.5));
+  withGlow(ctx, "#ff3333", 8, () => {
+    ctx.font = "14px monospace";
+    ctx.fillStyle = `rgba(255, 80, 80, ${a * promptAlpha * blinkAlpha})`;
+    ctx.fillText("PRESS SPACE TO TRY AGAIN", cx, h - 80);
+  });
 
   ctx.textAlign = "start";
+}
+
+// ---------------------------------------------------------------------------
+// Start screen — full-screen title overlay
+// ---------------------------------------------------------------------------
+
+export function drawStartScreen(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  elapsed: number,
+) {
+  const t = elapsed;
+  const cx = w / 2;
+  const cy = h / 2 - 50;
+
+  // Dim overlay
+  ctx.fillStyle = "rgba(5, 2, 10, 0.6)";
+  ctx.fillRect(0, 0, w, h);
+
+  // Slow-rotating starburst behind the title
+  drawStarburst(ctx, cx, cy, 350, 24, COLOURS.pink, 0.08, t * 0.15);
+  drawStarburst(ctx, cx, cy, 300, 18, COLOURS.cyan, 0.05, -t * 0.1);
+
+  // Pulsing ring
+  const ringR = 80 + 15 * Math.sin(t * 2);
+  ctx.strokeStyle = COLOURS.pink;
+  ctx.globalAlpha = 0.15 + 0.08 * Math.sin(t * 3);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Second pulsing ring (offset phase)
+  const ringR2 = 120 + 20 * Math.sin(t * 1.7 + 1);
+  ctx.strokeStyle = COLOURS.cyan;
+  ctx.globalAlpha = 0.08 + 0.05 * Math.sin(t * 2.3 + 1);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, ringR2, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Scanlines
+  drawScanlines(ctx, w, h, 0.025);
+
+  ctx.textAlign = "center";
+
+  // Title with glow pulse
+  const titlePulse = 1 + 0.02 * Math.sin(t * 4);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(titlePulse, titlePulse);
+  withGlow(ctx, COLOURS.pink, 18 + 6 * Math.sin(t * 2.5), () => {
+    ctx.font = "bold 48px monospace";
+    ctx.fillStyle = COLOURS.pink;
+    ctx.fillText("MOON LANDER", 0, 0);
+  });
+  ctx.restore();
+
+  // How-to-play lines
+  ctx.font = "14px monospace";
+  withGlow(ctx, COLOURS.cyan, 4, () => {
+    ctx.fillStyle = "rgba(0, 255, 255, 0.85)";
+    ctx.fillText("arrow keys / WASD \u2014 thrust", cx, cy + 60);
+    ctx.fillText("land gently \u2014 collect fuel \u2014 launch home", cx, cy + 84);
+  });
+
+  // Decorative dot row
+  ctx.save();
+  for (let i = 0; i < 7; i++) {
+    const dx = cx - 60 + i * 20;
+    const dy = cy + 115;
+    ctx.globalAlpha = 0.25 + 0.35 * Math.abs(Math.sin(t * 2 + i * 0.9));
+    ctx.fillStyle = i % 2 === 0 ? COLOURS.pink : COLOURS.cyan;
+    ctx.fillRect(Math.floor(dx), dy, 2, 2);
+  }
+  ctx.restore();
+
+  // Blinking prompt at bottom
+  const blinkAlpha = 0.4 + 0.6 * Math.abs(Math.sin(t * 2.5));
+  withGlow(ctx, COLOURS.pink, 10, () => {
+    ctx.font = "16px monospace";
+    ctx.fillStyle = `rgba(255, 0, 255, ${blinkAlpha})`;
+    ctx.fillText("PRESS SPACE TO START", cx, h - 80);
+  });
+
+  ctx.textAlign = "start";
+}
+
+// ---------------------------------------------------------------------------
+// Inventory bar — small deposit icons above the player's head
+// ---------------------------------------------------------------------------
+
+const INV_ICON_SIZE = 8;
+const INV_ICON_GAP = 3;
+
+export function drawInventoryBar(
+  ctx: CanvasRenderingContext2D,
+  screenX: number,
+  screenY: number,
+  inventory: Set<FuelType>,
+  requiredFuelType: FuelType,
+) {
+  // Show the required type first, then any other collected types
+  const types: FuelType[] = [requiredFuelType];
+  for (const ft of FUEL_TYPES) {
+    if (ft === requiredFuelType) continue;
+    if (inventory.has(ft)) types.push(ft);
+  }
+  if (types.length === 1 && !inventory.has(requiredFuelType)) {
+    // Only the required type (not yet collected) — still show it greyed out
+  }
+
+  const totalWidth = types.length * INV_ICON_SIZE + (types.length - 1) * INV_ICON_GAP;
+  const startX = Math.floor(screenX - totalWidth / 2);
+  const y = Math.floor(screenY);
+
+  for (let i = 0; i < types.length; i++) {
+    const ft = types[i];
+    const collected = inventory.has(ft);
+    const colour = DEPOSIT_COLOURS[ft] ?? COLOURS.cyan;
+    const ix = startX + i * (INV_ICON_SIZE + INV_ICON_GAP);
+
+    ctx.save();
+    if (collected) {
+      ctx.globalAlpha = 1;
+      ctx.shadowColor = colour;
+      ctx.shadowBlur = 4;
+    } else {
+      ctx.globalAlpha = 0.25;
+    }
+
+    const sprite = getDepositSprite(ft);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(sprite, ix, y, INV_ICON_SIZE, INV_ICON_SIZE);
+
+    ctx.restore();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Velocity warning — shown during descent when approaching crash thresholds
+// ---------------------------------------------------------------------------
+
+const CRASH_VEL_Y = 50;
+const CRASH_VEL_X = 30;
+
+function velColour(ratio: number): string {
+  if (ratio < 0.5) return COLOURS.green;
+  if (ratio < 0.8) return COLOURS.orange;
+  return "#ff3333";
+}
+
+export function drawVelocityWarning(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  velX: number,
+  velY: number,
+  now: number,
+) {
+  const ratioY = Math.abs(velY) / CRASH_VEL_Y;
+  const ratioX = Math.abs(velX) / CRASH_VEL_X;
+
+  const x = 14;
+  const baseY = h - 70;
+  const ROW_H = 22;
+  const BAR_W = 80;
+  const BAR_H = 10;
+  const barX = x + 68;
+
+  ctx.textAlign = "start";
+  ctx.font = "bold 13px monospace";
+
+  // Vertical speed
+  {
+    const col = velColour(ratioY);
+    const y = baseY;
+    const glow = ratioY > 0.8 ? 10 : ratioY > 0.5 ? 4 : 0;
+
+    withGlow(ctx, col, glow, () => {
+      ctx.fillStyle = col;
+      ctx.fillText("SPD " + Math.round(Math.abs(velY)), x, y);
+    });
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
+    ctx.fillRect(barX, y - BAR_H, BAR_W, BAR_H);
+    const filled = Math.min(1, ratioY);
+    withGlow(ctx, col, glow, () => {
+      ctx.fillStyle = col;
+      ctx.fillRect(barX, y - BAR_H, Math.floor(BAR_W * filled), BAR_H);
+    });
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
+    ctx.fillRect(barX + BAR_W, y - BAR_H - 2, 1, BAR_H + 4);
+  }
+
+  // Horizontal drift
+  {
+    const col = velColour(ratioX);
+    const y = baseY + ROW_H;
+    const glow = ratioX > 0.8 ? 10 : ratioX > 0.5 ? 4 : 0;
+
+    withGlow(ctx, col, glow, () => {
+      ctx.fillStyle = col;
+      ctx.fillText("DFT " + Math.round(Math.abs(velX)), x, y);
+    });
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
+    ctx.fillRect(barX, y - BAR_H, BAR_W, BAR_H);
+    const filled = Math.min(1, ratioX);
+    withGlow(ctx, col, glow, () => {
+      ctx.fillStyle = col;
+      ctx.fillRect(barX, y - BAR_H, Math.floor(BAR_W * filled), BAR_H);
+    });
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
+    ctx.fillRect(barX + BAR_W, y - BAR_H - 2, 1, BAR_H + 4);
+  }
+
+  // Flashing OVERSPEED when either axis is in the danger zone
+  if (ratioY >= 0.8 || ratioX >= 0.8) {
+    const flash = Math.abs(Math.sin(now * 6));
+    const warnY = baseY + ROW_H * 2 + 6;
+    withGlow(ctx, "#ff3333", 14, () => {
+      ctx.font = "bold 16px monospace";
+      ctx.fillStyle = `rgba(255, 50, 50, ${flash})`;
+      ctx.fillText("OVERSPEED", x, warnY);
+    });
+  }
 }
