@@ -14,6 +14,19 @@ mod routes;
 use clap::{Parser, Subcommand};
 use middleware::AuthConfig;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeEnvMode {
+    Production,
+    DevelopmentLike,
+}
+
+fn resolve_node_env_mode() -> NodeEnvMode {
+    match std::env::var("NODE_ENV") {
+        Ok(value) if value.eq_ignore_ascii_case("production") => NodeEnvMode::Production,
+        _ => NodeEnvMode::DevelopmentLike,
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "jazz-tools")]
 #[command(bin_name = "jazz-tools")]
@@ -56,6 +69,18 @@ enum Commands {
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
+
+        /// Enable anonymous local auth (X-Jazz-Local-Mode: anonymous).
+        ///
+        /// Required in NODE_ENV=production.
+        #[arg(long, env = "JAZZ_ALLOW_ANONYMOUS")]
+        allow_anonymous: bool,
+
+        /// Enable demo local auth (X-Jazz-Local-Mode: demo).
+        ///
+        /// Required in NODE_ENV=production.
+        #[arg(long, env = "JAZZ_ALLOW_DEMO")]
+        allow_demo: bool,
 
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
@@ -108,12 +133,26 @@ async fn main() {
             port,
             data_dir,
             jwks_url,
+            allow_anonymous,
+            allow_demo,
             backend_secret,
             admin_secret,
         } => {
+            let node_env_mode = resolve_node_env_mode();
+            let allow_anonymous = match node_env_mode {
+                NodeEnvMode::Production => allow_anonymous,
+                NodeEnvMode::DevelopmentLike => true,
+            };
+            let allow_demo = match node_env_mode {
+                NodeEnvMode::Production => allow_demo,
+                NodeEnvMode::DevelopmentLike => true,
+            };
+
             let auth_config = AuthConfig {
                 jwks_url,
                 jwks_set: None,
+                allow_anonymous,
+                allow_demo,
                 backend_secret,
                 admin_secret,
             };

@@ -80,20 +80,43 @@ const active = getActiveSyntheticAuth(process.env.NEXT_PUBLIC_JAZZ_APP_ID!);
 
 Switching profiles persists locally; by default the component refreshes the page after a switch.
 
+Vanilla JS apps can use the same storage logic with a DOM switcher helper:
+
+```ts
+import { createSyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools";
+
+const appId = process.env.JAZZ_APP_ID!;
+const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+createSyntheticUserSwitcher({
+  appId,
+  container: document.getElementById("auth-controls")!,
+  defaultMode: "demo",
+});
+
+// use active.localAuthMode + active.localAuthToken in createDb(...)
+```
+
 ## Server Setup
 
 ### `jazz-tools server` (single app)
 
-- Supports local auth headers out of the box.
-- Supports external JWT when `--jwks-url` is configured.
+- Supports external JWT only when `--jwks-url` is configured.
+- Local auth mode defaults depend on `NODE_ENV`:
+  - `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled
+    with `--allow-anonymous` / `--allow-demo`
+  - non-production (`development`, unset, etc.): anonymous and demo are enabled by
+    default
 - Supports external identity mapping persistence via `external_identities`.
 
 Example:
 
 ```bash
+NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
   --data-dir ./data \
+  --allow-demo \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"

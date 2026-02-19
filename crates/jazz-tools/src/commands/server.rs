@@ -258,13 +258,18 @@ pub async fn run(
     // Log auth configuration (without revealing secrets)
     if auth_config.is_configured() {
         info!(
-            "Auth configured: jwks={}, backend={}, admin={}",
+            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}",
+            auth_config.allow_anonymous,
+            auth_config.allow_demo,
             auth_config.jwks_url.is_some(),
             auth_config.backend_secret.is_some(),
             auth_config.admin_secret.is_some()
         );
     } else {
-        info!("Auth not configured - all endpoints are public");
+        info!(
+            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false",
+            auth_config.allow_anonymous, auth_config.allow_demo
+        );
     }
 
     let external_identity_store = Arc::new(
