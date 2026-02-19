@@ -1,0 +1,151 @@
+import { describe, expect, it, vi } from "vitest";
+import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
+
+function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
+  return {
+    addClient: vi.fn(() => "client-1"),
+    addServer: vi.fn(),
+    batchedTick: vi.fn(),
+    close: vi.fn(),
+    delete_: vi.fn(),
+    flush: vi.fn(),
+    getSchemaHash: vi.fn(() => "schema-hash"),
+    insert: vi.fn((_table, _valuesJson) => "row-1"),
+    onBatchedTickNeeded: vi.fn(),
+    onSyncMessageReceived: vi.fn(),
+    onSyncMessageReceivedFromClient: vi.fn(),
+    onSyncMessageToSend: vi.fn(),
+    query: vi.fn(() => JSON.stringify([{ id: "row-1", values: [] }])),
+    removeServer: vi.fn(),
+    setClientRole: vi.fn(),
+    subscribe: vi.fn(() => 7n),
+    unsubscribe: vi.fn(),
+    update: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe("JazzRnRuntimeAdapter", () => {
+  it("defers batched tick execution to avoid re-entrancy", async () => {
+    const binding = createBinding();
+    new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
+    const callbackObject = onBatchedTickNeeded.mock.calls[0][0];
+
+    callbackObject.requestBatchedTick();
+    expect(binding.batchedTick).not.toHaveBeenCalled();
+
+    await Promise.resolve();
+    expect(binding.batchedTick).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes mutation payloads and parses query responses", async () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    const id = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
+    expect(id).toBe("row-1");
+    expect(binding.insert).toHaveBeenCalledWith(
+      "todos",
+      JSON.stringify([{ type: "Text", value: "milk" }]),
+    );
+
+    adapter.update("row-1", { done: { type: "Boolean", value: true } });
+    expect(binding.update).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+    );
+
+    adapter.delete("row-1");
+    expect(binding.delete_).toHaveBeenCalledWith("row-1");
+
+    await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
+  });
+
+  it("bridges sync and subscription callbacks with handle conversion", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    const syncHandler = vi.fn();
+    adapter.onSyncMessageToSend(syncHandler);
+    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
+    expect(onSyncMessageToSend).toHaveBeenCalledTimes(1);
+
+    // Trigger callback captured by adapter wiring.
+    const callbackObject = onSyncMessageToSend.mock.calls[0][0];
+    callbackObject.onSyncMessage('{"destination":{},"payload":{}}');
+    expect(syncHandler).toHaveBeenCalledWith('{"destination":{},"payload":{}}');
+
+    const onUpdate = vi.fn();
+    const handle = adapter.subscribe("{}", onUpdate, null, null);
+    expect(handle).toBe(7);
+
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    subscriptionCallback.onUpdate('{"handle":7,"added":[],"removed":[],"updated":[]}');
+    expect(onUpdate).toHaveBeenCalledWith('{"handle":7,"added":[],"removed":[],"updated":[]}');
+
+    adapter.unsubscribe(handle);
+    expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
+  });
+
+  it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    adapter.onSyncMessageToSend(() => {
+      throw new Error("sync boom");
+    });
+    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
+    const syncCallback = onSyncMessageToSend.mock.calls[0][0];
+    expect(() => syncCallback.onSyncMessage("{}")).not.toThrow();
+
+    const onUpdate = vi.fn(() => {
+      throw new Error("sub boom");
+    });
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    expect(() =>
+      subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}'),
+    ).not.toThrow();
+  });
+
+  it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    await expect(adapter.insertPersisted("todos", [], "worker")).resolves.toBe("row-1");
+    expect(binding.flush).toHaveBeenCalledTimes(1);
+
+    await expect(adapter.updatePersisted("row-1", {}, "worker")).resolves.toBeUndefined();
+    await expect(adapter.deletePersisted("row-1", "worker")).resolves.toBeUndefined();
+    expect(binding.flush).toHaveBeenCalledTimes(3);
+
+    expect(() => adapter.insertPersisted("todos", [], "edge")).toThrow(
+      "supports only 'worker' tier",
+    );
+  });
+
+  it("swallows ObjectNotFound runtime errors for update/delete", () => {
+    const objectNotFound = {
+      tag: "Runtime",
+      inner: {
+        message: 'WriteError("ObjectNotFound(ObjectId(019c70f1-8514-72f0-bad8-8d849e1c3e70))")',
+      },
+    };
+    const binding = createBinding({
+      update: vi.fn(() => {
+        throw objectNotFound;
+      }),
+      delete_: vi.fn(() => {
+        throw objectNotFound;
+      }),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    expect(() => adapter.update("row-1", { done: true })).not.toThrow();
+    expect(() => adapter.delete("row-1")).not.toThrow();
+  });
+});

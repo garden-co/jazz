@@ -15,7 +15,7 @@ MVP needs a dedicated release CI path that validates release artifacts before pu
   - `workflow_dispatch` trigger for manual verification.
   - tag-based trigger for release candidates/final tags (for example `v*`).
 - Build release artifacts in clean CI:
-  - `jazz-cli` via `cargo build --release`.
+  - `jazz-tools` via `cargo build --release`.
   - `jazz-wasm` via `wasm-pack build --release`.
   - `jazz-napi` via `napi build --release` (explicitly bypass debug CI toggle).
 - Run basic smoke checks against produced artifacts.
