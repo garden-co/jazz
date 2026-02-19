@@ -152,7 +152,8 @@ export function getActiveSyntheticAuth(
   options: SyntheticUserStorageOptions = {},
 ): ActiveSyntheticAuth {
   const store = loadSyntheticUserStore(appId, options);
-  const profile = store.profiles.find((entry) => entry.id === store.activeProfileId) ?? store.profiles[0];
+  const profile =
+    store.profiles.find((entry) => entry.id === store.activeProfileId) ?? store.profiles[0];
   return {
     localAuthMode: profile.mode,
     localAuthToken: profile.token,

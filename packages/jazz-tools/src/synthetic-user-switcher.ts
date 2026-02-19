@@ -25,14 +25,18 @@ export interface SyntheticUserSwitcherHandle {
 }
 
 function activeProfile(store: SyntheticUserStore): SyntheticUserProfile {
-  return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0];
+  return (
+    store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0]
+  );
 }
 
 function shouldReload(reloadOnSwitch: boolean): boolean {
   return reloadOnSwitch && typeof window !== "undefined";
 }
 
-export function createSyntheticUserSwitcher(options: SyntheticUserSwitcherOptions): SyntheticUserSwitcherHandle {
+export function createSyntheticUserSwitcher(
+  options: SyntheticUserSwitcherOptions,
+): SyntheticUserSwitcherHandle {
   const {
     appId,
     container,
@@ -107,11 +111,7 @@ export function createSyntheticUserSwitcher(options: SyntheticUserSwitcherOption
     removeButton.disabled = store.profiles.length <= 1;
   };
 
-  const applyStore = (
-    nextStore: SyntheticUserStore,
-    persist: boolean,
-    triggerReload: boolean,
-  ) => {
+  const applyStore = (nextStore: SyntheticUserStore, persist: boolean, triggerReload: boolean) => {
     if (persist) {
       saveSyntheticUserStore(appId, nextStore, stableStorageOptions);
     }
@@ -143,9 +143,10 @@ export function createSyntheticUserSwitcher(options: SyntheticUserSwitcherOption
 
   const onAddProfile = () => {
     const suggestedName = `User ${store.profiles.length + 1}`;
-    const rawName = typeof window !== "undefined"
-      ? window.prompt("New synthetic user name", suggestedName)
-      : suggestedName;
+    const rawName =
+      typeof window !== "undefined"
+        ? window.prompt("New synthetic user name", suggestedName)
+        : suggestedName;
     if (rawName === null) return;
 
     const name = rawName.trim() || suggestedName;

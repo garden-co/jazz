@@ -18,7 +18,9 @@ export interface SyntheticUserSwitcherProps extends SyntheticUserStorageOptions 
 }
 
 function getActiveProfile(store: SyntheticUserStore): SyntheticUserProfile {
-  return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0];
+  return (
+    store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0]
+  );
 }
 
 export function SyntheticUserSwitcher({
@@ -73,7 +75,9 @@ export function SyntheticUserSwitcher({
   const handleAddProfile = () => {
     const suggestedName = `User ${store.profiles.length + 1}`;
     const rawName =
-      typeof window !== "undefined" ? window.prompt("New synthetic user name", suggestedName) : suggestedName;
+      typeof window !== "undefined"
+        ? window.prompt("New synthetic user name", suggestedName)
+        : suggestedName;
     if (rawName === null) return;
     const name = rawName.trim() || suggestedName;
     const profile = createSyntheticUserProfile(name, "demo");
@@ -98,15 +102,17 @@ export function SyntheticUserSwitcher({
     <div className={className}>
       <label>
         Synthetic User{" "}
-        <select value={store.activeProfileId} onChange={(event) => handleSwitch(event.target.value)}>
+        <select
+          value={store.activeProfileId}
+          onChange={(event) => handleSwitch(event.target.value)}
+        >
           {store.profiles.map((profile) => (
             <option key={profile.id} value={profile.id}>
               {profile.name} ({profile.mode})
             </option>
           ))}
         </select>
-      </label>
-      {" "}
+      </label>{" "}
       <label>
         Mode{" "}
         <select
@@ -116,12 +122,10 @@ export function SyntheticUserSwitcher({
           <option value="anonymous">anonymous</option>
           <option value="demo">demo</option>
         </select>
-      </label>
-      {" "}
+      </label>{" "}
       <button type="button" onClick={handleAddProfile}>
         Add
-      </button>
-      {" "}
+      </button>{" "}
       <button type="button" disabled={store.profiles.length <= 1} onClick={handleRemoveProfile}>
         Remove
       </button>

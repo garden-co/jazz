@@ -1,13 +1,7 @@
 import { useCallback } from "react";
 import type { LocalAuthMode } from "../runtime/context.js";
-import {
-  linkExternalIdentity,
-  type LinkExternalResponse,
-} from "../runtime/sync-transport.js";
-import {
-  getActiveSyntheticAuth,
-  type SyntheticUserStorageOptions,
-} from "./synthetic-users.js";
+import { linkExternalIdentity, type LinkExternalResponse } from "../runtime/sync-transport.js";
+import { getActiveSyntheticAuth, type SyntheticUserStorageOptions } from "./synthetic-users.js";
 
 export interface LinkExternalIdentityInput {
   jwtToken: string;
