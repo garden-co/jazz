@@ -1,6 +1,6 @@
 # Tracing Instrumentation
 
-Add structured tracing throughout the Rust codebase using the `tracing` crate, with `tracing-wasm` for browser console/Performance timeline output and `tracing-subscriber` for server-side terminal output. Goal: see the entire request flow from browser main thread → worker → WASM runtime (and separately, jazz-cli server) at TRACE level.
+Add structured tracing throughout the Rust codebase using the `tracing` crate, with `tracing-wasm` for browser console/Performance timeline output and `tracing-subscriber` for server-side terminal output. Goal: see the entire request flow from browser main thread → worker → WASM runtime (and separately, jazz-tools server) at TRACE level.
 
 ## Motivation
 
@@ -96,7 +96,7 @@ WasmRuntime::handleSyncMessages   → span: message count      ← not yet
 WasmRuntime::tick        → span (TRACE level, frequent)      ← not yet
 ```
 
-**jazz-cli — server** ✅
+**jazz-tools — server** ✅
 
 ```
 events_handler  → span: client_id (scoped)                   ✅
@@ -143,7 +143,7 @@ Key TypeScript events to log (DEBUG level, behind a flag):
 
 ### Filtering
 
-**Server (jazz-cli):** Uses `RUST_LOG` env filter. Example:
+**Server (jazz-tools):** Uses `RUST_LOG` env filter. Example:
 
 ```
 RUST_LOG=groove=trace,jazz_cli=debug cargo run -- server ...
