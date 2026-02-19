@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use crate::query_manager::types::{ColumnType, Schema, Value};
 
 use super::lens::{Direction, LensOp, LensTransform};
-use super::sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};
+use super::sql::{
+    SqlParseError, column_type_to_sql, lens_to_sql, parse_lens, parse_schema, schema_to_sql,
+};
 
 /// Errors that can occur during file operations.
 #[derive(Debug)]
@@ -612,17 +614,25 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                     default,
                     ..
                 } => {
-                    let method = sql_type_to_col_method(column_type);
                     let default_ts = value_to_ts_literal(default);
                     let optional = if matches!(default, Value::Null) {
                         ".optional()"
                     } else {
                         ""
                     };
-                    lines.push(format!(
-                        "  {}: col.add(){}.{}({{ default: {} }}),{}",
-                        column, optional, method, default_ts, draft_comment
-                    ));
+                    if let ColumnType::Array(element_type) = column_type {
+                        let element_literal = column_type_to_sql(element_type);
+                        lines.push(format!(
+                            "  {}: col.add(){}.array({{ of: \"{}\", default: {} }}),{}",
+                            column, optional, element_literal, default_ts, draft_comment
+                        ));
+                    } else {
+                        let method = sql_type_to_col_method(column_type);
+                        lines.push(format!(
+                            "  {}: col.add(){}.{}({{ default: {} }}),{}",
+                            column, optional, method, default_ts, draft_comment
+                        ));
+                    }
                 }
                 LensOp::RemoveColumn {
                     column,
@@ -630,12 +640,20 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                     default,
                     ..
                 } => {
-                    let method = sql_type_to_col_method(column_type);
                     let default_ts = value_to_ts_literal(default);
-                    lines.push(format!(
-                        "  {}: col.drop().{}({{ backwardsDefault: {} }}),{}",
-                        column, method, default_ts, draft_comment
-                    ));
+                    if let ColumnType::Array(element_type) = column_type {
+                        let element_literal = column_type_to_sql(element_type);
+                        lines.push(format!(
+                            "  {}: col.drop().array({{ of: \"{}\", backwardsDefault: {} }}),{}",
+                            column, element_literal, default_ts, draft_comment
+                        ));
+                    } else {
+                        let method = sql_type_to_col_method(column_type);
+                        lines.push(format!(
+                            "  {}: col.drop().{}({{ backwardsDefault: {} }}),{}",
+                            column, method, default_ts, draft_comment
+                        ));
+                    }
                 }
                 LensOp::RenameColumn {
                     old_name, new_name, ..
@@ -973,5 +991,27 @@ mod tests {
         let ts = lens_transform_to_ts(&transform);
         assert!(ts.contains("description: col.add().optional().string({ default: null }),"));
         assert!(ts.contains("title: col.add().string({ default: \"\" }),"));
+    }
+
+    #[test]
+    fn lens_transform_to_ts_uses_array_builder_for_array_columns() {
+        let transform = LensTransform::with_ops(vec![
+            super::super::lens::LensOp::AddColumn {
+                table: "projects".to_string(),
+                column: "todos".to_string(),
+                column_type: ColumnType::Array(Box::new(ColumnType::Uuid)),
+                default: crate::query_manager::types::Value::Array(vec![]),
+            },
+            super::super::lens::LensOp::RemoveColumn {
+                table: "projects".to_string(),
+                column: "todos".to_string(),
+                column_type: ColumnType::Array(Box::new(ColumnType::Uuid)),
+                default: crate::query_manager::types::Value::Array(vec![]),
+            },
+        ]);
+
+        let ts = lens_transform_to_ts(&transform);
+        assert!(ts.contains("todos: col.add().array({ of: \"UUID\", default: [] }),"));
+        assert!(ts.contains("todos: col.drop().array({ of: \"UUID\", backwardsDefault: [] }),"));
     }
 }

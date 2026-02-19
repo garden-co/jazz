@@ -23,17 +23,13 @@ interface BuilderOutput {
   offset?: number;
 }
 
-function getColumnType(
-  schema: WasmSchema,
-  table: string,
-  column: string,
-): ColumnType["type"] | undefined {
+function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
   // All tables have an implicit UUID primary key `id`.
-  if (column === "id") return "Uuid";
+  if (column === "id") return { type: "Uuid" };
   const tableSchema = schema.tables[table];
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
-  return col?.column_type?.type;
+  return col?.column_type;
 }
 
 /**
@@ -47,22 +43,30 @@ function toRuntimeColumn(column: string): string {
 /**
  * Translate a JavaScript value to WasmValue format.
  */
-function toWasmValue(value: unknown, columnType?: ColumnType["type"]): object {
+function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { Null: null };
+  }
+  if (Array.isArray(value)) {
+    if (columnType.type !== "Array") {
+      throw new Error("Unexpected array value for scalar column");
+    }
+    return {
+      Array: value.map((item) => toWasmValue(item, columnType.element)),
+    };
   }
   if (typeof value === "boolean") {
     return { Boolean: value };
   }
   if (typeof value === "number") {
-    if (columnType === "Timestamp") {
+    if (columnType?.type === "Timestamp") {
       return { Timestamp: value };
     }
     // Use Integer for all numbers - WASM will handle type coercion
     return { Integer: value };
   }
   if (typeof value === "string") {
-    if (columnType === "Uuid") {
+    if (columnType?.type === "Uuid") {
       return { Uuid: value };
     }
     return { Text: value };
@@ -79,7 +83,12 @@ function toCondition(
   table: string,
 ): object {
   const columnType = getColumnType(schema, table, cond.column);
-  const value = toWasmValue(cond.value, columnType);
+  if (!columnType) {
+    throw new Error(`Unknown column "${cond.column}" in table "${table}"`);
+  }
+  const valueTypeForCondition =
+    cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
+  const value = toWasmValue(cond.value, valueTypeForCondition);
   const runtimeColumn = toRuntimeColumn(cond.column);
 
   switch (cond.op) {
