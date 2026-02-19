@@ -84,7 +84,7 @@ impl std::error::Error for QueryError {}
 /// Handle to a pending query.
 ///
 /// Used to correlate query results with the original request.
-/// Wrappers (groove-runtime, groove-wasm) use this to fulfill
+/// Wrappers (groove-runtime, jazz-wasm) use this to fulfill
 /// platform-specific futures/promises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueryHandle(pub u64);

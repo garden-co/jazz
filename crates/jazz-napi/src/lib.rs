@@ -1,4 +1,4 @@
-//! groove-napi — Native Node.js bindings for Jazz.
+//! jazz-napi — Native Node.js bindings for Jazz.
 //!
 //! Provides `NapiRuntime` wrapping `RuntimeCore<SurrealKvStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
@@ -34,7 +34,7 @@ use groove::sync_manager::{
 };
 
 // ============================================================================
-// Value conversion (mirrors groove-wasm/src/types.rs WasmValue)
+// Value conversion (mirrors jazz-wasm/src/types.rs WasmValue)
 // ============================================================================
 
 /// Tagged value type for JS boundary. Serde-serialized as `{ type: "Text", value: "..." }`.

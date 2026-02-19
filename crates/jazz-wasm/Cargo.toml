@@ -1,5 +1,5 @@
 [package]
-name = "groove-wasm"
+name = "jazz-wasm"
 version = "0.1.0"
 edition = "2021"
 description = "WebAssembly bindings for the Groove database engine"
@@ -8,7 +8,7 @@ description = "WebAssembly bindings for the Groove database engine"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-groove = { package = "jazz-tools", path = "../jazz-cli", version = "2.0.0-alpha.0", default-features = false }
+groove = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

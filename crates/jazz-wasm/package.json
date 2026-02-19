@@ -1,5 +1,5 @@
 {
-  "name": "groove-wasm",
+  "name": "jazz-wasm",
   "version": "0.1.0",
   "description": "WebAssembly bindings for the Groove database engine",
   "keywords": [
@@ -14,13 +14,13 @@
     "url": "https://github.com/garden-co/jazz"
   },
   "files": [
-    "pkg/groove_wasm_bg.wasm",
-    "pkg/groove_wasm_bg.js",
-    "pkg/groove_wasm.js",
-    "pkg/groove_wasm.d.ts"
+    "pkg/jazz_wasm_bg.wasm",
+    "pkg/jazz_wasm_bg.js",
+    "pkg/jazz_wasm.js",
+    "pkg/jazz_wasm.d.ts"
   ],
-  "main": "pkg/groove_wasm.js",
-  "types": "pkg/groove_wasm.d.ts",
+  "main": "pkg/jazz_wasm.js",
+  "types": "pkg/jazz_wasm.d.ts",
   "scripts": {
     "build": "wasm-pack build --target web"
   }

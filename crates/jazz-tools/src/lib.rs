@@ -1,26 +1,16 @@
 extern crate self as groove;
 
-#[path = "../../groove/src/commit.rs"]
 pub mod commit;
-#[path = "../../groove/src/metadata.rs"]
 pub mod metadata;
-#[path = "../../groove/src/object.rs"]
 pub mod object;
-#[path = "../../groove/src/object_manager/mod.rs"]
 pub mod object_manager;
-#[path = "../../groove/src/query_manager/mod.rs"]
 pub mod query_manager;
-#[path = "../../groove/src/runtime_core.rs"]
 pub mod runtime_core;
-#[path = "../../groove/src/schema_manager/mod.rs"]
 pub mod schema_manager;
-#[path = "../../groove/src/storage/mod.rs"]
 pub mod storage;
-#[path = "../../groove/src/sync_manager/mod.rs"]
 pub mod sync_manager;
 
 #[cfg(feature = "runtime-tokio")]
-#[path = "../../groove-tokio/src/lib.rs"]
 pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
 pub use runtime_tokio as groove_tokio;

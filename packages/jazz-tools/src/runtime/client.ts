@@ -12,7 +12,7 @@ import { sendSyncPayload, readBinaryFrames, generateClientId } from "./sync-tran
 /**
  * Common interface for WASM and NAPI runtimes.
  *
- * Both `WasmRuntime` (from groove-wasm) and `NapiRuntime` (from jazz-napi)
+ * Both `WasmRuntime` (from jazz-wasm) and `NapiRuntime` (from jazz-napi)
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
@@ -666,9 +666,9 @@ export class JazzClient {
 
 /**
  * WASM module type for sync client creation.
- * This is the type of the groove-wasm module after dynamic import.
+ * This is the type of the jazz-wasm module after dynamic import.
  */
-export type WasmModule = typeof import("groove-wasm");
+export type WasmModule = typeof import("jazz-wasm");
 
 /**
  * Load and initialize the WASM module.
@@ -677,7 +677,7 @@ export type WasmModule = typeof import("groove-wasm");
  */
 export async function loadWasmModule(): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
-  const wasmModule: any = await import("groove-wasm");
+  const wasmModule: any = await import("jazz-wasm");
 
   // In Node.js, we need to read the .wasm file and use initSync
   // In browsers, the default fetch-based init works
@@ -686,10 +686,10 @@ export async function loadWasmModule(): Promise<WasmModule> {
     const { fileURLToPath } = await import("node:url");
     const { dirname, join } = await import("node:path");
 
-    // Find the .wasm file relative to the groove-wasm package
+    // Find the .wasm file relative to the jazz-wasm package
     const wasmPath = join(
       dirname(fileURLToPath(import.meta.url)),
-      "../../node_modules/groove-wasm/pkg/groove_wasm_bg.wasm",
+      "../../node_modules/jazz-wasm/pkg/jazz_wasm_bg.wasm",
     );
     const wasmBytes = readFileSync(wasmPath);
     wasmModule.initSync(wasmBytes);

@@ -1,4 +1,4 @@
-//! groove-wasm - WebAssembly bindings for the Groove database engine.
+//! jazz-wasm - WebAssembly bindings for the Groove database engine.
 //!
 //! This crate provides JavaScript bindings for the Groove local-first database engine,
 //! enabling TypeScript/JavaScript applications to use Jazz with custom storage backends.
@@ -13,7 +13,7 @@
 //! # Usage
 //!
 //! ```javascript
-//! import { WasmRuntime, WasmQueryBuilder } from 'groove-wasm';
+//! import { WasmRuntime, WasmQueryBuilder } from 'jazz-wasm';
 //!
 //! // Create a storage driver (e.g., IndexedDB)
 //! const driver = {

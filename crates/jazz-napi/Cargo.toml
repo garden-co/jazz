@@ -1,5 +1,5 @@
 [package]
-name = "groove-napi"
+name = "jazz-napi"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-groove = { package = "jazz-tools", path = "../jazz-cli", version = "2.0.0-alpha.0", default-features = false, features = [
+groove = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
   "surrealkv",
 ] }
 futures = "0.3"
