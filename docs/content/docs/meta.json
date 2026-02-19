@@ -2,6 +2,7 @@
   "title": "Jazz 2",
   "pages": [
     "index",
+    "react-quick-start",
     "setup",
     "schemas",
     "reading-data",
