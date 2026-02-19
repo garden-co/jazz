@@ -92,6 +92,8 @@ export class RawCoList<
   lastValidTransaction: number | undefined;
   totalValidTransactions: number = 0;
 
+  #isDeletionRestricted: boolean;
+
   private resetInternalState() {
     this.afterStart = [];
     this.beforeEnd = [];
@@ -114,6 +116,10 @@ export class RawCoList<
     this.beforeEnd = [];
     this.knownTransactions = { [core.id]: 0 };
     this.atTimeFilter = atTimeFilter;
+
+    const ruleset = this.core.verified.header.ruleset;
+    this.#isDeletionRestricted =
+      ruleset.type === "ownedByGroup" && ruleset.restrictDeletion === true;
 
     this._processNewTransactions();
   }
@@ -208,14 +214,8 @@ export class RawCoList<
     this._processNewTransactions();
   }
 
-  private transactionContainsDeletion(changes: JsonValue[]) {
-    return changes.some(
-      (change) =>
-        typeof change === "object" &&
-        change !== null &&
-        "op" in change &&
-        (change as { op?: string }).op === "del",
-    );
+  private transactionContainsDeletion(changes: ListOpPayload<Item>[]) {
+    return changes.some((change) => change.op === "del");
   }
 
   private _processNewTransactions() {
@@ -231,10 +231,6 @@ export class RawCoList<
       return;
     }
 
-    const ruleset = this.core.verified.header.ruleset;
-    const isDeletionRestricted =
-      ruleset.type === "ownedByGroup" && ruleset.restrictDeletion === true;
-
     let lastValidTransaction: number | undefined = undefined;
     let oldestValidTransaction: number | undefined = undefined;
     this._cachedEntries = undefined;
@@ -246,8 +242,8 @@ export class RawCoList<
 
       if (
         isValid &&
-        isDeletionRestricted &&
-        this.transactionContainsDeletion(changes)
+        this.#isDeletionRestricted &&
+        this.transactionContainsDeletion(changes as ListOpPayload<Item>[])
       ) {
         const author = accountOrAgentIDfromSessionID(txID.sessionID);
         const role = this.group.atTime(madeAt).roleOfInternal(author);
