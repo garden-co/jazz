@@ -111,7 +111,9 @@ describe("sync-transport", () => {
 
     expect(result.created).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/auth/link-external");
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://localhost:3000/apps/app-123/auth/link-external",
+    );
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
       Authorization: "Bearer jwt-token",
