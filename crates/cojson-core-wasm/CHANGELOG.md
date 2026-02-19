@@ -1,5 +1,11 @@
 # cojson-core-wasm
 
+## 0.20.10
+
+### Patch Changes
+
+- 706ab57: Added optional restricted deletion mode for CoList values, allowing only manager/admin roles to perform deletions when enabled via schema permissions: `co.list().withPermission({writer: "appendOnly"})`
+
 ## 0.20.9
 
 ## 0.20.8
