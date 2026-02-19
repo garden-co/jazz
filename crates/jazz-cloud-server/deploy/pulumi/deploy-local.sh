@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Quick local deploy helper for jazz-multi-server jazz-cloud2/dev stack.
+Quick local deploy helper for jazz-cloud-server jazz-cloud2/dev stack.
 
 Usage:
   ./deploy-local.sh [options]
@@ -14,7 +14,7 @@ Options:
   --stack <name>                      Pulumi stack name (short or org/project/stack; default: dev)
   --account-id <id>                   AWS account ID (default: from STS)
   --allowed-account-id <id>           Pulumi allowedAccountId (default: account-id)
-  --repo <name>                       ECR repo name (default: jazz-multi-server)
+  --repo <name>                       ECR repo name (default: jazz-cloud-server)
   --tag <tag>                         Image tag (default: git short SHA)
   --image <uri>                       Full image URI (skip build when used with --skip-build)
   --domain <fqdn>                     DNS hostname (default: cloud2.aws.cloud.jazz.tools)
@@ -29,7 +29,7 @@ Options:
 
 Secrets persistence:
   Generated secrets are written to:
-    crates/jazz-multi-server/deploy/pulumi/.deploy-secrets-<stack-id>.env
+    crates/jazz-cloud-server/deploy/pulumi/.deploy-secrets-<stack-id>.env
   so repeat deploys reuse the same key material.
 EOF
 }
@@ -48,7 +48,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 AWS_REGION="us-east-2"
 STACK="dev"
-ECR_REPOSITORY="jazz-multi-server"
+ECR_REPOSITORY="jazz-cloud-server"
 IMAGE_TAG="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
 DOMAIN_NAME="cloud2.aws.cloud.jazz.tools"
 SKIP_BUILD=0
@@ -215,7 +215,7 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   aws ecr get-login-password --region "${AWS_REGION}" | \
     docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >/dev/null
 
-  TMP_CONTEXT="$(mktemp -d -t jazz-multi-server-build-XXXXXX)"
+  TMP_CONTEXT="$(mktemp -d -t jazz-cloud-server-build-XXXXXX)"
   cleanup() {
     rm -rf "${TMP_CONTEXT}"
   }
@@ -235,14 +235,14 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
 FROM rust:1.88-bookworm AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p jazz-multi-server
+RUN cargo build --release -p jazz-cloud-server
 
 FROM debian:bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/jazz-multi-server /usr/local/bin/jazz-multi-server
-ENTRYPOINT ["/usr/local/bin/jazz-multi-server"]
+COPY --from=builder /app/target/release/jazz-cloud-server /usr/local/bin/jazz-cloud-server
+ENTRYPOINT ["/usr/local/bin/jazz-cloud-server"]
 EOF
 
   docker buildx build \

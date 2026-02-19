@@ -91,7 +91,7 @@ impl TestServer {
         let data_dir = TempDir::new().expect("create temp data dir");
         let port = get_free_port();
 
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-multi-server"))
+        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
             .args([
                 "--port",
                 &port.to_string(),
@@ -107,7 +107,7 @@ impl TestServer {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn jazz-multi-server");
+            .expect("spawn jazz-cloud-server");
 
         let server = Self {
             process,
@@ -134,7 +134,7 @@ impl TestServer {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("jazz-multi-server did not become ready in time");
+        panic!("jazz-cloud-server did not become ready in time");
     }
 
     async fn create_app(&self, jwks_endpoint: &str) -> CreateAppResponse {

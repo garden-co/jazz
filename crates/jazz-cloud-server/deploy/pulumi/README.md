@@ -1,6 +1,6 @@
 # jazz-cloud2 infrastructure
 
-Infrastructure as Code for the `jazz-multi-server` MVP deployment using Pulumi and AWS.
+Infrastructure as Code for the `jazz-cloud-server` MVP deployment using Pulumi and AWS.
 
 This deployment is intentionally simple:
 
@@ -24,8 +24,8 @@ This deployment is intentionally simple:
 - `index.ts` - Pulumi program
 - `Pulumi.yaml` - Pulumi project
 - `Pulumi.dev.yaml` - tracked non-secret stack config for stack `dev`
-- `Dockerfile` - container build for `jazz-multi-server`
-- `push-multi-server.sh` - local ECR push + Pulumi image tag update
+- `Dockerfile` - container build for `jazz-cloud-server`
+- `push-cloud-server.sh` - local ECR push + Pulumi image tag update
 - `deploy-local.sh` - end-to-end local build/push/config/deploy helper
 
 ## Getting started (local)
@@ -33,7 +33,7 @@ This deployment is intentionally simple:
 ### Step 1: install dependencies
 
 ```bash
-cd crates/jazz-multi-server/deploy/pulumi
+cd crates/jazz-cloud-server/deploy/pulumi
 pnpm install --ignore-workspace
 ```
 
@@ -89,7 +89,7 @@ pulumi config set awsDnsProfile "${DNS_PROFILE}"
 pulumi config rm route53DelegationRoleArn || true
 pulumi config set allowedAccountId "${STAGING_ACCOUNT_ID}"
 pulumi config set domainName cloud2.aws.cloud.jazz.tools
-pulumi config set containerImageRepository "${STAGING_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server"
+pulumi config set containerImageRepository "${STAGING_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server"
 pulumi config set containerImageTag latest
 ```
 

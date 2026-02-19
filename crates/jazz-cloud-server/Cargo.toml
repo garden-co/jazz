@@ -1,10 +1,10 @@
 [package]
-name = "jazz-multi-server"
+name = "jazz-cloud-server"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "jazz-multi-server"
+name = "jazz-cloud-server"
 path = "src/main.rs"
 
 [dependencies]

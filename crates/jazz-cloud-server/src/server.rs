@@ -404,7 +404,7 @@ impl MetaStore {
         let schema_manager = SchemaManager::new(
             sync_manager,
             meta_schema,
-            AppId::from_name("jazz-multi-server-meta"),
+            AppId::from_name("jazz-cloud-server-meta"),
             "meta",
             "main",
         )

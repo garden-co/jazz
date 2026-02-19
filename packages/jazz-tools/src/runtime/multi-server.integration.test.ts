@@ -91,7 +91,7 @@ function makeSyncPayload() {
 
 function findMultiServerBinary(): string | null {
   const runtimeDir = dirname(fileURLToPath(import.meta.url));
-  const basePath = join(runtimeDir, "../../../../target/debug/jazz-multi-server");
+  const basePath = join(runtimeDir, "../../../../target/debug/jazz-cloud-server");
   if (existsSync(basePath)) return basePath;
   if (existsSync(`${basePath}.exe`)) return `${basePath}.exe`;
   return null;
@@ -107,7 +107,7 @@ function assertIntegrationPrerequisites(): void {
     missing.push("missing Groove WASM runtime artifacts");
   }
   if (!binaryPath) {
-    missing.push("missing jazz-multi-server debug binary at target/debug/jazz-multi-server");
+    missing.push("missing jazz-cloud-server debug binary at target/debug/jazz-cloud-server");
   }
 
   throw new Error(
@@ -116,7 +116,7 @@ function assertIntegrationPrerequisites(): void {
       ...missing.map((entry) => `- ${entry}`),
       "Build prerequisites, then rerun tests:",
       "1. pnpm --filter @jazz/rust build:crates",
-      "2. cargo build -p jazz-multi-server",
+      "2. cargo build -p jazz-cloud-server",
     ].join("\n"),
   );
 }
@@ -157,7 +157,7 @@ async function waitForHealth(baseUrl: string): Promise<void> {
 async function startMultiServer(config: MultiServerConfig): Promise<MultiServerHandle> {
   const binary = findMultiServerBinary();
   if (!binary) {
-    throw new Error("jazz-multi-server binary not found");
+    throw new Error("jazz-cloud-server binary not found");
   }
 
   const port = await getFreePort();

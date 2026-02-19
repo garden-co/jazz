@@ -3,7 +3,7 @@ mod server;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "jazz-multi-server")]
+#[command(name = "jazz-cloud-server")]
 #[command(about = "Jazz multi-tenant sync server")]
 struct Cli {
     /// Port to listen on.
