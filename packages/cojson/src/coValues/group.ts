@@ -1499,6 +1499,15 @@ export class RawGroup<
     return inviteSecretFromSecretSeed(secretSeed);
   }
 
+  private assertCanWrite(): void {
+    const role = this.myRole();
+    if (role === undefined || role === "reader" || role === "revoked") {
+      throw new Error(
+        `Cannot create content: current user does not have write permissions`,
+      );
+    }
+  }
+
   /**
    * Creates a new `CoMap` within this group, with the specified specialized
    * `CoMap` type `M` and optional static metadata.
@@ -1512,6 +1521,7 @@ export class RawGroup<
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
     initMeta?: JsonObject,
   ): M {
+    this.assertCanWrite();
     const map = this.core.node
       .createCoValue({
         type: "comap",
@@ -1550,6 +1560,7 @@ export class RawGroup<
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
     initMeta?: JsonObject,
   ): L {
+    this.assertCanWrite();
     const list = this.core.node
       .createCoValue({
         type: "colist",
@@ -1586,6 +1597,7 @@ export class RawGroup<
     meta?: T["headerMeta"],
     initPrivacy: "trusting" | "private" = "private",
   ): T {
+    this.assertCanWrite();
     const text = this.core.node
       .createCoValue({
         type: "coplaintext",
@@ -1613,6 +1625,7 @@ export class RawGroup<
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
     initMeta?: JsonObject,
   ): C {
+    this.assertCanWrite();
     const stream = this.core.node
       .createCoValue({
         type: "costream",
@@ -1643,6 +1656,7 @@ export class RawGroup<
     meta: C["headerMeta"] = { type: "binary" },
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
   ): C {
+    this.assertCanWrite();
     return this.core.node
       .createCoValue({
         type: "costream",

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { RawCoID } from "../ids";
 import { PeerID } from "../sync";
-import { StorageAPI } from "../storage/types";
+import type {
+  StorageAPI,
+  StorageReconciliationAcquireResult,
+} from "../storage/types";
 import {
   createTestMetricReader,
   createTestNode,
@@ -29,6 +32,12 @@ function setup() {
 
 function createMockStorage(
   opts: {
+    getCoValueIDs?: (
+      limit: number,
+      offset: number,
+      callback: (batch: { id: RawCoID }[]) => void,
+    ) => void;
+    getCoValueCount?: (callback: (count: number) => void) => void;
     load?: (
       id: RawCoID,
       callback: (data: any) => void,
@@ -50,9 +59,26 @@ function createMockStorage(
     markDeleteAsValid?: (id: RawCoID) => void;
     enableDeletedCoValuesErasure?: () => void;
     eraseAllDeletedCoValues?: () => Promise<void>;
+    tryAcquireStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback: (result: StorageReconciliationAcquireResult) => void,
+    ) => void;
+    renewStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      offset: number,
+    ) => void;
+    releaseStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback?: () => void,
+    ) => void;
   } = {},
 ): StorageAPI {
   return {
+    getCoValueIDs: opts.getCoValueIDs || vi.fn(),
+    getCoValueCount: opts.getCoValueCount || vi.fn(),
     markDeleteAsValid: opts.markDeleteAsValid || vi.fn(),
     enableDeletedCoValuesErasure: opts.enableDeletedCoValuesErasure || vi.fn(),
     eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
@@ -67,6 +93,15 @@ function createMockStorage(
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
     onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
+    tryAcquireStorageReconciliationLock:
+      opts.tryAcquireStorageReconciliationLock ||
+      vi.fn((_sessionId, _peerId, callback) =>
+        callback({ acquired: false as const, reason: "not_due" as const }),
+      ),
+    renewStorageReconciliationLock:
+      opts.renewStorageReconciliationLock || vi.fn(),
+    releaseStorageReconciliationLock:
+      opts.releaseStorageReconciliationLock || vi.fn(),
   };
 }
 
@@ -518,6 +553,22 @@ describe("CoValueCore.loadFromStorage", () => {
 
       expect(loadSpy).toHaveBeenCalledTimes(1);
     });
+
+    test("should keep garbageCollected loadingState even when a peer is pending", () => {
+      const { state, node, id } = setup();
+      const storage = createMockStorage();
+      node.setStorage(storage);
+
+      state.setGarbageCollectedState({
+        id,
+        header: true,
+        sessions: {},
+      });
+      state.markPending("peer1");
+
+      expect(state.getLoadingStateForPeer("peer1")).toBe("pending");
+      expect(state.loadingState).toBe("garbageCollected");
+    });
   });
 
   describe("when state is onlyKnownState", () => {
@@ -575,6 +626,26 @@ describe("CoValueCore.loadFromStorage", () => {
       state.loadFromStorage();
 
       expect(loadSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test("should keep onlyKnownState loadingState even when a peer is pending", () => {
+      const { state, node, id } = setup();
+      const storage = createMockStorage({
+        loadKnownState: (id, callback) => {
+          callback({
+            id,
+            header: true,
+            sessions: { session1: 1 },
+          });
+        },
+      });
+      node.setStorage(storage);
+
+      state.getKnownStateFromStorage(() => {});
+      state.markPending("peer1");
+
+      expect(state.getLoadingStateForPeer("peer1")).toBe("pending");
+      expect(state.loadingState).toBe("onlyKnownState");
     });
   });
 

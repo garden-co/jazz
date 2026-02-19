@@ -5,8 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@10.16.1",
   "scripts": {
-    "dev": "vite dev",
-    "build": "pnpm check && vite build",
+    "ensure-env": "node scripts/ensure-env.js",
+    "dev": "pnpm ensure-env && vite dev",
+    "build": "pnpm ensure-env && pnpm check && vite build",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

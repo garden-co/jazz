@@ -1,4 +1,4 @@
-import { recreateTransform } from "@manuscripts/prosemirror-recreate-steps";
+import { recreateTransform } from "./recreateTransform.js";
 import { CoRichText } from "jazz-tools";
 import { EditorState, Transaction } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";

@@ -10,12 +10,29 @@ type OPSQLiteDB = ReturnType<typeof opSQLite.open>;
 import { type SQLiteDatabaseDriverAsync } from "jazz-tools/react-native-core";
 
 export class OPSQLiteAdapter implements SQLiteDatabaseDriverAsync {
+  private static adapterByDbName = new Map<string, OPSQLiteAdapter>();
   private db: OPSQLiteDB | opSQLite.Transaction | null = null;
+  private initializing: Promise<OPSQLiteDB> | null = null;
   private dbName: string;
 
   static withDB(db: OPSQLiteDB | opSQLite.Transaction): OPSQLiteAdapter {
     const adapter = new OPSQLiteAdapter();
     adapter.db = db;
+    return adapter;
+  }
+
+  /**
+   * Returns a shared adapter instance for the given database name.
+   * Multiple providers in the same runtime reuse the same adapter.
+   */
+  static getInstance(dbName: string = "jazz-storage"): OPSQLiteAdapter {
+    const existing = OPSQLiteAdapter.adapterByDbName.get(dbName);
+    if (existing) {
+      return existing;
+    }
+
+    const adapter = new OPSQLiteAdapter(dbName);
+    OPSQLiteAdapter.adapterByDbName.set(dbName, adapter);
     return adapter;
   }
 
@@ -28,15 +45,24 @@ export class OPSQLiteAdapter implements SQLiteDatabaseDriverAsync {
       return;
     }
 
-    const dbPath =
-      Platform.OS === "ios" ? IOS_LIBRARY_PATH : ANDROID_DATABASE_PATH;
+    if (!this.initializing) {
+      this.initializing = (async () => {
+        const dbPath =
+          Platform.OS === "ios" ? IOS_LIBRARY_PATH : ANDROID_DATABASE_PATH;
+        const db = opSQLite.open({
+          name: this.dbName,
+          location: dbPath,
+        });
+        await db.execute("PRAGMA journal_mode=WAL");
+        return db;
+      })();
+    }
 
-    const db = (this.db = opSQLite.open({
-      name: this.dbName,
-      location: dbPath,
-    }));
-
-    await db.execute("PRAGMA journal_mode=WAL");
+    try {
+      this.db = await this.initializing;
+    } finally {
+      this.initializing = null;
+    }
   }
 
   public async query<T>(sql: string, params?: unknown[]): Promise<T[]> {

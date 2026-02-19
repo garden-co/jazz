@@ -138,18 +138,23 @@ export class CoMap extends CoValueBase implements CoValue {
 
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
 
-    if (options && "fromRaw" in options) {
-      const coMapSchema = assertCoValueSchema(
-        this.constructor,
-        "CoMap",
-        "load",
-      );
-      Object.defineProperties(this, {
-        $jazz: {
-          value: new CoMapJazzApi(proxy, () => options.fromRaw, coMapSchema),
-          enumerable: false,
-        },
-      });
+    if (options) {
+      if ("fromRaw" in options) {
+        const coMapSchema = assertCoValueSchema(
+          this.constructor,
+          "CoMap",
+          "load",
+        );
+        Object.defineProperties(this, {
+          $jazz: {
+            value: new CoMapJazzApi(proxy, () => options.fromRaw, coMapSchema),
+            enumerable: false,
+            configurable: true,
+          },
+        });
+      } else {
+        throw new Error("Invalid CoMap constructor arguments");
+      }
     }
 
     return proxy;
@@ -266,6 +271,7 @@ export class CoMap extends CoValueBase implements CoValue {
       $jazz: {
         value: new CoMapJazzApi(instance, () => raw, schema),
         enumerable: false,
+        configurable: true,
       },
     });
 
@@ -1068,7 +1074,11 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     const descriptor = target.$jazz?.getDescriptor(key as string);
 
     if (target.$jazz?.raw && typeof key === "string" && descriptor) {
-      return target.$jazz.raw.get(key) !== undefined;
+      // Must return true for any key with a schema descriptor, even if the
+      // raw value is undefined. This ensures consistency with ownKeys and
+      // getOwnPropertyDescriptor, satisfying the Proxy invariant enforced
+      // by strict engines (e.g. Hermes in React Native 0.84+).
+      return true;
     } else {
       return Reflect.has(target, key);
     }

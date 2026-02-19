@@ -143,11 +143,11 @@ export class SyncStateManager {
   ) {
     const entry = this.syncManager.local.getCoValue(id);
 
-    if (!entry.hasVerifiedContent()) {
+    const knownState = entry.knownState();
+
+    if (!knownState.header) {
       return false;
     }
-
-    const knownState = entry.verified.knownState();
 
     return areCurrentSessionsInSyncWith(
       knownState.sessions,

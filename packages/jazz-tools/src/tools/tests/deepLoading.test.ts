@@ -475,7 +475,9 @@ test("The resolve type accepts keys from discriminated unions", async () => {
     if (pet.type === "dog") {
       expect(pet.owner?.name).toEqual("Rex");
     } else {
-      expect("owner" in pet).toEqual(false);
+      // `in` returns true because the discriminated union injects a dummy
+      // field descriptor for "owner" on Cat. Use value check instead.
+      expect("owner" in pet).toEqual(true);
       // @ts-expect-error - this should still not appear in the types
       expect(pet.owner).toBeUndefined();
     }

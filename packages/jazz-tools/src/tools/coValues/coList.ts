@@ -109,8 +109,9 @@ export class CoList<out Item = any>
         $jazz: {
           value: new CoListJazzApi(proxy, () => options.fromRaw, coListSchema),
           enumerable: false,
+          configurable: true,
         },
-        $isLoaded: { value: true, enumerable: false },
+        $isLoaded: { value: true, enumerable: false, configurable: true },
       });
     }
 
@@ -165,8 +166,9 @@ export class CoList<out Item = any>
       $jazz: {
         value: new CoListJazzApi(instance, () => raw, coListSchema),
         enumerable: false,
+        configurable: true,
       },
-      $isLoaded: { value: true, enumerable: false },
+      $isLoaded: { value: true, enumerable: false, configurable: true },
     });
 
     const initMeta = firstComesWins ? { fww: "init" } : undefined;

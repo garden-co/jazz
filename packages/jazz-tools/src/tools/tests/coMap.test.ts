@@ -102,6 +102,7 @@ describe("CoMap", async () => {
       const john = Person.create({ name: "John" });
 
       expect("name" in john).toEqual(true);
+      // "age" is not in the schema, so `in` returns false
       expect("age" in john).toEqual(false);
     });
 
@@ -741,8 +742,11 @@ describe("CoMap", async () => {
         $jazz: { id: john.$jazz.id },
         name: "John",
       });
-      // The CoMap proxy hides the age property from the `in` operator
-      expect("age" in john).toEqual(false);
+      // `in` returns true for schema-defined keys even when value is undefined,
+      // to satisfy proxy invariant consistency with ownKeys/getOwnPropertyDescriptor.
+      expect("age" in john).toEqual(true);
+      // $jazz.has() returns true because age was explicitly set (even to undefined)
+      expect(john.$jazz.has("age")).toEqual(true);
       // The key still exists, since age === undefined
       expect(Object.keys(john)).toEqual(["name", "age"]);
     });
@@ -773,8 +777,12 @@ describe("CoMap", async () => {
         $jazz: { id: john.$jazz.id },
         name: "John",
       });
-      expect("age" in john).toEqual(false);
-      expect("pet" in john).toEqual(false);
+      // `in` returns true for schema-defined keys even after deletion.
+      // Use $jazz.has() to check if a key has a set value.
+      expect("age" in john).toEqual(true);
+      expect("pet" in john).toEqual(true);
+      expect(john.$jazz.has("age")).toEqual(false);
+      expect(john.$jazz.has("pet")).toEqual(false);
       expect(Object.keys(john)).toEqual(["name"]);
     });
 
@@ -1074,6 +1082,94 @@ describe("CoMap", async () => {
       expect(loadedPerson.name.$jazz.loadingState).toBe(
         CoValueLoadingState.LOADING,
       );
+    });
+  });
+
+  describe("proxy invariant consistency", () => {
+    test("has trap is consistent with ownKeys for schema-defined keys", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number().optional(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      // ownKeys includes "age" via the schema even though it was never set
+      const ownKeys = Object.keys(person);
+
+      // `in` must return true for all keys reported by ownKeys
+      for (const key of ownKeys) {
+        expect(key in person).toBe(true);
+      }
+
+      // "age" is schema-defined, so `in` returns true even when unset
+      expect("age" in person).toBe(true);
+      // but $jazz.has() correctly reports it as unset
+      expect(person.$jazz.has("age")).toBe(false);
+    });
+
+    test("has trap is consistent with getOwnPropertyDescriptor", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number().optional(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      // getOwnPropertyDescriptor returns a descriptor for schema-defined keys
+      const ageDescriptor = Object.getOwnPropertyDescriptor(person, "age");
+      expect(ageDescriptor).toBeDefined();
+
+      // has trap must agree — if a descriptor exists, `in` must return true
+      expect("age" in person).toBe(true);
+    });
+
+    test("has trap returns false for keys not in schema", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      expect("nonExistent" in person).toBe(false);
+    });
+
+    test("internal properties are configurable", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      // $isLoaded must be configurable to satisfy proxy invariants
+      const isLoadedDesc = Object.getOwnPropertyDescriptor(person, "$isLoaded");
+      expect(isLoadedDesc).toBeDefined();
+      expect(isLoadedDesc!.configurable).toBe(true);
+    });
+
+    test("$jazz.has() is unaffected by has trap changes", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number().optional(),
+        bio: z.string().optional(),
+      });
+
+      const person = Person.create({ name: "John", age: 20 });
+
+      // $jazz.has() returns true only for keys with set values
+      expect(person.$jazz.has("name")).toBe(true);
+      expect(person.$jazz.has("age")).toBe(true);
+      expect(person.$jazz.has("bio")).toBe(false);
+
+      // `in` returns true for all schema-defined keys
+      expect("name" in person).toBe(true);
+      expect("age" in person).toBe(true);
+      expect("bio" in person).toBe(true);
+
+      // Delete age — $jazz.has() reflects deletion, `in` does not
+      person.$jazz.delete("age");
+      expect(person.$jazz.has("age")).toBe(false);
+      expect("age" in person).toBe(true);
     });
   });
 

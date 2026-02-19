@@ -556,6 +556,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "edge -> core | LOAD Map sessions: header/100",
         "edge -> client | CONTENT Group header: true new: After: 0 New: 6",
         "edge -> client | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
+        "edge -> client | KNOWN Map sessions: header/100",
         "storage -> edge | CONTENT Map header: true new: After: 21 New: 21",
         "edge -> client | CONTENT Map header: false new: After: 21 New: 21 expectContentUntil: header/100",
         "storage -> edge | CONTENT Map header: true new: After: 42 New: 21",

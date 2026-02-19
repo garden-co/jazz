@@ -435,6 +435,93 @@ test("Should heal the missing key_for_everyone", async () => {
   );
 });
 
+describe("reader cannot create content", () => {
+  test("createMap throws for reader", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember(
+      await loadCoValueOrFail(node1.node, node2.accountID),
+      "reader",
+    );
+
+    await group.core.waitForSync();
+
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+    expect(groupOnNode2.myRole()).toBe("reader");
+    expect(() => groupOnNode2.createMap()).toThrow(
+      "does not have write permissions",
+    );
+  });
+
+  test("createList throws for reader", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember(
+      await loadCoValueOrFail(node1.node, node2.accountID),
+      "reader",
+    );
+
+    await group.core.waitForSync();
+
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+    expect(() => groupOnNode2.createList()).toThrow(
+      "does not have write permissions",
+    );
+  });
+
+  test("createStream throws for reader", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember(
+      await loadCoValueOrFail(node1.node, node2.accountID),
+      "reader",
+    );
+
+    await group.core.waitForSync();
+
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+    expect(() => groupOnNode2.createStream()).toThrow(
+      "does not have write permissions",
+    );
+  });
+
+  test("createBinaryStream throws for reader", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember(
+      await loadCoValueOrFail(node1.node, node2.accountID),
+      "reader",
+    );
+
+    await group.core.waitForSync();
+
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+    expect(() => groupOnNode2.createBinaryStream()).toThrow(
+      "does not have write permissions",
+    );
+  });
+
+  test("writer can still create content", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember(
+      await loadCoValueOrFail(node1.node, node2.accountID),
+      "writer",
+    );
+
+    await group.core.waitForSync();
+
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+    const map = groupOnNode2.createMap();
+    expect(map.type).toBe("comap");
+  });
+});
+
 describe("writeOnly", () => {
   test("Admins can invite writeOnly members", async () => {
     const { node1, node2 } = await createTwoConnectedNodes("server", "server");

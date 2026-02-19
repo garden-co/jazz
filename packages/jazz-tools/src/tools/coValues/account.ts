@@ -103,10 +103,11 @@ export class Account extends CoValueBase implements CoValue {
     );
 
     Object.defineProperties(this, {
-      [TypeSym]: { value: "Account", enumerable: false },
+      [TypeSym]: { value: "Account", enumerable: false, configurable: true },
       $jazz: {
         value: new AccountJazzApi(proxy, options.fromRaw, accountSchema),
         enumerable: false,
+        configurable: true,
       },
     });
 

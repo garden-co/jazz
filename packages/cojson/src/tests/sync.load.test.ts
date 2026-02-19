@@ -656,6 +656,31 @@ describe("loading coValues from server", () => {
     `);
   });
 
+  test("should mark closed persistent peers as unavailable after grace timeout", async () => {
+    vi.useFakeTimers();
+
+    const client = setupTestNode();
+    const connection = client.connectToSyncServer({
+      persistent: true,
+    });
+    connection.peerState.gracefulShutdown();
+
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    const map = group.createMap({
+      test: "value",
+    });
+
+    const loadPromise = client.node.load(map.id, true);
+
+    await vi.advanceTimersByTimeAsync(CO_VALUE_LOADING_CONFIG.TIMEOUT + 10);
+
+    const coValue = await loadPromise;
+    expect(coValue).toBe("unavailable");
+
+    vi.useRealTimers();
+  });
+
   test("should handle reconnections in the middle of a load with a persistent peer", async () => {
     TEST_NODE_CONFIG.withAsyncPeers = false; // To avoid flakiness
 
@@ -1550,6 +1575,7 @@ describe("lazy storage load optimization", () => {
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/1",
         "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]

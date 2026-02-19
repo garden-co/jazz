@@ -68,7 +68,10 @@ describe("CoMap.Record", async () => {
       const person = Person.create({ name: "John" });
 
       expect("name" in person).toEqual(true);
-      expect("age" in person).toEqual(false);
+      // CoRecords accept any string key, so `in` returns true for all strings.
+      // Use $jazz.has() to check if a key has a set value.
+      expect("age" in person).toEqual(true);
+      expect(person.$jazz.has("age")).toEqual(false);
     });
 
     test("create a Record with an account as owner", () => {
@@ -138,7 +141,10 @@ describe("CoMap.Record", async () => {
       person.$jazz.delete("age");
 
       expect(person.name).toEqual("John");
-      expect("age" in person).toEqual(false);
+      // `in` returns true for all string keys on CoRecords.
+      // Use $jazz.has() to check if a key has a set value.
+      expect("age" in person).toEqual(true);
+      expect(person.$jazz.has("age")).toEqual(false);
 
       expect(person.toJSON()).toEqual({
         $jazz: { id: person.$jazz.id },

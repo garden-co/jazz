@@ -68,6 +68,10 @@ export class LinkedList<T> {
     return value;
   }
 
+  trackPushPull() {
+    this.meter?.trackPushPull();
+  }
+
   /**
    * Remove a specific node from the list in O(1) time.
    * The node must be a valid node that was returned by push().
@@ -136,7 +140,13 @@ class QueueMeter {
   public push() {
     this.pushCounter.add(1, this.attrs);
   }
+
+  public trackPushPull() {
+    this.pullCounter.add(1, this.attrs);
+    this.pushCounter.add(1, this.attrs);
+  }
 }
+
 export function meteredList<T>(
   type: "incoming" | "outgoing" | "storage-streaming" | "load-requests-queue",
   attrs?: Record<string, string | number>,

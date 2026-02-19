@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  onTestFinished,
+  test,
+  vi,
+} from "vitest";
 import {
   CO_VALUE_LOADING_CONFIG,
   setMaxInFlightLoadsPerPeer,
@@ -188,6 +196,26 @@ describe("OutgoingLoadQueue", () => {
 
       queue.enqueue(map.core, () => {});
       queue.enqueue(map.core, () => {
+        duplicateCallbackCount += 1;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(duplicateCallbackCount).toBe(0);
+    });
+
+    test("should skip duplicate enqueue for same CoValue ID while in-flight", () => {
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const otherNode = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      const sameIdCoValue = otherNode.getCoValue(map.id);
+
+      let duplicateCallbackCount = 0;
+
+      queue.enqueue(map.core, () => {});
+      queue.enqueue(sameIdCoValue, () => {
         duplicateCallbackCount += 1;
       });
 
@@ -417,6 +445,34 @@ describe("OutgoingLoadQueue", () => {
       expect(queue.inFlightCount).toBe(1);
     });
 
+    test("should complete in-flight request by CoValue ID even with different instance", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const otherNode = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      const nextMap = group.createMap();
+      const sameIdCoValue = otherNode.getCoValue(map.id);
+
+      let nextCallbackCalled = false;
+
+      queue.enqueue(map.core, () => {});
+      queue.enqueue(nextMap.core, () => {
+        nextCallbackCalled = true;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(nextCallbackCalled).toBe(false);
+
+      // Complete using a different CoValue instance with the same ID.
+      queue.trackComplete(sameIdCoValue);
+
+      expect(nextCallbackCalled).toBe(true);
+      expect(queue.inFlightCount).toBe(1);
+    });
+
     test("should allow re-enqueue after completion", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
@@ -445,7 +501,7 @@ describe("OutgoingLoadQueue", () => {
       expect(secondCallbackCount).toBe(1);
     });
 
-    test("should not complete if CoValue is streaming", () => {
+    test("should not complete if CoValue is streaming for content updates", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -468,7 +524,7 @@ describe("OutgoingLoadQueue", () => {
       expect(callback2Called).toBe(false);
 
       // trackComplete should not complete because map1 is streaming
-      queue.trackComplete(map1.core);
+      queue.trackComplete(map1.core, "content");
 
       // Should still be in-flight and pending should not be processed
       expect(queue.inFlightCount).toBe(1);
@@ -479,7 +535,35 @@ describe("OutgoingLoadQueue", () => {
       vi.spyOn(map1.core, "isStreaming").mockReturnValue(false);
 
       // Now trackComplete should work
-      queue.trackComplete(map1.core);
+      queue.trackComplete(map1.core, "content");
+
+      expect(queue.inFlightCount).toBe(1); // map2 is now in-flight
+      expect(callback2Called).toBe(true);
+      expect(queue.pendingCount).toBe(0);
+    });
+
+    test("should complete if CoValue is streaming for known-state updates", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+
+      vi.spyOn(map1.core, "isStreaming").mockReturnValue(true);
+
+      let callback2Called = false;
+
+      queue.enqueue(map1.core, () => {});
+      queue.enqueue(map2.core, () => {
+        callback2Called = true;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(callback2Called).toBe(false);
+
+      queue.trackComplete(map1.core, "known");
 
       expect(queue.inFlightCount).toBe(1); // map2 is now in-flight
       expect(callback2Called).toBe(true);
@@ -731,62 +815,145 @@ describe("OutgoingLoadQueue", () => {
 
     test("should balance push/pull metrics when clearing pending items", async () => {
       const metricReader = createTestMetricReader();
+      onTestFinished(tearDownTestMetricReader);
 
-      try {
-        setMaxInFlightLoadsPerPeer(1);
-        const queue = new OutgoingLoadQueue(TEST_PEER_ID);
-        const node = createTestNode();
-        const group = node.createGroup();
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
 
-        // Block the queue first (this item is pushed then immediately shifted to go in-flight)
-        const blockerMap = group.createMap();
-        queue.enqueue(blockerMap.core, () => {});
+      // Block the queue first (this item is pushed then immediately shifted to go in-flight)
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
 
-        // Enqueue multiple items that will be pending
-        const map1 = group.createMap();
-        const map2 = group.createMap();
-        const map3 = group.createMap();
+      // Enqueue multiple items that will be pending
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+      const map3 = group.createMap();
 
-        queue.enqueue(map1.core, () => {});
-        queue.enqueue(map2.core, () => {});
-        queue.enqueue(map3.core, () => {});
+      queue.enqueue(map1.core, () => {});
+      queue.enqueue(map2.core, () => {});
+      queue.enqueue(map3.core, () => {});
 
-        expect(queue.pendingCount).toBe(3);
+      expect(queue.pendingCount).toBe(3);
 
-        // Get metrics before clear
-        // 4 items pushed (blocker + 3 pending), 1 pulled (blocker was shifted to go in-flight)
-        const pushedBefore = await metricReader.getMetricValue(
-          "jazz.messagequeue.load-requests-queue.pushed",
-          { priority: "high" },
-        );
-        const pulledBefore = await metricReader.getMetricValue(
-          "jazz.messagequeue.load-requests-queue.pulled",
-          { priority: "high" },
-        );
+      // Get metrics before clear
+      // 4 items pushed (blocker + 3 pending), 1 pulled (blocker was shifted to go in-flight)
+      const pushedBefore = await metricReader.getMetricValue(
+        "jazz.messagequeue.load-requests-queue.pushed",
+        { priority: "high" },
+      );
+      const pulledBefore = await metricReader.getMetricValue(
+        "jazz.messagequeue.load-requests-queue.pulled",
+        { priority: "high" },
+      );
 
-        expect(pushedBefore).toBe(4);
-        expect(pulledBefore).toBe(1);
+      expect(pushedBefore).toBe(4);
+      expect(pulledBefore).toBe(1);
 
-        // Clear the queue - this should drain pending items, incrementing pulled counter
-        queue.clear();
+      // Clear the queue - this should drain pending items, incrementing pulled counter
+      queue.clear();
 
-        // Get metrics after clear - pushed and pulled should now be equal
-        const pushedAfter = await metricReader.getMetricValue(
-          "jazz.messagequeue.load-requests-queue.pushed",
-          { priority: "high" },
-        );
-        const pulledAfter = await metricReader.getMetricValue(
-          "jazz.messagequeue.load-requests-queue.pulled",
-          { priority: "high" },
-        );
+      // Get metrics after clear - pushed and pulled should now be equal
+      const pushedAfter = await metricReader.getMetricValue(
+        "jazz.messagequeue.load-requests-queue.pushed",
+        { priority: "high" },
+      );
+      const pulledAfter = await metricReader.getMetricValue(
+        "jazz.messagequeue.load-requests-queue.pulled",
+        { priority: "high" },
+      );
 
-        // All 4 pushed items should now be pulled (balanced)
-        expect(pushedAfter).toBe(4);
-        expect(pulledAfter).toBe(4);
-        expect(pushedAfter).toBe(pulledAfter);
-      } finally {
-        tearDownTestMetricReader();
-      }
+      // All 4 pushed items should now be pulled (balanced)
+      expect(pushedAfter).toBe(4);
+      expect(pulledAfter).toBe(4);
+      expect(pushedAfter).toBe(pulledAfter);
+    });
+
+    test("should track in-flight loads with OpenTelemetry", async () => {
+      const metricReader = createTestMetricReader();
+      onTestFinished(tearDownTestMetricReader);
+
+      setMaxInFlightLoadsPerPeer(2);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(0);
+
+      queue.enqueue(map1.core, () => {});
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(1);
+
+      queue.enqueue(map2.core, () => {});
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(2);
+
+      queue.trackComplete(map1.core);
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(1);
+
+      queue.clear();
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(0);
+    });
+
+    test("should decrement in-flight metric when a load times out", async () => {
+      CO_VALUE_LOADING_CONFIG.TIMEOUT = 5;
+
+      const metricReader = createTestMetricReader();
+      onTestFinished(tearDownTestMetricReader);
+
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const coValue = node.getCoValue("co_zTestMetricTimeout00001" as any);
+
+      queue.enqueue(coValue, () => {});
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(1);
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(0);
+    });
+
+    test("should not change in-flight metric when completing unknown CoValue", async () => {
+      const metricReader = createTestMetricReader();
+      onTestFinished(tearDownTestMetricReader);
+
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+      const knownMap = group.createMap();
+      const unknownCoValue = node.getCoValue(
+        "co_zTestUnknownMetric0001" as any,
+      );
+
+      queue.enqueue(knownMap.core, () => {});
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(1);
+
+      queue.trackComplete(unknownCoValue);
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(1);
+
+      queue.trackComplete(knownMap.core);
+      expect(
+        await metricReader.getMetricValue("jazz.loadqueue.outgoing.inflight"),
+      ).toBe(0);
     });
   });
 
