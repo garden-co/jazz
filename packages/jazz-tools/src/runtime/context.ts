@@ -4,6 +4,9 @@
 
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
+/** Local auth mode for client-generated identities. */
+export type LocalAuthMode = "anonymous" | "demo";
+
 /**
  * Session context for policy evaluation.
  */
@@ -48,6 +51,18 @@ export interface AppContext {
    * Sent as `Authorization: Bearer <token>`.
    */
   jwtToken?: string;
+
+  /**
+   * Local auth mode for client-generated identities.
+   * Sent as `X-Jazz-Local-Mode`.
+   */
+  localAuthMode?: LocalAuthMode;
+
+  /**
+   * Client-generated auth token for anonymous/demo identity.
+   * Sent as `X-Jazz-Local-Token`.
+   */
+  localAuthToken?: string;
 
   /**
    * Backend secret for session impersonation.

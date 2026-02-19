@@ -32,7 +32,7 @@ use hmac::{Hmac, Mac};
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -42,6 +42,8 @@ type HmacSha256 = Hmac<Sha256>;
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
+const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
+const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -334,6 +336,29 @@ enum AppStatus {
     #[default]
     Active,
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAuthMode {
+    Anonymous,
+    Demo,
+}
+
+impl LocalAuthMode {
+    fn from_header(value: &str) -> Option<Self> {
+        match value {
+            "anonymous" => Some(Self::Anonymous),
+            "demo" => Some(Self::Demo),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Demo => "demo",
+        }
+    }
 }
 
 impl AppStatus {
@@ -1068,6 +1093,13 @@ fn decode_session_header(b64: &str) -> Option<Session> {
     serde_json::from_str(json_str).ok()
 }
 
+fn derive_local_principal_id(app_id: AppId, mode: LocalAuthMode, token: &str) -> String {
+    let input = format!("{app_id}:{}:{token}", mode.as_str());
+    let digest = Sha256::digest(input.as_bytes());
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    format!("local:{encoded}")
+}
+
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1349,6 +1381,36 @@ async fn extract_session(
 
         let session = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
         return Ok(Some(session));
+    }
+
+    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers.get(LOCAL_TOKEN_HEADER).and_then(|v| v.to_str().ok());
+
+    match (local_mode, local_token) {
+        (Some(mode), Some(token)) => {
+            let mode = LocalAuthMode::from_header(mode)
+                .ok_or((StatusCode::BAD_REQUEST, "Invalid local auth mode"))?;
+            let token = token.trim();
+            if token.is_empty() {
+                return Err((StatusCode::UNAUTHORIZED, "Empty local auth token"));
+            }
+
+            let principal_id = derive_local_principal_id(app_id, mode, token);
+            return Ok(Some(Session {
+                user_id: principal_id,
+                claims: serde_json::json!({
+                    "auth_mode": "local",
+                    "local_mode": mode.as_str(),
+                }),
+            }));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
+            ));
+        }
+        (None, None) => {}
     }
 
     Ok(None)

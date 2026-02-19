@@ -13,6 +13,7 @@ import {
   generateClientId,
   buildEventsUrl,
   buildEndpointUrl,
+  applyUserAuthHeaders,
 } from "./sync-transport.js";
 
 /**
@@ -513,9 +514,13 @@ export class JazzClient {
       headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
       headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
     }
-    // Priority 2: Frontend JWT auth
-    else if (this.context.jwtToken) {
-      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
+    // Priority 2: frontend auth (JWT or local anonymous/demo token headers)
+    else {
+      applyUserAuthHeaders(headers, {
+        jwtToken: this.context.jwtToken,
+        localAuthMode: this.context.localAuthMode,
+        localAuthToken: this.context.localAuthToken,
+      });
     }
 
     return fetch(url, {
@@ -580,6 +585,8 @@ export class JazzClient {
   private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
       clientId: this.serverClientId,
       pathPrefix: this.activeServerPathPrefix,
@@ -632,9 +639,11 @@ export class JazzClient {
     const headers: Record<string, string> = {
       Accept: "application/octet-stream",
     };
-    if (this.context.jwtToken) {
-      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
-    }
+    applyUserAuthHeaders(headers, {
+      jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+    });
 
     this.streamAbortController = new AbortController();
 

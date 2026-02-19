@@ -28,8 +28,12 @@ use base64::Engine;
 use groove::query_manager::session::Session;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::commands::server::ServerState;
+
+const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
+const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 
 // ============================================================================
 // Auth Configuration
@@ -104,6 +108,29 @@ impl std::fmt::Display for JwtError {
             JwtError::NoKeyConfigured => write!(f, "No JWT validation key configured"),
             JwtError::Invalid(msg) => write!(f, "Invalid JWT: {}", msg),
             JwtError::Expired => write!(f, "JWT has expired"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAuthMode {
+    Anonymous,
+    Demo,
+}
+
+impl LocalAuthMode {
+    fn from_header(value: &str) -> Option<Self> {
+        match value {
+            "anonymous" => Some(Self::Anonymous),
+            "demo" => Some(Self::Demo),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Demo => "demo",
         }
     }
 }
@@ -316,6 +343,36 @@ pub fn extract_session(
         }
     }
 
+    // Priority 3: Local anonymous/demo token auth
+    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers.get(LOCAL_TOKEN_HEADER).and_then(|v| v.to_str().ok());
+
+    match (local_mode, local_token) {
+        (Some(mode), Some(token)) => {
+            let mode = LocalAuthMode::from_header(mode)
+                .ok_or((StatusCode::BAD_REQUEST, "Invalid local auth mode"))?;
+            let token = token.trim();
+            if token.is_empty() {
+                return Err((StatusCode::UNAUTHORIZED, "Empty local auth token"));
+            }
+            let principal_id = derive_local_principal_id(mode, token);
+            return Ok(Some(Session {
+                user_id: principal_id,
+                claims: serde_json::json!({
+                    "auth_mode": "local",
+                    "local_mode": mode.as_str(),
+                }),
+            }));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
+            ));
+        }
+        (None, None) => {}
+    }
+
     // No auth provided
     Ok(None)
 }
@@ -325,6 +382,13 @@ fn decode_session_header(b64: &str) -> Option<Session> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let json_str = std::str::from_utf8(&bytes).ok()?;
     serde_json::from_str(json_str).ok()
+}
+
+fn derive_local_principal_id(mode: LocalAuthMode, token: &str) -> String {
+    let input = format!("{}:{}", mode.as_str(), token);
+    let digest = Sha256::digest(input.as_bytes());
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    format!("local:{encoded}")
 }
 
 /// Check if admin secret is valid.

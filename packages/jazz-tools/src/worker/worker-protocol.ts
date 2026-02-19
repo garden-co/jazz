@@ -20,6 +20,8 @@ export interface InitMessage {
   serverUrl?: string;
   serverPathPrefix?: string;
   jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
   adminSecret?: string;
 }
 
@@ -32,7 +34,9 @@ export interface SyncToWorkerMessage {
 /** Update auth credentials (e.g., token refresh). */
 export interface UpdateAuthMessage {
   type: "update-auth";
-  jwtToken: string;
+  jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
 }
 
 /** Request graceful shutdown. */
