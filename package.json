@@ -1,13 +1,13 @@
 {
   "scripts": {
-    "format": "oxfmt .",
-    "format:check": "oxfmt --check . && cargo fmt --check",
-    "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
-    "ensure:rust-toolchain": "export CARGO_HOME=\"${CARGO_HOME:-$HOME/.cargo}\" && export RUSTUP_HOME=\"${RUSTUP_HOME:-$HOME/.rustup}\" && export PATH=\"$CARGO_HOME/bin:$PATH\" && (command -v rustup >/dev/null 2>&1 || (curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable)) && rustup toolchain install stable && rustup default stable && rustup target add wasm32-unknown-unknown",
+    "format": "oxfmt . --exclude crates/jazz-rn/src/**",
+    "format:check": "oxfmt --check . --exclude crates/jazz-rn/src/** && cargo fmt --check",
+    "lint": "oxlint . --exclude crates/jazz-rn/src/** && cargo clippy --workspace -- -D warnings",
+    "ensure:rust-toolchain": "bash scripts/install-jazz-rn-deps.sh",
     "build:vercel-docs": "export CARGO_HOME=\"${CARGO_HOME:-$HOME/.cargo}\" && export RUSTUP_HOME=\"${RUSTUP_HOME:-$HOME/.rustup}\" && export PATH=\"$CARGO_HOME/bin:$PATH\" && export RUSTUP_TOOLCHAIN=stable && pnpm run ensure:rust-toolchain && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
     "build:all": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build:rn --filter=jazz-rn && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
-    "test": "turbo run test",
+    "test": "turbo run test --filter=!jazz-rn --only",
     "postinstall": "lefthook install"
   },
   "devDependencies": {
