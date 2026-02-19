@@ -9,6 +9,8 @@ import mtorImage from "./showcase/images/mtor.png";
 import hendImage from "./showcase/images/hend.png";
 import motleyImage from "./showcase/images/motley.png";
 import spicyGolfImage from "./showcase/images/spicy-golf.png";
+import alkalyeImage from "./showcase/images/alkalye.png";
+import hifzImage from "./showcase/images/hifz-garden.png";
 
 export const products = [
   {
@@ -37,8 +39,7 @@ export const products = [
   },
   {
     name: "Tilly",
-    description:
-      "A relationship journal so simple that you actually use it.",
+    description: "A relationship journal so simple that you actually use it.",
     url: "https://tilly.social",
     imageUrl: tillyScreenImage.src,
   },
@@ -53,7 +54,8 @@ export const products = [
     name: "Cuppl",
     imageUrl: cupplImage.src,
     url: "https://www.getcuppl.com",
-    description: "An all-in-one app for couples to manage tasks, schedules, and shopping lists.",
+    description:
+      "An all-in-one app for couples to manage tasks, schedules, and shopping lists.",
   },
   {
     name: "MTOR",
@@ -72,12 +74,27 @@ export const products = [
     name: "Motley",
     imageUrl: motleyImage.src,
     url: "https://trymotley.com",
-    description: "Collect and connect anything - a mix between Are.na, mymind, and a regular read-later app.",
+    description:
+      "Collect and connect anything - a mix between Are.na, mymind, and a regular read-later app.",
   },
   {
     name: "Spicy Golf",
     imageUrl: spicyGolfImage.src,
     url: "https://spicy.golf",
     description: "Golf Games Kicked up a Notch.",
-  }
+  },
+  {
+    name: "Alkalye",
+    imageUrl: alkalyeImage.src,
+    url: "https://alkalye.com",
+    description:
+      "A platform for sharing and discovering knowledge.A beautiful markdown editor that works offline, syncs across all your devices, and keeps your words encrypted. From first thought to final presentation — one document, infinite possibilities.",
+  },
+  {
+    name: "Hifz Garden",
+    imageUrl: hifzImage.src,
+    url: "https://hifzgarden.com/",
+    description:
+      "A private, offline-first companion for your hifz journey. Log every session, know what needs review, and build lasting consistency.",
+  },
 ];
