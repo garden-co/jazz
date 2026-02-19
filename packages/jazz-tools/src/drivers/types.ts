@@ -13,7 +13,7 @@ import type {
   WasmRowDelta as GrooveWasmRowDelta,
   WasmTableSchema as GrooveWasmTableSchema,
   WasmValue as GrooveWasmValue,
-} from "groove-wasm";
+} from "jazz-wasm";
 
 export type Value = GrooveWasmValue;
 export type WasmRow = GrooveWasmRow;

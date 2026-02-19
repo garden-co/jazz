@@ -66,7 +66,7 @@ Algorithm:
 5. If new → create `schema_vN+1_{hash}.sql`
 6. Generate migrations for all adjacent version pairs (including cross-pair for branch merges)
 
-> `crates/jazz-cli/src/commands/build.rs:69-194`
+> `crates/jazz-tools/src/commands/build.rs:69-194`
 
 ## TypeScript DSL
 
@@ -142,7 +142,7 @@ Only `current.sql`/`current.ts` can conflict in git, which is resolved by the de
 | `crates/groove/src/schema_manager/sql.rs`   | SQL parsing/generation (700+ lines) |
 | `crates/groove/src/schema_manager/files.rs` | File convention API (940+ lines)    |
 | `crates/groove/src/schema_manager/diff.rs`  | Schema diffing (150+ lines)         |
-| `crates/jazz-cli/src/commands/build.rs`     | CLI build command (370+ lines)      |
+| `crates/jazz-tools/src/commands/build.rs`   | CLI build command (370+ lines)      |
 | `packages/jazz-tools/src/cli.ts`            | TypeScript CLI                      |
 | `packages/jazz-tools/src/dsl.ts`            | TypeScript DSL                      |
 | `packages/jazz-tools/src/sql-gen.ts`        | TS → SQL generation                 |

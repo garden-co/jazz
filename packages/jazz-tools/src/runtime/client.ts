@@ -7,7 +7,13 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
-import { sendSyncPayload, readBinaryFrames, generateClientId } from "./sync-transport.js";
+import {
+  sendSyncPayload,
+  readBinaryFrames,
+  generateClientId,
+  buildEventsUrl,
+  buildEndpointUrl,
+} from "./sync-transport.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -23,7 +29,7 @@ export interface RequestLike {
 /**
  * Common interface for WASM and NAPI runtimes.
  *
- * Both `WasmRuntime` (from groove-wasm) and `NapiRuntime` (from jazz-napi)
+ * Both `WasmRuntime` (from jazz-wasm) and `NapiRuntime` (from jazz-napi)
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
@@ -186,13 +192,12 @@ export class SessionClient {
    * Create a new row as this session's user.
    */
   async create(table: string, values: Value[]): Promise<string> {
-    const serverUrl = this.client.getServerUrl();
-    if (!serverUrl) {
+    if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
 
     const response = await this.client.sendRequest(
-      `${serverUrl}/sync/object`,
+      this.client.getRequestUrl("/sync/object"),
       "POST",
       {
         table,
@@ -214,8 +219,7 @@ export class SessionClient {
    * Update a row as this session's user.
    */
   async update(objectId: string, updates: Record<string, Value>): Promise<void> {
-    const serverUrl = this.client.getServerUrl();
-    if (!serverUrl) {
+    if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
 
@@ -223,7 +227,7 @@ export class SessionClient {
     const updateArray = Object.entries(updates);
 
     const response = await this.client.sendRequest(
-      `${serverUrl}/sync/object`,
+      this.client.getRequestUrl("/sync/object"),
       "PUT",
       {
         object_id: objectId,
@@ -242,13 +246,12 @@ export class SessionClient {
    * Delete a row as this session's user.
    */
   async delete(objectId: string): Promise<void> {
-    const serverUrl = this.client.getServerUrl();
-    if (!serverUrl) {
+    if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
 
     const response = await this.client.sendRequest(
-      `${serverUrl}/sync/object/delete`,
+      this.client.getRequestUrl("/sync/object/delete"),
       "POST",
       {
         object_id: objectId,
@@ -289,6 +292,7 @@ export class JazzClient {
   private streamAttached = false;
   private serverClientId: string = generateClientId();
   private activeServerUrl: string | null = null;
+  private activeServerPathPrefix: string | undefined;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
 
@@ -321,7 +325,7 @@ export class JazzClient {
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
-      client.setupSync(context.serverUrl);
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -352,7 +356,7 @@ export class JazzClient {
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
-      client.setupSync(context.serverUrl);
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -373,7 +377,7 @@ export class JazzClient {
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
-      client.setupSync(context.serverUrl);
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -607,6 +611,17 @@ export class JazzClient {
   }
 
   /**
+   * Build a fully-qualified endpoint URL against the configured server.
+   * @internal
+   */
+  getRequestUrl(path: string): string {
+    if (!this.context.serverUrl) {
+      throw new Error("No server connection");
+    }
+    return buildEndpointUrl(this.context.serverUrl, path, this.context.serverPathPrefix);
+  }
+
+  /**
    * Get schema context for server requests.
    * @internal
    */
@@ -677,8 +692,9 @@ export class JazzClient {
     }
   }
 
-  private setupSync(serverUrl: string): void {
+  private setupSync(serverUrl: string, serverPathPrefix?: string): void {
     this.activeServerUrl = serverUrl;
+    this.activeServerPathPrefix = serverPathPrefix;
 
     // Set up outgoing message handler
     this.runtime.onSyncMessageToSend((envelope: string) => {
@@ -705,6 +721,7 @@ export class JazzClient {
       jwtToken: this.context.jwtToken,
       adminSecret: this.context.adminSecret,
       clientId: this.serverClientId,
+      pathPrefix: this.activeServerPathPrefix,
     });
   }
 
@@ -761,7 +778,7 @@ export class JazzClient {
     this.streamAbortController = new AbortController();
 
     try {
-      const eventsUrl = `${serverUrl}/events?client_id=${encodeURIComponent(this.serverClientId)}`;
+      const eventsUrl = buildEventsUrl(serverUrl, this.serverClientId, this.activeServerPathPrefix);
 
       const response = await fetch(eventsUrl, {
         headers,
@@ -805,9 +822,9 @@ export class JazzClient {
 
 /**
  * WASM module type for sync client creation.
- * This is the type of the groove-wasm module after dynamic import.
+ * This is the type of the jazz-wasm module after dynamic import.
  */
-export type WasmModule = typeof import("groove-wasm");
+export type WasmModule = typeof import("jazz-wasm");
 
 /**
  * Load and initialize the WASM module.
@@ -816,25 +833,32 @@ export type WasmModule = typeof import("groove-wasm");
  */
 export async function loadWasmModule(): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
-  const wasmModule: any = await import("groove-wasm");
+  const wasmModule: any = await import("jazz-wasm");
 
-  // In Node.js, we need to read the .wasm file and use initSync
-  // In browsers, the default fetch-based init works
+  // In Node.js, we need to read the .wasm file and use initSync.
+  // In browsers/React Native, the default fetch-based init works (or default()).
+  // Use try/catch so we skip the Node path when node:* modules are unavailable (e.g. RN).
+  let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
-    const { readFileSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-    const { dirname, join } = await import("node:path");
+    try {
+      const { existsSync, readFileSync } = await import("node:fs");
+      const { createRequire } = await import("node:module");
+      const { dirname, resolve } = await import("node:path");
 
-    // Find the .wasm file relative to the groove-wasm package
-    const wasmPath = join(
-      dirname(fileURLToPath(import.meta.url)),
-      "../../node_modules/groove-wasm/pkg/groove_wasm_bg.wasm",
-    );
-    const wasmBytes = readFileSync(wasmPath);
-    wasmModule.initSync(wasmBytes);
-  } else if (typeof wasmModule.default === "function") {
-    // In browsers without a bundler WASM plugin, call the init function.
-    // With vite-plugin-wasm, init happens at import time and default is not a function.
+      const require = createRequire(import.meta.url);
+      const packageJsonPath = require.resolve("jazz-wasm/package.json");
+      const packageDir = dirname(packageJsonPath);
+      const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+      if (existsSync(wasmPath)) {
+        wasmModule.initSync({ module: readFileSync(wasmPath) });
+        nodeInitDone = true;
+      }
+    } catch {
+      // Node modules unavailable (e.g. React Native with process polyfill)
+    }
+  }
+  if (!nodeInitDone && typeof wasmModule.default === "function") {
     await wasmModule.default();
   }
 

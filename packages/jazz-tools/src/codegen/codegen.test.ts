@@ -96,6 +96,46 @@ describe("schemaToWasm", () => {
     });
   });
 
+  it("converts TEXT[] to Array<Text>", () => {
+    table("items", { tags: col.array(col.string()) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "tags",
+      column_type: { type: "Array", element: { type: "Text" } },
+      nullable: false,
+    });
+  });
+
+  it("converts nested arrays (INTEGER[][])", () => {
+    table("items", { matrix: col.array(col.array(col.int())) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "matrix",
+      column_type: {
+        type: "Array",
+        element: { type: "Array", element: { type: "Integer" } },
+      },
+      nullable: false,
+    });
+  });
+
+  it("preserves references for UUID[] from array(ref)", () => {
+    table("items", { owner_ids: col.array(col.ref("users")) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "owner_ids",
+      column_type: { type: "Array", element: { type: "Uuid" } },
+      nullable: false,
+      references: "users",
+    });
+  });
+
   it("converts multiple tables", () => {
     table("users", { name: col.string() });
     table("todos", { title: col.string(), user_id: col.ref("users") });
@@ -259,6 +299,19 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("  owner_id: string;");
+  });
+
+  it("maps array columns recursively", () => {
+    table("items", {
+      tags: col.array(col.string()),
+      matrix: col.array(col.array(col.int())),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("  tags: string[];");
+    expect(output).toContain("  matrix: number[][];");
   });
 
   it("exports wasmSchema constant", () => {
@@ -610,6 +663,15 @@ describe("generateWhereInputTypes", () => {
 
     expect(output).toContain("owner_id?: string | { eq?: string; ne?: string };");
   });
+
+  it("generates array filters with eq and contains", () => {
+    table("todos", { tags: col.array(col.string()) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("tags?: string[] | { eq?: string[]; contains?: string };");
+  });
 });
 
 describe("generateQueryBuilderClasses", () => {
@@ -624,7 +686,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export class TodoQueryBuilder<I extends Record<string, never> = {}>");
-    expect(output).toContain("declare readonly _rowType: Todo;");
+    expect(output).toContain("declare _rowType!: Todo;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
     expect(output).toContain("orderBy(column: keyof Todo");
