@@ -35,6 +35,7 @@ impl AuthConfig {
 pub struct ServerConnection {
     client: Client,
     base_url: String,
+    route_prefix: String,
     auth: AuthConfig,
 }
 
@@ -42,6 +43,7 @@ impl ServerConnection {
     /// Connect to a Jazz server.
     pub async fn connect(base_url: &str, auth: AuthConfig) -> Result<Self> {
         let client = Client::new();
+        let (base_url, route_prefix) = split_base_url(base_url)?;
 
         // Test connection with health check
         let health_url = format!("{}/health", base_url);
@@ -54,7 +56,8 @@ impl ServerConnection {
 
         Ok(Self {
             client,
-            base_url: base_url.to_string(),
+            base_url,
+            route_prefix,
             auth,
         })
     }
@@ -122,7 +125,7 @@ impl ServerConnection {
 
     /// Push a sync payload to the server.
     pub async fn push_sync(&self, payload: SyncPayload, client_id: ClientId) -> Result<()> {
-        let url = format!("{}/sync", self.base_url);
+        let url = self.endpoint_url("/sync");
 
         // Check if this is a catalogue object - use admin headers
         let headers = if is_catalogue_payload(&payload) {
@@ -145,9 +148,42 @@ impl ServerConnection {
         Ok(())
     }
 
-    /// Get the base URL for this connection.
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    /// Get the events stream URL for the given client id.
+    pub fn stream_url(&self, client_id: &str) -> String {
+        format!("{}?client_id={}", self.endpoint_url("/events"), client_id)
+    }
+
+    fn endpoint_url(&self, endpoint: &str) -> String {
+        format!("{}{}{}", self.base_url, self.route_prefix, endpoint)
+    }
+}
+
+fn split_base_url(input: &str) -> Result<(String, String)> {
+    let parsed = reqwest::Url::parse(input)
+        .map_err(|e| JazzError::Connection(format!("invalid server URL '{input}': {e}")))?;
+
+    let mut origin = parsed.clone();
+    origin.set_path("");
+    origin.set_query(None);
+    origin.set_fragment(None);
+
+    let base_url = origin.as_str().trim_end_matches('/').to_string();
+    let route_prefix = normalize_route_prefix(parsed.path());
+
+    Ok((base_url, route_prefix))
+}
+
+fn normalize_route_prefix(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return String::new();
+    }
+
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
     }
 }
 

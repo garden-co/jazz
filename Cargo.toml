@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/jazz-cloud-server",
   "crates/jazz-tools",
   "crates/jazz-wasm",
   "crates/jazz-napi",

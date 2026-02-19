@@ -1,0 +1,6 @@
+name: jazz-cloud2
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: MVP single-instance cloud2 deployment for jazz-cloud-server on stack dev (ECS + ALB + Route53)
