@@ -1,0 +1,19 @@
+{
+  "name": "jazz-cloud2-pulumi",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "push:image:local": "./push-cloud-server.sh",
+    "preview": "pulumi preview",
+    "up": "pulumi up"
+  },
+  "dependencies": {
+    "@pulumi/aws": "^6.83.2",
+    "@pulumi/pulumi": "^3.220.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  }
+}

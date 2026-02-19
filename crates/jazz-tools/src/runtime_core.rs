@@ -1855,6 +1855,37 @@ mod tests {
     }
 
     #[test]
+    fn rc_query_settled_tier_empty_resolves() {
+        let mut s = create_3tier_rc();
+
+        let mut future =
+            s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "Query should be pending before Worker settlement"
+        );
+
+        // No rows inserted anywhere; query should still resolve once settled tier is reached.
+        pump_a_to_b(&mut s);
+        pump_b_to_a(&mut s);
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Ok(results)) => {
+                assert_eq!(
+                    results.len(),
+                    0,
+                    "Settled query with no rows should resolve to empty result"
+                );
+            }
+            Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+            Poll::Pending => panic!("Query should resolve after Worker QuerySettled"),
+        }
+    }
+
+    #[test]
     fn rc_subscribe_settled_tier() {
         let mut s = create_3tier_rc();
 

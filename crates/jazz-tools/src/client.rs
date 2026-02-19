@@ -190,7 +190,7 @@ impl JazzClient {
 
         // Spawn binary stream listener if connected to server
         let stream_listener_task = if let Some(ref conn) = server_connection {
-            let base_url = conn.base_url().to_string();
+            let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
             let stream_headers = conn.build_stream_headers();
@@ -198,7 +198,7 @@ impl JazzClient {
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
                 loop {
-                    let url = format!("{}/events?client_id={}", base_url, client_id_str);
+                    let url = conn_for_stream.stream_url(&client_id_str);
 
                     tracing::info!("Connecting to server event stream: {}", url);
 

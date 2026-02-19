@@ -2959,4 +2959,77 @@ mod tests {
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert_eq!(total_added, 1, "Should contain the one row");
     }
+
+    /// Test 6: One-shot query() with settled_tier resolves to empty snapshot after tier settle.
+    #[test]
+    fn query_one_shot_settled_tier_empty_results() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let mut client = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut storage = MemoryStorage::new();
+
+        // No rows inserted. Subscribe with settled_tier=Worker.
+        let query = QueryBuilder::new("items")
+            .branch(&client.branch_name().to_string())
+            .build();
+        let sub_id = client
+            .query_manager_mut()
+            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .unwrap();
+        client.process(&mut storage);
+
+        // No delivery before settled tier.
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "Should not resolve before QuerySettled"
+        );
+
+        // Send QuerySettled(Worker).
+        let query_id = QueryId(sub_id.0);
+        let server_id = ServerId::new();
+        client
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: PersistenceTier::Worker,
+                },
+            });
+        client.process(&mut storage);
+
+        // Should resolve with an empty snapshot.
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "Should deliver empty snapshot after QuerySettled(Worker)"
+        );
+        assert!(
+            matching.iter().all(|u| u.delta.is_empty()),
+            "Expected empty delta for empty snapshot"
+        );
+    }
 }
