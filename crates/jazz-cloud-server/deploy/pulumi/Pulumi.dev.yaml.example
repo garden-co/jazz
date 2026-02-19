@@ -1,0 +1,17 @@
+config:
+  jazz-cloud2:region: us-east-2
+  jazz-cloud2:awsPrimaryProfile: jazz2:staging
+  jazz-cloud2:awsDnsProfile: jazz2:shared
+  jazz-cloud2:allowedAccountId: "739068833263"
+  jazz-cloud2:domainName: cloud2.aws.cloud.jazz.tools
+  jazz-cloud2:containerImageRepository: 739068833263.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server
+  jazz-cloud2:containerImageTag: latest
+  # Alternative to awsDnsProfile:
+  # jazz-cloud2:route53DelegationRoleArn: arn:aws:iam::851454408348:role/jazz-route53-delegation-staging
+  # Alternatively:
+  # jazz-cloud2:containerImage: 739068833263.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server:latest
+  jazz-cloud2:dataVolumeSizeGiB: "100"
+  jazz-cloud2:instanceType: t3.large
+  # Set as secrets with `pulumi config set --secret`
+  # jazz-cloud2:internalApiSecret: ...
+  # jazz-cloud2:secretHashKey: ...
