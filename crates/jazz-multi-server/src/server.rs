@@ -329,7 +329,9 @@ impl Drop for WorkerPool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 enum AppStatus {
+    #[default]
     Active,
     Disabled,
 }
@@ -348,12 +350,6 @@ impl AppStatus {
             "disabled" => Some(Self::Disabled),
             _ => None,
         }
-    }
-}
-
-impl Default for AppStatus {
-    fn default() -> Self {
-        Self::Active
     }
 }
 

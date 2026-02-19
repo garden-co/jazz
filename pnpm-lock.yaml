@@ -23,6 +23,9 @@ importers:
       lefthook:
         specifier: ^2.0.15
         version: 2.0.15
+      next:
+        specifier: 16.1.6
+        version: 16.1.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       oxfmt:
         specifier: ^0.27.0
         version: 0.27.0
@@ -38,13 +41,13 @@ importers:
 
   crates: {}
 
-  crates/groove-napi:
+  crates/jazz-napi:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^2
         version: 2.18.4
 
-  crates/groove-wasm: {}
+  crates/jazz-wasm: {}
 
   docs:
     dependencies:
@@ -176,7 +179,7 @@ importers:
         version: 4.22.1
       jazz-napi:
         specifier: workspace:*
-        version: link:../../crates/groove-napi
+        version: link:../../crates/jazz-napi
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -199,9 +202,9 @@ importers:
 
   packages/jazz-tools:
     dependencies:
-      groove-wasm:
+      jazz-wasm:
         specifier: workspace:*
-        version: link:../../crates/groove-wasm
+        version: link:../../crates/jazz-wasm
       react:
         specifier: ^18 || ^19
         version: 19.2.4

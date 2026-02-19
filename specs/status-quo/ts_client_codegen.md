@@ -151,6 +151,20 @@ The TS runtime intentionally treats upstream attachment as replay boundary for s
 > `packages/jazz-tools/src/runtime/client.ts:572-663`
 > `packages/jazz-tools/src/worker/groove-worker.ts:152-241`
 
+## Part 7: React Bindings
+
+`jazz-tools` now ships first-party React bindings via the `jazz-tools/react` subpath export:
+
+- `JazzProvider` — async `createDb(config)` on mount, provides `Db` through context, calls `db.shutdown()` on unmount
+- `useDb()` — context hook returning `Db` (throws outside provider)
+- `useAll(query, tier?)` — `useSyncExternalStore` wrapper over `db.subscribeAll(...)`
+
+`useAll(query)` (no tier) returns `T[]` immediately from the synchronous initial subscription callback path. `useAll(query, tier)` returns `T[] | undefined` until the requested tier settles.
+
+> `packages/jazz-tools/package.json` (`./react` export)
+> `packages/jazz-tools/src/react/provider.tsx`
+> `packages/jazz-tools/src/react/use-all.ts`
+
 ## Test Coverage
 
 | Suite                        | Tests                       | Scope                                           |
@@ -171,3 +185,9 @@ The TS runtime intentionally treats upstream attachment as replay boundary for s
 > `examples/todo-client-localfirst-ts/schema/current.ts` (schema definition)
 > `examples/todo-client-localfirst-ts/schema/app.ts` (generated client)
 > `examples/todo-client-localfirst-ts/src/main.ts` (application code)
+
+`examples/todo-client-localfirst-react/` provides the same flow with the React bindings (`JazzProvider` + `useAll` + `useDb`), including browser e2e coverage.
+
+> `examples/todo-client-localfirst-react/src/App.tsx`
+> `examples/todo-client-localfirst-react/src/TodoList.tsx`
+> `examples/todo-client-localfirst-react/tests/browser/todo-app.test.tsx`

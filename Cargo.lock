@@ -313,9 +313,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.19.1"
+version = "3.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
+checksum = "5c6f81257d10a0f602a294ae4182251151ff97dbb504ef9afcdda4a64b24d9b4"
 
 [[package]]
 name = "byteorder"
@@ -1011,45 +1011,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "groove-napi"
-version = "0.1.0"
-dependencies = [
- "futures",
- "jazz-tools",
- "napi",
- "napi-build",
- "napi-derive",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "groove-wasm"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "jazz-tools",
- "jazz-wasm-tracing",
- "js-sys",
- "serde",
- "serde-wasm-bindgen 0.6.5",
- "serde_bytes",
- "serde_json",
- "smallvec",
- "tracing",
- "tsify",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "web-sys",
- "web-time",
-]
-
-[[package]]
 name = "guardian"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1525,6 +1486,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-napi"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "jazz-tools",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-tools"
 version = "2.0.0-alpha.0"
 dependencies = [
@@ -1556,6 +1531,31 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "jazz-wasm"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "jazz-tools",
+ "jazz-wasm-tracing",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "serde_bytes",
+ "serde_json",
+ "smallvec",
+ "tracing",
+ "tsify",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
  "web-time",
 ]
 
@@ -1873,9 +1873,9 @@ dependencies = [
 
 [[package]]
 name = "native-tls"
-version = "0.2.16"
+version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d5d26952a508f321b4d3d2e80e78fc2603eaefcdf0c30783867f19586518bdc"
+checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
 dependencies = [
  "libc",
  "log",
@@ -2016,7 +2016,7 @@ dependencies = [
  "rocksdb",
  "serde",
  "serde-wasm-bindgen 0.6.5",
- "surrealkv 0.20.1",
+ "surrealkv 0.20.2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2871,9 +2871,9 @@ dependencies = [
 
 [[package]]
 name = "surrealkv"
-version = "0.20.1"
+version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c4fc0342a7e1dce8078ee08aade1f092a39a672a6b6e840b63a66af9d694090"
+checksum = "a6c1dd97851edc773c24afb282d6a17eb1bc798fafac53ea0d2951458854d472"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2888,7 +2888,6 @@ dependencies = [
  "integer-encoding",
  "log",
  "lz4_flex 0.12.0",
- "memmap2",
  "parking_lot",
  "quick_cache",
  "rand 0.9.2",

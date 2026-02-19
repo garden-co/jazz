@@ -8,7 +8,7 @@ name = "jazz-multi-server"
 path = "src/main.rs"
 
 [dependencies]
-groove = { package = "jazz-tools", path = "../jazz-cli", features = [
+groove = { package = "jazz-tools", path = "../jazz-tools", features = [
   "surrealkv",
   "runtime-tokio",
   "transport",
