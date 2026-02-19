@@ -1,3 +1,23 @@
+Released Jazz 0.20.10:
+- Added optional restricted deletion mode for CoLists via schema permissions (`co.list().withPermission({ writer: "appendOnly" })`), so only manager/admin roles can delete when append-only mode is enabled.
+- Added periodic full storage reconciliation to keep locally stored CoValues in sync with the server, with interruption handling and resume support.
+- Improved sync load handling by prioritizing pending loads, fixing in-flight load tracking, and ensuring peers always reply to load requests even when there is no content delta.
+- Added richer observability for sync and transport internals, including queue/load metrics and WebSocket ping-delay metadata/logging.
+- Improved reconciliation and sync performance across storage adapters by reducing unnecessary content loading, optimizing SQLite reconciliation queries, and refining batch/ack flow behavior.
+- Introduced runtime validation modes for write operations  (`strict` and `loose`) and app-level defaults via `setDefaultValidationMode()`. The current default remains `loose` (invalid writes still apply but emit a warning), and moving to `strict` is encouraged ahead of a future default change.
+- Added contextual hints when CoValues fail to load due to sync configuration (`when: "never"` or `when: "signedUp"` restrictions).
+- Added an optional `navigation` prop to `JazzSvelteProvider` to wait for pending CoValue syncs before SvelteKit navigations, reducing stale data on SSR pages.
+- Throw immediately when calling `.create()` in groups where the current user does not have write permissions.
+- Reused Expo and OP-SQLite DB clients across multiple Jazz providers to avoid duplicate clients.
+- Replaced `@manuscripts/prosemirror-recreate-steps` with a local implementation to remove transitive vulnerabilities.
+- **BREAKING:** Removed legacy `coField` and `Encoders` exports and completed migration to runtime schema descriptors. Apps using old schema APIs should migrate to current `co`/Zod-based schemas.
+- **BREAKING:** On CoMap instances, the `in` operator now returns `true` for schema-defined keys even when the value is unset/deleted. Use `coMap.$jazz.has("key")` to check whether a value is actually set. Also fixed Hermes V1 proxy invariant issues by making internal CoValue property definitions configurable.
+- Bugfix: fixed support for React Native 0.84
+- Bugfix: fixed CoValues getting stuck in loading state with persistent peers by marking closed peers unavailable after a grace timeout and not treating `KNOWN`+`header: true` as completion without content.
+
+Released Jazz 0.20.9:
+- Bugfix: revert the Expo db adapter to use withTransactionAsync instead of withExclusiveTransactionAsync
+
 Released Jazz 0.20.8:
 - Improved FileStream base64 encoding performance. Up to **20x faster** in `asBase64` conversion on React Native and around **5x faster** blob conversions on all the platforms.
 - Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing for streaming values
