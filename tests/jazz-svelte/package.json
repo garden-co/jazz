@@ -14,7 +14,8 @@
     "test": "vitest",
     "test:coverage": "vitest --coverage",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "sync": "jazz-run sync"
   },
   "files": [
     "dist",
@@ -51,6 +52,7 @@
     "typescript": "catalog:default",
     "virtua": "^0.41.5",
     "vite": "^6.3.5",
+    "jazz-run": "workspace:*",
     "zod": "^4.1.11"
   },
   "dependencies": {

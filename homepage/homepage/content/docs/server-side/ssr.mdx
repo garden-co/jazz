@@ -127,6 +127,26 @@ The last step is to link to your server-rendered page from your `Festival` compo
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
+<ContentByFramework framework="svelte">
+## Syncing data before navigation [!framework=svelte]
+
+In some cases, especially on slow networks, and when navigating immediately after updating data, it is possible that updates to data may still be syncing to the sync server before the SSR agent renders the page. This results in old data appearing in the server-rendered page.
+
+To prevent this, you can pass SvelteKit's `beforeNavigate` and `goto` functions to the `JazzSvelteProvider` using the `navigation` prop. This automatically waits for any pending syncs to complete before allowing navigation.
+
+<FileName>src/routes/+layout.svelte</FileName>
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```svelte +layout-with-navigation.svelte
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4" title="Why do I have to do this manually?">
+  Since `$app/navigation` is a SvelteKit virtual module, you need to pass these to the Provider as props.
+
+The `navigation` prop can only be used in SvelteKit apps that use SSR.
+</Alert>
+</ContentByFramework>
+
 ## Start your app
 Let's fire up your app and see if it works!
 
