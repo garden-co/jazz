@@ -30,6 +30,7 @@ import {
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   inspect,
+  LocalValidationMode,
 } from "../internal.js";
 import type {
   BranchDefinition,
@@ -37,10 +38,15 @@ import type {
 } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
 import { JazzError } from "../subscribe/JazzError.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export interface CoValueClass<Value extends CoValue = CoValue> {
+export interface CoValueClass<
+  Value extends CoValue = CoValue,
+  Schema extends CoreCoValueSchema = CoreCoValueSchema,
+> {
+  coValueSchema?: Schema;
   /** @ignore */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   new (...args: any[]): Value;
@@ -465,17 +471,37 @@ export function isAnonymousAgentInstance(
   return TypeSym in instance && instance[TypeSym] === "Anonymous";
 }
 
+export type CoValueCreateOptions<
+  MoreOptions extends object = {},
+  Owner extends Group | Account = Group,
+> =
+  | undefined
+  | Owner
+  | ((
+      | {
+          owner: Owner;
+          // we want to have explicit owner if unique is provided
+          unique: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
+      | {
+          owner?: Owner;
+          unique?: undefined;
+          validation?: LocalValidationMode;
+        }
+    ) &
+      MoreOptions);
+
+export type CoValueCreateOptionsInternal = CoValueCreateOptions<
+  {
+    onCreate?: OnCreateCallback;
+    firstComesWins?: boolean;
+  },
+  Account | Group
+>;
+
 export function parseCoValueCreateOptions(
-  options:
-    | {
-        owner?: Account | Group;
-        unique?: CoValueUniqueness["uniqueness"];
-        onCreate?: OnCreateCallback;
-        firstComesWins?: boolean;
-      }
-    | Account
-    | Group
-    | undefined,
+  options: CoValueCreateOptionsInternal,
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;

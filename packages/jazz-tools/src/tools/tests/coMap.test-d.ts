@@ -274,6 +274,39 @@ describe("CoMap", async () => {
       // @ts-expect-error - x is not a valid property
       Person.create({ name: "John", age: 30, xtra: 1 });
     });
+
+    test("create options", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      Person.create({ name: "John" });
+      Person.create({ name: "John" }, Group.create());
+      Person.create({ name: "John" }, {});
+      Person.create({ name: "John" }, { owner: Group.create() });
+      Person.create(
+        { name: "John" },
+        { owner: Group.create(), unique: "test" },
+      );
+
+      // @ts-expect-error - owner is required if unique is provided
+      Person.create({ name: "John" }, { unique: "test" });
+
+      // this is deprecated but valid
+      Person.create({ name: "John" }, Account.getMe());
+      Person.create(
+        { name: "John" },
+        { owner: Account.getMe(), unique: "test" },
+      );
+
+      Person.create({ name: "John" }, { validation: "loose" });
+      Person.create(
+        { name: "John" },
+        { owner: Group.create(), validation: "loose" },
+      );
+      // @ts-expect-error - owner is required if unique is provided
+      Person.create({ name: "John" }, { unique: "test", validation: "loose" });
+    });
   });
 
   describe("Mutation", () => {

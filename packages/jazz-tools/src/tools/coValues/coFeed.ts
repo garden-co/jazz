@@ -30,7 +30,6 @@ import {
   RefsToResolveStrict,
   Resolved,
   Schema,
-  SchemaFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -40,9 +39,7 @@ import {
   CoValueJazzApi,
   ItemsSym,
   Ref,
-  SchemaInit,
   accessChildById,
-  coField,
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
@@ -52,7 +49,25 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreFileStreamSchema,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
+import {
+  CoreCoFeedSchema,
+  createCoreCoFeedSchema,
+} from "../implementation/zodSchema/schemaTypes/CoFeedSchema.js";
+import {
+  executeValidation,
+  GlobalValidationMode,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
+import {
+  expectArraySchema,
+  normalizeZodSchema,
+} from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
+import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -96,29 +111,8 @@ export { CoFeed as CoStream };
  * @category CoValues
  */
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
+  static coValueSchema?: CoreCoFeedSchema;
   declare $jazz: CoFeedJazzApi<this>;
-
-  /**
-   * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `coField.ref`.
-   *
-   * @example
-   * ```ts
-   * class ColorFeed extends CoFeed.Of(coField.string) {}
-   * class AnimalFeed extends CoFeed.Of(coField.ref(Animal)) {}
-   * ```
-   *
-   * @category Declaration
-   */
-  static Of<Item>(item: Item): typeof CoFeed<Item> {
-    const cls = class CoFeedOf extends CoFeed<Item> {
-      [coField.items] = item;
-    };
-
-    cls._schema ||= {};
-    cls._schema[ItemsSym] = (item as any)[SchemaInit];
-
-    return cls;
-  }
 
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
@@ -128,10 +122,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
-  /** @internal */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static _schema: any;
-
   /**
    * The current account's view of this `CoFeed`
    * @category Content
@@ -203,10 +193,15 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   /** @internal */
   constructor(options: { fromRaw: RawCoStream }) {
     super();
+    const coFeedSchema = assertCoValueSchema(
+      this.constructor,
+      "CoFeed",
+      "load",
+    );
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoFeedJazzApi(this, options.fromRaw),
+        value: new CoFeedJazzApi(this, options.fromRaw, coFeedSchema),
         enumerable: false,
         configurable: true,
       },
@@ -223,15 +218,9 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          firstComesWins?: boolean;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
+    const coFeedSchema = assertCoValueSchema(this, "CoFeed", "create");
     const { owner, uniqueness, firstComesWins } =
       parseCoValueCreateOptions(options);
     const initMeta = firstComesWins ? { fww: "init" } : undefined;
@@ -239,8 +228,20 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     const processedInit: JsonValue[] = [];
 
     if (init) {
-      // @ts-expect-error - _schema is not defined on the class
-      const itemDescriptor = this._schema[ItemsSym] as Schema;
+      const validation =
+        options && typeof options === "object" && "validation" in options
+          ? options.validation
+          : undefined;
+      const validationMode = resolveValidationMode(validation);
+
+      // Validate using the full schema - init is an array, so it will match the array branch
+      // of the union (instanceof CoFeed | array of items)
+      if (validationMode !== "loose") {
+        const fullSchema = coFeedSchema.getValidationSchema();
+        executeValidation(fullSchema, init, validationMode) as typeof init;
+      }
+
+      const itemDescriptor = coFeedSchema.getDescriptorsSchema();
 
       for (let index = 0; index < init.length; index++) {
         const item = init[index];
@@ -256,6 +257,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
                   firstComesWins,
                 }
               : undefined,
+            validationMode,
           ),
         );
       }
@@ -337,7 +339,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     [key: string]: unknown;
     in: { [key: string]: unknown };
   } {
-    const itemDescriptor = this.$jazz.schema[ItemsSym] as Schema;
+    const itemDescriptor = this.$jazz.getItemsDescriptor();
     const mapper =
       itemDescriptor === "json"
         ? (v: unknown) => v
@@ -375,10 +377,11 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static schema<V extends CoFeed>(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this: { new (...args: any): V } & typeof CoFeed,
-    def: { [ItemsSym]: V["$jazz"]["schema"][ItemsSym] },
+    def: {
+      [ItemsSym]: CoFieldInit<V extends CoFeed<infer Item> ? Item : never>;
+    },
   ) {
-    this._schema ||= {};
-    Object.assign(this._schema, def);
+    this.coValueSchema = createCoreCoFeedSchema(def[ItemsSym]);
   }
 
   /**
@@ -436,6 +439,7 @@ function processCoFeedItem<F extends CoFeed>(
     fieldName: string;
     firstComesWins: boolean;
   },
+  validationMode?: GlobalValidationMode,
 ) {
   if (itemDescriptor === "json") {
     return item as JsonValue;
@@ -454,6 +458,7 @@ function processCoFeedItem<F extends CoFeed>(
         newOwnerStrategy,
         onCreate,
         unique,
+        validationMode,
       );
       refId = coValue.$jazz.id;
     }
@@ -467,8 +472,17 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   constructor(
     private coFeed: F,
     public raw: RawCoStream,
+    private coFeedSchema: CoreCoFeedSchema,
   ) {
     super(coFeed);
+  }
+
+  private getItemSchema(): z.ZodType {
+    const fieldSchema = expectArraySchema(
+      this.coFeedSchema.getValidationSchema(),
+    ).element;
+
+    return normalizeZodSchema(fieldSchema);
   }
 
   get owner(): Group {
@@ -496,15 +510,42 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * @category Content
    */
   push(...items: CoFieldInit<CoFeedItem<F>>[]): void {
+    const validationMode = resolveValidationMode();
+    if (validationMode !== "loose" && this.coFeedSchema) {
+      const schema = z.array(this.getItemSchema());
+      executeValidation(schema, items, validationMode) as CoFieldInit<
+        CoFeedItem<F>
+      >[];
+    }
+    this.pushLoose(...items);
+  }
+
+  /**
+   * Push items to this `CoFeed` without applying schema validation.
+   *
+   * @category Content
+   */
+  pushLoose(...items: CoFieldInit<CoFeedItem<F>>[]): void {
     for (const item of items) {
-      this.pushItem(item);
+      this.pushItem(item, { validationMode: "loose" });
     }
   }
 
-  private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
-    const itemDescriptor = this.schema[ItemsSym] as Schema;
+  private pushItem(
+    item: CoFieldInit<CoFeedItem<F>>,
+    { validationMode }: { validationMode?: LocalValidationMode },
+  ) {
+    const itemDescriptor = this.getItemsDescriptor();
 
-    this.raw.push(processCoFeedItem(itemDescriptor, item, this.owner));
+    this.raw.push(
+      processCoFeedItem(
+        itemDescriptor,
+        item,
+        this.owner,
+        undefined,
+        validationMode,
+      ),
+    );
   }
 
   /**
@@ -562,15 +603,8 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * Get the descriptor for the items in the `CoFeed`
    * @internal
    */
-  getItemsDescriptor(): Schema | undefined {
-    return this.schema[ItemsSym];
-  }
-
-  /** @internal */
-  get schema(): {
-    [ItemsSym]: SchemaFor<CoFeedItem<F>> | any;
-  } {
-    return (this.coFeed.constructor as typeof CoFeed)._schema;
+  getItemsDescriptor(): Schema {
+    return this.coFeedSchema.getDescriptorsSchema();
   }
 }
 
@@ -663,7 +697,7 @@ export const CoStreamPerAccountProxyHandler = (
         rawEntry,
         innerTarget.$jazz.loadedAs,
         key as unknown as ID<Account>,
-        innerTarget.$jazz.schema[ItemsSym],
+        innerTarget.$jazz.getItemsDescriptor(),
       );
 
       Object.defineProperty(entry, "all", {
@@ -680,7 +714,7 @@ export const CoStreamPerAccountProxyHandler = (
                 rawEntry.value,
                 innerTarget.$jazz.loadedAs,
                 key as unknown as ID<Account>,
-                innerTarget.$jazz.schema[ItemsSym],
+                innerTarget.$jazz.getItemsDescriptor(),
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -732,7 +766,7 @@ const CoStreamPerSessionProxyHandler = (
         cojsonInternals.isAccountID(by)
           ? (by as unknown as ID<Account>)
           : undefined,
-        innerTarget.$jazz.schema[ItemsSym],
+        innerTarget.$jazz.getItemsDescriptor(),
       );
 
       Object.defineProperty(entry, "all", {
@@ -749,7 +783,7 @@ const CoStreamPerSessionProxyHandler = (
                 cojsonInternals.isAccountID(by)
                   ? (by as unknown as ID<Account>)
                   : undefined,
-                innerTarget.$jazz.schema[ItemsSym],
+                innerTarget.$jazz.getItemsDescriptor(),
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -802,6 +836,8 @@ export class FileStream extends CoValueBase implements CoValue {
 
   /** @category Type Helpers */
   declare [TypeSym]: "BinaryCoStream";
+
+  static coValueSchema?: CoreFileStreamSchema;
 
   constructor(
     options:

@@ -19,6 +19,9 @@ import {
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  isCoValueSchema,
+  type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -33,6 +36,11 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
   CoMapInstanceCoValuesMaybeLoaded<Shape>
@@ -50,7 +58,44 @@ export class CoMapSchema<
   builtin = "CoMap" as const;
   shape: Shape;
   catchAll?: CatchAll;
+  #descriptorsSchema: CoMapDescriptorsSchema | undefined = undefined;
   getDefinition: () => CoMapSchemaDefinition;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const plainShape: Record<string, z.ZodTypeAny> = {};
+
+    for (const key in this.shape) {
+      const item = this.shape[key];
+      if (isCoValueSchema(item)) {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => generateValidationSchemaFromItem(item),
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        plainShape[key] = generateValidationSchemaFromItem(item);
+      }
+    }
+
+    let validationSchema = z.strictObject(plainShape);
+    if (this.catchAll) {
+      validationSchema = validationSchema.catchall(
+        generateValidationSchemaFromItem(
+          this.catchAll as unknown as AnyZodOrCoValueSchema,
+        ),
+      );
+    }
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoMap);
+
+    return this.#validationSchema;
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -77,30 +122,45 @@ export class CoMapSchema<
     this.getDefinition = coreSchema.getDefinition;
   }
 
+  getDescriptorsSchema = (): CoMapDescriptorsSchema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    const descriptorShape: Record<string, Schema> = {};
+    for (const key of Object.keys(this.shape)) {
+      const field = this.shape[key as keyof Shape];
+      descriptorShape[key] = resolveSchemaField(field as any);
+    }
+
+    const descriptorCatchall =
+      this.catchAll === undefined
+        ? undefined
+        : resolveSchemaField(this.catchAll as any);
+
+    this.#descriptorsSchema = {
+      shape: descriptorShape,
+      catchall: descriptorCatchall,
+    };
+
+    return this.#descriptorsSchema;
+  };
+
   create(
     init: CoMapSchemaInit<Shape>,
-    options?:
-      | {
-          owner?: Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoMapSchemaInit<Shape>,
-    options?:
-      | {
-          owner?: Owner;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Owner,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   create(init: any, options?: any) {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );
+
     return this.coValueClass.create(init, optionsWithPermissions);
   }
 
@@ -466,11 +526,36 @@ export function createCoreCoMapSchema<
   Shape extends z.core.$ZodLooseShape,
   CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
 >(shape: Shape, catchAll?: CatchAll): CoreCoMapSchema<Shape, CatchAll> {
+  let descriptorsSchema: CoMapDescriptorsSchema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoMap" as const,
     shape,
     catchAll,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      const descriptorShape: Record<string, Schema> = {};
+      for (const key of Object.keys(shape)) {
+        const field = shape[key as keyof Shape];
+        descriptorShape[key] = resolveSchemaField(field as any);
+      }
+
+      const descriptorCatchall =
+        catchAll === undefined
+          ? undefined
+          : resolveSchemaField(catchAll as any);
+
+      descriptorsSchema = {
+        shape: descriptorShape,
+        catchall: descriptorCatchall,
+      };
+
+      return descriptorsSchema;
+    },
     getDefinition: () => ({
       get shape() {
         return shape;
@@ -497,6 +582,7 @@ export function createCoreCoMapSchema<
       },
     }),
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -508,6 +594,11 @@ export interface CoMapSchemaDefinition<
   catchall?: CatchAll;
 }
 
+export type CoMapDescriptorsSchema = {
+  shape: Record<string, Schema>;
+  catchall?: Schema;
+};
+
 // less precise version to avoid circularity issues and allow matching against
 export interface CoreCoMapSchema<
   Shape extends z.core.$ZodLooseShape = z.core.$ZodLooseShape,
@@ -516,6 +607,7 @@ export interface CoreCoMapSchema<
   builtin: "CoMap";
   shape: Shape;
   catchAll?: CatchAll;
+  getDescriptorsSchema: () => CoMapDescriptorsSchema;
   getDefinition: () => CoMapSchemaDefinition;
 }
 

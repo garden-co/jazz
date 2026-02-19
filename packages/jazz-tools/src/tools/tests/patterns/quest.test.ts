@@ -36,16 +36,21 @@ beforeEach(async () => {
 describe("QuestSchema", () => {
   test("should fill categories array with category when categories is undefined", async () => {
     // Create a quest without categories
-    // @ts-expect-error -  (simulating old data)
-    const quest = QuestSchema.create({
-      title: "Test Quest",
-      description: "A test quest description",
-      imageUrl: "https://example.com/image.jpg",
-      twigs: 100,
-      difficulty: "medium",
-      category: "adventure",
-      completed: false,
-    });
+    const quest = QuestSchema.create(
+      // @ts-expect-error - (simulating old data)
+      {
+        title: "Test Quest",
+        description: "A test quest description",
+        imageUrl: "https://example.com/image.jpg",
+        twigs: 100,
+        difficulty: "medium",
+        category: "adventure",
+        completed: false,
+      },
+      {
+        validation: "loose",
+      },
+    );
 
     // Initially categories should be undefined
     expect(quest.categories).toBeUndefined();

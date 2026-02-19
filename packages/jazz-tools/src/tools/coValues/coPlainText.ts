@@ -19,13 +19,17 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CorePlainTextSchema,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
 import { Account } from "./account.js";
 import { getCoValueOwner, Group } from "./group.js";
+import { type CoreRichTextSchema } from "../implementation/zodSchema/schemaTypes/RichTextSchema.js";
 
 export type TextPos = OpID;
 
 export class CoPlainText extends String implements CoValue {
+  static coValueSchema?: CorePlainTextSchema | CoreRichTextSchema;
   declare [TypeSym]: "CoPlainText";
 
   declare $jazz: CoTextJazzApi<this>;
@@ -102,7 +106,7 @@ export class CoPlainText extends String implements CoValue {
   static create<T extends CoPlainText>(
     this: CoValueClass<T>,
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     return new this({ text, owner });

@@ -14,6 +14,8 @@ import {
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -28,6 +30,12 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -36,6 +44,7 @@ export class CoListSchema<
 {
   collaborative = true as const;
   builtin = "CoList" as const;
+  #descriptorsSchema: Schema | undefined = undefined;
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -53,32 +62,45 @@ export class CoListSchema<
     return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
   }
 
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const validationSchema = z.array(
+      generateValidationSchemaFromItem(this.element),
+    );
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoList);
+    return this.#validationSchema;
+  };
+
   constructor(
     public element: T,
     private coValueClass: typeof CoList,
   ) {}
 
+  getDescriptorsSchema = (): Schema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    this.#descriptorsSchema = resolveSchemaField(this.element as any);
+
+    return this.#descriptorsSchema;
+  };
+
   create(
     items: CoListSchemaInit<T>,
-    options?:
-      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoListInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     items: CoListSchemaInit<T>,
-    options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoListInstance<T>;
-  create(
-    items: CoListSchemaInit<T>,
-    options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
-  ): CoListInstance<T> {
+  create(items: any, options?: any): CoListInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
@@ -313,11 +335,23 @@ export class CoListSchema<
 export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoreCoListSchema<T> {
+  let descriptorsSchema: Schema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoList" as const,
     element,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      descriptorsSchema = resolveSchemaField(element as any);
+
+      return descriptorsSchema;
+    },
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -327,6 +361,7 @@ export interface CoreCoListSchema<
 > extends CoreCoValueSchema {
   builtin: "CoList";
   element: T;
+  getDescriptorsSchema: () => Schema;
 }
 
 export type CoListInstance<T extends AnyZodOrCoValueSchema> = CoList<

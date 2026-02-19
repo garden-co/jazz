@@ -37,10 +37,8 @@ import {
   Account,
   CoValueBase,
   CoValueJazzApi,
-  ItemsSym,
   Ref,
   RegisteredSchemas,
-  SchemaInit,
   accessChildById,
   accessChildByKey,
   ensureCoValueLoaded,
@@ -53,7 +51,20 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoMapSchema,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
+import {
+  expectObjectSchema,
+  normalizeZodSchema,
+} from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
+import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
 
 export type CoMapEdit<V> = {
   value?: V;
@@ -69,27 +80,24 @@ export type CoMapEdits<M extends CoMap> = {
   [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
 };
 
-type CoMapFieldSchema = {
-  [key: string]: Schema;
-} & { [ItemsSym]?: Schema };
-
 /**
  * CoMaps are collaborative versions of plain objects, mapping string-like keys to values.
  *
  * @categoryDescription Declaration
  * Declare your own CoMap schemas by subclassing `CoMap` and assigning field schemas with `co`.
  *
- * Optional `coField.ref(...)` fields must be marked with `{ optional: true }`.
+ * Optional refs can be declared with `co.optional(...)`.
  *
  * ```ts
- * import { coField, CoMap } from "jazz-tools";
+ * import { co, z } from "jazz-tools";
  *
- * class Person extends CoMap {
- *   name = coField.string;
- *   age = coField.number;
- *   pet = coField.ref(Animal);
- *   car = coField.ref(Car, { optional: true });
- * }
+ * const Pet = co.map({ name: z.string() });
+ * const Person = co.map({
+ *   name: z.string(),
+ *   age: z.number(),
+ *   pet: Pet,
+ *   car: co.optional(Pet),
+ * });
  * ```
  *
  * @categoryDescription Content
@@ -122,8 +130,7 @@ export class CoMap extends CoValueBase implements CoValue {
    */
   declare $jazz: CoMapJazzApi<this>;
 
-  /** @internal */
-  static _schema: CoMapFieldSchema;
+  static coValueSchema?: CoreCoMapSchema;
 
   /** @internal */
   constructor(options: { fromRaw: RawCoMap } | undefined) {
@@ -133,9 +140,14 @@ export class CoMap extends CoValueBase implements CoValue {
 
     if (options) {
       if ("fromRaw" in options) {
+        const coMapSchema = assertCoValueSchema(
+          this.constructor,
+          "CoMap",
+          "load",
+        );
         Object.defineProperties(this, {
           $jazz: {
-            value: new CoMapJazzApi(proxy, () => options.fromRaw),
+            value: new CoMapJazzApi(proxy, () => options.fromRaw, coMapSchema),
             enumerable: false,
             configurable: true,
           },
@@ -171,17 +183,11 @@ export class CoMap extends CoValueBase implements CoValue {
   static create<M extends CoMap>(
     this: CoValueClass<M>,
     init: Simplify<CoMapInit_DEPRECATED<M>>,
-    options?:
-      | {
-          owner?: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
+    const coMapSchema = assertCoValueSchema(this, "CoMap", "create");
     const instance = new this();
-
-    return CoMap._createCoMap(instance, init, options);
+    return CoMap._createCoMap(instance, coMapSchema, init, options);
   }
 
   /**
@@ -242,22 +248,28 @@ export class CoMap extends CoValueBase implements CoValue {
    */
   static _createCoMap<M extends CoMap>(
     instance: M,
+    schema: CoreCoMapSchema,
     init: Simplify<CoMapInit_DEPRECATED<M>>,
-    options?:
-      | {
-          owner?: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          firstComesWins?: boolean;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ): M {
+    const validationMode = resolveValidationMode(
+      options && "validation" in options ? options.validation : undefined,
+    );
+
+    if (schema && validationMode !== "loose") {
+      executeValidation(
+        schema.getValidationSchema(),
+        init,
+        validationMode,
+      ) as typeof init;
+    }
+
     const { owner, uniqueness, firstComesWins } =
       parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
       $jazz: {
-        value: new CoMapJazzApi(instance, () => raw),
+        value: new CoMapJazzApi(instance, () => raw, schema),
         enumerable: false,
         configurable: true,
       },
@@ -269,6 +281,7 @@ export class CoMap extends CoValueBase implements CoValue {
       owner,
       firstComesWins,
       uniqueness,
+      options && "validation" in options ? options.validation : undefined,
     );
 
     return instance;
@@ -284,6 +297,7 @@ export class CoMap extends CoValueBase implements CoValue {
     owner: Group,
     firstComesWins: boolean,
     uniqueness?: CoValueUniqueness,
+    validationMode?: LocalValidationMode,
   ) {
     const rawOwner = owner.$jazz.raw;
 
@@ -323,6 +337,7 @@ export class CoMap extends CoValueBase implements CoValue {
                       firstComesWins,
                     }
                   : undefined,
+                validationMode,
               );
               refId = coValue.$jazz.id;
             }
@@ -338,35 +353,6 @@ export class CoMap extends CoValueBase implements CoValue {
 
     const initMeta = firstComesWins ? { fww: "init" } : undefined;
     return rawOwner.createMap(rawInit, null, "private", uniqueness, initMeta);
-  }
-
-  /**
-   * Declare a Record-like CoMap schema, by extending `CoMap.Record(...)` and passing the value schema using `co`. Keys are always `string`.
-   *
-   * @example
-   * ```ts
-   * import { coField, CoMap } from "jazz-tools";
-   *
-   * class ColorToFruitMap extends CoMap.Record(
-   *  coField.ref(Fruit)
-   * ) {}
-   *
-   * // assume we have map: ColorToFruitMap
-   * // and strawberry: Fruit
-   * map["red"] = strawberry;
-   * ```
-   *
-   * @category Declaration
-   */
-  static Record<Value>(value: Value) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-    class RecordLikeCoMap extends CoMap {
-      [ItemsSym] = value;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-    interface RecordLikeCoMap extends Record<string, Value> {}
-
-    return RecordLikeCoMap;
   }
 
   /**
@@ -546,6 +532,7 @@ export class CoMap extends CoValueBase implements CoValue {
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
+      validation?: LocalValidationMode;
     },
   ): Promise<Settled<Resolved<M, R>>> {
     return internalLoadUnique(this, {
@@ -557,10 +544,13 @@ export class CoMap extends CoValueBase implements CoValue {
         (this as any).create(options.value, {
           owner: options.owner,
           unique: options.unique,
+          validation: options.validation,
         });
       },
       onUpdateWhenFound(value) {
-        value.$jazz.applyDiff(options.value);
+        value.$jazz.applyDiff(options.value, {
+          validation: options.validation,
+        });
       },
     });
   }
@@ -605,15 +595,40 @@ export class CoMap extends CoValueBase implements CoValue {
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
 class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
+  private descriptorCache = new Map<string, Schema | undefined>();
+
   constructor(
     private coMap: M,
     private getRaw: () => RawCoMap,
+    private coMapSchema: CoreCoMapSchema,
   ) {
     super(coMap);
   }
 
   get owner(): Group {
     return getCoValueOwner(this.coMap);
+  }
+
+  private getPropertySchema(key: string): z.ZodType {
+    const fullSchema = this.coMapSchema.getValidationSchema();
+    let objectValidation: z.ZodObject | undefined;
+
+    try {
+      objectValidation = expectObjectSchema(fullSchema);
+    } catch {
+      // Base/core schemas may expose a non-union validation schema (e.g. z.any()).
+      // In those cases we keep legacy dynamic behavior and skip strict per-field validation.
+      return z.any();
+    }
+
+    const fieldSchema =
+      objectValidation.shape[key] ?? objectValidation.def.catchall;
+
+    if (fieldSchema === undefined) {
+      throw new Error(`Field ${key} is not defined in the CoMap schema`);
+    }
+
+    return normalizeZodSchema(fieldSchema);
   }
 
   /**
@@ -635,10 +650,25 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @param key The key to set
    * @param value The value to set
+   * @param options Optional options for setting the value
    *
    * @category Content
    */
-  set<K extends CoKeys<M>>(key: K, value: CoFieldInit<M[K]>): void {
+  set<K extends CoKeys<M>>(
+    key: K,
+    value: CoFieldInit<M[K]>,
+    options?: { validation?: LocalValidationMode },
+  ): void {
+    // Validate the value based on the resolved validation mode
+    const validationMode = resolveValidationMode(options?.validation);
+    if (validationMode !== "loose" && this.coMapSchema) {
+      // Get the field schema for this specific key from the shape
+      const fieldSchema = this.getPropertySchema(key);
+      executeValidation(fieldSchema, value, validationMode) as CoFieldInit<
+        M[K]
+      >;
+    }
+
     const descriptor = this.getDescriptor(key as string);
 
     if (!descriptor) {
@@ -667,6 +697,8 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
             this.owner,
             newOwnerStrategy,
             onCreate,
+            undefined,
+            options?.validation,
           );
           refId = coValue.$jazz.id;
         }
@@ -699,11 +731,16 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @param newValues - The new values to apply to the CoMap. For collaborative values,
    * both CoValues and JSON values are supported.
+   * @param options Optional options for applying the diff.
+   * @param options.validation The validation mode to use. Defaults to "strict".
    * @returns The modified CoMap.
    *
    * @category Content
    */
-  applyDiff(newValues: Partial<CoMapInit<M>>): M {
+  applyDiff(
+    newValues: Partial<CoMapInit<M>>,
+    options?: { validation?: LocalValidationMode },
+  ): M {
     for (const key in newValues) {
       if (Object.prototype.hasOwnProperty.call(newValues, key)) {
         const tKey = key as keyof typeof newValues & keyof this;
@@ -716,13 +753,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
 
         if (descriptor === "json" || "encoded" in descriptor) {
           if (currentValue !== newValue) {
-            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>);
+            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>, options);
           }
         } else if (isRefEncoded(descriptor)) {
           const currentId = (currentValue as CoValue | undefined)?.$jazz.id;
           let newId = (newValue as CoValue | undefined)?.$jazz?.id;
           if (currentId !== newId) {
-            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>);
+            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>, options);
           }
         }
       }
@@ -790,11 +827,20 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    * @internal
    */
   getDescriptor(key: string): Schema | undefined {
-    return (
-      this.schema?.[key] ||
-      this.schema?.[ItemsSym] ||
-      (this.coMap as any)[ItemsSym]
-    );
+    if (this.descriptorCache.has(key)) {
+      return this.descriptorCache.get(key);
+    }
+
+    const descriptorsSchema = this.coMapSchema.getDescriptorsSchema();
+    const descriptor =
+      descriptorsSchema.shape[key] ?? descriptorsSchema.catchall;
+    if (descriptor) {
+      this.descriptorCache.set(key, descriptor);
+      return descriptor;
+    }
+
+    this.descriptorCache.set(key, undefined);
+    return undefined;
   }
 
   /**
@@ -890,11 +936,6 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   override get raw() {
     return this.getRaw();
   }
-
-  /** @internal */
-  get schema(): CoMapFieldSchema {
-    return (this.coMap.constructor as typeof CoMap)._schema;
-  }
 }
 
 export type CoKeys<Map extends object> = Exclude<
@@ -960,9 +1001,7 @@ export type CoMapInit<Map extends object> = {
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<CoMap> = {
   get(target, key, receiver) {
-    if (key === "_schema" || key === ItemsSym) {
-      return Reflect.get(target, key);
-    } else if (key in target) {
+    if (key in target) {
       return Reflect.get(target, key, receiver);
     } else {
       if (typeof key !== "string") {
@@ -989,17 +1028,6 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     }
   },
   set(target, key, value, receiver) {
-    if (
-      typeof key === "string" &&
-      typeof value === "object" &&
-      value !== null &&
-      SchemaInit in value
-    ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
-      return true;
-    }
-
     if (typeof key !== "string") {
       return Reflect.set(target, key, value, receiver);
     }
@@ -1011,21 +1039,10 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     throw Error("Cannot update a CoMap directly. Use `$jazz.set` instead.");
   },
   defineProperty(target, key, attributes) {
-    if (
-      "value" in attributes &&
-      typeof attributes.value === "object" &&
-      SchemaInit in attributes.value
-    ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key as string] =
-        attributes.value[SchemaInit];
-      return true;
-    } else {
-      return Reflect.defineProperty(target, key, attributes);
-    }
+    return Reflect.defineProperty(target, key, attributes);
   },
   ownKeys(target) {
-    const keys = Reflect.ownKeys(target).filter((k) => k !== ItemsSym);
+    const keys = Reflect.ownKeys(target);
 
     for (const key of target.$jazz.raw.keys()) {
       if (!keys.includes(key)) {

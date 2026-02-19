@@ -13,7 +13,13 @@ import {
   runWithoutActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  expectValidationError,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
+import { setDefaultValidationMode } from "../implementation/zodSchema/validationSettings.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -109,6 +115,47 @@ describe("Simple CoList operations", async () => {
     });
   });
 
+  test("create CoList with validation errors", () => {
+    const List = co.list(z.string());
+    expect(
+      // @ts-expect-error - number is not a string
+      () => List.create([2]),
+    ).toThrow();
+  });
+
+  test("create CoList with validation errors with loose validation", () => {
+    const List = co.list(z.string());
+    expect(
+      // @ts-expect-error - number is not a string
+      () => List.create([2], { validation: "loose" }),
+    ).not.toThrow();
+  });
+
+  test("CoList's items keep schema validation", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const List = co.list(Person);
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => List.create([{ name: 2 }]),
+    );
+
+    const list = List.create([{ name: "John" }]);
+    expect(list[0]?.name).toBe("John");
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => list[0]?.$jazz.set("name", 2),
+      [
+        expect.objectContaining({
+          message: "Invalid input: expected string, received number",
+        }),
+      ],
+    );
+  });
+
   test("list with nullable content", () => {
     const List = co.list(z.string().nullable());
     const list = List.create(["a", "b", "c", null]);
@@ -151,6 +198,60 @@ describe("Simple CoList operations", async () => {
     expect(coList).toEqual(list);
   });
 
+  test("loaded CoList keeps schema validation", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const List = co.list(Person);
+    const list = List.create([{ name: "John" }]);
+
+    const loadedList = await List.load(list.$jazz.id, {
+      resolve: { $each: true },
+    });
+    assertLoaded(loadedList);
+    expect(loadedList[0]?.name).toBe("John");
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => loadedList[0]?.$jazz.set("name", 2),
+      [
+        expect.objectContaining({
+          message: "Invalid input: expected string, received number",
+        }),
+      ],
+    );
+  });
+
+  test("loaded CoList keeps schema validation", async () => {
+    const Map = co.map({
+      list: co.list(
+        co.map({
+          name: z.string(),
+        }),
+      ),
+    });
+
+    const map = Map.create({
+      list: [{ name: "John" }, { name: "Jane" }],
+    });
+
+    const loadedMap = await Map.load(map.$jazz.id, {
+      resolve: { list: { $each: true } },
+    });
+    assertLoaded(loadedMap);
+    expect(loadedMap.list).toEqual([{ name: "John" }, { name: "Jane" }]);
+
+    expectValidationError(
+      // @ts-expect-error - number is not a person
+      () => loadedMap.list.$jazz.push(2),
+    );
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => loadedMap.list[0]?.$jazz.set("name", 2),
+    );
+  });
+
   describe("Mutation", () => {
     test("assignment", () => {
       const list = TestList.create(["bread", "butter", "onion"], {
@@ -159,6 +260,37 @@ describe("Simple CoList operations", async () => {
       list.$jazz.set(1, "margarine");
       expect(list.$jazz.raw.asArray()).toEqual(["bread", "margarine", "onion"]);
       expect(list[1]).toBe("margarine");
+    });
+
+    test("assignment with validation errors", () => {
+      const list = TestList.create(["bread", "butter", "onion"], {
+        owner: me,
+      });
+
+      expectValidationError(
+        // @ts-expect-error - number is not a string
+        () => list.$jazz.set(1, 2),
+        [
+          expect.objectContaining({
+            message: "Invalid input: expected string, received number",
+          }),
+        ],
+      );
+    });
+
+    test("assignment with validation errors with loose validation", () => {
+      const list = TestList.create(["bread", "butter", "onion"], {
+        owner: me,
+      });
+
+      list.$jazz.set(
+        1,
+        // @ts-expect-error - number is not a string
+        2,
+        { validation: "loose" },
+      );
+
+      expect(list[1]).toBe(2);
     });
 
     test("assignment with ref using CoValue", () => {
@@ -200,7 +332,9 @@ describe("Simple CoList operations", async () => {
       );
 
       expect(() => {
-        recipe.$jazz.set(1, undefined as unknown as Loaded<typeof Ingredient>);
+        recipe.$jazz.set(1, undefined as unknown as Loaded<typeof Ingredient>, {
+          validation: "loose",
+        });
       }).toThrow("Cannot set required reference 1 to undefined");
 
       expect(recipe[1]?.name).toBe("butter");
@@ -257,6 +391,42 @@ describe("Simple CoList operations", async () => {
           "onion",
           "cheese",
         ]);
+      });
+
+      test("push with validation errors", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.push(2),
+          [
+            expect.objectContaining({
+              message: "Invalid input: expected string, received number",
+            }),
+          ],
+        );
+
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.push("test", 2),
+        );
+
+        expect(list).toEqual(["bread", "butter", "onion"]);
+      });
+
+      test("push with validation errors with loose validation", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.pushLoose(2);
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.pushLoose("test", 2);
+
+        expect(list).toEqual(["bread", "butter", "onion", 2, "test", 2]);
       });
 
       test("push CoValue into list of CoValues", () => {
@@ -321,6 +491,42 @@ describe("Simple CoList operations", async () => {
         const list = Schema.create(["bread", "butter", "onion"]);
         list.$jazz.unshift("lettuce");
         expect(list[0]?.toString()).toBe("lettuce");
+      });
+
+      test("unshift with validation errors", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.unshift(2),
+          [
+            expect.objectContaining({
+              message: "Invalid input: expected string, received number",
+            }),
+          ],
+        );
+
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.unshift("test", 2),
+        );
+
+        expect(list).toEqual(["bread", "butter", "onion"]);
+      });
+
+      test("unshift with validation errors with loose validation", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.unshiftLoose(2);
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.unshiftLoose("test", 2);
+
+        expect(list).toEqual([2, "test", 2, "bread", "butter", "onion"]);
       });
     });
 
@@ -414,6 +620,53 @@ describe("Simple CoList operations", async () => {
         const list = Schema.create(["bread", "butter", "onion"]);
         list.$jazz.splice(1, 0, "lettuce");
         expect(list[1]?.toString()).toBe("lettuce");
+      });
+
+      test("splice with validation errors", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.splice(1, 0, 2),
+          [
+            expect.objectContaining({
+              message: "Invalid input: expected string, received number",
+            }),
+          ],
+        );
+
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.splice(0, 1, "test", 2),
+        );
+
+        expect(list).toEqual(["bread", "butter", "onion"]);
+      });
+
+      test("spliceLoose removes and returns deleted items", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        const deleted = list.$jazz.spliceLoose(1, 1);
+
+        expect(deleted).toEqual(["butter"]);
+        expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
+      });
+
+      test("spliceLoose with validation errors with loose validation", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.spliceLoose(1, 0, 2);
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.spliceLoose(0, 1, "test", 2);
+
+        expect(list).toEqual(["test", 2, 2, "butter", "onion"]);
       });
     });
 
@@ -597,7 +850,7 @@ describe("CoList applyDiff operations", async () => {
     list.$jazz.applyDiff([row1, row2, winningRow]);
     expect(list.length).toBe(3);
     expect(list[2]?.toJSON()).toEqual(["O", "O", "X"]);
-    // Only elements with different $jazz.id are replaced
+    // elements with different $jazz.id are replaced
     expect(list[0]?.$jazz.id).toBe(row1?.$jazz.id);
     expect(list[1]?.$jazz.id).toBe(row2?.$jazz.id);
     expect(list[2]?.$jazz.id).not.toBe(row3?.$jazz.id);
@@ -689,6 +942,79 @@ describe("CoList applyDiff operations", async () => {
     // Test partial update
     list.$jazz.applyDiff(["e", "c", "new", "y", "x"]);
     expect(list.$jazz.raw.asArray()).toEqual(["e", "c", "new", "y", "x"]);
+  });
+
+  test("applyDiff respects schema validation in strict mode", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const list = PersonList.create([{ name: "John" }], { owner: me });
+
+    expect(list.length).toBe(1);
+
+    expectValidationError(() =>
+      list.$jazz.applyDiff([
+        { name: "John" },
+        { name: 123 as unknown as string },
+      ]),
+    );
+
+    // The list should remain unchanged after failed validation
+    expect(list.length).toBe(1);
+    expect(list[0]?.name).toBe("John");
+  });
+
+  test("applyDiff respects local loose validation mode", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const list = PersonList.create([{ name: "John" }], { owner: me });
+
+    list.$jazz.applyDiff(
+      [
+        { name: "John" },
+        {
+          name: 123 as unknown as string,
+        },
+      ],
+      { validation: "loose" },
+    );
+
+    // Invalid data is accepted when validation is globally loose
+    expect(list.length).toBe(2);
+    expect(list[0]?.name).toBe("John");
+    expect(list[1]?.name).toBe(123 as unknown as string);
+  });
+
+  test("applyDiff respects global loose validation mode", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const list = PersonList.create([{ name: "John" }], { owner: me });
+
+    setDefaultValidationMode("loose");
+
+    try {
+      list.$jazz.applyDiff([
+        { name: "John" },
+        {
+          name: 123 as unknown as string,
+        },
+      ]);
+
+      // Invalid data is accepted when validation is globally loose
+      expect(list.length).toBe(2);
+      expect(list[0]?.name).toBe("John");
+      expect(list[1]?.name).toBe(123 as unknown as string);
+    } finally {
+      setDefaultValidationMode("strict");
+    }
   });
 
   test("applyDiff should emit a single update", () => {
@@ -1142,7 +1468,7 @@ describe("CoList subscription", async () => {
       (update) => {
         spy(update);
 
-        // The update should be triggered only when the new item is loaded
+        // The update should be triggered when the new item is loaded
         for (const item of update) {
           expect(item).toBeDefined();
         }
@@ -1232,6 +1558,268 @@ describe("lastUpdatedAt", () => {
     list.$jazz.push("Jane");
 
     expect(list.$jazz.lastUpdatedAt).not.toEqual(updatedAt);
+  });
+});
+
+describe("CoList proxy traps", () => {
+  test(".values() returns the same values as Object.values()", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create([]);
+    list.$jazz.push("bread");
+    list.$jazz.push("butter");
+    list.$jazz.push("onion");
+
+    const valuesFromMethod = [...list.values()];
+    const valuesFromObject = Object.values(list);
+    expect(valuesFromMethod).toEqual(valuesFromObject);
+    expect(valuesFromMethod).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test(".values().map() returns the same values as .map()", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create([]);
+    list.$jazz.push("bread");
+    list.$jazz.push("butter");
+    list.$jazz.push("onion");
+
+    const valuesFromMethod = [...list.values().map((v) => v.toUpperCase())];
+    const valuesFromObject = list.map((v) => v.toUpperCase());
+
+    expect(valuesFromMethod).toEqual(valuesFromObject);
+    expect(valuesFromMethod).toEqual(["BREAD", "BUTTER", "ONION"]);
+  });
+
+  test(".keys() returns numeric indices", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const keys = [...list.keys()];
+
+    expect(keys).toEqual([0, 1, 2]);
+  });
+
+  test(".entries() returns index-value pairs", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const entries = [...list.entries()];
+
+    expect(entries).toEqual([
+      [0, "bread"],
+      [1, "butter"],
+      [2, "onion"],
+    ]);
+  });
+
+  test("for...of iteration works correctly", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const items: string[] = [];
+    for (const item of list) {
+      items.push(item);
+    }
+
+    expect(items).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test("spread operator works correctly", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const items = [...list];
+
+    expect(items).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test("Array.from works correctly", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const items = Array.from(list);
+
+    expect(items).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test(".values() works with CoValue references", () => {
+    const Dog = co.map({
+      name: z.string(),
+    });
+    const DogList = co.list(Dog);
+
+    const list = DogList.create([
+      { name: "Rex" },
+      { name: "Fido" },
+      { name: "Buddy" },
+    ]);
+
+    const valuesFromMethod = [...list.values()];
+    const valuesFromObject = Object.values(list);
+
+    expect(valuesFromMethod.length).toBe(3);
+    expect(valuesFromMethod.map((d) => d?.name)).toEqual([
+      "Rex",
+      "Fido",
+      "Buddy",
+    ]);
+    expect(valuesFromMethod).toEqual(valuesFromObject);
+  });
+
+  test(".values() works after ensureLoaded", async () => {
+    const Task = co.map({
+      title: z.string(),
+    });
+    const TaskList = co.list(Task);
+
+    const list = TaskList.create([
+      { title: "Task 1" },
+      { title: "Task 2" },
+      { title: "Task 3" },
+    ]);
+
+    const loadedList = await list.$jazz.ensureLoaded({
+      resolve: { $each: true },
+    });
+
+    const valuesFromMethod = [...loadedList.values()];
+    const valuesFromObject = Object.values(loadedList);
+
+    expect(valuesFromMethod.length).toBe(3);
+    expect(valuesFromMethod.map((t) => t.title)).toEqual([
+      "Task 1",
+      "Task 2",
+      "Task 3",
+    ]);
+    expect(valuesFromMethod.map((t) => t.$jazz.id)).toEqual(
+      valuesFromObject.map((t) => t.$jazz.id),
+    );
+  });
+
+  test(".values() works on remotely loaded list", async () => {
+    const Task = co.map({
+      title: z.string(),
+    });
+    const TaskList = co.list(Task);
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const list = TaskList.create(
+      [{ title: "Task 1" }, { title: "Task 2" }, { title: "Task 3" }],
+      group,
+    );
+
+    const userB = await createJazzTestAccount();
+
+    const loadedList = await TaskList.load(list.$jazz.id, {
+      resolve: { $each: true },
+      loadAs: userB,
+    });
+
+    assertLoaded(loadedList);
+
+    const valuesFromMethod = [...loadedList.values()];
+    const valuesFromObject = Object.values(loadedList);
+
+    expect(valuesFromMethod.length).toBe(3);
+    expect(valuesFromMethod.map((t) => t.title)).toEqual([
+      "Task 1",
+      "Task 2",
+      "Task 3",
+    ]);
+    expect(valuesFromMethod.map((t) => t.$jazz.id)).toEqual(
+      valuesFromObject.map((t) => t.$jazz.id),
+    );
+  });
+
+  test("iterator methods work on empty list", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create([]);
+
+    expect([...list.values()]).toEqual([]);
+    expect([...list.keys()]).toEqual([]);
+    expect([...list.entries()]).toEqual([]);
+    expect([...list]).toEqual([]);
+  });
+
+  test("Object.getOwnPropertyDescriptors returns correct descriptors", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["a", "b", "c"]);
+
+    const descriptors = Object.getOwnPropertyDescriptors(list);
+
+    // Check numeric index descriptors
+    expect(descriptors["0"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: "a",
+    });
+    expect(descriptors["1"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: "b",
+    });
+    expect(descriptors["2"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: "c",
+    });
+
+    // Check length descriptor
+    expect(descriptors["length"]).toEqual({
+      enumerable: false,
+      configurable: false,
+      writable: true,
+      value: 3,
+    });
+
+    // Verify only expected enumerable keys
+    const enumerableKeys = Object.keys(descriptors).filter(
+      (key) => descriptors[key]?.enumerable,
+    );
+    expect(enumerableKeys.sort()).toEqual(["0", "1", "2"]);
+  });
+
+  test("Object.getOwnPropertyDescriptors returns the resolved references", () => {
+    const TestList = co.list(co.map({ name: z.string() }));
+    const list = TestList.create([{ name: "a" }, { name: "b" }, { name: "c" }]);
+
+    const descriptors = Object.getOwnPropertyDescriptors(list);
+
+    // Check numeric index descriptors
+    expect(descriptors["0"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: list[0],
+    });
+    expect(descriptors["1"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: list[1],
+    });
+    expect(descriptors["2"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: list[2],
+    });
+  });
+
+  test("setting the lenght to 0 has no effect", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["a", "b", "c"]);
+
+    list.length = 0;
+
+    expect(list.length).toBe(3);
+    expect(list[0]).toBe("a");
+    expect(list[1]).toBe("b");
+    expect(list[2]).toBe("c");
   });
 });
 

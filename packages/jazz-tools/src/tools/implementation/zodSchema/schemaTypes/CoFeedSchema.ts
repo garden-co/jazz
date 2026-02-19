@@ -15,6 +15,8 @@ import {
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -27,6 +29,12 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -35,6 +43,7 @@ export class CoFeedSchema<
 {
   collaborative = true as const;
   builtin = "CoFeed" as const;
+  #descriptorsSchema: Schema | undefined = undefined;
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -52,31 +61,47 @@ export class CoFeedSchema<
     return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
   }
 
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const validationSchema = z.array(
+      generateValidationSchemaFromItem(this.element),
+    );
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoFeed);
+    return this.#validationSchema;
+  };
+
   constructor(
     public element: T,
     private coValueClass: typeof CoFeed,
   ) {}
 
+  getDescriptorsSchema = (): Schema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    this.#descriptorsSchema = resolveSchemaField(this.element as any);
+
+    return this.#descriptorsSchema;
+  };
+
   create(
     init: CoFeedSchemaInit<T>,
-    options?:
-      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
-    options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
+    options: CoValueCreateOptions<{}, Account | Group>,
   ): CoFeedInstance<T>;
   create(
     init: CoFeedSchemaInit<T>,
-    options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoFeedInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
@@ -265,11 +290,23 @@ export class CoFeedSchema<
 export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoreCoFeedSchema<T> {
+  let descriptorsSchema: Schema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoFeed" as const,
     element,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      descriptorsSchema = resolveSchemaField(element as any);
+
+      return descriptorsSchema;
+    },
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -279,6 +316,7 @@ export interface CoreCoFeedSchema<
 > extends CoreCoValueSchema {
   builtin: "CoFeed";
   element: T;
+  getDescriptorsSchema: () => Schema;
 }
 
 export type CoFeedInstance<T extends AnyZodOrCoValueSchema> = CoFeed<

@@ -286,7 +286,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
 
       expect(
         handleSyncMessageSpy.mock.calls.filter(([msg]) => msg.id === user.id),
-      ).toHaveLength(3);
+      ).toHaveLength(2);
     });
 
     it("should return the new entity with date objects", async () => {

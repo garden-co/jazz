@@ -16,6 +16,7 @@ import { CoreCoValueSchema } from "./CoValueSchema.js";
 import { coOptionalDefiner } from "../zodCo.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import type { AccountRole, InviteSecret } from "cojson";
+import { z } from "../zodReExport.js";
 
 export interface CoreGroupSchema extends CoreCoValueSchema {
   builtin: "Group";
@@ -26,6 +27,7 @@ export function createCoreGroupSchema(): CoreGroupSchema {
     collaborative: true as const,
     builtin: "Group" as const,
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 
@@ -33,6 +35,17 @@ export class GroupSchema implements CoreGroupSchema {
   readonly collaborative = true as const;
   readonly builtin = "Group" as const;
   readonly resolveQuery = true as const;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.instanceof(Group);
+    return this.#validationSchema;
+  };
 
   getCoValueClass(): typeof Group {
     return Group;

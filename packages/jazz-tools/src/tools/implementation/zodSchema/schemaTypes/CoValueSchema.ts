@@ -1,3 +1,5 @@
+import { z } from "../zodReExport.js";
+
 /**
  * "Core" CoValue schemas contain all data necessary to represent a CoValue schema.
  * Behavior is provided by CoValue schemas that extend "core" CoValue schema data structures.
@@ -17,6 +19,8 @@ export interface CoreCoValueSchema {
   builtin: string;
 
   resolveQuery: CoreResolveQuery;
+
+  getValidationSchema: () => z.ZodType;
 }
 
 /**

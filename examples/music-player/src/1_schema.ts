@@ -1,4 +1,11 @@
-import { co, z, setDefaultSchemaPermissions } from "jazz-tools";
+import {
+  co,
+  z,
+  setDefaultSchemaPermissions,
+  setDefaultValidationMode,
+} from "jazz-tools";
+
+setDefaultValidationMode("strict");
 
 setDefaultSchemaPermissions({
   onInlineCreate: "sameAsContainer",

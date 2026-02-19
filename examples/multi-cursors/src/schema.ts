@@ -1,5 +1,7 @@
-import { co, z } from "jazz-tools";
+import { co, z, setDefaultValidationMode } from "jazz-tools";
 import { Camera, Cursor } from "./types";
+
+setDefaultValidationMode("strict");
 
 export const CursorFeed = co.feed(Cursor);
 export type CursorFeed = co.loaded<typeof CursorFeed>;

@@ -1,4 +1,6 @@
-import { co, z } from "jazz-tools";
+import { co, z, setDefaultValidationMode } from "jazz-tools";
+
+setDefaultValidationMode("strict");
 
 export const BubbleTeaAddOnTypes = [
   "Pearl",
