@@ -18,3 +18,9 @@ pnpm test
 ```
 
 `pnpm run ensure:rust-toolchain` runs `scripts/install-jazz-rn-deps.sh` to bootstrap Rust (via `rustup` if needed), required Rust targets, `cargo-ndk`, and platform build tools (`cmake`, `ninja`, `clang-format`).
+
+For docs-only builds (for example on Vercel), set `JAZZ_SKIP_RN_DEPS=1` to skip React Native-specific bootstrap:
+
+```sh
+JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
+```

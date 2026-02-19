@@ -5,6 +5,14 @@ set -euo pipefail
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
+JAZZ_SKIP_RN_DEPS="${JAZZ_SKIP_RN_DEPS:-0}"
+
+is_truthy() {
+  case "$1" in
+    1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 ensure_wrapper_command_exists() {
   local env_var="$1"
@@ -31,8 +39,15 @@ fi
 
 rustup toolchain install stable
 rustup default stable
+rustup target add wasm32-unknown-unknown
+
+if is_truthy "$JAZZ_SKIP_RN_DEPS"; then
+  echo "Skipping React Native dependency bootstrap (JAZZ_SKIP_RN_DEPS=$JAZZ_SKIP_RN_DEPS)."
+  echo "Jazz prerequisites installed."
+  exit 0
+fi
+
 rustup target add \
-  wasm32-unknown-unknown \
   aarch64-linux-android \
   armv7-linux-androideabi \
   i686-linux-android \
