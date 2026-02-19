@@ -9,6 +9,8 @@
 
 mod commands;
 mod middleware;
+#[cfg(feature = "otel")]
+mod otel;
 mod routes;
 
 use clap::{Parser, Subcommand};
@@ -83,15 +85,8 @@ enum CreateResource {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz=info".parse().unwrap())
-                .add_directive("jazz_tools=info".parse().unwrap())
-                .add_directive("tower_http=debug".parse().unwrap()),
-        )
-        .init();
+    // Initialize tracing with layered subscriber
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -124,7 +119,56 @@ async fn main() {
             };
             if let Err(e) = commands::server::run(&app_id, port, &data_dir, auth_config).await {
                 eprintln!("Server error: {}", e);
+                shutdown_tracing();
                 std::process::exit(1);
+            }
+            shutdown_tracing();
+        }
+    }
+}
+
+fn make_env_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("jazz=info".parse().unwrap())
+        .add_directive("jazz_tools=info".parse().unwrap())
+        .add_directive("tower_http=debug".parse().unwrap())
+}
+
+#[cfg(feature = "otel")]
+static OTEL_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    std::sync::OnceLock::new();
+
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[cfg(feature = "otel")]
+    {
+        if std::env::var("JAZZ_OTEL").map_or(false, |v| v == "1") {
+            let provider = otel::init_tracer_provider();
+            let otel_layer = otel::layer(&provider);
+            let _ = OTEL_PROVIDER.set(provider);
+            tracing_subscriber::registry()
+                .with(make_env_filter())
+                .with(tracing_subscriber::fmt::layer())
+                .with(otel_layer)
+                .init();
+            return;
+        }
+    }
+
+    tracing_subscriber::registry()
+        .with(make_env_filter())
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}
+
+fn shutdown_tracing() {
+    #[cfg(feature = "otel")]
+    {
+        if let Some(provider) = OTEL_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                eprintln!("OTel shutdown error: {e}");
             }
         }
     }

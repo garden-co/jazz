@@ -318,6 +318,7 @@ impl RowNode for FilterNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        let input_size = input.added.len() + input.removed.len() + input.updated.len();
         let mut result = TupleDelta::new();
 
         // Filter removed tuples
@@ -362,6 +363,9 @@ impl RowNode for FilterNode {
                 }
             }
         }
+
+        let output_size = result.added.len() + result.removed.len() + result.updated.len();
+        tracing::trace!(input_size, output_size, "filter node processed");
 
         self.dirty = false;
         result

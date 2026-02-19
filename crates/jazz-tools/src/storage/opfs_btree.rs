@@ -453,6 +453,7 @@ impl Storage for OpfsBTreeStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        tracing::trace!(table, column, branch, ?row_id, "index_insert");
         let key = Self::index_entry_key(table, column, branch, value, row_id);
         self.tree_insert(&key, &[0x01])
     }
@@ -465,6 +466,7 @@ impl Storage for OpfsBTreeStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        tracing::trace!(table, column, branch, ?row_id, "index_remove");
         let key = Self::index_entry_key(table, column, branch, value, row_id);
         self.tree_delete(&key)
     }
@@ -476,6 +478,7 @@ impl Storage for OpfsBTreeStorage {
         branch: &str,
         value: &Value,
     ) -> Vec<ObjectId> {
+        tracing::trace!(table, column, branch, "index_lookup");
         let prefix = Self::index_value_prefix(table, column, branch, value);
         match self.tree_scan_keys(&prefix) {
             Ok(keys) => keys
@@ -551,12 +554,14 @@ impl Storage for OpfsBTreeStorage {
     }
 
     fn flush(&self) {
+        let _span = tracing::debug_span!("OpfsBTreeStorage::flush").entered();
         if let Err(error) = self.with_tree_mut(|tree| tree.checkpoint().map_err(map_storage_err)) {
             tracing::warn!(?error, "OpfsBTreeStorage flush failed");
         }
     }
 
     fn flush_wal(&self) {
+        let _span = tracing::debug_span!("OpfsBTreeStorage::flush_wal").entered();
         // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
         self.flush();
     }
