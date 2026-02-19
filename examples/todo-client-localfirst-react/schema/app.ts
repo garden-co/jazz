@@ -91,60 +91,60 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  "tables": {
-    "projects": {
-      "columns": [
+  tables: {
+    projects: {
+      columns: [
         {
-          "name": "name",
-          "column_type": {
-            "type": "Text"
+          name: "name",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
-        }
-      ]
+          nullable: false,
+        },
+      ],
     },
-    "todos": {
-      "columns": [
+    todos: {
+      columns: [
         {
-          "name": "title",
-          "column_type": {
-            "type": "Text"
+          name: "title",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "done",
-          "column_type": {
-            "type": "Boolean"
+          name: "done",
+          column_type: {
+            type: "Boolean",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "description",
-          "column_type": {
-            "type": "Text"
+          name: "description",
+          column_type: {
+            type: "Text",
           },
-          "nullable": true
+          nullable: true,
         },
         {
-          "name": "parent",
-          "column_type": {
-            "type": "Uuid"
+          name: "parent",
+          column_type: {
+            type: "Uuid",
           },
-          "nullable": true,
-          "references": "todos"
+          nullable: true,
+          references: "todos",
         },
         {
-          "name": "project",
-          "column_type": {
-            "type": "Uuid"
+          name: "project",
+          column_type: {
+            type: "Uuid",
           },
-          "nullable": true,
-          "references": "projects"
-        }
-      ]
-    }
-  }
+          nullable: true,
+          references: "projects",
+        },
+      ],
+    },
+  },
 };
 
 export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {
