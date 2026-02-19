@@ -65,37 +65,61 @@ After linking, external JWT sessions resolve to the same principal.
 
 ## Demo User Switcher UI
 
-React bindings now include a synthetic-user switcher backed by `localStorage`:
+Switcher helpers are backed by `localStorage` and support profile switching in `demo` mode.
 
-```tsx
-import { SyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools/react";
+<Tabs items={["React", "TypeScript"]}>
+  <Tab value="React">
+    ```tsx
+    import { JazzProvider, SyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools/react";
 
-function AuthControls() {
-  return <SyntheticUserSwitcher appId={process.env.NEXT_PUBLIC_JAZZ_APP_ID!} />;
-}
+    const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+    const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
-const active = getActiveSyntheticAuth(process.env.NEXT_PUBLIC_JAZZ_APP_ID!);
-// use active.localAuthMode + active.localAuthToken in your AppContext
-```
+    export function App() {
+      return (
+        <>
+          <SyntheticUserSwitcher appId={appId} defaultMode="demo" />
+          <JazzProvider
+            config={{
+              appId,
+              env: "dev",
+              userBranch: "main",
+              localAuthMode: active.localAuthMode,
+              localAuthToken: active.localAuthToken,
+            }}
+          >
+            <TodoApp />
+          </JazzProvider>
+        </>
+      );
+    }
+    ```
+  </Tab>
+  <Tab value="TypeScript">
+    ```ts
+    import { createDb, createSyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools";
 
-Switching profiles persists locally; by default the component refreshes the page after a switch.
+    const appId = process.env.JAZZ_APP_ID!;
+    const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
-Vanilla JS apps can use the same storage logic with a DOM switcher helper:
+    createSyntheticUserSwitcher({
+      appId,
+      container: document.getElementById("auth-controls")!,
+      defaultMode: "demo",
+    });
 
-```ts
-import { createSyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools";
+    const db = await createDb({
+      appId,
+      env: "dev",
+      userBranch: "main",
+      localAuthMode: active.localAuthMode,
+      localAuthToken: active.localAuthToken,
+    });
+    ```
+  </Tab>
+</Tabs>
 
-const appId = process.env.JAZZ_APP_ID!;
-const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
-createSyntheticUserSwitcher({
-  appId,
-  container: document.getElementById("auth-controls")!,
-  defaultMode: "demo",
-});
-
-// use active.localAuthMode + active.localAuthToken in createDb(...)
-```
+Switching profiles persists locally; by default the switcher refreshes the page after a profile change.
 
 ## Server Setup
 
