@@ -13,6 +13,7 @@ export {
 export type { AppContext, LocalAuthMode, Session } from "./context.js";
 export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transport.js";
 export { createDb, Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
+export { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
 export { toValue, toValueArray, toUpdateRecord } from "./value-converter.js";
