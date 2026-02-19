@@ -3,7 +3,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -89,16 +89,35 @@ function makeSyncPayload() {
   };
 }
 
-function findCloudServerBinary(): string | null {
+function resolveCargoTargetDir(): string {
   const runtimeDir = dirname(fileURLToPath(import.meta.url));
-  const basePath = join(runtimeDir, "../../../../target/debug/jazz-cloud-server");
-  if (existsSync(basePath)) return basePath;
-  if (existsSync(`${basePath}.exe`)) return `${basePath}.exe`;
+  const repoRoot = join(runtimeDir, "../../../../");
+  const configuredTargetDir = process.env.CARGO_TARGET_DIR;
+  if (!configuredTargetDir) {
+    return join(repoRoot, "target");
+  }
+  return isAbsolute(configuredTargetDir)
+    ? configuredTargetDir
+    : join(repoRoot, configuredTargetDir);
+}
+
+function findCloudServerBinary(): string | null {
+  const targetDir = resolveCargoTargetDir();
+  const candidates = [
+    join(targetDir, "debug", "jazz-cloud-server"),
+    join(targetDir, "release", "jazz-cloud-server"),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+    if (existsSync(`${candidate}.exe`)) return `${candidate}.exe`;
+  }
   return null;
 }
 
 function assertIntegrationPrerequisites(): void {
   const hasWasm = hasGrooveWasmBuild();
+  const targetDir = resolveCargoTargetDir();
   const binaryPath = findCloudServerBinary();
   if (hasWasm && binaryPath) return;
 
@@ -107,7 +126,9 @@ function assertIntegrationPrerequisites(): void {
     missing.push("missing Groove WASM runtime artifacts");
   }
   if (!binaryPath) {
-    missing.push("missing jazz-cloud-server debug binary at target/debug/jazz-cloud-server");
+    missing.push(
+      `missing jazz-cloud-server binary under ${targetDir}/{debug,release}/jazz-cloud-server`,
+    );
   }
 
   throw new Error(
@@ -116,7 +137,6 @@ function assertIntegrationPrerequisites(): void {
       ...missing.map((entry) => `- ${entry}`),
       "Build prerequisites, then rerun tests:",
       "1. pnpm --filter @jazz/rust build:crates",
-      "2. cargo build -p jazz-cloud-server",
     ].join("\n"),
   );
 }
