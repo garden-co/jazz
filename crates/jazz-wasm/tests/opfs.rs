@@ -9,8 +9,8 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
-use jazz_wasm::WasmRuntime;
 use jazz_wasm::types::WasmValue;
+use jazz_wasm::WasmRuntime;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 

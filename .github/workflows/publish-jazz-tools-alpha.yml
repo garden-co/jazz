@@ -28,6 +28,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
       - uses: goto-bus-stop/setup-zig@v2
@@ -70,6 +71,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build CLI binary
@@ -94,6 +96,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: x86_64-pc-windows-msvc
 
       - name: Build CLI binary
