@@ -6,6 +6,25 @@ export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 
+ensure_wrapper_command_exists() {
+  local env_var="$1"
+  local wrapper_value="$2"
+  local wrapper_cmd="${wrapper_value%% *}"
+
+  if ! command -v "$wrapper_cmd" >/dev/null 2>&1; then
+    echo "warning: $env_var is set to '$wrapper_value' but '$wrapper_cmd' is unavailable; disabling wrapper for bootstrap." >&2
+    unset "$env_var"
+  fi
+}
+
+if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
+  ensure_wrapper_command_exists "RUSTC_WRAPPER" "$RUSTC_WRAPPER"
+fi
+
+if [[ -n "${CARGO_BUILD_RUSTC_WRAPPER:-}" ]]; then
+  ensure_wrapper_command_exists "CARGO_BUILD_RUSTC_WRAPPER" "$CARGO_BUILD_RUSTC_WRAPPER"
+fi
+
 if ! command -v rustup >/dev/null 2>&1; then
   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 fi
