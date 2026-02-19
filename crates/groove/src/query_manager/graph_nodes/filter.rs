@@ -2,8 +2,10 @@ use ahash::AHashSet;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use crate::query_manager::encoding::{column_bytes, column_is_null, compare_column_to_value};
-use crate::query_manager::types::{Row, RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
+use crate::query_manager::encoding::{
+    column_bytes, column_is_null, compare_column_to_value, decode_column,
+};
+use crate::query_manager::types::{Row, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value};
 
 use super::RowNode;
 
@@ -22,6 +24,8 @@ pub enum Predicate {
     Gt { col_index: usize, value: Vec<u8> },
     /// Column greater than or equal to value.
     Ge { col_index: usize, value: Vec<u8> },
+    /// Array column contains value.
+    Contains { col_index: usize, value: Value },
     /// Column is null.
     IsNull { col_index: usize },
     /// Column is not null.
@@ -45,7 +49,8 @@ impl Predicate {
             | Predicate::Lt { col_index, .. }
             | Predicate::Le { col_index, .. }
             | Predicate::Gt { col_index, .. }
-            | Predicate::Ge { col_index, .. } => [*col_index].into_iter().collect(),
+            | Predicate::Ge { col_index, .. }
+            | Predicate::Contains { col_index, .. } => [*col_index].into_iter().collect(),
             Predicate::IsNull { col_index } | Predicate::IsNotNull { col_index } => {
                 [*col_index].into_iter().collect()
             }
@@ -96,6 +101,12 @@ impl Predicate {
                     compare_column_to_value(descriptor, &row.data, *col_index, value),
                     Ok(Ordering::Greater) | Ok(Ordering::Equal)
                 )
+            }
+            Predicate::Contains { col_index, value } => {
+                match decode_column(descriptor, &row.data, *col_index) {
+                    Ok(Value::Array(elements)) => elements.iter().any(|element| element == value),
+                    _ => false,
+                }
             }
             Predicate::IsNull { col_index } => {
                 column_is_null(descriptor, &row.data, *col_index).unwrap_or(false)
@@ -233,6 +244,12 @@ impl FilterNode {
                     Some(Ordering::Greater) | Some(Ordering::Equal)
                 )
             }
+            Predicate::Contains { col_index, value } => {
+                match self.get_column_value(tuple, *col_index) {
+                    Some(Value::Array(elements)) => elements.iter().any(|element| element == value),
+                    _ => false,
+                }
+            }
             Predicate::IsNull { col_index } => {
                 self.is_column_null(tuple, *col_index).unwrap_or(false)
             }
@@ -260,6 +277,15 @@ impl FilterNode {
             .ok()
             .flatten()
             .map(|b| b.to_vec())
+    }
+
+    /// Decode a column value from the correct tuple element using global column index.
+    fn get_column_value(&self, tuple: &Tuple, global_col_index: usize) -> Option<Value> {
+        let (elem_idx, local_col_idx) = self.tuple_descriptor.resolve_column(global_col_index)?;
+        let elem = tuple.get(elem_idx)?;
+        let content = elem.content()?;
+        let descriptor = &self.tuple_descriptor.element(elem_idx)?.descriptor;
+        decode_column(descriptor, content, local_col_idx).ok()
     }
 
     /// Compare a column to a value using global column index.
@@ -388,6 +414,23 @@ mod tests {
         let descriptor = test_descriptor();
         let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
         FilterNode::with_tuple_descriptor(tuple_desc, predicate)
+    }
+
+    fn array_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+        ])
+    }
+
+    fn make_array_tuple(id: ObjectId, values: &[Value]) -> Tuple {
+        let descriptor = array_descriptor();
+        let data = encode_row(&descriptor, values).unwrap();
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
     }
 
     #[test]
@@ -637,6 +680,43 @@ mod tests {
         assert!(result.updated.is_empty());
     }
 
+    #[test]
+    fn filter_contains() {
+        let predicate = Predicate::Contains {
+            col_index: 1,
+            value: Value::Text("rust".into()),
+        };
+        let tuple_desc = TupleDescriptor::single_with_materialization("", array_descriptor(), true);
+        let mut node = FilterNode::with_tuple_descriptor(tuple_desc, predicate);
+
+        let id1 = ObjectId::new();
+        let id2 = ObjectId::new();
+        let tuple1 = make_array_tuple(
+            id1,
+            &[
+                Value::Integer(1),
+                Value::Array(vec![Value::Text("rust".into()), Value::Text("db".into())]),
+            ],
+        );
+        let tuple2 = make_array_tuple(
+            id2,
+            &[
+                Value::Integer(2),
+                Value::Array(vec![Value::Text("js".into()), Value::Text("web".into())]),
+            ],
+        );
+
+        let delta = TupleDelta {
+            added: vec![tuple1, tuple2],
+            removed: vec![],
+            updated: vec![],
+        };
+
+        let result = node.process(delta);
+        assert_eq!(result.added.len(), 1);
+        assert!(contains_id(&result.added, id1));
+    }
+
     // ========================================================================
     // Predicate::required_columns() tests
     // ========================================================================
@@ -690,6 +770,15 @@ mod tests {
     fn required_columns_true() {
         let pred = Predicate::True;
         assert!(pred.required_columns().is_empty());
+    }
+
+    #[test]
+    fn required_columns_contains() {
+        let pred = Predicate::Contains {
+            col_index: 4,
+            value: Value::Text("rust".into()),
+        };
+        assert_eq!(pred.required_columns(), [4].into_iter().collect());
     }
 
     // ========================================================================
