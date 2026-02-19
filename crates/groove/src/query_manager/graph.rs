@@ -1034,7 +1034,7 @@ impl QueryGraph {
             self.mark_downstream_dirty(node_id);
         }
 
-        // Mark PolicyFilter nodes whose INHERITS-referenced tables changed
+        // Mark PolicyFilter nodes whose policy dependency tables changed
         let affected_policy_filters: Vec<NodeId> = self
             .policy_filter_tables
             .iter()
@@ -1049,7 +1049,7 @@ impl QueryGraph {
 
         for node_id in affected_policy_filters {
             self.mark_dirty(node_id);
-            // Mark the node as needing INHERITS re-evaluation
+            // Mark the node as needing policy re-evaluation
             if let Some(GraphNode::PolicyFilter(node)) = self.get_node_mut(node_id) {
                 node.mark_inherits_dirty();
             }

@@ -156,13 +156,35 @@ export const wasmSchema: WasmSchema = {
       policies: {
         select: {
           using: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
+            type: "Or",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "owner_id",
+                op: "Eq",
+                value: {
+                  type: "SessionRef",
+                  path: ["user_id"],
+                },
+              },
+              {
+                type: "Cmp",
+                column: "done",
+                op: "Eq",
+                value: {
+                  type: "Literal",
+                  value: {
+                    type: "Boolean",
+                    value: false,
+                  },
+                },
+              },
+              {
+                type: "Inherits",
+                operation: "Select",
+                via_column: "project",
+              },
+            ],
           },
         },
         insert: {
@@ -178,22 +200,76 @@ export const wasmSchema: WasmSchema = {
         },
         update: {
           using: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
+            type: "Or",
+            exprs: [
+              {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Cmp",
+                    column: "owner_id",
+                    op: "Eq",
+                    value: {
+                      type: "SessionRef",
+                      path: ["user_id"],
+                    },
+                  },
+                  {
+                    type: "Cmp",
+                    column: "done",
+                    op: "Eq",
+                    value: {
+                      type: "Literal",
+                      value: {
+                        type: "Boolean",
+                        value: false,
+                      },
+                    },
+                  },
+                ],
+              },
+              {
+                type: "And",
+                exprs: [
+                  {
+                    type: "Inherits",
+                    operation: "Update",
+                    via_column: "project",
+                  },
+                  {
+                    type: "Cmp",
+                    column: "done",
+                    op: "Eq",
+                    value: {
+                      type: "Literal",
+                      value: {
+                        type: "Boolean",
+                        value: false,
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
           },
           with_check: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
+            type: "Or",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "owner_id",
+                op: "Eq",
+                value: {
+                  type: "SessionRef",
+                  path: ["user_id"],
+                },
+              },
+              {
+                type: "Inherits",
+                operation: "Update",
+                via_column: "project",
+              },
+            ],
           },
         },
         delete: {

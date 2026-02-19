@@ -55,6 +55,11 @@ export type PolicyExpr =
       session_path: string[];
     }
   | {
+      type: "Exists";
+      table: string;
+      condition: PolicyExpr;
+    }
+  | {
       type: "Inherits";
       operation: PolicyOperation;
       via_column: string;

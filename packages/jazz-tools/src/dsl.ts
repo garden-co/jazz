@@ -200,6 +200,14 @@ export const policy = {
     };
   },
 
+  exists(table: string, condition: PolicyExpr): PolicyExpr {
+    return {
+      type: "Exists",
+      table,
+      condition,
+    };
+  },
+
   isNull(column: string): PolicyExpr {
     return { type: "IsNull", column };
   },
