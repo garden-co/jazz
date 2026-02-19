@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "todo-client-localfirst-expo",
+    "slug": "todo-client-localfirst-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "android": {
+      "package": "dev.jazz.todo.localfirstexpo"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.todo.localfirstexpo"
+    }
+  }
+}
