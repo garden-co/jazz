@@ -28,6 +28,8 @@ export interface DbConfig {
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
+  /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
+  serverPathPrefix?: string;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
@@ -187,6 +189,7 @@ export class Db {
         driver: this.config.driver,
         // In worker mode, don't connect to server directly — worker handles it
         serverUrl: this.worker ? undefined : this.config.serverUrl,
+        serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
         env: this.config.env,
         userBranch: this.config.userBranch,
         jwtToken: this.config.jwtToken,
@@ -207,6 +210,7 @@ export class Db {
             userBranch: this.config.userBranch ?? "main",
             dbName: this.config.dbName ?? this.config.appId,
             serverUrl: this.config.serverUrl,
+            serverPathPrefix: this.config.serverPathPrefix,
             jwtToken: this.config.jwtToken,
             adminSecret: this.config.adminSecret,
           })
