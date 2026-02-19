@@ -84,7 +84,7 @@ function App() {
       config={{
         appId: "my-app",
         serverUrl: "http://127.0.0.1:4200",  // optional — omit for offline-only
-        jwtToken: "...",                       // optional — see Auth below
+        // local anonymous auth is default in browser clients
       }}
       fallback={<p>Loading...</p>}
     >
@@ -100,7 +100,9 @@ function App() {
 |-------|----------|-------------|
 | `appId` | yes | Application identifier. Isolates storage between apps. |
 | `serverUrl` | no | Jazz sync server URL. Omit for fully local/offline mode. |
-| `jwtToken` | no | JWT Bearer token for authenticating with the server. |
+| `localAuthMode` | no | Local synthetic auth mode: `"anonymous"` or `"demo"`. Browser default is `"anonymous"`. |
+| `localAuthToken` | no | Explicit local synthetic token override. If omitted in browser, Jazz auto-generates and persists one. |
+| `jwtToken` | no | External auth bearer JWT. Requires server-side JWKS configuration. |
 | `adminSecret` | no | Admin secret for schema catalogue sync. |
 | `dbName` | no | OPFS database name (browser). Defaults to `appId`. |
 | `env` | no | Environment label (e.g. `"dev"`, `"prod"`). |
@@ -357,93 +359,132 @@ const results = useAll(
 
 ## Authentication
 
-Jazz uses JWT for authentication. Your app obtains tokens through whatever auth system you already have; Jazz just needs the token string passed into the provider config.
+Jazz 2 supports three auth methods:
 
-### How it works
+1. `anonymous` (default in browser clients)
+2. `demo` (multi-user simulation on one device)
+3. `external` (provider JWT validated by server JWKS)
 
-1. Your app authenticates the user (your own login flow, OAuth, etc.)
-2. Your backend issues a JWT with a `sub` claim identifying the user
-3. You pass the token to `JazzProvider` via `config.jwtToken`
-4. Jazz sends it as `Authorization: Bearer <token>` on all sync requests
+### 1. Anonymous auth (default)
 
-The JWT payload Jazz expects:
-
-```json
-{
-  "sub": "user-123",
-  "claims": { "role": "admin", "team": "eng" },
-  "exp": 1735689600
-}
-```
-
-- `sub` (required) — becomes the user identity for this session
-- `claims` (optional) — arbitrary JSON, forwarded to the server for policy evaluation
-- `exp` (optional) — standard expiry, validated server-side
-
-### Server-side configuration
-
-The Jazz server validates tokens using either a shared HMAC secret (development) or a JWKS endpoint (production):
-
-```bash
-# Development: shared secret (HS256)
-jazz-tools server $APP_ID --jwt-secret "my-secret" --admin-secret "my-secret"
-
-# Production: JWKS endpoint (RS256)
-jazz-tools server $APP_ID --jwks-url "https://auth.example.com/.well-known/jwks.json" --admin-secret "..."
-```
-
-Or via environment variables: `JAZZ_JWT_SECRET`, `JAZZ_JWKS_URL`, `JAZZ_ADMIN_SECRET`.
-
-### Development shortcut
-
-For local development, you can sign tokens client-side with the same shared secret the server uses:
-
-```ts
-async function signDevJwt(userId: string, secret: string): Promise<string> {
-  const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const payload = base64url(JSON.stringify({
-    sub: userId,
-    claims: {},
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  }));
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw", enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false, ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(`${header}.${payload}`));
-  return `${header}.${payload}.${base64url(new Uint8Array(sig))}`;
-}
-```
-
-Then pass it to the provider:
+If you provide no `jwtToken` or explicit local auth fields, Jazz auto-generates an anonymous token on first load and persists it in `localStorage`.
 
 ```tsx
-const token = await signDevJwt("alice", "my-secret");
-
-<JazzProvider config={{ appId: "my-app", serverUrl, jwtToken: token, adminSecret: "my-secret" }} />
+<JazzProvider
+  config={{
+    appId: "my-app",
+    serverUrl: "http://127.0.0.1:4200",
+  }}
+>
+  <TodoList />
+</JazzProvider>
 ```
 
-<Callout title="Why adminSecret?">
-  Clients currently need to push schema definitions to the server's catalogue, which requires the admin secret. This requirement will go away in a future release.
-</Callout>
+If needed, you can explicitly override the local token:
 
-### No auth / offline only
+```tsx
+<JazzProvider
+  config={{
+    appId: "my-app",
+    localAuthMode: "anonymous",
+    localAuthToken: "device-token-123",
+  }}
+>
+  <TodoList />
+</JazzProvider>
+```
 
-Omit both `serverUrl` and `jwtToken` for a fully local, offline-only database. Data lives in the browser's OPFS and never leaves the device:
+### 2. Demo auth (local multi-user testing)
+
+Use the synthetic user switcher to create/swap local demo profiles:
+
+```tsx
+import {
+  JazzProvider,
+  SyntheticUserSwitcher,
+  getActiveSyntheticAuth,
+} from "jazz-tools/react";
+
+const appId = "my-app";
+const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+function App() {
+  return (
+    <>
+      <SyntheticUserSwitcher appId={appId} defaultMode="demo" />
+      <JazzProvider
+        config={{
+          appId,
+          serverUrl: "http://127.0.0.1:4200",
+          localAuthMode: active.localAuthMode,
+          localAuthToken: active.localAuthToken,
+        }}
+      >
+        <TodoList />
+      </JazzProvider>
+    </>
+  );
+}
+```
+
+### 3. External auth and upgrade from anonymous/demo
+
+After provider sign-in, link the current local identity so existing local data stays attached when you switch to external JWT sessions:
+
+```tsx
+import { useState } from "react";
+import { JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
+
+function App() {
+  const [jwtToken, setJwtToken] = useState<string | undefined>();
+  const appId = "my-app";
+  const serverUrl = "http://127.0.0.1:4200";
+  const linkExternalIdentity = useLinkExternalIdentity({
+    appId,
+    serverUrl,
+    defaultMode: "anonymous",
+  });
+
+  async function onSignedIn(providerJwt: string) {
+    await linkExternalIdentity({ jwtToken: providerJwt });
+    setJwtToken(providerJwt);
+  }
+
+  return (
+    <JazzProvider
+      key={jwtToken ?? "local"}
+      config={{ appId, serverUrl, jwtToken }}
+    >
+      <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
+      <TodoList />
+    </JazzProvider>
+  );
+}
+```
+
+### Server auth config (`jazz-tools server`)
+
+- `NODE_ENV=production`: local modes are disabled unless you explicitly pass `--allow-anonymous` / `--allow-demo`
+- non-production (`development`, unset, etc.): local anonymous + demo are enabled by default
+- external auth requires `--jwks-url`
+
+```bash
+NODE_ENV=production \
+jazz-tools server "$APP_ID" \
+  --port 4200 \
+  --data-dir ./data \
+  --allow-demo \
+  --jwks-url "https://auth.example.com/.well-known/jwks.json" \
+  --backend-secret "$JAZZ_BACKEND_SECRET" \
+  --admin-secret "$JAZZ_ADMIN_SECRET"
+```
+
+### Offline-only mode
+
+Omit `serverUrl` to keep all data local in OPFS:
 
 ```tsx
 <JazzProvider config={{ appId: "my-app" }} />
 ```
 
-### Changing tokens
-
-`config` is read once at mount. To handle token refresh or login/logout, remount the provider with a new React `key`:
-
-```tsx
-<JazzProvider key={jwtToken} config={{ ...config, jwtToken }}>
-  {children}
-</JazzProvider>
-```
-
+For full auth setup details (including TypeScript non-React usage), see [Authentication](/docs/authentication).
