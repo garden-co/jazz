@@ -1,7 +1,7 @@
 /**
  * Global setup for browser tests — spawns a real jazz-tools server.
  *
- * Pattern mirrors crates/jazz-cli/tests/test_server.rs:
+ * Pattern mirrors crates/jazz-tools/tests/test_server.rs:
  * - Spawn `jazz-tools server` with known secrets on a fixed port
  * - Poll /health until ready
  * - Tear down on completion

@@ -60,7 +60,7 @@ Both platform implementations use a boolean flag to prevent overlapping batched_
 - **WASM**: Sets flag before spawn_local, clears before calling batched_tick
 
 > `crates/groove-tokio/src/lib.rs:72-90` (TokioScheduler)
-> `crates/groove-wasm/src/runtime.rs:91-106` (WasmScheduler)
+> `crates/jazz-wasm/src/runtime.rs:91-106` (WasmScheduler)
 
 ## Platform Implementations
 
@@ -70,11 +70,11 @@ Both platform implementations use a boolean flag to prevent overlapping batched_
 
 > `crates/groove-tokio/src/lib.rs:42-91` (TokioScheduler), `164-206` (TokioRuntime)
 
-### WASM (groove-wasm)
+### WASM (jazz-wasm)
 
 `WasmScheduler` uses `spawn_local`. `JsSyncSender` serializes sync messages to JSON and calls a JS callback.
 
-> `crates/groove-wasm/src/runtime.rs:66-141`
+> `crates/jazz-wasm/src/runtime.rs:66-141`
 
 ## CRUD Operation Flow
 
@@ -100,4 +100,4 @@ Tests use `NoopScheduler` (no-op scheduling) and `VecSyncSender` (collects messa
 | `groove/src/runtime_core.rs` | RuntimeCore with immediate_tick/batched_tick       |
 | `groove/src/storage/mod.rs`  | Storage trait (replaces IoHandler for persistence) |
 | `groove-tokio/src/lib.rs`    | TokioScheduler and TokioRuntime                    |
-| `groove-wasm/src/runtime.rs` | WasmScheduler and WasmRuntime                      |
+| `jazz-wasm/src/runtime.rs`   | WasmScheduler and WasmRuntime                      |

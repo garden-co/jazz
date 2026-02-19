@@ -22,24 +22,6 @@ crates=(
   "jazz-tools:2.0.0-alpha.0"
 )
 
-wait_for_index() {
-  local name="$1"
-  local expected_version="$2"
-
-  for _ in {1..60}; do
-    local published
-    published="$(curl -s "https://crates.io/api/v1/crates/${name}" | jq -r '.crate.max_version // empty')"
-    if [[ "$published" == "$expected_version" ]]; then
-      echo "crates.io index now has ${name}@${published}"
-      return 0
-    fi
-    sleep 5
-  done
-
-  echo "Timed out waiting for ${name}@${expected_version} to appear in crates.io index"
-  return 1
-}
-
 for crate_spec in "${crates[@]}"; do
   name="${crate_spec%%:*}"
   version="${crate_spec##*:}"
@@ -56,9 +38,19 @@ for crate_spec in "${crates[@]}"; do
   fi
 
   echo "==> cargo publish -p ${name} (publish)"
-  cargo publish -p "$name" --allow-dirty
 
-  wait_for_index "$name" "$version"
+  publish_log="$(mktemp)"
+  if ! cargo publish -p "$name" --allow-dirty 2>&1 | tee "$publish_log"; then
+    if grep -q "already exists on crates.io index" "$publish_log"; then
+      echo "==> ${name}@${version} already published, skipping"
+      rm -f "$publish_log"
+      continue
+    fi
+    rm -f "$publish_log"
+    echo "==> failed to publish ${name}@${version}"
+    exit 1
+  fi
+  rm -f "$publish_log"
 done
 
 echo "Crate publish flow complete (${MODE})."
