@@ -17,6 +17,7 @@ import {
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type LinkExternalResponse,
 } from "./sync-transport.js";
+import { resolveLocalAuthDefaults } from "./local-auth.js";
 
 /**
  * Common interface for WASM and NAPI runtimes.
@@ -220,24 +221,26 @@ export class JazzClient {
    * @returns Connected JazzClient instance
    */
   static async connect(context: AppContext): Promise<JazzClient> {
+    const resolvedContext = resolveLocalAuthDefaults(context);
+
     // Load WASM module dynamically
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(context.schema);
+    const schemaJson = JSON.stringify(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      context.tier,
+      resolvedContext.appId,
+      resolvedContext.env ?? "dev",
+      resolvedContext.userBranch ?? "main",
+      resolvedContext.tier,
     );
 
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, resolvedContext);
 
     // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
+    if (resolvedContext.serverUrl) {
+      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
     }
 
     return client;
@@ -254,21 +257,23 @@ export class JazzClient {
    * @returns Connected JazzClient instance (created synchronously)
    */
   static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+    const resolvedContext = resolveLocalAuthDefaults(context);
+
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(context.schema);
+    const schemaJson = JSON.stringify(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      context.tier,
+      resolvedContext.appId,
+      resolvedContext.env ?? "dev",
+      resolvedContext.userBranch ?? "main",
+      resolvedContext.tier,
     );
 
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, resolvedContext);
 
     // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
+    if (resolvedContext.serverUrl) {
+      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
     }
 
     return client;
