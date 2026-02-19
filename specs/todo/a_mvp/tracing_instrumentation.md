@@ -14,9 +14,9 @@ Server-side Rust instrumentation is complete. OTel export is wired up and workin
 
 ### Done
 
-- **groove crate**: Full span/event coverage across all subsystems — ObjectManager (create, get_or_load, add_commit), QueryManager (subscribe, settle, graph node evaluation, writes), SyncManager (inbox processing, forwarding, sync logic), SchemaManager (insert, delete, process), RuntimeCore (callback counter, ack watcher, flush_wal), storage layer (flush, flush_wal for both OpfsBTree and SurrealKv).
-- **groove-wasm**: Debug logs at JS→WASM boundary for insert, update, delete, subscribe; debug_span on unsubscribe.
-- **jazz-cli**: Layered tracing subscriber with optional OTel layer (`--features otel` + `JAZZ_OTEL=1`). sync_handler span with client_id and payload_size. events_handler span (scoped to avoid !Send issue with Entered guard across .await). /events excluded from tower-http TraceLayer to avoid long-lived request spans.
+- **jazz-tools crate**: Full span/event coverage across all subsystems — ObjectManager (create, get_or_load, add_commit), QueryManager (subscribe, settle, graph node evaluation, writes), SyncManager (inbox processing, forwarding, sync logic), SchemaManager (insert, delete, process), RuntimeCore (callback counter, ack watcher, flush_wal), storage layer (flush, flush_wal for both OpfsBTree and SurrealKv).
+- **jazz-wasm**: Debug logs at JS→WASM boundary for insert, update, delete, subscribe; debug_span on unsubscribe.
+- **jazz-tools CLI**: Layered tracing subscriber with optional OTel layer (`--features otel` + `JAZZ_OTEL=1`). sync_handler span with client_id and payload_size. events_handler span (scoped to avoid !Send issue with Entered guard across .await). /events excluded from tower-http TraceLayer to avoid long-lived request spans.
 - **opfs-btree**: trace_spans on get/put/delete/range, debug_span on checkpoint with dirty_pages/total_pages.
 - **OTel export**: Feature-gated OTLP gRPC exporter (tonic) with stdout fallback. Provider stored in OnceLock, flushed on shutdown.
 - **Dev stack**: `dev/observability/` with OTel Collector + grafana/otel-lgtm docker-compose.
@@ -83,7 +83,7 @@ RuntimeCore::batched_tick
   └─ flush outbox → event: messages sent
 ```
 
-**groove-wasm — WASM bindings** ✅ (partially)
+**jazz-wasm — WASM bindings** ✅ (partially)
 
 ```
 WasmRuntime::new        → span: app_id, schema summary       ← not yet
@@ -159,9 +159,9 @@ Or just hardcode TRACE during development — the browser console has its own le
 
 ## Remaining implementation steps
 
-1. Add `tracing-wasm` dependency to `groove-wasm` Cargo.toml
+1. Add `tracing-wasm` dependency to `jazz-wasm` Cargo.toml
 2. Initialize `tracing-wasm` in `WasmRuntime::new()`
-3. Add spans to remaining groove-wasm public methods (new, addServer, addClient, handleSyncMessages, tick)
+3. Add spans to remaining jazz-wasm public methods (new, addServer, addClient, handleSyncMessages, tick)
 4. Add `batched_tick` parent span to RuntimeCore
 5. Add `[main]`/`[worker]` prefixes to TypeScript console calls
 6. Test: run todo example with tracing, verify full write→read flow visible in browser console

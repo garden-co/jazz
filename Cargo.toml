@@ -1,9 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/jazz-cli",
-  "crates/groove-wasm",
-  "crates/groove-napi",
+  "crates/jazz-cloud-server",
+  "crates/jazz-tools",
+  "crates/jazz-wasm",
+  "crates/jazz-napi",
   "crates/wasm-tracing",
   "examples/todo-server-rs",
   "crates/opfs-btree",

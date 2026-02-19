@@ -2,7 +2,7 @@
  * Integration test: SubscriptionManager with real WASM runtime.
  *
  * This test verifies that SubscriptionManager correctly consumes row-level
- * deltas from the actual groove-wasm runtime and produces typed SubscriptionDelta
+ * deltas from the actual jazz-wasm runtime and produces typed SubscriptionDelta
  * objects with accurate index positions for add/update/remove.
  *
  * Flow:

@@ -19,14 +19,14 @@ function resolveGrooveWasmPaths(): GrooveWasmPaths | null {
   const require = createRequire(import.meta.url);
   let packageJsonPath: string;
   try {
-    packageJsonPath = require.resolve("groove-wasm/package.json");
+    packageJsonPath = require.resolve("jazz-wasm/package.json");
   } catch {
     return null;
   }
 
   const packageDir = dirname(packageJsonPath);
-  const modulePath = resolve(packageDir, "pkg/groove_wasm.js");
-  const wasmPath = resolve(packageDir, "pkg/groove_wasm_bg.wasm");
+  const modulePath = resolve(packageDir, "pkg/jazz_wasm.js");
+  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
 
   if (!existsSync(modulePath) || !existsSync(wasmPath)) {
     return null;
@@ -45,7 +45,7 @@ function loadWasmModule(): Promise<any> {
       const paths = resolveGrooveWasmPaths();
       if (!paths) {
         throw new Error(
-          "groove-wasm build artifacts not found. Run `pnpm --filter @jazz/rust build:crates` first.",
+          "jazz-wasm build artifacts not found. Run `pnpm --filter @jazz/rust build:crates` first.",
         );
       }
 
