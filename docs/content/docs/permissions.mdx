@@ -46,6 +46,23 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
   </Tab>
 </Tabs>
 
+## Combining Conditions (`allOf` / `anyOf`)
+
+In TypeScript permissions, combine multiple conditions with array-based combinators:
+
+```ts
+import { definePermissions } from "jazz-tools/permissions";
+import { app } from "./app.js";
+
+export default definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => [
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
+  ),
+]);
+```
+
+`allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
+
 ## Inherited Access Policies (`allowedTo.*`)
 
 TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete(...)`, which compiles to `INHERITS` policy expressions.
