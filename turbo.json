@@ -27,7 +27,7 @@
       "outputs": ["android/**", "ios/**", "lib/**", "src/**"]
     },
     "test": {
-      "dependsOn": ["build"],
+      "dependsOn": ["^build"],
       "cache": false
     }
   }

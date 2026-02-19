@@ -27,7 +27,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
           components: clippy, rustfmt
 
       - uses: actions/setup-node@v6
@@ -35,12 +35,15 @@ jobs:
           node-version-file: .nvmrc
 
       - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Rust prerequisites
+        run: pnpm run ensure:rust-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - run: pnpm install --frozen-lockfile
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
@@ -57,7 +60,7 @@ jobs:
         run: sccache --show-stats || true
 
       - run: pnpm format:check
-      - run: pnpm oxlint .
+      - run: pnpm oxlint . --exclude crates/jazz-rn/src/**
       - run: pnpm build
       - name: Show sccache stats (after pnpm build)
         run: sccache --show-stats || true
