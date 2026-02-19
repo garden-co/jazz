@@ -1,5 +1,33 @@
 # jazz-tools
 
+## 0.20.10
+
+### Patch Changes
+
+- 706ab57: Added optional restricted deletion mode for CoList values, allowing only manager/admin roles to perform deletions when enabled via schema permissions: `co.list().withPermission({writer: "appendOnly"})`
+- 01c3641: Add optional `navigation` prop to `JazzSvelteProvider` that automatically waits for pending CoValue syncs before SvelteKit navigations, preventing stale data on SSR pages.
+- 796c65b: **BREAKING:** The `in` operator on CoMap instances now returns `true` for all schema-defined keys, even if the value is `undefined` or has been deleted. This fixes a fatal `TypeError` on React Native 0.84+ (Hermes V1) caused by proxy invariant violations.
+
+  Previously, `"key" in coMap` returned `false` for unset/deleted optional properties. Now it returns `true` for any key with a schema descriptor, consistent with `Object.keys()` and `Object.getOwnPropertyDescriptor()`.
+
+  To check whether a key has an actual value set, use `coMap.$jazz.has("key")` instead of the `in` operator.
+
+  Also adds `configurable: true` to all internal property definitions (`$jazz`, `$isLoaded`, `[TypeSym]`, `_instanceID`) across all CoValue types to satisfy ES2015 proxy invariants enforced by Hermes V1.
+
+- 81c3a0a: Replaced a vulnerable dependency with a local implementation, removing transitive vulnerabilities.
+- cdcdad1: Introduced runtime validation for schema-based CoValues. All mutations now accept a `validation` option of `strict` or `loose`. `setDefaultValidationMode()` can also be used to enable or disable validation across the entire app. Currently, the default validation mode is `warn`: updates and inserts of invalid data will still be allowed, but a console warning will be issued. The usage of `setDefaultValidationMode("strict")` is encouraged, as it will be the default mode in the future.
+- 1317e90: Removed the legacy `coField` and `Encoders` exports and completed the runtime schema migration to the new schema descriptors. Apps still using the old schema APIs should migrate to the current `co`/zod based schemas.
+- 76c6229: Reuse Expo & OP-SQLite DB client across Jazz providers
+- e707d3c: Add contextual hints to the "unable to load" error message when sync is disabled (`when: "never"`) or restricted (`when: "signedUp"`).
+- Updated dependencies [706ab57]
+- Updated dependencies [3f50adb]
+- Updated dependencies [283ff4f]
+- Updated dependencies [93c220c]
+- Updated dependencies [41d8587]
+  - cojson@0.20.10
+  - cojson-transport-ws@0.20.10
+  - cojson-storage-indexeddb@0.20.10
+
 ## 0.20.9
 
 ### Patch Changes

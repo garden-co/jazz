@@ -1,5 +1,25 @@
 # cojson
 
+## 0.20.10
+
+### Patch Changes
+
+- 706ab57: Added optional restricted deletion mode for CoList values, allowing only manager/admin roles to perform deletions when enabled via schema permissions: `co.list().withPermission({writer: "appendOnly"})`
+- 3f50adb: Throw immediately when calling `.create()` on a group where the current user does not have write permissions, instead of silently producing empty data.
+- 283ff4f: Fixed an issue where CoValues could remain stuck in a loading state when using persistent server peers.
+
+  Closed persistent peers are now marked unavailable after a grace timeout, and load requests are no longer considered complete when a peer replies with `KNOWN` and `header: true` but never sends content.
+
+- 93c220c: Improved sync load handling and queue behavior by prioritizing pending loads and ensuring peers always respond to load requests, including cases with no new content.
+
+  Added queue and in-flight load metrics, plus richer WebSocket peer metadata and ping-delay logging to improve observability during sync operations.
+
+- 41d8587: Run a full storage reconciliation process periodically to ensure all CoValues in storage are synced with the server.
+- Updated dependencies [706ab57]
+  - cojson-core-wasm@0.20.10
+  - cojson-core-rn@0.20.10
+  - cojson-core-napi@0.20.10
+
 ## 0.20.9
 
 ### Patch Changes

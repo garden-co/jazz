@@ -1,5 +1,20 @@
 # cojson-transport-nodejs-ws
 
+## 0.20.10
+
+### Patch Changes
+
+- 93c220c: Improved sync load handling and queue behavior by prioritizing pending loads and ensuring peers always respond to load requests, including cases with no new content.
+
+  Added queue and in-flight load metrics, plus richer WebSocket peer metadata and ping-delay logging to improve observability during sync operations.
+
+- Updated dependencies [706ab57]
+- Updated dependencies [3f50adb]
+- Updated dependencies [283ff4f]
+- Updated dependencies [93c220c]
+- Updated dependencies [41d8587]
+  - cojson@0.20.10
+
 ## 0.20.9
 
 ### Patch Changes
