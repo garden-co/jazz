@@ -1,4 +1,4 @@
-import { createDb, Db } from "jazz-tools";
+import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect } from "vitest";
 import { app } from "./fixtures/basic/app";
 
