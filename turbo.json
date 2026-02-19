@@ -21,8 +21,13 @@
       "dependsOn": ["^build:crates"],
       "outputs": ["../target/debug/jazz*"]
     },
+    "build:rn": {
+      "dependsOn": ["^build:rn"],
+      "inputs": ["rust/**"],
+      "outputs": ["android/**", "ios/**", "lib/**", "src/**"]
+    },
     "test": {
-      "dependsOn": ["build"],
+      "dependsOn": ["^build"],
       "cache": false
     }
   }
