@@ -40,7 +40,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
-    "groove-wasm": "workspace:*",
+    "jazz-wasm": "workspace:*",
     "tsx": "^4.0.0"
   },
   "devDependencies": {

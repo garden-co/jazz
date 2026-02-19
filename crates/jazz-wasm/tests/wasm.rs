@@ -1,4 +1,4 @@
-//! WASM integration tests for groove-wasm.
+//! WASM integration tests for jazz-wasm.
 //!
 //! Run with: wasm-pack test --node
 
@@ -8,8 +8,8 @@ use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-use groove_wasm::types::WasmValue;
-use groove_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
+use jazz_wasm::types::WasmValue;
+use jazz_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
 
 #[wasm_bindgen_test]
 fn test_generate_id() {
