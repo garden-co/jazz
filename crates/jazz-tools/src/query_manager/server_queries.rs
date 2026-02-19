@@ -663,7 +663,7 @@ impl QueryManager {
                     to_approve.push(*pending_id);
                 } else {
                     let reason = format!(
-                        "{:?} denied by policy on table {} (INHERITS check failed)",
+                        "{:?} denied by policy on table {} (complex policy check failed)",
                         state.pending_check.operation, state.table.0
                     );
                     to_reject.push((*pending_id, reason));

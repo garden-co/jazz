@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   table,
   col,
+  policy,
   migrate,
   getCollectedSchema,
   getCollectedMigration,
@@ -134,6 +135,41 @@ describe("schemaToSql", () => {
     parent_id UUID REFERENCES todos,
     owner_id UUID REFERENCES users NOT NULL
 );
+`);
+  });
+
+  it("generates CREATE POLICY statements from table permissions", () => {
+    resetCollectedState();
+    table(
+      "todos",
+      {
+        title: col.string(),
+        owner_id: col.string(),
+      },
+      {
+        permissions: {
+          select: policy.eqSession("owner_id", "user_id"),
+          insert: policy.eqSession("owner_id", "user_id"),
+          update: {
+            using: policy.eqSession("owner_id", "user_id"),
+            withCheck: policy.eqSession("owner_id", "user_id"),
+          },
+          delete: policy.eqSession("owner_id", "user_id"),
+        },
+      },
+    );
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toBe(`CREATE TABLE todos (
+    title TEXT NOT NULL,
+    owner_id TEXT NOT NULL
+);
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
+CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session.user_id) WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
 `);
   });
 });

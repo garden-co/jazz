@@ -20,6 +20,17 @@ import {
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 
 /**
+ * Minimal request shape supported by `JazzClient.forRequest()`.
+ *
+ * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
+ * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ */
+export interface RequestLike {
+  header?: (name: string) => string | undefined;
+  headers?: Headers | Record<string, string | string[] | undefined>;
+}
+
+/**
  * Common interface for WASM and NAPI runtimes.
  *
  * Both `WasmRuntime` (from jazz-wasm) and `NapiRuntime` (from jazz-napi)
@@ -85,6 +96,94 @@ export interface LinkExternalIdentityOptions {
 }
 
 export type LinkExternalIdentityResult = LinkExternalResponse;
+
+/**
+ * QueryBuilder-compatible input accepted by query and subscribe APIs.
+ */
+export interface QueryInput {
+  _build(): string;
+}
+
+function resolveQueryJson(query: string | QueryInput): string {
+  return typeof query === "string" ? query : query._build();
+}
+
+function readHeader(request: RequestLike, name: string): string | undefined {
+  const lower = name.toLowerCase();
+
+  const fromMethod = request.header?.(name) ?? request.header?.(lower);
+  if (typeof fromMethod === "string") {
+    return fromMethod;
+  }
+
+  const headers = request.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    return headers.get(name) ?? headers.get(lower) ?? undefined;
+  }
+
+  const record = headers as Record<string, string | string[] | undefined>;
+  const raw = record[name] ?? record[lower];
+  if (Array.isArray(raw)) {
+    return raw[0];
+  }
+  return raw;
+}
+
+function decodeBase64Url(value: string): string {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+
+  if (typeof atob === "function") {
+    return atob(padded);
+  }
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(padded, "base64").toString("utf8");
+  }
+
+  throw new Error("No base64 decoder available in this runtime");
+}
+
+function sessionFromRequest(request: RequestLike): Session {
+  const authHeader = readHeader(request, "authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    throw new Error("Missing or invalid Authorization header");
+  }
+
+  const token = authHeader.slice("Bearer ".length).trim();
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    throw new Error("Invalid JWT format");
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(decodeBase64Url(parts[1]));
+  } catch {
+    throw new Error("Invalid JWT payload");
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Invalid JWT payload");
+  }
+
+  const typedPayload = payload as { sub?: unknown; claims?: unknown };
+  if (typeof typedPayload.sub !== "string" || typedPayload.sub.length === 0) {
+    throw new Error("JWT payload missing sub");
+  }
+
+  const claims =
+    typedPayload.claims &&
+    typeof typedPayload.claims === "object" &&
+    !Array.isArray(typedPayload.claims)
+      ? (typedPayload.claims as Record<string, unknown>)
+      : {};
+
+  return { user_id: typedPayload.sub, claims };
+}
 
 /**
  * Session-scoped client for backend operations.
@@ -181,15 +280,15 @@ export class SessionClient {
   /**
    * Query as this session's user.
    */
-  async query(queryJson: string): Promise<Row[]> {
-    return this.client.queryInternal(queryJson, this.session);
+  async query(query: string | QueryInput): Promise<Row[]> {
+    return this.client.queryInternal(resolveQueryJson(query), this.session);
   }
 
   /**
    * Subscribe to a query as this session's user.
    */
-  subscribe(queryJson: string, callback: SubscriptionCallback): number {
-    return this.client.subscribeInternal(queryJson, callback, this.session);
+  subscribe(query: string | QueryInput, callback: SubscriptionCallback): number {
+    return this.client.subscribeInternal(query, callback, this.session);
   }
 }
 
@@ -328,6 +427,20 @@ export class JazzClient {
   }
 
   /**
+   * Create a session-scoped client from an authenticated HTTP request.
+   *
+   * Extracts `Authorization: Bearer <jwt>` and maps payload fields:
+   * - `sub` -> `session.user_id`
+   * - `claims` -> `session.claims` (defaults to `{}`)
+   *
+   * This helper only extracts payload fields and does not validate JWT signatures.
+   * JWT verification should happen in your auth middleware before request handling.
+   */
+  forRequest(request: RequestLike): SessionClient {
+    return this.forSession(sessionFromRequest(request));
+  }
+
+  /**
    * Insert a new row into a table (sync, fire-and-forget).
    *
    * @param table Table name
@@ -339,26 +452,33 @@ export class JazzClient {
   }
 
   /**
-   * Insert a row and wait for persistence at the specified tier.
+   * Insert a row and wait for acknowledgement at the specified tier.
    *
    * @param table Table name
    * @param values Array of column values
-   * @param tier Persistence tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acks
+   * @param tier Acknowledgement tier to wait for
+   * @returns Promise resolving to the new row's ID when the tier acknowledges
+   */
+  async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
+    return this.runtime.insertPersisted(table, values, tier);
+  }
+
+  /**
+   * @deprecated Use createWithAck().
    */
   async createPersisted(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertPersisted(table, values, tier);
+    return this.createWithAck(table, values, tier);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
-   * @param queryJson JSON-encoded query specification
+   * @param query Query builder or JSON-encoded query specification
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns Array of matching rows
    */
-  async query(queryJson: string, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(queryJson, undefined, settledTier);
+  async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
+    return this.queryInternal(resolveQueryJson(query), undefined, settledTier);
   }
 
   /**
@@ -386,14 +506,25 @@ export class JazzClient {
   }
 
   /**
-   * Update a row and wait for persistence at the specified tier.
+   * Update a row and wait for acknowledgement at the specified tier.
+   */
+  async updateWithAck(
+    objectId: string,
+    updates: Record<string, Value>,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    await this.runtime.updatePersisted(objectId, updates, tier);
+  }
+
+  /**
+   * @deprecated Use updateWithAck().
    */
   async updatePersisted(
     objectId: string,
     updates: Record<string, Value>,
     tier: PersistenceTier,
   ): Promise<void> {
-    await this.runtime.updatePersisted(objectId, updates, tier);
+    await this.updateWithAck(objectId, updates, tier);
   }
 
   /**
@@ -406,26 +537,33 @@ export class JazzClient {
   }
 
   /**
-   * Delete a row and wait for persistence at the specified tier.
+   * Delete a row and wait for acknowledgement at the specified tier.
+   */
+  async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
+    await this.runtime.deletePersisted(objectId, tier);
+  }
+
+  /**
+   * @deprecated Use deleteWithAck().
    */
   async deletePersisted(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deletePersisted(objectId, tier);
+    await this.deleteWithAck(objectId, tier);
   }
 
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param queryJson JSON-encoded query specification
+   * @param query Query builder or JSON-encoded query specification
    * @param callback Called with delta whenever results change
    * @param settledTier Optional tier to hold initial delivery until confirmed
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
-    queryJson: string,
+    query: string | QueryInput,
     callback: SubscriptionCallback,
     settledTier?: PersistenceTier,
   ): number {
-    return this.subscribeInternal(queryJson, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, undefined, settledTier);
   }
 
   /**
@@ -433,12 +571,13 @@ export class JazzClient {
    * @internal
    */
   subscribeInternal(
-    queryJson: string,
+    query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
     settledTier?: PersistenceTier,
   ): number {
     const sessionJson = session ? JSON.stringify(session) : undefined;
+    const queryJson = resolveQueryJson(query);
     const subId = this.runtime.subscribe(
       queryJson,
       (deltaJsonOrObject: RowDelta | string) => {

@@ -4,6 +4,7 @@
 export {
   table,
   col,
+  policy,
   migrate,
   getCollectedSchema,
   getCollectedMigration,
@@ -14,6 +15,12 @@ export type {
   Schema,
   Table,
   Column,
+  PolicyExpr,
+  PolicyOperation,
+  PolicyCmpOp,
+  PolicyValue,
+  OperationPolicy,
+  TablePolicies,
   Lens,
   LensOp,
   SqlType,
@@ -32,6 +39,9 @@ export * from "./drivers/index.js";
 
 // Runtime client
 export * from "./runtime/index.js";
+
+// Permissions DSL
+export * from "./permissions/index.js";
 
 // Local synthetic users and vanilla switcher UI
 export {

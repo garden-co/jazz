@@ -516,6 +516,7 @@ impl MetaStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_app(
         &self,
         app_id: AppId,
@@ -1326,21 +1327,22 @@ async fn resolve_external_session(
         None
     };
 
-    if let (Some(claim), Some(mapped)) = (principal_claim, mapped_principal.as_deref())
-        && claim != mapped
-    {
-        warn!(
-            app_id = %app_id,
-            claim_principal = %claim,
-            mapped_principal = %mapped,
-            issuer = issuer.unwrap_or("<missing>"),
-            subject = %subject,
-            "external principal claim mismatches persisted identity mapping"
-        );
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "External identity mapping conflict",
-        ));
+    match (principal_claim, mapped_principal.as_deref()) {
+        (Some(claim), Some(mapped)) if claim != mapped => {
+            warn!(
+                app_id = %app_id,
+                claim_principal = %claim,
+                mapped_principal = %mapped,
+                issuer = issuer.unwrap_or("<missing>"),
+                subject = %subject,
+                "external principal claim mismatches persisted identity mapping"
+            );
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "External identity mapping conflict",
+            ));
+        }
+        _ => {}
     }
 
     let principal_id = if let Some(claim) = principal_claim {
@@ -1438,10 +1440,9 @@ fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm
     let mut candidates = Vec::new();
 
     for jwk in &jwks.keys {
-        if let Some(expected_kid) = kid
-            && jwk.common.key_id.as_deref() != Some(expected_kid)
-        {
-            continue;
+        match kid {
+            Some(expected_kid) if jwk.common.key_id.as_deref() != Some(expected_kid) => continue,
+            _ => {}
         }
 
         if let Some(key_alg) = jwk.common.key_algorithm {
@@ -1537,7 +1538,13 @@ async fn load_jwks_for_app(
 ) -> Result<JwkSet, String> {
     let ttl_us = JWKS_CACHE_TTL.as_micros().min(u128::from(u64::MAX)) as u64;
 
-    if !force_refresh && let Some(cached) = state.jwks_cache.read().await.get(&app_id).cloned() {
+    let cached_jwks = if force_refresh {
+        None
+    } else {
+        state.jwks_cache.read().await.get(&app_id).cloned()
+    };
+
+    if let Some(cached) = cached_jwks {
         let age_us = now_timestamp_us().saturating_sub(cached.fetched_at_us);
         if cached.endpoint == jwks_endpoint && age_us <= ttl_us {
             return Ok(cached.set);
@@ -1653,8 +1660,10 @@ async fn extract_session(
         }
     }
 
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())
-        && let Some(token) = auth_value.strip_prefix("Bearer ")
+    if let Some(token) = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth_value| auth_value.strip_prefix("Bearer "))
     {
         let token = token.trim();
         if token.is_empty() {
@@ -2388,20 +2397,22 @@ async fn link_external_handler(
 
     let local_principal_id = derive_local_principal_id(app_id, mode, token);
 
-    if let Some(claim_principal) = verified
+    match verified
         .principal_id_claim
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        && claim_principal != local_principal_id
     {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::bad_request(
-                "JWT jazz_principal_id claim does not match local principal",
-            )),
-        )
-            .into_response();
+        Some(claim_principal) if claim_principal != local_principal_id => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::bad_request(
+                    "JWT jazz_principal_id claim does not match local principal",
+                )),
+            )
+                .into_response();
+        }
+        _ => {}
     }
 
     let mut created = false;
