@@ -228,14 +228,15 @@ async fn sync_handler(
     let payload_size = serde_json::to_vec(&request.payload)
         .map(|v| v.len())
         .unwrap_or(0);
-    let _span = tracing::debug_span!(
-        "sync_handler",
-        client_id = %request.client_id,
-        payload_size,
-    )
-    .entered();
-
-    tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
+    {
+        let _span = tracing::debug_span!(
+            "sync_handler",
+            client_id = %request.client_id,
+            payload_size,
+        )
+        .entered();
+        tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
+    }
 
     // Check admin secret — if present and valid, promote client to Admin role
     let is_admin = {
