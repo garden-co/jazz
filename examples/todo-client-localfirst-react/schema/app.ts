@@ -175,7 +175,7 @@ export const wasmSchema: WasmSchema = {
 export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare _rowType!: Project;
+  declare readonly _rowType: Project;
   declare readonly _initType: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
@@ -249,7 +249,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
 export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<Todo> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare _rowType!: Todo;
+  declare readonly _rowType: Todo;
   declare readonly _initType: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
