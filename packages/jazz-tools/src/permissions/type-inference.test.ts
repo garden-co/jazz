@@ -69,17 +69,18 @@ const app = {
 
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
-    definePermissions(app, ({ policy, either, allowedTo, session }) => {
+    definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
 
       return [
         policy.todos.allowRead.where((todo) =>
-          either({ done: false }).or(
+          anyOf([
+            { done: false },
             policy.projects.exists.where({
               id: todo.projectId,
               ownerId: session.userId,
             }),
-          ),
+          ]),
         ),
         policy.todos.allowUpdate
           .whereOld(allowedTo.update("projectId"))

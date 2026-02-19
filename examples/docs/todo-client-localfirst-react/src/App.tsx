@@ -1,4 +1,4 @@
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, type JazzProviderProps } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
 
 function readEnvAppId(): string | undefined {
@@ -6,17 +6,18 @@ function readEnvAppId(): string | undefined {
     ?.JAZZ_APP_ID;
 }
 
+function defaultConfig(): NonNullable<JazzProviderProps["config"]> {
+  return {
+    appId: readEnvAppId() ?? "todo-react-example",
+    env: "dev",
+    userBranch: "main",
+  };
+}
+
 // #region context-setup-react
-export function App() {
+export function App({ config, fallback }: Partial<JazzProviderProps> = {}) {
   return (
-    <JazzProvider
-      config={{
-        appId: readEnvAppId() ?? "todo-react-example",
-        env: "dev",
-        userBranch: "main",
-      }}
-      fallback={<p>Loading...</p>}
-    >
+    <JazzProvider config={config ?? defaultConfig()} fallback={fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
     </JazzProvider>

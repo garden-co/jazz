@@ -12,11 +12,12 @@ import type {
   OperationPolicy,
   TablePolicies,
 } from "./schema.js";
+import { sqlTypeToString } from "./schema.js";
 
 function columnToSql(column: Column): string {
   const ref = column.references ? ` REFERENCES ${column.references}` : "";
   const nullability = column.nullable ? "" : " NOT NULL";
-  return `    ${column.name} ${column.sqlType}${ref}${nullability}`;
+  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
 }
 
 function tableToSql(table: Table): string {
@@ -142,13 +143,16 @@ function formatDefaultValue(value: unknown): string {
   if (value === null) {
     return "NULL";
   }
+  if (Array.isArray(value)) {
+    return `ARRAY[${value.map(formatDefaultValue).join(", ")}]`;
+  }
   throw new Error(`Unsupported default value type: ${typeof value}`);
 }
 
 function lensOpToForwardSql(table: string, op: LensOp): string {
   switch (op.type) {
     case "introduce":
-      return `ALTER TABLE ${table} ADD COLUMN ${op.column} TEXT DEFAULT ${formatDefaultValue(op.value)};`;
+      return `ALTER TABLE ${table} ADD COLUMN ${op.column} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
     case "drop":
       return `ALTER TABLE ${table} DROP COLUMN ${op.column};`;
     case "rename":
@@ -161,7 +165,7 @@ function lensOpToBackwardSql(table: string, op: LensOp): string {
     case "introduce":
       return `ALTER TABLE ${table} DROP COLUMN ${op.column};`;
     case "drop":
-      return `ALTER TABLE ${table} ADD COLUMN ${op.column} TEXT DEFAULT ${formatDefaultValue(op.value)};`;
+      return `ALTER TABLE ${table} ADD COLUMN ${op.column} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
     case "rename":
       return `ALTER TABLE ${table} RENAME COLUMN ${op.value} TO ${op.column};`;
   }

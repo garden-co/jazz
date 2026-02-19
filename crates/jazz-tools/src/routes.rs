@@ -26,17 +26,17 @@ use crate::middleware::auth::{
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
-    Router::new()
-        // Binary streaming events endpoint
-        .route("/events", get(events_handler))
-        // Unified sync endpoint - all client→server communication flows through here
+    let traced_routes = Router::new()
         .route("/sync", post(sync_handler))
         // Link a local anonymous/demo principal to an external identity.
         .route("/auth/link-external", post(link_external_handler))
         // Health check
         .route("/health", get(health_handler))
-        // Add middleware
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+
+    Router::new()
+        .route("/events", get(events_handler))
+        .merge(traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -83,7 +83,11 @@ async fn events_handler(
             .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
         None => groove::sync_manager::ClientId::new(),
     };
-    tracing::info!(%client_id, "events stream connecting");
+
+    {
+        let _span = tracing::debug_span!("events_handler", %client_id).entered();
+        tracing::info!(%client_id, "events stream connecting");
+    }
 
     // Extract session from headers (JWT or backend impersonation)
     let session = {
@@ -220,6 +224,17 @@ async fn sync_handler(
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
+
+    let payload_size = serde_json::to_vec(&request.payload)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let _span = tracing::debug_span!(
+        "sync_handler",
+        client_id = %request.client_id,
+        payload_size,
+    )
+    .entered();
+
     tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
 
     // Check admin secret — if present and valid, promote client to Admin role

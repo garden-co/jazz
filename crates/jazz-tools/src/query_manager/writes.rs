@@ -94,16 +94,19 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
+        tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
         self.sync_manager
             .forward_update_to_servers(object_id, branch.into());
 
         // Update indices immediately and persist
         self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
+        tracing::trace!(%object_id, table, "index_insert complete");
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
+        tracing::trace!(table, "mark_subscriptions_dirty");
 
-        tracing::debug!(%object_id, branch = self.current_branch(), "row created");
+        tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
         Ok(InsertHandle {
             row_id: object_id,
             row_commit_id,
@@ -445,6 +448,7 @@ impl QueryManager {
 
         // Forward update to all connected servers
         let branch = self.current_branch();
+        tracing::trace!(%id, ?commit_id, "forward update to servers");
         self.sync_manager
             .forward_update_to_servers(id, branch.into());
 
@@ -457,10 +461,12 @@ impl QueryManager {
             &new_data,
             &descriptor,
         )?;
+        tracing::trace!(%id, table = %table_name.0, "index_update complete");
 
         // Mark subscriptions dirty and notify about content update
         self.mark_subscriptions_dirty(&table_name.0);
         self.mark_row_updated_in_subscriptions(&table_name.0, id);
+        tracing::trace!(table = %table_name.0, "mark_subscriptions_dirty");
 
         Ok(commit_id)
     }
@@ -585,6 +591,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Forward delete to all connected servers
+        tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
         {
             let branch = self.current_branch();
             self.sync_manager
@@ -593,10 +600,12 @@ impl QueryManager {
 
         // Update indices: remove from _id and column indices, add to _id_deleted
         self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
+        tracing::trace!(%id, table = %table, "index_remove complete (soft delete)");
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
         self.mark_row_deleted_in_subscriptions(&table, id);
+        tracing::trace!(table = %table, "mark_subscriptions_dirty (delete)");
 
         Ok(DeleteHandle {
             row_id: id,

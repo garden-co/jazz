@@ -74,7 +74,12 @@ impl QueryManager {
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
 
-        tracing::debug!(sub_id = id.0, ?branches, "subscription created");
+        tracing::debug!(
+            sub_id = id.0,
+            ?branches,
+            node_count = graph.nodes.len(),
+            "subscription created"
+        );
         self.subscriptions.insert(
             id,
             QuerySubscription {

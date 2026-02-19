@@ -286,8 +286,9 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("syncs a todo between two app instances through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const token1 = await signJwt("ts-user-a", JWT_SECRET);
-    const token2 = await signJwt("ts-user-b", JWT_SECRET);
+    const syncUserId = "ts-user-sync";
+    const token1 = await signJwt(syncUserId, JWT_SECRET);
+    const token2 = await signJwt(syncUserId, JWT_SECRET);
 
     const el1 = await mount({
       appId: APP_ID,

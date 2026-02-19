@@ -133,6 +133,7 @@ impl ObjectManager {
         io: &mut H,
         metadata: Option<HashMap<String, String>>,
     ) -> ObjectId {
+        let _span = tracing::debug_span!("OM::create").entered();
         let object = Object::new(metadata.clone());
         let id = object.id;
 
@@ -140,6 +141,7 @@ impl ObjectManager {
         let _ = io.create_object(id, metadata.clone().unwrap_or_default());
 
         self.objects.insert(id, object);
+        tracing::debug!(%id, "created object");
         id
     }
 
@@ -179,6 +181,7 @@ impl ObjectManager {
         storage: &dyn Storage,
         branches: &[String],
     ) -> Option<&Object> {
+        let _span = tracing::trace_span!("OM::get_or_load", %id).entered();
         if self.objects.contains_key(&id) {
             return self.objects.get(&id);
         }
@@ -275,6 +278,7 @@ impl ObjectManager {
         metadata: Option<BTreeMap<String, String>>,
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
+        let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
         // (previous_commit_ids, old_content)
@@ -364,6 +368,8 @@ impl ObjectManager {
         branch.tips.insert(commit_id);
 
         branch.commits.insert(commit_id, commit);
+
+        tracing::trace!(?commit_id, "commit applied");
 
         // Notify subscribers of updated frontier
         self.notify_subscribers_of_commit(object_id, branch_name);

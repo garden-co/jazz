@@ -106,6 +106,8 @@ enum Token {
     // Punctuation
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Comma,
     Semicolon,
     Dot,
@@ -229,6 +231,14 @@ impl<'a> Tokenizer<'a> {
             ')' => {
                 self.advance();
                 Token::RParen
+            }
+            '[' => {
+                self.advance();
+                Token::LBracket
+            }
+            ']' => {
+                self.advance();
+                Token::RBracket
             }
             ',' => {
                 self.advance();
@@ -397,7 +407,7 @@ impl Parser {
             self.advance(); // consume RParen
         }
 
-        match type_name.to_uppercase().as_str() {
+        let mut col_type = match type_name.to_uppercase().as_str() {
             "TEXT" | "VARCHAR" | "CHAR" | "STRING" => Ok(ColumnType::Text),
             "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => Ok(ColumnType::Integer),
             "BIGINT" => Ok(ColumnType::BigInt),
@@ -405,7 +415,16 @@ impl Parser {
             "TIMESTAMP" => Ok(ColumnType::Timestamp),
             "UUID" => Ok(ColumnType::Uuid),
             _ => Err(SqlParseError::UnsupportedType(type_name)),
+        }?;
+
+        // Optional array suffixes: UUID[], TEXT[][], etc.
+        while self.peek() == Some(&Token::LBracket) {
+            self.advance(); // consume '['
+            self.expect(&Token::RBracket)?;
+            col_type = ColumnType::Array(Box::new(col_type));
         }
+
+        Ok(col_type)
     }
 
     fn parse_policy_operation(&mut self) -> Result<Operation, SqlParseError> {
@@ -1203,16 +1222,16 @@ fn lens_op_to_sql(op: &LensOp) -> String {
     }
 }
 
-fn column_type_to_sql(ct: &ColumnType) -> &'static str {
+pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
     match ct {
-        ColumnType::Integer => "INTEGER",
-        ColumnType::BigInt => "BIGINT",
-        ColumnType::Boolean => "BOOLEAN",
-        ColumnType::Text => "TEXT",
-        ColumnType::Timestamp => "TIMESTAMP",
-        ColumnType::Uuid => "UUID",
-        ColumnType::Array(_) => "TEXT",
-        ColumnType::Row(_) => "TEXT",
+        ColumnType::Integer => "INTEGER".to_string(),
+        ColumnType::BigInt => "BIGINT".to_string(),
+        ColumnType::Boolean => "BOOLEAN".to_string(),
+        ColumnType::Text => "TEXT".to_string(),
+        ColumnType::Timestamp => "TIMESTAMP".to_string(),
+        ColumnType::Uuid => "UUID".to_string(),
+        ColumnType::Array(elem) => format!("{}[]", column_type_to_sql(elem)),
+        ColumnType::Row(_) => "TEXT".to_string(),
     }
 }
 
@@ -1565,6 +1584,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_uuid_array_column_with_references() {
+        let sql = "CREATE TABLE files (parts UUID[] REFERENCES file_parts NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("files"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(col.name.as_str(), "parts");
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Uuid))
+        );
+        assert_eq!(col.references, Some(TableName::new("file_parts")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn parse_nested_array_column_type() {
+        let sql = "CREATE TABLE t (matrix INTEGER[][] NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Array(Box::new(ColumnType::Integer))))
+        );
+        assert!(!col.nullable);
+    }
+
+    #[test]
     fn reject_non_create_in_schema() {
         let sql = "ALTER TABLE users ADD COLUMN age INTEGER;";
 
@@ -1736,6 +1786,28 @@ mod tests {
             .descriptor
             .columns[0];
         assert_eq!(col.references, Some(TableName::new("users")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn sql_round_trip_with_array_references() {
+        let sql = "CREATE TABLE files (parts UUID[] REFERENCES file_parts NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+
+        assert!(regenerated.contains("parts UUID[] REFERENCES file_parts NOT NULL"));
+
+        let reparsed = parse_schema(&regenerated).unwrap();
+        let col = &reparsed
+            .get(&TableName::new("files"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Uuid))
+        );
+        assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
     }
 
