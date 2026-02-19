@@ -178,7 +178,7 @@ const albSecurityGroup = new aws.ec2.SecurityGroup(
   "alb-sg",
   {
     vpcId: vpc.id,
-    description: "ALB ingress for cloud2 multi-server",
+    description: "ALB ingress for cloud2 cloud-server",
     ingress: [
       { fromPort: 80, toPort: 80, protocol: "tcp", cidrBlocks: ["0.0.0.0/0"] },
       { fromPort: 443, toPort: 443, protocol: "tcp", cidrBlocks: ["0.0.0.0/0"] },
@@ -241,7 +241,7 @@ const dataVolume = new aws.ebs.Volume(
     tags: {
       ...tags,
       Name: `${namePrefix}-data`,
-      Component: "multi-server-data",
+      Component: "cloud-server-data",
     },
   },
   { provider: primary },

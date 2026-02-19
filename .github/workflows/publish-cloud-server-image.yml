@@ -1,4 +1,4 @@
-name: Publish Multi Server Image
+name: Publish Cloud Server Image
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ jobs:
     env:
       AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      ECR_REPOSITORY: ${{ vars.JAZZ_MULTI_SERVER_ECR_REPOSITORY || 'jazz-multi-server' }}
+      ECR_REPOSITORY: ${{ vars.JAZZ_CLOUD_SERVER_ECR_REPOSITORY || 'jazz-cloud-server' }}
 
     steps:
       - name: Checkout
@@ -51,7 +51,7 @@ jobs:
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
-          role-session-name: github-multi-server-image-publish
+          role-session-name: github-cloud-server-image-publish
 
       - name: Set image metadata
         id: meta
@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           docker buildx build \
             --platform linux/amd64 \
-            --file crates/jazz-multi-server/deploy/pulumi/Dockerfile \
+            --file crates/jazz-cloud-server/deploy/pulumi/Dockerfile \
             --tag "${{ steps.meta.outputs.image_uri }}" \
             --push \
             .
@@ -98,7 +98,7 @@ jobs:
         run: |
           set -euo pipefail
           gh api repos/${{ github.repository }}/dispatches \
-            -f event_type=multi-server-image-updated \
+            -f event_type=cloud-server-image-updated \
             -f client_payload="{\"stack\":\"${{ github.event.inputs.stack }}\",\"image_tag\":\"${{ steps.meta.outputs.tag }}\"}"
 
       - name: Summary

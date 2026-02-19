@@ -32,7 +32,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz_multi_server=info".parse().unwrap())
+                .add_directive("jazz_cloud_server=info".parse().unwrap())
                 .add_directive("tower_http=debug".parse().unwrap()),
         )
         .init();

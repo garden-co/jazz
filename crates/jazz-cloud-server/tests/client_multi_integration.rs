@@ -248,7 +248,7 @@ async fn wait_for_todos_count(
 }
 
 #[tokio::test]
-async fn jazz_tools_clients_sync_queries_and_mutations_over_multi_server() {
+async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let server = ServerProcess::start(server_data.path()).await;
