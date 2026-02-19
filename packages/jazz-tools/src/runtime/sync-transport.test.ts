@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { generateClientId, sendSyncPayload } from "./sync-transport.js";
+import {
+  buildEndpointUrl,
+  buildEventsUrl,
+  generateClientId,
+  normalizePathPrefix,
+  sendSyncPayload,
+} from "./sync-transport.js";
 
 describe("sync-transport", () => {
   const originalFetch = globalThis.fetch;
@@ -65,6 +71,34 @@ describe("sync-transport", () => {
 
     await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
       "Sync POST failed: network down",
+    );
+  });
+
+  it("posts to path-prefixed sync route when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload(
+      "http://localhost:3000/",
+      { Ping: {} },
+      { jwtToken: "token", pathPrefix: "apps/app-123/" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
+  });
+
+  it("normalizes route prefixes and endpoint URLs", () => {
+    expect(normalizePathPrefix(undefined)).toBe("");
+    expect(normalizePathPrefix("")).toBe("");
+    expect(normalizePathPrefix("apps/app-1/")).toBe("/apps/app-1");
+    expect(normalizePathPrefix("/apps/app-1/")).toBe("/apps/app-1");
+
+    expect(buildEndpointUrl("http://localhost:1625/", "/sync", "apps/app-1")).toBe(
+      "http://localhost:1625/apps/app-1/sync",
+    );
+    expect(buildEventsUrl("http://localhost:1625", "client#1", "/apps/app-1")).toBe(
+      "http://localhost:1625/apps/app-1/events?client_id=client%231",
     );
   });
 });

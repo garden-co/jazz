@@ -7,7 +7,12 @@
  */
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
-import { sendSyncPayload, readBinaryFrames, generateClientId } from "../runtime/sync-transport.js";
+import {
+  sendSyncPayload,
+  readBinaryFrames,
+  generateClientId,
+  buildEventsUrl,
+} from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -24,6 +29,7 @@ let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
 let serverClientId: string = generateClientId();
 let activeServerUrl: string | null = null;
+let activeServerPathPrefix: string | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let streamConnecting = false;
@@ -42,7 +48,7 @@ function post(msg: WorkerToMainMessage): void {
 
 async function startup(): Promise<void> {
   try {
-    const wasmModule: any = await import("groove-wasm");
+    const wasmModule: any = await import("jazz-wasm");
     // With vite-plugin-wasm, init happens at import time and default is not a function.
     // Without it, default is the init function that must be called.
     if (typeof wasmModule.default === "function") {
@@ -60,10 +66,11 @@ async function startup(): Promise<void> {
 
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
-    const wasmModule: any = await import("groove-wasm");
+    const wasmModule: any = await import("jazz-wasm");
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;
+    activeServerPathPrefix = msg.serverPathPrefix;
     reconnectAttempt = 0;
     streamAttached = false;
     streamConnecting = false;
@@ -144,7 +151,7 @@ async function sendToServer(serverUrl: string, payload: any): Promise<void> {
   await sendSyncPayload(
     serverUrl,
     payload,
-    { jwtToken, adminSecret, clientId: serverClientId },
+    { jwtToken, adminSecret, clientId: serverClientId, pathPrefix: activeServerPathPrefix },
     "[worker] ",
   );
 }
@@ -197,7 +204,7 @@ async function connectStream(): Promise<void> {
   streamAbortController = new AbortController();
 
   try {
-    const eventsUrl = `${activeServerUrl}/events?client_id=${encodeURIComponent(serverClientId)}`;
+    const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
 
     const response = await fetch(eventsUrl, {
       headers,
@@ -279,6 +286,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       isShuttingDown = true;
       initComplete = false;
       activeServerUrl = null;
+      activeServerPathPrefix = undefined;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -304,6 +312,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       isShuttingDown = true;
       initComplete = false;
       activeServerUrl = null;
+      activeServerPathPrefix = undefined;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
