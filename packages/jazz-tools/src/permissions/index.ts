@@ -67,13 +67,7 @@ type RowContext<Row> = {
 
 export type WhereInputOrCallback<WhereInput, Row> =
   | WhereInput
-  | ((row: RowContext<Row>) => WhereInput | ConditionBuilder);
-
-export interface ConditionBuilder {
-  and(input: unknown): ConditionBuilder;
-  or(input: unknown): ConditionBuilder;
-  _condition(): Condition;
-}
+  | ((row: RowContext<Row>) => WhereInput | Condition);
 
 export type SessionContext = Record<string, SessionRefValue>;
 
@@ -90,11 +84,7 @@ interface ExistsBuilder<WhereInput> {
 
 interface ActionBuilder<WhereInput, Row> {
   where(
-    input:
-      | Condition
-      | PermissionWhereInput<WhereInput>
-      | ((row: RowContext<Row>) => unknown)
-      | ConditionBuilder,
+    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): Rule;
 }
 
@@ -117,8 +107,8 @@ export type PolicyContext<TApp extends AppLike> = {
       RowFor<QueryBuilderFor<TApp, K>>
     >;
   };
-  either: (input: unknown) => ConditionBuilder;
-  both: (input: unknown) => ConditionBuilder;
+  anyOf: (conditions: readonly unknown[]) => Condition;
+  allOf: (conditions: readonly unknown[]) => Condition;
   allowedTo: AllowedToContext;
   session: SessionContext;
 };
@@ -139,11 +129,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   constructor(private readonly table: string) {}
 
   where(
-    input:
-      | Condition
-      | PermissionWhereInput<WhereInput>
-      | ((row: RowContext<Row>) => unknown)
-      | ConditionBuilder,
+    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): Rule {
     const condition = resolveWhereInput(input);
     return {
@@ -155,22 +141,14 @@ class UpdateRuleBuilder<WhereInput, Row> {
   }
 
   whereOld(
-    input:
-      | Condition
-      | PermissionWhereInput<WhereInput>
-      | ((row: RowContext<Row>) => unknown)
-      | ConditionBuilder,
+    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): this {
     this.oldCondition = resolveWhereInput(input);
     return this;
   }
 
   whereNew(
-    input:
-      | Condition
-      | PermissionWhereInput<WhereInput>
-      | ((row: RowContext<Row>) => unknown)
-      | ConditionBuilder,
+    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): this {
     this.newCondition = resolveWhereInput(input);
     return this;
@@ -197,8 +175,8 @@ export function definePermissions<TApp extends AppLike>(
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
   const ctx = {
     policy: buildPolicyContext(tableNames),
-    either,
-    both,
+    anyOf,
+    allOf,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
@@ -351,14 +329,14 @@ function normalizeWhereObject(input: unknown): Record<string, unknown> {
 }
 
 function resolveWhereInput(input: unknown): Condition {
-  if (isConditionBuilder(input)) {
-    return input._condition();
-  }
   if (typeof input === "function") {
     const result = input(createRowContext());
     return resolveWhereInput(result);
   }
   if (isExistsCondition(input)) {
+    return input;
+  }
+  if (isCompoundCondition(input)) {
     return input;
   }
   if (isPolicyExpr(input)) {
@@ -494,38 +472,24 @@ function andExpr(exprs: PolicyExpr[]): PolicyExpr {
   return { type: "And", exprs };
 }
 
-export function either(input: unknown): ConditionBuilder {
-  return compoundBuilder("Or", input);
+export function anyOf(conditions: readonly unknown[]): Condition {
+  return compoundCondition("Or", conditions);
 }
 
-export function both(input: unknown): ConditionBuilder {
-  return compoundBuilder("And", input);
+export function allOf(conditions: readonly unknown[]): Condition {
+  return compoundCondition("And", conditions);
 }
 
-function compoundBuilder(op: "And" | "Or", input: unknown): ConditionBuilder {
-  const conditions: Condition[] = [resolveWhereInput(input)];
+function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): CompoundCondition {
+  if (!Array.isArray(inputs)) {
+    const fnName = op === "And" ? "allOf" : "anyOf";
+    throw new Error(`"${fnName}(...)" expects an array of conditions.`);
+  }
+
   return {
-    and(next) {
-      if (op !== "And") {
-        throw new Error('Use "both(...)" for AND chains.');
-      }
-      conditions.push(resolveWhereInput(next));
-      return this;
-    },
-    or(next) {
-      if (op !== "Or") {
-        throw new Error('Use "either(...)" for OR chains.');
-      }
-      conditions.push(resolveWhereInput(next));
-      return this;
-    },
-    _condition() {
-      return {
-        __jazzPermissionKind: "compound",
-        op,
-        conditions: [...conditions],
-      };
-    },
+    __jazzPermissionKind: "compound",
+    op,
+    conditions: inputs.map((input) => resolveWhereInput(input)),
   };
 }
 
@@ -727,10 +691,6 @@ function isCompoundCondition(input: unknown): input is CompoundCondition {
     (input.op === "And" || input.op === "Or") &&
     Array.isArray(input.conditions)
   );
-}
-
-function isConditionBuilder(input: unknown): input is ConditionBuilder {
-  return isPlainObject(input) && typeof input._condition === "function";
 }
 
 function isUpdateRuleBuilder(input: unknown): input is UpdateRuleBuilder<unknown, unknown> {

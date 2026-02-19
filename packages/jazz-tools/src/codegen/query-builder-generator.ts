@@ -11,6 +11,25 @@ import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { tableNameToInterface } from "./type-generator.js";
 import type { Relation } from "./relation-analyzer.js";
 
+function columnTypeToTs(type: ColumnType): string {
+  switch (type.type) {
+    case "Text":
+      return "string";
+    case "Boolean":
+      return "boolean";
+    case "Integer":
+    case "BigInt":
+    case "Timestamp":
+      return "number";
+    case "Uuid":
+      return "string";
+    case "Array":
+      return `${columnTypeToTs(type.element)}[]`;
+    default:
+      return "unknown";
+  }
+}
+
 /**
  * Generate WhereInput type for a column based on its type.
  */
@@ -40,6 +59,11 @@ function columnToWhereInputType(col: {
           : "string | { eq?: string; ne?: string }";
       }
       return "string | { eq?: string; ne?: string; in?: string[] }";
+    case "Array": {
+      const elementTs = columnTypeToTs(col.column_type.element);
+      const arrayTs = `${elementTs}[]`;
+      return `${arrayTs} | { eq?: ${arrayTs}; contains?: ${elementTs} }`;
+    }
     default:
       return "unknown";
   }
@@ -74,7 +98,6 @@ export function generateWhereInputTypes(schema: WasmSchema): string[] {
  */
 function generateQueryBuilderClass(
   tableName: string,
-  schema: WasmSchema,
   relations: Map<string, Relation[]>,
 ): string[] {
   const lines: string[] = [];
@@ -91,6 +114,7 @@ function generateQueryBuilderClass(
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
+  // Phantom fields used only for type inference.
   lines.push(`  declare readonly _rowType: ${interfaceName};`);
   lines.push(`  declare readonly _initType: ${interfaceName}Init;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
@@ -200,7 +224,7 @@ export function generateQueryBuilderClasses(
   const lines: string[] = [];
 
   for (const tableName of Object.keys(schema.tables)) {
-    lines.push(...generateQueryBuilderClass(tableName, schema, relations));
+    lines.push(...generateQueryBuilderClass(tableName, relations));
   }
 
   return lines;

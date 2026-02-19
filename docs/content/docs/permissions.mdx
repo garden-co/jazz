@@ -29,7 +29,7 @@ Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly 
   </Tab>
 </Tabs>
 
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.allow()` / `USING (TRUE)`).
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.where({})` / `USING (TRUE)`).
 
 ## Simple Policies
 
@@ -45,6 +45,23 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
     </include>
   </Tab>
 </Tabs>
+
+## Combining Conditions (`allOf` / `anyOf`)
+
+In TypeScript permissions, combine multiple conditions with array-based combinators:
+
+```ts
+import { definePermissions } from "jazz-tools/permissions";
+import { app } from "./app.js";
+
+export default definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => [
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
+  ),
+]);
+```
+
+`allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
 
 ## Inherited Access Policies (`allowedTo.*`)
 

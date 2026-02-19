@@ -4,6 +4,7 @@
 
 import type {
   Schema,
+  ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
   PolicyExpr as DslPolicyExpr,
@@ -20,17 +21,21 @@ import type {
   Value,
 } from "../drivers/types.js";
 
+const map: Record<ScalarSqlType, ColumnType> = {
+  TEXT: { type: "Text" },
+  BOOLEAN: { type: "Boolean" },
+  INTEGER: { type: "Integer" },
+  REAL: { type: "Integer" }, // REAL maps to Integer in WASM (no Float type)
+  UUID: { type: "Uuid" },
+};
+
 /**
  * Convert a DSL SqlType to WasmColumnType format.
  */
 function sqlTypeToWasm(sqlType: SqlType): ColumnType {
-  const map: Record<SqlType, ColumnType> = {
-    TEXT: { type: "Text" },
-    BOOLEAN: { type: "Boolean" },
-    INTEGER: { type: "Integer" },
-    REAL: { type: "Integer" }, // REAL maps to Integer in WASM (no Float type)
-    UUID: { type: "Uuid" },
-  };
+  if (typeof sqlType !== "string") {
+    return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
+  }
   return map[sqlType];
 }
 

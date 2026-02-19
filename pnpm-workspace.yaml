@@ -6,6 +6,7 @@ packages:
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
+  - crates/jazz-rn
 
 ignoredBuiltDependencies:
   - blake3

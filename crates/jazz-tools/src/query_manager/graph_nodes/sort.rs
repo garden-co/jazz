@@ -112,6 +112,7 @@ impl RowNode for SortNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        let input_size = input.added.len() + input.removed.len() + input.updated.len();
         let old_sorted = self.sorted_tuples.clone();
         let old_positions: ahash::AHashMap<_, _> = old_sorted
             .iter()
@@ -200,6 +201,9 @@ impl RowNode for SortNode {
                 emitted_updated_ids.insert(ids);
             }
         }
+
+        let output_size = result.added.len() + result.removed.len() + result.updated.len();
+        tracing::trace!(input_size, output_size, "sort node processed");
 
         self.dirty = false;
         result

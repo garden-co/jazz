@@ -44,7 +44,7 @@ table("todos", {
 
 function currentSchemaWithInlinePermissions(): string {
   return `
-import { table, col, policy } from ${JSON.stringify(dslPath)};
+import { table, col } from ${JSON.stringify(dslPath)};
 
 table("projects", {
   name: col.string(),
@@ -55,7 +55,7 @@ table("todos", {
   owner_id: col.string(),
 }, {
   permissions: {
-    select: policy.eqSession("owner_id", "user_id"),
+    select: { type: "True" },
   },
 });
 `;
@@ -130,13 +130,12 @@ describe("cli build permissions generation", () => {
     expect(permissionsTest).toContain("Permissions test starter.");
   });
 
-  it("fails when inline table permissions and permissions.ts both define the same table", async () => {
+  it("fails when current.ts uses inline table permissions", async () => {
     const { schemaDir, jazzBin } = await createWorkspace();
     await writeFile(join(schemaDir, "current.ts"), currentSchemaWithInlinePermissions());
-    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchema());
 
     await expect(build({ schemaDir, jazzBin })).rejects.toThrow(
-      /defines permissions in both current.ts and permissions.ts/i,
+      /inline table permissions are no longer supported/i,
     );
   });
 

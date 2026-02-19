@@ -89,11 +89,11 @@ const appWithoutSchema = {
 
 describe("permissions DSL", () => {
   it("compiles read/insert/update/delete policies", () => {
-    const compiled = definePermissions(app, ({ policy, both, allowedTo, session }) => [
+    const compiled = definePermissions(app, ({ policy, allOf, allowedTo, session }) => [
       policy.todos.allowRead.where({ ownerId: session.userId }),
       policy.todos.allowInsert.where({ ownerId: session.userId }),
       policy.todos.allowUpdate
-        .whereOld(both(allowedTo.update("projectId")).and({ archived: false }))
+        .whereOld(allOf([allowedTo.update("projectId"), { archived: false }]))
         .whereNew(allowedTo.update("projectId")),
       policy.todos.allowDelete.where({ ownerId: session.userId }),
     ]);
@@ -152,9 +152,9 @@ describe("permissions DSL", () => {
   });
 
   it("supports plural action aliases and OR-merges repeated rules", () => {
-    const compiled = definePermissions(app, ({ policy, either, allowedTo, session }) => [
+    const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
       policy.todos.allowReads.where({ ownerId: session.userId }),
-      policy.todos.allowReads.where(either({ done: true }).or(allowedTo.read("projectId"))),
+      policy.todos.allowReads.where(anyOf([{ done: true }, allowedTo.read("projectId")])),
       policy.todos.allowInserts.where({ ownerId: session.userId }),
     ]);
 
@@ -308,7 +308,7 @@ describe("permissions DSL", () => {
     expect(newOnly.todos.update?.using).toEqual(newOnly.todos.update?.with_check);
   });
 
-  it("rejects unsupported where operators and invalid compound chains", () => {
+  it("rejects unsupported where operators and invalid compound combinator inputs", () => {
     expect(() =>
       definePermissions(app, ({ policy }) => [
         policy.todos.allowRead.where({ done: { contains: true } } as unknown as TodoWhere),
@@ -316,28 +316,29 @@ describe("permissions DSL", () => {
     ).toThrow(/where operator "contains" is not yet supported/i);
 
     expect(() =>
-      definePermissions(app, ({ policy, both }) => [
-        policy.todos.allowRead.where(both({ done: true }).or({ archived: false })),
+      definePermissions(app, ({ policy, allOf }) => [
+        policy.todos.allowRead.where(allOf({ done: true } as unknown as readonly unknown[])),
       ]),
-    ).toThrow(/use "either\(\.\.\.\)" for OR chains/i);
+    ).toThrow(/allOf\(\.\.\.\).*array/i);
 
     expect(() =>
-      definePermissions(app, ({ policy, either }) => [
-        policy.todos.allowRead.where(either({ done: true }).and({ archived: false })),
+      definePermissions(app, ({ policy, anyOf }) => [
+        policy.todos.allowRead.where(anyOf({ done: true } as unknown as readonly unknown[])),
       ]),
-    ).toThrow(/use "both\(\.\.\.\)" for AND chains/i);
+    ).toThrow(/anyOf\(\.\.\.\).*array/i);
   });
 
   it("compiles correlated exists row references", () => {
-    const compiled = definePermissions(app, ({ policy, either, allowedTo, session }) => [
+    const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
       policy.todos.allowRead.where((todo) =>
-        either(allowedTo.read("projectId")).or(
+        anyOf([
+          allowedTo.read("projectId"),
           policy.todoShares.exists.where({
             todoId: todo.id,
             userId: session.userId,
             canRead: true,
           }),
-        ),
+        ]),
       ),
     ]);
 

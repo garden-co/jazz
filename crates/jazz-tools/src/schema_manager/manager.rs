@@ -749,6 +749,9 @@ impl SchemaManager {
         table: &str,
         values: &[Value],
     ) -> Result<InsertHandle, QueryError> {
+        let _span =
+            tracing::debug_span!("SM::insert", table, schema_hash = %self.context.current_hash)
+                .entered();
         self.insert_with_session(storage, table, values, None)
     }
 
@@ -776,6 +779,7 @@ impl SchemaManager {
         table: &str,
         object_id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
+        let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
         self.query_manager.delete_on_branch(
             storage,
             table,
@@ -793,6 +797,7 @@ impl SchemaManager {
     /// When schemas activate, QueryManager is updated incrementally and
     /// buffered row updates are retried.
     pub fn process<H: Storage>(&mut self, storage: &mut H) {
+        let _span = tracing::debug_span!("SM::process").entered();
         self.query_manager.process(storage);
 
         // Process any catalogue updates queued by QueryManager

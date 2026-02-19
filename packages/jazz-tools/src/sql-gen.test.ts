@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   table,
   col,
-  policy,
   migrate,
   getCollectedSchema,
   getCollectedMigration,
@@ -73,6 +72,24 @@ describe("schemaToSql", () => {
     expect(sql).toContain("real_null REAL");
   });
 
+  it("handles array column types", () => {
+    resetCollectedState();
+    table("arrays", {
+      numbers: col.array(col.int()),
+      tags: col.array(col.string()),
+      flags: col.array(col.boolean()),
+      matrix: col.array(col.array(col.int())),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("numbers INTEGER[] NOT NULL");
+    expect(sql).toContain("flags BOOLEAN[] NOT NULL");
+    expect(sql).toContain("tags TEXT[]");
+    expect(sql).toContain("matrix INTEGER[][] NOT NULL");
+  });
+
   it("generates UUID REFERENCES for required ref", () => {
     resetCollectedState();
     table("todos", {
@@ -119,6 +136,19 @@ describe("schemaToSql", () => {
     expect(parent.nullable).toBe(true);
   });
 
+  it("stores references in array(ref(...)) metadata", () => {
+    resetCollectedState();
+    table("files", {
+      parts: col.array(col.ref("file_parts")),
+    });
+    const schema = getCollectedSchema();
+
+    const parts = schema.tables[0].columns.find((c) => c.name === "parts")!;
+    expect(parts.sqlType).toEqual({ kind: "ARRAY", element: "UUID" });
+    expect(parts.references).toBe("file_parts");
+    expect(parts.nullable).toBe(false);
+  });
+
   it("generates complete table with mixed columns and refs", () => {
     resetCollectedState();
     table("todos", {
@@ -140,25 +170,24 @@ describe("schemaToSql", () => {
 
   it("generates CREATE POLICY statements from table permissions", () => {
     resetCollectedState();
-    table(
-      "todos",
-      {
-        title: col.string(),
-        owner_id: col.string(),
-      },
-      {
-        permissions: {
-          select: policy.eqSession("owner_id", "user_id"),
-          insert: policy.eqSession("owner_id", "user_id"),
-          update: {
-            using: policy.eqSession("owner_id", "user_id"),
-            withCheck: policy.eqSession("owner_id", "user_id"),
-          },
-          delete: policy.eqSession("owner_id", "user_id"),
-        },
-      },
-    );
+    table("todos", {
+      title: col.string(),
+      owner_id: col.string(),
+    });
     const schema = getCollectedSchema();
+    const ownerMatchesSession: import("./schema.js").PolicyExpr = {
+      type: "Cmp",
+      column: "owner_id",
+      op: "Eq",
+      value: { type: "SessionRef", path: ["user_id"] },
+    };
+
+    schema.tables[0]!.policies = {
+      select: { using: ownerMatchesSession },
+      insert: { with_check: ownerMatchesSession },
+      update: { using: ownerMatchesSession, with_check: ownerMatchesSession },
+      delete: { using: ownerMatchesSession },
+    };
 
     const sql = schemaToSql(schema);
 
@@ -248,6 +277,80 @@ describe("lensToSql", () => {
     );
     expect(lensToSql(lens, "bwd")).toBe(
       `ALTER TABLE todos DROP COLUMN description;
+`,
+    );
+  });
+
+  it("preserves SQL type for add lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      priority: col.add().int({ default: 0 }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE todos ADD COLUMN priority INTEGER DEFAULT 0;
+`);
+  });
+
+  it("preserves SQL type for drop lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      priority: col.drop().int({ backwardsDefault: 0 }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "bwd")).toBe(`ALTER TABLE todos ADD COLUMN priority INTEGER DEFAULT 0;
+`);
+  });
+
+  it("supports array defaults in migration SQL generation", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.add().string({ default: [] as unknown as string }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE projects ADD COLUMN todos TEXT DEFAULT ARRAY[];
+`);
+  });
+
+  it("supports adding array columns in lenses", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.add().array({ of: "UUID", default: [] }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY[];
+`,
+    );
+  });
+
+  it("supports adding array columns with default values in lenses", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.add().array({ of: "UUID", default: ["123e4567-e89b-12d3-a456-426614174000"] }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY['123e4567-e89b-12d3-a456-426614174000'];
+`,
+    );
+  });
+
+  it("supports dropping array columns with backward re-add", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.drop().array({ of: "UUID", backwardsDefault: [] }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE projects DROP COLUMN todos;
+`);
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY[];
 `,
     );
   });
