@@ -1,38 +1,40 @@
 import {
-  GROUND_LEVEL,
   ASTRONAUT_HEIGHT,
-  LANDER_HEIGHT,
-  SHARE_PROXIMITY_RADIUS,
   curveOffset,
-  leanAngle,
-  type FuelType,
-} from "./constants.js";
-import {
-  drawBackground,
-  drawLander,
-  drawAstronaut,
-  drawDeposit,
-  drawArrow,
-  drawSplash,
-  drawCrashSplash,
-  drawBubbles,
-  drawStartScreen,
-  drawInventoryBar,
-  drawVelocityWarning,
   DEPOSIT_COLOURS,
-} from "./render.js";
-import { wrapScreenX, wrapDistance, wrapLerp } from "./world.js";
-import { tickSpriteAnimation } from "./sprites.js";
+  type FuelType,
+  GROUND_LEVEL,
+  LANDER_HEIGHT,
+  leanAngle,
+  SHARE_PROXIMITY_RADIUS,
+} from "./constants";
 import {
-  updateParticles,
+  drawCrashSplash,
+  drawSplash,
+  drawStartScreen,
+  drawVelocityWarning,
+} from "./overlays";
+import {
   drawParticles,
-  emitThrust,
+  emitBurstUpward,
   emitSideThrust,
   emitSparkle,
-  emitBurstUpward,
+  emitThrust,
   emitTrail,
-} from "./particles.js";
-import type { SceneContext } from "./types.js";
+  updateParticles,
+} from "./particles";
+import {
+  drawArrow,
+  drawAstronaut,
+  drawBubbles,
+  drawDeposit,
+  drawInventoryBar,
+  drawLander,
+} from "./render";
+import { tickSpriteAnimation } from "./sprites";
+import { drawBackground } from "./terrain";
+import type { SceneContext } from "./types";
+import { wrapDistance, wrapLerp, wrapScreenX } from "./world";
 
 // ---------------------------------------------------------------------------
 // renderScene — draws one complete frame
@@ -168,8 +170,10 @@ export function renderScene(scene: SceneContext): SceneResult {
   }
   if (world.mode === "descending") {
     const jetY = world.posY - LANDER_HEIGHT * 0.65;
-    if (thrustRight) emitSideThrust(particles, world.posX - 12 - 5, jetY, -1, vx, vy);
-    if (thrustLeft) emitSideThrust(particles, world.posX + 12 + 5, jetY, 1, vx, vy);
+    if (thrustRight)
+      emitSideThrust(particles, world.posX - 12 - 5, jetY, -1, vx, vy);
+    if (thrustLeft)
+      emitSideThrust(particles, world.posX + 12 + 5, jetY, 1, vx, vy);
   }
 
   // --- Collection sparkles + burst effects ---
@@ -204,8 +208,8 @@ export function renderScene(scene: SceneContext): SceneResult {
     }
   }
   for (const rp of remotePlayers) {
-    if (rp.mode === "walking" && rp.landerX != null) {
-      const rpLanderSX = wrapScreenX(rp.landerX, cameraX);
+    if (rp.mode === "walking" && rp.landerSpawnX != null) {
+      const rpLanderSX = wrapScreenX(rp.landerSpawnX, cameraX);
       if (rpLanderSX > -40 && rpLanderSX < w + 40) {
         const rpLanderY = groundScreenY + curveOffset(rpLanderSX, w);
         ctx.save();
@@ -238,7 +242,8 @@ export function renderScene(scene: SceneContext): SceneResult {
     const rpLean = leanAngle(rpSX, w);
     if (rp.mode === "walking") {
       const rpWalkY = s.y - cameraY + rpCurve;
-      const isMoving = Math.abs(rp.positionX - (smoothed.get(rp.id)?.x ?? rp.positionX)) > 0.5;
+      const isMoving =
+        Math.abs(rp.positionX - (smoothed.get(rp.id)?.x ?? rp.positionX)) > 0.5;
       ctx.save();
       ctx.translate(rpSX, rpWalkY);
       ctx.rotate(rpLean);
@@ -274,7 +279,16 @@ export function renderScene(scene: SceneContext): SceneResult {
   const localMoving = isWalking && scene.walkingInput;
   if (world.mode === "descending") {
     const screenY = world.posY - cameraY + localCurve;
-    drawLander(ctx, screenX, screenY, thrusting, undefined, undefined, thrustLeft, thrustRight);
+    drawLander(
+      ctx,
+      screenX,
+      screenY,
+      thrusting,
+      undefined,
+      undefined,
+      thrustLeft,
+      thrustRight,
+    );
   } else if (world.mode === "landed" || world.mode === "in_lander") {
     const landedY = groundScreenY + localCurve;
     ctx.save();
@@ -295,7 +309,13 @@ export function renderScene(scene: SceneContext): SceneResult {
       localPlayerName || undefined,
       localMoving,
     );
-    drawInventoryBar(ctx, 0, -ASTRONAUT_HEIGHT - 26, inventory, requiredFuelType);
+    drawInventoryBar(
+      ctx,
+      0,
+      -ASTRONAUT_HEIGHT - 26,
+      inventory,
+      requiredFuelType,
+    );
     ctx.restore();
   } else if (world.mode === "launched") {
     const screenY = world.posY - cameraY + localCurve;
@@ -315,7 +335,9 @@ export function renderScene(scene: SceneContext): SceneResult {
   // --- Speech bubbles ---
   const nowS = Math.floor(Date.now() / 1000);
   const BUBBLE_EXPIRY_S = 15;
-  const recentMsgs = chatMessages.filter((m) => nowS - m.createdAt < BUBBLE_EXPIRY_S);
+  const recentMsgs = chatMessages.filter(
+    (m) => nowS - m.createdAt < BUBBLE_EXPIRY_S,
+  );
   if (recentMsgs.length > 0) {
     const byPlayer = new Map<string, string[]>();
     for (const m of recentMsgs) {
@@ -329,7 +351,8 @@ export function renderScene(scene: SceneContext): SceneResult {
     const localMsgs = byPlayer.get(localPlayerId);
     if (localMsgs) {
       const localBubbleY =
-        (world.mode === "walking" ? world.posY - cameraY : groundScreenY) + localCurve;
+        (world.mode === "walking" ? world.posY - cameraY : groundScreenY) +
+        localCurve;
       // Lean the bubble along with the player — offset x by the lean at sprite top height
       // Extra height accounts for inventory bar above the name label
       const spriteH = ASTRONAUT_HEIGHT + 30;
@@ -346,7 +369,8 @@ export function renderScene(scene: SceneContext): SceneResult {
       if (rpSX < -60 || rpSX > w + 60) continue;
       const rpBubCurve = curveOffset(rpSX, w);
       const rpBubLean = leanAngle(rpSX, w);
-      const rpBubbleY = (rp.mode === "walking" ? s.y - cameraY : groundScreenY) + rpBubCurve;
+      const rpBubbleY =
+        (rp.mode === "walking" ? s.y - cameraY : groundScreenY) + rpBubCurve;
       const rpSpriteH = ASTRONAUT_HEIGHT + 16;
       const rpBubbleDx = Math.sin(rpBubLean) * rpSpriteH;
       const spriteTop = rpBubbleY - rpSpriteH * Math.cos(rpBubLean);
@@ -376,7 +400,7 @@ export function renderScene(scene: SceneContext): SceneResult {
       if (!rp.requiredFuelType || !rp.playerId) continue;
       const dist = wrapDistance(world.posX, rp.positionX);
       if (dist > HINT_RADIUS || dist <= SHARE_PROXIMITY_RADIUS) continue;
-      if (rp.hasRequiredFuel) continue;
+      if (rp.landerFuelLevel >= 100) continue;
       const ft = rp.requiredFuelType as FuelType;
       if (ft === requiredFuelType) continue;
       if (!inventory.has(ft)) continue;

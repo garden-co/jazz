@@ -16,10 +16,10 @@
  *   Recent chat messages from Jazz, rendered as speech bubbles.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
-import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
-import { Game } from "../../src/Game.js";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
+import { Game } from "../../src/Game";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,14 +28,16 @@ import { Game } from "../../src/Game.js";
 const SPEED = 10;
 const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
-async function mountGameWith(props: Record<string, unknown>): Promise<HTMLDivElement> {
+async function mountGameWith(
+  props: Record<string, unknown>,
+): Promise<HTMLDivElement> {
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
   mounts.push({ root, container: el });
 
   await act(async () => {
-    root.render(<Game {...({ physicsSpeed: SPEED, ...props } as any)} />);
+    root.render(<Game {...({ physicsSpeed: SPEED, initialMode: "landed", ...props } as any)} />);
   });
 
   await waitFor(
@@ -120,9 +122,6 @@ describe("Moon Lander — Phase 5: Chat", () => {
   it("Enter opens chat input, Escape closes it", async () => {
     const el = await mountGameWith({ deposits: [], inventory: [] });
 
-    // Land first
-    await waitForAttr(el, "player-mode", "landed", 3000);
-
     // Chat should start closed
     expect(readStr(el, "chat-open")).toBe("false");
 
@@ -154,14 +153,14 @@ describe("Moon Lander — Phase 5: Chat", () => {
       },
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
-
     // Open chat
     pressKey("Enter", "Enter");
     await waitForAttr(el, "chat-open", "true", 1000);
 
     // Find the input element and type into it
-    const input = el.querySelector('[data-testid="chat-input"]') as HTMLInputElement;
+    const input = el.querySelector(
+      '[data-testid="chat-input"]',
+    ) as HTMLInputElement;
     expect(input).toBeTruthy();
 
     // Simulate typing by setting input value directly
@@ -172,11 +171,7 @@ describe("Moon Lander — Phase 5: Chat", () => {
     releaseKey("Enter", "Enter");
 
     // onSendMessage should have fired
-    await waitFor(
-      () => messages.length > 0,
-      1000,
-      "onSendMessage should fire",
-    );
+    await waitFor(() => messages.length > 0, 1000, "onSendMessage should fire");
     expect(messages[0]).toBe("hello moon");
 
     // Chat should close after sending
@@ -192,8 +187,7 @@ describe("Moon Lander — Phase 5: Chat", () => {
   it("game keys are suppressed while chat is open", async () => {
     const el = await mountGameWith({ deposits: [], inventory: [] });
 
-    // Land and walk out
-    await waitForAttr(el, "player-mode", "landed", 3000);
+    // Walk out
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -233,8 +227,6 @@ describe("Moon Lander — Phase 5: Chat", () => {
         messages.push(text);
       },
     });
-
-    await waitForAttr(el, "player-mode", "landed", 3000);
 
     // Open chat and immediately press Enter (empty input)
     pressKey("Enter", "Enter");

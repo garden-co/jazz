@@ -1,414 +1,438 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { Player } from "../../schema/app";
 import {
-  CANVAS_WIDTH,
   CANVAS_HEIGHT,
-  INITIAL_ALTITUDE,
-  GROUND_LEVEL,
-  INITIAL_FUEL,
+  CANVAS_WIDTH,
   type FuelType,
-} from "./constants.js";
-import { drawBackground } from "./render.js";
-import { generateDeposits } from "./world.js";
-import { mergeInventory } from "./inventory.js";
-import { updatePhysics } from "./physics.js";
-import { renderScene } from "./scene.js";
-import { createParticlePool } from "./particles.js";
-import type { ArcAnimation, Deposit, RemotePlayerView, EngineState, GameWorld } from "./types.js";
+  GROUND_LEVEL,
+  INITIAL_ALTITUDE,
+  INITIAL_FUEL,
+  MOON_SURFACE_WIDTH,
+} from "./constants";
+import { mergeInventory } from "./inventory";
+import { type Particle, createParticlePool } from "./particles";
+import { updatePhysics } from "./physics";
+import { renderScene } from "./scene";
+import { drawBackground } from "./terrain";
+import type {
+  ArcAnimation,
+  Deposit,
+  EngineProps,
+  EngineState,
+  GameWorld,
+} from "./types";
+import { generateDeposits } from "./world";
 
-export type { Deposit, RemotePlayerView, EngineState } from "./types.js";
+export type { Deposit, EngineState } from "./types";
 
 // ---------------------------------------------------------------------------
-// useGameEngine — orchestrates physics, camera, and rendering on a canvas
+// GameEngine — owns all mutable game state outside React
+// ---------------------------------------------------------------------------
+
+export class GameEngine {
+  // --- Props (pushed from React each render) ---
+  props: EngineProps;
+
+  // --- Canvas ---
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+  private size: { w: number; h: number };
+
+  // --- World ---
+  world: GameWorld;
+  private smoothCamY = NaN; // NaN = snap on first frame
+
+  // --- Remote players ---
+  private smoothedRemotes = new Map<string, { x: number; y: number }>();
+
+  // --- Deposits ---
+  private externalDeposits: Deposit[] = [];
+  private localDeposits: Deposit[];
+
+  // --- Inventory ---
+  private inventory = new Set<FuelType>();
+  private optimisticInventory = new Set<FuelType>();
+  private collectedIds = new Set<string>();
+  private arcs: ArcAnimation[] = [];
+  private particles: Particle[];
+  private prevExternalInventory = new Set<FuelType>();
+  private sharedOut = new Set<FuelType>();
+  shareHint = false;
+  thrusting = false;
+
+  // --- Input ---
+  private keys = new Set<string>();
+  private actions: string[] = [];
+
+  // --- RAF ---
+  private rafId = 0;
+  private lastTime = performance.now();
+
+  // --- Event listener refs (for cleanup) ---
+  private onKeyDown: (e: KeyboardEvent) => void;
+  private onKeyUp: (e: KeyboardEvent) => void;
+  private onBlur: () => void;
+  private onResize: () => void;
+
+  constructor(canvas: HTMLCanvasElement, initialProps: EngineProps) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d")!;
+    this.props = initialProps;
+
+    // Resize to fill viewport
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    this.size = { w: canvas.width, h: canvas.height };
+
+    // Initialise world
+    const startX =
+      initialProps.spawnX ?? Math.floor(Math.random() * MOON_SURFACE_WIDTH);
+    const grounded =
+      initialProps.initialMode === "landed" ||
+      initialProps.initialMode === "walking" ||
+      initialProps.initialMode === "in_lander";
+    this.world = {
+      posX: startX,
+      posY: grounded ? GROUND_LEVEL : INITIAL_ALTITUDE,
+      velX: 0,
+      velY: 0,
+      mode: initialProps.initialMode,
+      landerX: grounded ? startX : 0,
+      fuel: INITIAL_FUEL,
+      launchElapsed: 0,
+      crashElapsed: 0,
+    };
+
+    // Initialise deposits and particles
+    this.localDeposits = generateDeposits(
+      initialProps.requiredFuelType,
+      CANVAS_WIDTH / 2,
+    );
+    this.particles = createParticlePool();
+
+    // Initial draw
+    const { w, h } = this.size;
+    const initCamY = Math.floor(this.world.posY - h / 2);
+    drawBackground(this.ctx, this.world.posX - w / 2, initCamY, w, h);
+
+    // Event listeners
+    this.onKeyDown = (e: KeyboardEvent) => {
+      if (this.props.chatOpen) return;
+      const fresh = !this.keys.has(e.code);
+      this.keys.add(e.code);
+      if (e.code === "KeyE") this.actions.push("interact");
+      if (e.code === "Space") this.actions.push("launch");
+      if (fresh && (e.code === "Space" || e.code === "KeyW"))
+        this.actions.push("jump");
+    };
+    this.onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
+    this.onBlur = () => this.keys.clear();
+    this.onResize = () => {
+      this.canvas.width = window.innerWidth;
+      this.canvas.height = window.innerHeight;
+      this.size = { w: this.canvas.width, h: this.canvas.height };
+    };
+
+    document.addEventListener("keydown", this.onKeyDown);
+    document.addEventListener("keyup", this.onKeyUp);
+    window.addEventListener("blur", this.onBlur);
+    window.addEventListener("resize", this.onResize);
+
+    // Start RAF
+    this.rafId = requestAnimationFrame(this.gameLoop);
+  }
+
+  setProps(props: EngineProps): void {
+    this.props = props;
+    if (props.deposits !== undefined) {
+      this.externalDeposits = props.deposits;
+    }
+  }
+
+  snapshot(): EngineState {
+    const deposits = this.activeDeposits();
+    let depositCount = 0;
+    for (const d of deposits) {
+      if (!this.collectedIds.has(d.id)) depositCount++;
+    }
+    return {
+      mode: this.world.mode,
+      positionX: this.world.posX,
+      positionY: this.world.posY,
+      velocityX: this.world.velX,
+      velocityY: this.world.velY,
+      landerX: this.world.landerX,
+      fuel: this.world.fuel,
+      thrusting: this.thrusting,
+      depositCount,
+      inventory: [...this.inventory],
+      remotePlayerCount: this.props.remotePlayers.length,
+      shareHint: this.shareHint,
+    };
+  }
+
+  destroy(): void {
+    cancelAnimationFrame(this.rafId);
+    document.removeEventListener("keydown", this.onKeyDown);
+    document.removeEventListener("keyup", this.onKeyUp);
+    window.removeEventListener("blur", this.onBlur);
+    window.removeEventListener("resize", this.onResize);
+  }
+
+  // --- Private ---
+
+  private activeDeposits(): Deposit[] {
+    return this.props.deposits !== undefined
+      ? this.externalDeposits
+      : this.localDeposits;
+  }
+
+  private mergeExternalInventory(): void {
+    const { props, world } = this;
+    if (props.inventory === undefined) return;
+    const canHold =
+      world.mode === "walking" ||
+      world.mode === "landed" ||
+      world.mode === "in_lander" ||
+      world.mode === "launched";
+    if (!canHold) return;
+
+    const result = mergeInventory({
+      jazzInventory: props.inventory,
+      optimistic: this.optimisticInventory,
+      sharedOut: this.sharedOut,
+      collectedIds: this.collectedIds,
+      prevJazzInventory: this.prevExternalInventory,
+      externalDeposits: this.externalDeposits,
+      remotePlayers: props.remotePlayers,
+      playerX: world.posX,
+    });
+
+    this.inventory = result.merged;
+    this.sharedOut = result.sharedOut;
+    this.prevExternalInventory = result.prevJazzInventory;
+    for (const arc of result.newArcs) this.arcs.push(arc);
+    for (const id of result.collectedIdsToRemove) this.collectedIds.delete(id);
+  }
+
+  private gameLoop = (now: number): void => {
+    try {
+    const rawDt = Math.min((now - this.lastTime) / 1000, 0.05);
+    const dt = rawDt * this.props.physicsSpeed;
+    this.lastTime = now;
+    const { w, h } = this.size;
+    const world = this.world;
+
+    // --- Inventory merge (idempotent, runs each frame) ---
+    this.mergeExternalInventory();
+
+    // --- Read input ---
+    const actions = this.actions.splice(0);
+    const input = {
+      left: this.keys.has("ArrowLeft") || this.keys.has("KeyA"),
+      right: this.keys.has("ArrowRight") || this.keys.has("KeyD"),
+      up: this.keys.has("ArrowUp") || this.keys.has("KeyW"),
+      interact: actions.includes("interact"),
+      launch: actions.includes("launch"),
+      jump: actions.includes("jump"),
+    };
+
+    // --- Physics ---
+    const deposits = this.activeDeposits();
+    const collectEffects: Array<{
+      x: number;
+      fuelType: FuelType;
+      isRequired: boolean;
+    }> = [];
+    const { thrusting, thrustLeft, thrustRight } = updatePhysics(
+      world,
+      input,
+      {
+        dt,
+        requiredFuelType: this.props.requiredFuelType,
+        deposits,
+        collectedIds: this.collectedIds,
+        inventory: this.inventory,
+        optimisticInventory: this.optimisticInventory,
+        sharedOut: this.sharedOut,
+        remotePlayers: this.props.remotePlayers,
+        arcs: this.arcs,
+        collectEffects,
+        callbacks: {
+          onCollectDeposit: (id) => this.props.onCollectDeposit?.(id),
+          onRefuel: (ft) => this.props.onRefuel?.(ft),
+          onShareFuel: (ft, rpId) => this.props.onShareFuel?.(ft, rpId),
+          onBurstDeposit: (ft) => this.props.onBurstDeposit?.(ft),
+        },
+      },
+    );
+
+    this.thrusting = thrusting;
+
+    // --- Camera (smoothed) ---
+    const cameraX = Math.floor(world.posX - w / 2);
+    const GROUND_MARGIN = 80;
+
+    const groundCamY = GROUND_LEVEL - h + GROUND_MARGIN;
+    let targetCamY: number;
+    if (world.mode === "launched") {
+      targetCamY = world.posY - h / 2;
+      targetCamY = Math.min(targetCamY, this.smoothCamY);
+    } else if (world.mode === "descending" || world.mode === "start") {
+      targetCamY = world.posY - h / 2;
+    } else {
+      targetCamY = groundCamY;
+    }
+    targetCamY = Math.min(targetCamY, groundCamY);
+
+    if (isNaN(this.smoothCamY)) {
+      this.smoothCamY = targetCamY;
+    }
+    const camLerp =
+      world.mode === "launched"
+        ? 3 * Math.max(0, 1 - world.launchElapsed / 1.5)
+        : 5;
+    this.smoothCamY +=
+      (targetCamY - this.smoothCamY) * Math.min(1, camLerp * dt);
+    const cameraY = Math.floor(this.smoothCamY);
+
+    // --- Render ---
+    const sceneResult = renderScene({
+      ctx: this.ctx,
+      w,
+      h,
+      cameraX,
+      cameraY,
+      groundScreenY: GROUND_LEVEL - cameraY,
+      dt: rawDt,
+      now: now / 1000,
+      world,
+      thrusting,
+      localPlayerName: this.props.localPlayerName,
+      localPlayerColor: this.props.localPlayerColor,
+      deposits,
+      collectedIds: this.collectedIds,
+      requiredFuelType: this.props.requiredFuelType,
+      inventory: this.inventory,
+      arcs: this.arcs,
+      remotePlayers: this.props.remotePlayers,
+      smoothedRemotes: this.smoothedRemotes,
+      chatMessages: this.props.chatMessages,
+      localPlayerId: this.props.localPlayerId,
+      particles: this.particles,
+      thrustLeft,
+      thrustRight,
+      collectEffects,
+      walkingInput: world.mode === "walking" && (input.left || input.right),
+    });
+    this.shareHint = sceneResult.shareHint;
+    } catch (e) { console.error("GAMELOOP ERROR:", e); }
+
+    this.rafId = requestAnimationFrame(this.gameLoop);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// useGameEngine — thin React lifecycle wrapper around GameEngine
 // ---------------------------------------------------------------------------
 
 export function useGameEngine(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   options?: {
     physicsSpeed?: number;
+    initialMode?: import("./constants").PlayerMode;
+    /** Override the random spawn X position (for tests). */
+    spawnX?: number;
     requiredFuelType?: FuelType;
-    remotePlayers?: RemotePlayerView[];
+    remotePlayers?: Player[];
     deposits?: Deposit[];
     inventory?: FuelType[];
     onCollectDeposit?: (id: string) => void;
     onRefuel?: (fuelType: FuelType) => void;
     onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
     onBurstDeposit?: (fuelType: string) => void;
-    chatMessages?: Array<{ id: string; playerId: string; message: string; createdAt: number }>;
+    chatMessages?: Array<{
+      id: string;
+      playerId: string;
+      message: string;
+      createdAt: number;
+    }>;
     localPlayerId?: string;
     localPlayerName?: string;
     localPlayerColor?: string;
-    chatOpenRef?: React.RefObject<boolean>;
+    chatOpen?: boolean;
   },
 ): EngineState {
-  const physicsSpeed = options?.physicsSpeed ?? 1;
-  const requiredFuelType = options?.requiredFuelType ?? "circle";
+  const engineRef = useRef<GameEngine | null>(null);
 
-  const sizeRef = useRef({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
+  const initialMode = options?.initialMode ?? "start";
+  const grounded =
+    initialMode === "landed" ||
+    initialMode === "walking" ||
+    initialMode === "in_lander";
 
-  // Consolidated mutable world state (replaces 9 individual refs)
-  const worldRef = useRef<GameWorld>({
-    posX: CANVAS_WIDTH / 2,
-    posY: INITIAL_ALTITUDE,
-    velX: 0,
-    velY: 0,
-    mode: "start",
-    landerX: 0,
-    landerY: 0,
-    fuel: INITIAL_FUEL,
-    launchElapsed: 0,
-    crashElapsed: 0,
-  });
-
-  // Camera smoothing
-  const smoothCamYRef = useRef(NaN); // NaN = snap on first frame
-
-  // Remote players (updated from props via ref so the game loop sees latest)
-  const remotePlayersRef = useRef<RemotePlayerView[]>([]);
-  const smoothedRemotesRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-
-  // Fuel deposits and inventory
-  const isConnected = options?.deposits !== undefined;
-  const externalDepositsRef = useRef<Deposit[]>([]);
-  const localDepositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
-  const onCollectDepositRef = useRef(options?.onCollectDeposit);
-  onCollectDepositRef.current = options?.onCollectDeposit;
-  const onRefuelRef = useRef(options?.onRefuel);
-  onRefuelRef.current = options?.onRefuel;
-  const onShareFuelRef = useRef(options?.onShareFuel);
-  onShareFuelRef.current = options?.onShareFuel;
-  const onBurstDepositRef = useRef(options?.onBurstDeposit);
-  onBurstDepositRef.current = options?.onBurstDeposit;
-
-  // Chat + local player identity
-  const chatMessagesRef = useRef(options?.chatMessages ?? []);
-  chatMessagesRef.current = options?.chatMessages ?? [];
-  const localPlayerIdRef = useRef(options?.localPlayerId ?? "");
-  localPlayerIdRef.current = options?.localPlayerId ?? "";
-  const localPlayerNameRef = useRef(options?.localPlayerName ?? "");
-  localPlayerNameRef.current = options?.localPlayerName ?? "";
-  const localPlayerColorRef = useRef(options?.localPlayerColor ?? "");
-  localPlayerColorRef.current = options?.localPlayerColor ?? "";
-  const chatOpenRef = options?.chatOpenRef ?? useRef(false);
-
-  // Keep external deposits ref in sync with latest props
-  if (isConnected) {
-    externalDepositsRef.current = options.deposits!;
-  }
-  const depositsRef = isConnected ? externalDepositsRef : localDepositsRef;
-
-  // Inventory
-  const inventoryRef = useRef<Set<FuelType>>(new Set());
-  const optimisticInventoryRef = useRef<Set<FuelType>>(new Set());
-  const collectedIdsRef = useRef<Set<string>>(new Set());
-  const arcsRef = useRef<ArcAnimation[]>([]);
-  const particlesRef = useRef(createParticlePool());
-  const prevExternalInventoryRef = useRef<Set<FuelType>>(new Set());
-  const sharedOutRef = useRef<Set<FuelType>>(new Set());
-  const shareHintRef = useRef(false);
-  const thrustingRef = useRef(false);
-
-  // Merge Jazz inventory into the working set each render (connected mode).
-  // Skip during start/descending/crashed — the player has no inventory in those modes
-  // and merging would re-add stale DB items before the burst flush clears them.
-  const canHoldInventory =
-    worldRef.current.mode === "walking" ||
-    worldRef.current.mode === "landed" ||
-    worldRef.current.mode === "in_lander" ||
-    worldRef.current.mode === "launched";
-  if (options?.inventory !== undefined && canHoldInventory) {
-    const result = mergeInventory({
-      jazzInventory: options.inventory,
-      optimistic: optimisticInventoryRef.current,
-      sharedOut: sharedOutRef.current,
-      collectedIds: collectedIdsRef.current,
-      prevJazzInventory: prevExternalInventoryRef.current,
-      externalDeposits: externalDepositsRef.current,
-      remotePlayers: remotePlayersRef.current,
-      playerX: worldRef.current.posX,
-    });
-
-    inventoryRef.current = result.merged;
-    sharedOutRef.current = result.sharedOut;
-    prevExternalInventoryRef.current = result.prevJazzInventory;
-    for (const arc of result.newArcs) arcsRef.current.push(arc);
-    for (const id of result.collectedIdsToRemove) collectedIdsRef.current.delete(id);
-  }
-
-  // Mirrored into state for external consumption (HUD, data attributes, Jazz)
   const [state, setState] = useState<EngineState>({
-    mode: "start",
+    mode: initialMode,
     positionX: CANVAS_WIDTH / 2,
-    positionY: INITIAL_ALTITUDE,
+    positionY: grounded ? GROUND_LEVEL : INITIAL_ALTITUDE,
     velocityX: 0,
     velocityY: 0,
     landerX: 0,
-    landerY: 0,
     fuel: INITIAL_FUEL,
     thrusting: false,
-    depositCount: depositsRef.current.length,
+    depositCount: 0,
     inventory: [],
     remotePlayerCount: 0,
     shareHint: false,
   });
 
-  // Keep remote players ref in sync with latest props
-  remotePlayersRef.current = options?.remotePlayers ?? [];
+  // Build props from options
+  const props: EngineProps = {
+    physicsSpeed: options?.physicsSpeed ?? 1,
+    initialMode,
+    spawnX: options?.spawnX,
+    requiredFuelType: options?.requiredFuelType ?? "circle",
+    remotePlayers: options?.remotePlayers ?? [],
+    deposits: options?.deposits,
+    inventory: options?.inventory,
+    chatMessages: options?.chatMessages ?? [],
+    localPlayerId: options?.localPlayerId ?? "",
+    localPlayerName: options?.localPlayerName ?? "",
+    localPlayerColor: options?.localPlayerColor ?? "",
+    chatOpen: options?.chatOpen ?? false,
+    onCollectDeposit: options?.onCollectDeposit,
+    onRefuel: options?.onRefuel,
+    onShareFuel: options?.onShareFuel,
+    onBurstDeposit: options?.onBurstDeposit,
+  };
 
-  // Track which keys are currently held + one-shot action queue
-  const keysRef = useRef(new Set<string>());
-  const actionsRef = useRef<string[]>([]);
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (chatOpenRef.current) return; // suppress game keys while chatting
-      const fresh = !keysRef.current.has(e.code);
-      keysRef.current.add(e.code);
-      if (e.code === "KeyE") actionsRef.current.push("interact");
-      if (e.code === "Space") actionsRef.current.push("launch");
-      if (fresh && (e.code === "Space" || e.code === "KeyW")) actionsRef.current.push("jump");
-    };
-    const onKeyUp = (e: KeyboardEvent) => keysRef.current.delete(e.code);
-    const onBlur = () => keysRef.current.clear();
-    document.addEventListener("keydown", onKeyDown);
-    document.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      document.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, []);
-
-  // Resize canvas to fill viewport
-  const resize = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    sizeRef.current = { w: canvas.width, h: canvas.height };
-  }, []);
-
-  useEffect(() => {
-    resize();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, [resize]);
+  // Push latest props into the engine each render
+  if (engineRef.current) {
+    engineRef.current.setProps(props);
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
 
-    // Initial draw
-    const { w, h } = sizeRef.current;
-    const world = worldRef.current;
-    const initCamY = Math.floor(world.posY - h / 2);
-    drawBackground(ctx, world.posX - w / 2, initCamY, w, h);
+    const engine = new GameEngine(canvas, props);
+    engineRef.current = engine;
 
-    let lastTime = performance.now();
-    let rafId = 0;
-
-    const gameLoop = (now: number) => {
-      const rawDt = Math.min((now - lastTime) / 1000, 0.05);
-      const dt = rawDt * physicsSpeed;
-      lastTime = now;
-      const keys = keysRef.current;
-      const { w, h } = sizeRef.current;
-      const world = worldRef.current;
-
-      // --- Read input ---
-      const actions = actionsRef.current.splice(0);
-      const input = {
-        left: keys.has("ArrowLeft") || keys.has("KeyA"),
-        right: keys.has("ArrowRight") || keys.has("KeyD"),
-        up: keys.has("ArrowUp") || keys.has("KeyW"),
-        interact: actions.includes("interact"),
-        launch: actions.includes("launch"),
-        jump: actions.includes("jump"),
-      };
-
-      // --- Physics ---
-      const collectEffects: Array<{
-        x: number;
-        fuelType: import("./constants.js").FuelType;
-        isRequired: boolean;
-      }> = [];
-      const { thrusting, thrustLeft, thrustRight } = updatePhysics(world, input, {
-        dt,
-        requiredFuelType,
-        deposits: depositsRef.current,
-        collectedIds: collectedIdsRef.current,
-        inventory: inventoryRef.current,
-        optimisticInventory: optimisticInventoryRef.current,
-        sharedOut: sharedOutRef.current,
-        remotePlayers: remotePlayersRef.current,
-        arcs: arcsRef.current,
-        collectEffects,
-        callbacks: {
-          onCollectDeposit: (id) => onCollectDepositRef.current?.(id),
-          onRefuel: (ft) => onRefuelRef.current?.(ft),
-          onShareFuel: (ft, rpId) => onShareFuelRef.current?.(ft, rpId),
-          onBurstDeposit: (ft) => onBurstDepositRef.current?.(ft),
-        },
-      });
-
-      // Store thrusting state for sync interval
-      thrustingRef.current = thrusting;
-
-      // --- Camera (smoothed) ---
-      const cameraX = Math.floor(world.posX - w / 2);
-      const GROUND_MARGIN = 80;
-
-      const groundCamY = GROUND_LEVEL - h + GROUND_MARGIN;
-      let targetCamY: number;
-      if (world.mode === "launched") {
-        targetCamY = world.posY - h / 2;
-        targetCamY = Math.min(targetCamY, smoothCamYRef.current);
-      } else if (world.mode === "descending" || world.mode === "start") {
-        targetCamY = world.posY - h / 2;
-      } else {
-        targetCamY = groundCamY;
-      }
-      // Never show more ground than the landed/walking view.
-      targetCamY = Math.min(targetCamY, groundCamY);
-
-      if (isNaN(smoothCamYRef.current)) {
-        smoothCamYRef.current = targetCamY;
-      }
-      // During launch, camera gradually stops following so the lander flies off
-      // the top of the viewport before the success splash appears.
-      const camLerp =
-        world.mode === "launched" ? 3 * Math.max(0, 1 - world.launchElapsed / 1.5) : 5;
-      smoothCamYRef.current += (targetCamY - smoothCamYRef.current) * Math.min(1, camLerp * dt);
-      const cameraY = Math.floor(smoothCamYRef.current);
-
-      // --- Render ---
-      const sceneResult = renderScene({
-        ctx,
-        w,
-        h,
-        cameraX,
-        cameraY,
-        groundScreenY: GROUND_LEVEL - cameraY,
-        dt: rawDt,
-        now: now / 1000, // monotonic seconds
-        world,
-        thrusting,
-        localPlayerName: localPlayerNameRef.current,
-        localPlayerColor: localPlayerColorRef.current,
-        deposits: depositsRef.current,
-        collectedIds: collectedIdsRef.current,
-        requiredFuelType,
-        inventory: inventoryRef.current,
-        arcs: arcsRef.current,
-        remotePlayers: remotePlayersRef.current,
-        smoothedRemotes: smoothedRemotesRef.current,
-        chatMessages: chatMessagesRef.current,
-        localPlayerId: localPlayerIdRef.current,
-        particles: particlesRef.current,
-        thrustLeft,
-        thrustRight,
-        collectEffects,
-        walkingInput: world.mode === "walking" && (input.left || input.right),
-      });
-      shareHintRef.current = sceneResult.shareHint;
-
-      rafId = requestAnimationFrame(gameLoop);
-    };
-    rafId = requestAnimationFrame(gameLoop);
-
-    // Sync exposed state periodically so data attributes + HUD update.
-    const prevRef = {
-      mode: "" as string,
-      positionX: NaN,
-      positionY: NaN,
-      velocityX: NaN,
-      velocityY: NaN,
-      landerX: NaN,
-      landerY: NaN,
-      fuel: NaN,
-      thrusting: false,
-      depositCount: NaN,
-      inventoryKey: "",
-      remotePlayerCount: NaN,
-      shareHint: false,
-    };
+    // Sync exposed state periodically so data attributes + HUD update
+    let prevKey = "";
     const syncId = setInterval(() => {
-      const world = worldRef.current;
-      const mode = world.mode;
-      const positionX = world.posX;
-      const positionY = world.posY;
-      const velocityX = world.velX;
-      const velocityY = world.velY;
-      const landerX = world.landerX;
-      const landerY = world.landerY;
-      const fuel = world.fuel;
-      const remotePlayerCount = remotePlayersRef.current.length;
-      const shareHint = shareHintRef.current;
-      const isThrusting = thrustingRef.current;
-
-      let depositCount = 0;
-      for (const d of depositsRef.current) {
-        if (!collectedIdsRef.current.has(d.id)) depositCount++;
-      }
-
-      const inventoryArr = [...inventoryRef.current];
-      const inventoryKey = inventoryArr.join(",");
-
-      // Skip setState if nothing changed
-      if (
-        mode === prevRef.mode &&
-        positionX === prevRef.positionX &&
-        positionY === prevRef.positionY &&
-        velocityX === prevRef.velocityX &&
-        velocityY === prevRef.velocityY &&
-        landerX === prevRef.landerX &&
-        landerY === prevRef.landerY &&
-        fuel === prevRef.fuel &&
-        isThrusting === prevRef.thrusting &&
-        depositCount === prevRef.depositCount &&
-        inventoryKey === prevRef.inventoryKey &&
-        remotePlayerCount === prevRef.remotePlayerCount &&
-        shareHint === prevRef.shareHint
-      ) {
-        return;
-      }
-
-      prevRef.mode = mode;
-      prevRef.positionX = positionX;
-      prevRef.positionY = positionY;
-      prevRef.velocityX = velocityX;
-      prevRef.velocityY = velocityY;
-      prevRef.landerX = landerX;
-      prevRef.landerY = landerY;
-      prevRef.fuel = fuel;
-      prevRef.thrusting = isThrusting;
-      prevRef.depositCount = depositCount;
-      prevRef.inventoryKey = inventoryKey;
-      prevRef.remotePlayerCount = remotePlayerCount;
-      prevRef.shareHint = shareHint;
-
-      setState({
-        mode,
-        positionX,
-        positionY,
-        velocityX,
-        velocityY,
-        landerX,
-        landerY,
-        fuel,
-        thrusting: isThrusting,
-        depositCount,
-        inventory: inventoryArr,
-        remotePlayerCount,
-        shareHint,
-      });
+      const next = engine.snapshot();
+      const inventoryKey = next.inventory.join(",");
+      const key = `${next.mode}|${next.positionX}|${next.positionY}|${next.velocityX}|${next.velocityY}|${next.landerX}|${next.fuel}|${next.thrusting}|${next.depositCount}|${inventoryKey}|${next.remotePlayerCount}|${next.shareHint}`;
+      if (key === prevKey) return;
+      prevKey = key;
+      setState(next);
     }, 50);
 
     return () => {
-      cancelAnimationFrame(rafId);
+      engine.destroy();
       clearInterval(syncId);
+      engineRef.current = null;
     };
   }, []);
 

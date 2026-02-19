@@ -1,5 +1,5 @@
-import { MOON_SURFACE_WIDTH, FUEL_TYPES, type FuelType } from "./constants.js";
-import type { Deposit } from "./types.js";
+import { FUEL_TYPES, type FuelType, MOON_SURFACE_WIDTH } from "./constants";
+import type { Deposit } from "./types";
 
 // ---------------------------------------------------------------------------
 // World wrapping — the moon is round
@@ -48,7 +48,10 @@ export function seededRand(seed: number): number {
  * required type placed 1/4–1/2 of the world away from the spawn point.
  * A no-spawn zone keeps deposits away from where the player lands.
  */
-export function generateDeposits(requiredFuelType: FuelType, spawnX: number): Deposit[] {
+export function generateDeposits(
+  requiredFuelType: FuelType,
+  spawnX: number,
+): Deposit[] {
   const deposits: Deposit[] = [];
   const noSpawnRadius = 300;
 
@@ -61,13 +64,24 @@ export function generateDeposits(requiredFuelType: FuelType, spawnX: number): De
       if (wrapDistance(x, spawnX) < noSpawnRadius) {
         x = wrapX(spawnX + noSpawnRadius + seededRand(seed + 0.7) * 1000);
       }
-      deposits.push({ id: String(deposits.length), x, type: FUEL_TYPES[ti], spawnTime: 0 });
+      deposits.push({
+        id: String(deposits.length),
+        x,
+        type: FUEL_TYPES[ti],
+        spawnTime: 0,
+      });
     }
   }
 
   // 1 extra of the required type, placed 1/4–1/2 world away
-  const offset = MOON_SURFACE_WIDTH / 4 + seededRand(9999) * (MOON_SURFACE_WIDTH / 4);
-  deposits.push({ id: String(deposits.length), x: wrapX(spawnX + offset), type: requiredFuelType, spawnTime: 0 });
+  const offset =
+    MOON_SURFACE_WIDTH / 4 + seededRand(9999) * (MOON_SURFACE_WIDTH / 4);
+  deposits.push({
+    id: String(deposits.length),
+    x: wrapX(spawnX + offset),
+    type: requiredFuelType,
+    spawnTime: 0,
+  });
 
   return deposits;
 }

@@ -1,33 +1,55 @@
+import type { Player } from "../../schema/app";
 import {
-  CANVAS_WIDTH,
-  GRAVITY,
-  THRUST_POWER,
-  THRUST_POWER_X,
-  MAX_LANDING_VELOCITY,
-  WALK_SPEED,
-  LANDER_INTERACT_RADIUS,
-  MAX_FUEL,
-  REFUEL_AMOUNT,
-  FUEL_BURN_Y,
-  FUEL_BURN_X,
   ASTRONAUT_WIDTH,
-  SHARE_PROXIMITY_RADIUS,
+  FUEL_BURN_X,
+  FUEL_BURN_Y,
+  type FuelType,
+  GRAVITY,
   GROUND_LEVEL,
   INITIAL_ALTITUDE,
   INITIAL_FUEL,
-  JUMP_VELOCITY,
   JUMP_GRAVITY,
-  type FuelType,
-} from "./constants.js";
-import { wrapX, wrapDistance } from "./world.js";
+  JUMP_VELOCITY,
+  LANDER_INTERACT_RADIUS,
+  MAX_FUEL,
+  MAX_LANDING_VELOCITY,
+  MOON_SURFACE_WIDTH,
+  REFUEL_AMOUNT,
+  SHARE_PROXIMITY_RADIUS,
+  THRUST_POWER,
+  THRUST_POWER_X,
+  WALK_SPEED,
+} from "./constants";
 import type {
+  ArcAnimation,
+  Deposit,
   GameWorld,
   InputSnapshot,
   PhysicsCallbacks,
-  ArcAnimation,
-  Deposit,
-  RemotePlayerView,
-} from "./types.js";
+} from "./types";
+import { wrapDistance, wrapX } from "./world";
+
+/** Reset world + inventory state for a fresh descent. */
+function resetToDescending(
+  world: GameWorld,
+  inventory: Set<FuelType>,
+  optimisticInventory: Set<FuelType>,
+  sharedOut: Set<FuelType>,
+  collectedIds: Set<string>,
+): void {
+  inventory.clear();
+  optimisticInventory.clear();
+  sharedOut.clear();
+  collectedIds.clear();
+  world.mode = "descending";
+  world.posX = Math.floor(Math.random() * MOON_SURFACE_WIDTH);
+  world.posY = INITIAL_ALTITUDE;
+  world.velX = 0;
+  world.velY = 0;
+  world.fuel = INITIAL_FUEL;
+  world.launchElapsed = 0;
+  world.crashElapsed = 0;
+}
 
 // ---------------------------------------------------------------------------
 // Physics context — mutable state the physics step reads and writes
@@ -41,10 +63,15 @@ export interface PhysicsContext {
   inventory: Set<FuelType>;
   optimisticInventory: Set<FuelType>;
   sharedOut: Set<FuelType>;
-  remotePlayers: RemotePlayerView[];
+  remotePlayers: Player[];
   arcs: ArcAnimation[];
   callbacks: PhysicsCallbacks;
-  collectEffects: Array<{ x: number; fuelType: FuelType; isRequired: boolean; burst?: boolean }>;
+  collectEffects: Array<{
+    x: number;
+    fuelType: FuelType;
+    isRequired: boolean;
+    burst?: boolean;
+  }>;
 }
 
 export interface PhysicsResult {
@@ -76,15 +103,13 @@ export function updatePhysics(
     collectEffects,
   } = ctx;
 
-  // Start screen: wait for Space to begin
+  // Start screen: keep state clean, wait for Space to begin
   if (world.mode === "start") {
     inventory.clear();
     optimisticInventory.clear();
     sharedOut.clear();
     collectedIds.clear();
-    if (input.launch) {
-      world.mode = "descending";
-    }
+    if (input.launch) world.mode = "descending";
     return { thrusting: false, thrustLeft: false, thrustRight: false };
   }
 
@@ -125,7 +150,6 @@ export function updatePhysics(
       world.velX = 0;
       world.velY = 0;
       world.landerX = world.posX;
-      world.landerY = GROUND_LEVEL;
     }
   } else if (world.mode === "landed" || world.mode === "in_lander") {
     if (input.launch && world.mode === "in_lander" && world.fuel >= MAX_FUEL) {
@@ -160,11 +184,18 @@ export function updatePhysics(
     const pickupRange = ASTRONAUT_WIDTH;
     for (const d of deposits) {
       if (collectedIds.has(d.id)) continue;
-      if (wrapDistance(d.x, world.posX) < pickupRange && !inventory.has(d.type)) {
+      if (
+        wrapDistance(d.x, world.posX) < pickupRange &&
+        !inventory.has(d.type)
+      ) {
         inventory.add(d.type);
         optimisticInventory.add(d.type);
         collectedIds.add(d.id);
-        collectEffects.push({ x: d.x, fuelType: d.type, isRequired: d.type === requiredFuelType });
+        collectEffects.push({
+          x: d.x,
+          fuelType: d.type,
+          isRequired: d.type === requiredFuelType,
+        });
         callbacks.onCollectDeposit?.(d.id);
       }
     }
@@ -173,8 +204,9 @@ export function updatePhysics(
     for (const rp of remotePlayers) {
       if (rp.mode !== "walking") continue;
       if (!rp.requiredFuelType || !rp.playerId) continue;
-      if (wrapDistance(world.posX, rp.positionX) > SHARE_PROXIMITY_RADIUS) continue;
-      if (rp.hasRequiredFuel) continue; // receiver already has what they need
+      if (wrapDistance(world.posX, rp.positionX) > SHARE_PROXIMITY_RADIUS)
+        continue;
+      if (rp.landerFuelLevel >= 100) continue; // receiver already has what they need
       const ft = rp.requiredFuelType as FuelType;
       if (ft === requiredFuelType) continue; // never give away what we need
       if (!inventory.has(ft)) continue;
@@ -217,7 +249,12 @@ export function updatePhysics(
           inventory.delete(ft);
           optimisticInventory.delete(ft);
           sharedOut.add(ft);
-          collectEffects.push({ x: world.posX, fuelType: ft, isRequired: false, burst: true });
+          collectEffects.push({
+            x: world.posX,
+            fuelType: ft,
+            isRequired: false,
+            burst: true,
+          });
           callbacks.onBurstDeposit?.(ft);
         }
       }
@@ -233,34 +270,24 @@ export function updatePhysics(
     }
     // Restart after success splash
     if (input.launch && world.launchElapsed > 5) {
-      inventory.clear();
-      optimisticInventory.clear();
-      sharedOut.clear();
-      collectedIds.clear();
-      world.mode = "descending";
-      world.posX = CANVAS_WIDTH / 2;
-      world.posY = INITIAL_ALTITUDE;
-      world.velX = 0;
-      world.velY = 0;
-      world.fuel = INITIAL_FUEL;
-      world.launchElapsed = 0;
-      world.crashElapsed = 0;
+      resetToDescending(
+        world,
+        inventory,
+        optimisticInventory,
+        sharedOut,
+        collectedIds,
+      );
     }
   } else if (world.mode === "crashed") {
     world.crashElapsed += dt;
     if (input.launch && world.crashElapsed > 1) {
-      inventory.clear();
-      optimisticInventory.clear();
-      sharedOut.clear();
-      collectedIds.clear();
-      world.mode = "descending";
-      world.posX = CANVAS_WIDTH / 2;
-      world.posY = INITIAL_ALTITUDE;
-      world.velX = 0;
-      world.velY = 0;
-      world.fuel = INITIAL_FUEL;
-      world.launchElapsed = 0;
-      world.crashElapsed = 0;
+      resetToDescending(
+        world,
+        inventory,
+        optimisticInventory,
+        sharedOut,
+        collectedIds,
+      );
     }
   }
 

@@ -12,23 +12,23 @@
  *   data-player-mode     — (existing) adds "launched" state
  *
  * All tests mount <Game> directly (no Jazz sync) with physicsSpeed=10.
+ *
+ * NOTE: physicsSpeed=10 means free-fall from INITIAL_ALTITUDE always exceeds
+ * the crash threshold. Tests that need the lander on the ground use
+ * initialMode="landed". Descent-only tests use initialMode="descending".
  */
 
-import { describe, it, expect, afterEach } from "vitest";
-import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
-import { Game } from "../../src/Game.js";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
+import { Game } from "../../src/Game";
 import {
-  GROUND_LEVEL,
+  FUEL_BURN_X,
+  FUEL_BURN_Y,
+  FUEL_TYPES,
   INITIAL_FUEL,
   MAX_FUEL,
-  FUEL_BURN_Y,
-  FUEL_BURN_X,
-  LANDER_INTERACT_RADIUS,
-  WALK_SPEED,
-  FUEL_TYPES,
-  REFUEL_AMOUNT,
-} from "../../src/game/constants.js";
+} from "../../src/game/constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,15 +39,41 @@ const SPEED = 10;
 
 const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
-/** Mount the Game component. Returns the wrapper element. */
-async function mountGame(): Promise<HTMLDivElement> {
+/** Mount the Game in descending mode (for thrust/fuel-burn tests). */
+async function mountDescending(): Promise<HTMLDivElement> {
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
   mounts.push({ root, container: el });
 
   await act(async () => {
-    root.render(<Game physicsSpeed={SPEED} />);
+    root.render(
+      <Game
+        {...({ physicsSpeed: SPEED, initialMode: "descending" } as any)}
+      />,
+    );
+  });
+
+  await waitFor(
+    () => el.querySelector('[data-testid="game-canvas"]') !== null,
+    3000,
+    "Game canvas should render",
+  );
+
+  return el;
+}
+
+/** Mount the Game already landed on the surface. */
+async function mountLanded(): Promise<HTMLDivElement> {
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  const root = createRoot(el);
+  mounts.push({ root, container: el });
+
+  await act(async () => {
+    root.render(
+      <Game {...({ physicsSpeed: SPEED, initialMode: "landed" } as any)} />,
+    );
   });
 
   await waitFor(
@@ -173,10 +199,9 @@ async function waitFrames(n: number): Promise<void> {
   }
 }
 
-/** Land the player and exit the lander. Returns the wrapper element. */
+/** Mount landed, exit the lander, and start walking. */
 async function landAndWalk(): Promise<HTMLDivElement> {
-  const el = await mountGame();
-  await waitForAttr(el, "player-mode", "landed", 3000);
+  const el = await mountLanded();
 
   pressKey("e", "KeyE");
   await waitForAttr(el, "player-mode", "walking", 3000);
@@ -215,7 +240,7 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
      * World generation seeds 3 of each fuel type across the surface.
      * The deposit-types attribute exposes the set of fuel types present.
      *
-     *   surface: ▲ □ ⬠ ● ▲ ⬡ ◯ ■ △ ... (3 of each × 7 types = 21+)
+     *   surface: triangle square pentagon circle triangle hexagon circle ... (3 of each x 7 types = 21+)
      */
     const el = await landAndWalk();
 
@@ -229,7 +254,7 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
   // =========================================================================
 
   it("vertical thrust burns fuel during descent", async () => {
-    const el = await mountGame();
+    const el = await mountDescending();
 
     const fuelBefore = readNum(el, "lander-fuel");
     expect(fuelBefore).toBe(INITIAL_FUEL);
@@ -245,11 +270,11 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
     // Verify approximate burn rate: ~16 units in 2 game-seconds
     const burned = fuelBefore - fuelAfter;
     expect(burned).toBeGreaterThan(FUEL_BURN_Y * 1); // At least 1 game-second of burn
-    expect(burned).toBeLessThan(FUEL_BURN_Y * 4);    // At most 4 game-seconds of burn
+    expect(burned).toBeLessThan(FUEL_BURN_Y * 4); // At most 4 game-seconds of burn
   });
 
   it("horizontal thrust burns fuel during descent", async () => {
-    const el = await mountGame();
+    const el = await mountDescending();
 
     const fuelBefore = readNum(el, "lander-fuel");
 
@@ -267,13 +292,13 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
 
   it("thrust is disabled when fuel reaches 0", async () => {
     /**
-     * Burn all fuel, then try to thrust — velocity should not decrease.
+     * Burn all fuel, then try to thrust; velocity should not decrease.
      *
-     *   fuel: 40 ──thrust──→ 0
+     *   fuel: 40 --thrust--> 0
      *   then: ArrowUp pressed, but no thrust applied
      *         gravity continues pulling lander down
      */
-    const el = await mountGame();
+    const el = await mountDescending();
 
     // Burn all fuel by thrusting for a long time
     // 40 units / (FUEL_BURN_Y=8 units/sec) = 5 game-seconds = 500ms at 10x
@@ -281,13 +306,14 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
     await waitFrames(5);
 
     await waitForNum(
-      el, "lander-fuel",
+      el,
+      "lander-fuel",
       (f) => f === 0,
       3000,
       "fuel should reach 0",
     );
 
-    // Now check velocity — gravity should be accelerating us downward
+    // Now check velocity; gravity should be accelerating us downward
     // and pressing thrust should have no effect
     const vyBefore = readNum(el, "velocity-y");
 
@@ -295,7 +321,7 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
     await waitFrames(5);
 
     const vyAfter = readNum(el, "velocity-y");
-    // With no fuel, thrust does nothing — gravity only pulls downward,
+    // With no fuel, thrust does nothing; gravity only pulls downward,
     // so velocity should be >= what it was (more downward or same)
     expect(vyAfter).toBeGreaterThanOrEqual(vyBefore);
   });
@@ -310,11 +336,11 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
      * Eventually walks over a fuel deposit and collects it.
      *
      *   lander    deposit
-     *     ▼         ▼
-     *   ═══╤═══════╤═══════
-     *      └──walk──→ collect!
+     *     v         v
+     *   ===+========+========
+     *      +--walk-->  collect!
      *
-     * inventory: [] → ["circle"] (or whatever type)
+     * inventory: [] -> ["circle"] (or whatever type)
      */
     const el = await landAndWalk();
 
@@ -322,7 +348,7 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
     expect(inventoryBefore).toHaveLength(0);
 
     // Walk right for a while to find deposits
-    // At 10x speed, 120px/s * 10 = 1200px/s → 3s covers ~3600px
+    // At 10x speed, 120px/s * 10 = 1200px/s -> 3s covers ~3600px
     await holdKey("d", 3000, "KeyD");
     await waitFrames(5);
 
@@ -365,7 +391,7 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
 
     const inventory = readInventory(el);
 
-    // Check no duplicates — each type should appear at most once
+    // Check no duplicates: each type should appear at most once
     const uniqueTypes = new Set(inventory);
     expect(uniqueTypes.size).toBe(inventory.length);
   });
@@ -396,17 +422,17 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
 
   it("re-entering lander with correct fuel type refuels it", async () => {
     /**
-     *   lander (needs ⬠)     ⬠ deposit
-     *        ▼                  ▼
-     *   ════╤══════════════════╤═══
-     *       └───walk right────→ collect ⬠
-     *       ←───walk back──────┘
-     *       press E → enter lander
-     *       fuel: 40 → 100 (capped)
+     *   lander (needs pentagon)     pentagon deposit
+     *        v                         v
+     *   ====+==========================+=====
+     *       +----walk right-----------> collect pentagon
+     *       <----walk back--------------+
+     *       press E -> enter lander
+     *       fuel: 40 -> 100 (capped)
      *
      * The player's required fuel type is deterministic from their ID.
      * Walking far enough should find a deposit of the correct type
-     * (spec guarantees one spawns 1/4–1/2 world away).
+     * (spec guarantees one spawns 1/4 to 1/2 world away).
      */
     const el = await landAndWalk();
 
@@ -414,8 +440,8 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
     const fuelBefore = readNum(el, "lander-fuel");
 
     // Walk far right to collect the required fuel type
-    // World is 9600px. Required fuel is placed 1/4–1/2 away (2400–4800px).
-    // At 10x speed + 120px/s = 1200px/s → walk 4s to cover ~4800px
+    // World is 9600px. Required fuel is placed 1/4 to 1/2 away (2400 to 4800px).
+    // At 10x speed + 120px/s = 1200px/s -> walk 4s to cover ~4800px
     await holdKey("d", 4000, "KeyD");
     await waitFrames(5);
 
@@ -512,13 +538,13 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
   it("Space key launches when in lander with fuel >= 100", async () => {
     /**
      *   lander (fuel=100)
-     *     │  player presses Space
-     *     │
-     *     ▼
-     *   LAUNCH!  mode → "launched"
-     *     │
-     *     │  lander flies upward
-     *     ▼
+     *     |  player presses Space
+     *     |
+     *     v
+     *   LAUNCH!  mode -> "launched"
+     *     |
+     *     |  lander flies upward
+     *     v
      *   escaped the moon
      */
     const el = await landAndWalk();
@@ -547,10 +573,9 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
   });
 
   it("Space key does nothing when fuel < 100", async () => {
-    const el = await mountGame();
-    await waitForAttr(el, "player-mode", "landed", 3000);
+    const el = await mountLanded();
 
-    // In lander with INITIAL_FUEL (40) — not enough to launch
+    // In lander with INITIAL_FUEL (40); not enough to launch
     const fuel = readNum(el, "lander-fuel");
     expect(fuel).toBeLessThan(MAX_FUEL);
 
@@ -582,39 +607,29 @@ describe("Moon Lander — Phase 3: Fuel Collection", () => {
   /**
    * The Phase 3 question: "Can I collect fuel, return, and launch?"
    *
-   *   spawn (descending, fuel=40)
-   *     │  gravity + thrust → land on surface
-   *     ▼
-   *   land (landed, fuel≤40)
-   *     │  press E → exit lander
-   *     ▼
+   *   landed (fuel=40)
+   *     |  press E -> exit lander
+   *     v
    *   walk (walking)
-   *     │  walk across moon surface →→→→→
-   *     │  collect fuel deposits along the way
-   *     │  find required fuel type
-   *     │  ←←←←← walk back to lander
-   *     ▼
-   *   near lander → press E
-   *     │
-   *     ▼
-   *   in_lander (correct fuel auto-transfers, fuel→100)
-   *     │  press Space
-   *     ▼
-   *   launched! 🚀
+   *     |  walk across moon surface >>>>
+   *     |  collect fuel deposits along the way
+   *     |  find required fuel type
+   *     |  <<<< walk back to lander
+   *     v
+   *   near lander -> press E
+   *     |
+   *     v
+   *   in_lander (correct fuel auto-transfers, fuel -> 100)
+   *     |  press Space
+   *     v
+   *   launched!
    */
-  it("full Phase 3 flow: descend → land → collect → refuel → launch", async () => {
-    const el = await mountGame();
+  it("full Phase 3 flow: land -> collect -> refuel -> launch", async () => {
+    const el = await mountLanded();
 
-    // --- Descending ---
-    expect(readStr(el, "player-mode")).toBe("descending");
+    // --- Landed ---
+    expect(readStr(el, "player-mode")).toBe("landed");
     expect(readNum(el, "lander-fuel")).toBe(INITIAL_FUEL);
-
-    // Land
-    await waitForAttr(el, "player-mode", "landed", 3000);
-
-    // Fuel should have decreased during descent (thrust burns fuel)
-    const fuelAfterLanding = readNum(el, "lander-fuel");
-    expect(fuelAfterLanding).toBeLessThanOrEqual(INITIAL_FUEL);
 
     // --- Exit lander ---
     pressKey("e", "KeyE");

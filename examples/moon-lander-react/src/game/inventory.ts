@@ -1,6 +1,7 @@
-import type { FuelType } from "./constants.js";
-import type { ArcAnimation, RemotePlayerView } from "./types.js";
-import { wrapDistance } from "./world.js";
+import type { Player } from "../../schema/app";
+import type { FuelType } from "./constants";
+import type { ArcAnimation } from "./types";
+import { wrapDistance } from "./world";
 
 // ---------------------------------------------------------------------------
 // Inventory merge — reconcile Jazz props with local optimistic state
@@ -20,7 +21,7 @@ export interface InventoryMergeInput {
   /** External deposits list (for cleaning up confirmed collected IDs). */
   externalDeposits: Array<{ id: string }>;
   /** Remote players (for finding nearest walker to animate share receipt). */
-  remotePlayers: RemotePlayerView[];
+  remotePlayers: Player[];
   /** Local player's world X position. */
   playerX: number;
 }
@@ -38,7 +39,9 @@ export interface InventoryMergeResult {
   newArcs: ArcAnimation[];
 }
 
-export function mergeInventory(input: InventoryMergeInput): InventoryMergeResult {
+export function mergeInventory(
+  input: InventoryMergeInput,
+): InventoryMergeResult {
   const {
     jazzInventory,
     optimistic,

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:server": "rm -rf /tmp/jazz-moon-lander-dev && JAZZ_JWT_SECRET=dev-jwt-secret-moon-lander JAZZ_ADMIN_SECRET=dev-admin-secret-moon-lander ../../target/debug/jazz server 00000000-0000-0000-0000-000000000004 --port 4200 --data-dir /tmp/jazz-moon-lander-dev",
+    "dev:server": "rm -rf /tmp/jazz-moon-lander-dev && JAZZ_JWT_SECRET=dev-jwt-secret-moon-lander JAZZ_ADMIN_SECRET=dev-admin-secret-moon-lander ../../target/debug/jazz server 00000000-0000-0000-0000-000000000005 --port 4200 --data-dir /tmp/jazz-moon-lander-dev",
     "build": "vite build",
     "test": "vitest run --config vitest.config.browser.ts"
   },

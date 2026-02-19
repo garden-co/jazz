@@ -1,4 +1,4 @@
-import { COLOURS, type FuelType } from "./constants.js";
+import { COLOURS, DEPOSIT_COLOURS, type FuelType } from "./constants";
 
 // ---------------------------------------------------------------------------
 // Pixel-art sprite system — OffscreenCanvas cache with palette colouring
@@ -43,37 +43,21 @@ type Palette = Record<string, string>;
 // Colour helpers
 // ---------------------------------------------------------------------------
 
+function adjustColour(hex: string, fn: (ch: number) => number): string {
+  const r = fn(parseInt(hex.slice(1, 3), 16));
+  const g = fn(parseInt(hex.slice(3, 5), 16));
+  const b = fn(parseInt(hex.slice(5, 7), 16));
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
 function darken(hex: string, amount = 0.3): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  const f = 1 - amount;
-  const tr = Math.round(r * f)
-    .toString(16)
-    .padStart(2, "0");
-  const tg = Math.round(g * f)
-    .toString(16)
-    .padStart(2, "0");
-  const tb = Math.round(b * f)
-    .toString(16)
-    .padStart(2, "0");
-  return `#${tr}${tg}${tb}`;
+  return adjustColour(hex, (ch) => Math.round(ch * (1 - amount)));
 }
 
 function lighten(hex: string, amount = 0.4): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  const tr = Math.min(255, Math.round(r + (255 - r) * amount))
-    .toString(16)
-    .padStart(2, "0");
-  const tg = Math.min(255, Math.round(g + (255 - g) * amount))
-    .toString(16)
-    .padStart(2, "0");
-  const tb = Math.min(255, Math.round(b + (255 - b) * amount))
-    .toString(16)
-    .padStart(2, "0");
-  return `#${tr}${tg}${tb}`;
+  return adjustColour(hex, (ch) =>
+    Math.min(255, Math.round(ch + (255 - ch) * amount)),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -407,19 +391,8 @@ function makeAstroPalette(colour: string): Palette {
   };
 }
 
-// Deposit colours duplicated here to avoid circular import with render.ts
-const SPRITE_DEPOSIT_COLOURS: Record<FuelType, string> = {
-  circle: COLOURS.cyan,
-  triangle: COLOURS.pink,
-  square: COLOURS.yellow,
-  pentagon: COLOURS.green,
-  hexagon: COLOURS.orange,
-  diamond: COLOURS.softPink,
-  octagon: COLOURS.purple,
-};
-
 function makeDepositPalette(fuelType: FuelType): Palette {
-  const colour = SPRITE_DEPOSIT_COLOURS[fuelType];
+  const colour = DEPOSIT_COLOURS[fuelType];
   return {
     C: colour,
     H: lighten(colour, 0.5),
@@ -443,7 +416,10 @@ export function getLanderSprite(colour?: string): OffscreenCanvas {
   return s;
 }
 
-export function getAstronautSprite(colour: string | undefined, frame: number): OffscreenCanvas {
+export function getAstronautSprite(
+  colour: string | undefined,
+  frame: number,
+): OffscreenCanvas {
   const c = colour ?? COLOURS.cyan;
   const f = frame % 2;
   const key = `astro:${c}:${f}`;

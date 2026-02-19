@@ -1,19 +1,41 @@
-import { FUEL_TYPES, type FuelType } from "./constants.js";
+import { FUEL_TYPES, type FuelType } from "./constants";
 
 // ---------------------------------------------------------------------------
 // Deterministic player identity — derived from a stable localStorage UUID
 // ---------------------------------------------------------------------------
 
 const PLAYER_NAMES = [
-  "Armstrong", "Aldrin", "Collins", "Shepard", "Glenn",
-  "Ride", "Jemison", "Tereshkova", "Gagarin", "Leonov",
-  "Bean", "Conrad", "Lovell", "Swigert", "Haise",
-  "Cernan", "Schmitt", "Duke", "Young", "Scott",
+  "Armstrong",
+  "Aldrin",
+  "Collins",
+  "Shepard",
+  "Glenn",
+  "Ride",
+  "Jemison",
+  "Tereshkova",
+  "Gagarin",
+  "Leonov",
+  "Bean",
+  "Conrad",
+  "Lovell",
+  "Swigert",
+  "Haise",
+  "Cernan",
+  "Schmitt",
+  "Duke",
+  "Young",
+  "Scott",
 ];
 
 const PLAYER_COLOURS = [
-  "#ff00ff", "#00ffff", "#ff6600", "#00ff00",
-  "#ff66ff", "#8b00ff", "#ffff00", "#ff3366",
+  "#ff00ff",
+  "#00ffff",
+  "#ff6600",
+  "#00ff00",
+  "#ff66ff",
+  "#8b00ff",
+  "#ffff00",
+  "#ff3366",
 ];
 
 /** Simple hash of a string to a number (for deterministic derivation). */

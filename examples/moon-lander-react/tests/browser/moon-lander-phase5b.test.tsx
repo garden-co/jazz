@@ -10,11 +10,11 @@
  *   data-player-y     — goes above GROUND_LEVEL during jump, returns after
  */
 
-import { describe, it, expect, afterEach } from "vitest";
-import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
-import { Game } from "../../src/Game.js";
-import { GROUND_LEVEL } from "../../src/game/constants.js";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
+import { Game } from "../../src/Game";
+import { GROUND_LEVEL } from "../../src/game/constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,7 +30,7 @@ async function mountGame(): Promise<HTMLDivElement> {
   mounts.push({ root, container: el });
 
   await act(async () => {
-    root.render(<Game physicsSpeed={SPEED} />);
+    root.render(<Game physicsSpeed={SPEED} initialMode={"landed" as any} />);
   });
 
   await waitFor(
@@ -124,8 +124,7 @@ describe("Moon Lander — Phase 5b: Walking Jump", () => {
   it("Space triggers a jump that rises above ground and returns", async () => {
     const el = await mountGame();
 
-    // Land and walk
-    await waitForAttr(el, "player-mode", "landed", 3000);
+    // Walk
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -155,7 +154,8 @@ describe("Moon Lander — Phase 5b: Walking Jump", () => {
 
     // Still walking (jump doesn't change mode)
     expect(
-      el.querySelector('[data-testid="game-container"]')!
+      el
+        .querySelector('[data-testid="game-container"]')!
         .getAttribute("data-player-mode"),
     ).toBe("walking");
   });
@@ -167,7 +167,6 @@ describe("Moon Lander — Phase 5b: Walking Jump", () => {
   it("W key also triggers a jump while walking", async () => {
     const el = await mountGame();
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -195,7 +194,6 @@ describe("Moon Lander — Phase 5b: Walking Jump", () => {
   it("jump peak is modest (under 80px)", async () => {
     const el = await mountGame();
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -226,7 +224,6 @@ describe("Moon Lander — Phase 5b: Walking Jump", () => {
   it("cannot double-jump while airborne", async () => {
     const el = await mountGame();
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");

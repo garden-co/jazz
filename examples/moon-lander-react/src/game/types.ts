@@ -1,50 +1,5 @@
-import type { PlayerMode, FuelType } from "./constants.js";
-
-// ---------------------------------------------------------------------------
-// Types — the contract between Jazz and the game engine
-// ---------------------------------------------------------------------------
-
-/** State pushed to Jazz on each sync tick. */
-export interface GameState {
-  mode: PlayerMode;
-  positionX: number;
-  positionY: number;
-  velocityX: number;
-  velocityY: number;
-  fuel: number;
-  landerSpawnX: number;
-  playerName: string;
-  playerColor: string;
-  requiredFuelType: FuelType;
-  thrusting: boolean;
-}
-
-/** A remote player received from Jazz and rendered in the game world. */
-export interface RemotePlayer {
-  id: string;
-  name: string;
-  mode: PlayerMode;
-  positionX: number;
-  positionY: number;
-  velocityX: number;
-  velocityY: number;
-  color: string;
-  requiredFuelType: string;
-  lastSeen: number;
-  landerFuelLevel: number;
-  thrusting: boolean;
-  playerId?: string;
-  landerX?: number;
-  hasRequiredFuel?: boolean;
-}
-
-/** A chat message from Jazz. */
-export interface ChatMessage {
-  id: string;
-  playerId: string;
-  message: string;
-  createdAt: number;
-}
+import type { Player } from "../../schema/app";
+import type { FuelType, PlayerMode } from "./constants";
 
 // ---------------------------------------------------------------------------
 // Engine types — the snapshot exposed to React each tick
@@ -52,14 +7,14 @@ export interface ChatMessage {
 
 export interface ArcAnimation {
   fuelType: FuelType;
-  startX: number;   // world X
-  endX: number;     // world X
+  startX: number; // world X
+  endX: number; // world X
   peakHeight: number; // pixels above ground level
   duration: number; // seconds (game time)
   elapsed: number;
   onComplete?: () => void;
-  rotation: number;     // current rotation angle (radians)
-  glowPhase: number;    // offset for pulsing glow (radians)
+  rotation: number; // current rotation angle (radians)
+  glowPhase: number; // offset for pulsing glow (radians)
   targetPlayerId?: string; // if set, arc tracks this player's position
 }
 
@@ -71,22 +26,6 @@ export interface Deposit {
   spawnTime: number;
 }
 
-/** A remote player to render (already filtered for staleness). */
-export interface RemotePlayerView {
-  id: string;
-  name: string;
-  mode: string;
-  positionX: number;
-  positionY: number;
-  velocityY: number;
-  color: string;
-  thrusting: boolean;
-  landerX?: number;
-  requiredFuelType?: string;
-  playerId?: string;
-  hasRequiredFuel?: boolean;
-}
-
 export interface EngineState {
   mode: PlayerMode;
   positionX: number;
@@ -94,13 +33,41 @@ export interface EngineState {
   velocityX: number;
   velocityY: number;
   landerX: number;
-  landerY: number;
   fuel: number;
   thrusting: boolean;
   depositCount: number;
   inventory: string[];
   remotePlayerCount: number;
   shareHint: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// EngineProps — everything the engine receives from React each render
+// ---------------------------------------------------------------------------
+
+export interface EngineProps {
+  physicsSpeed: number;
+  initialMode: PlayerMode;
+  /** Override the random spawn X position (for tests). */
+  spawnX?: number;
+  requiredFuelType: FuelType;
+  remotePlayers: Player[];
+  deposits?: Deposit[];
+  inventory?: FuelType[];
+  chatMessages: Array<{
+    id: string;
+    playerId: string;
+    message: string;
+    createdAt: number;
+  }>;
+  localPlayerId: string;
+  localPlayerName: string;
+  localPlayerColor: string;
+  chatOpen: boolean;
+  onCollectDeposit?: (id: string) => void;
+  onRefuel?: (fuelType: FuelType) => void;
+  onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
+  onBurstDeposit?: (fuelType: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +81,6 @@ export interface GameWorld {
   velY: number;
   mode: PlayerMode;
   landerX: number;
-  landerY: number;
   fuel: number;
   launchElapsed: number;
   crashElapsed: number;
@@ -166,14 +132,24 @@ export interface SceneContext {
   requiredFuelType: FuelType;
   inventory: Set<FuelType>;
   arcs: ArcAnimation[];
-  remotePlayers: RemotePlayerView[];
+  remotePlayers: Player[];
   smoothedRemotes: Map<string, { x: number; y: number }>;
-  chatMessages: Array<{ id: string; playerId: string; message: string; createdAt: number }>;
+  chatMessages: Array<{
+    id: string;
+    playerId: string;
+    message: string;
+    createdAt: number;
+  }>;
   localPlayerId: string;
-  particles: import("./particles.js").Particle[];
+  particles: import("./particles").Particle[];
   thrustLeft: boolean;
   thrustRight: boolean;
   /** Deposit pickups this frame: [{x, fuelType, isRequired, burst?}] for sparkle/burst effects */
-  collectEffects: Array<{ x: number; fuelType: FuelType; isRequired: boolean; burst?: boolean }>;
+  collectEffects: Array<{
+    x: number;
+    fuelType: FuelType;
+    isRequired: boolean;
+    burst?: boolean;
+  }>;
   walkingInput: boolean; // true if left/right keys held during walking mode
 }

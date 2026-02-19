@@ -1,13 +1,14 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { FuelType, PlayerMode } from "./game/constants.js";
-import type { Deposit, RemotePlayerView } from "./game/engine.js";
-import { useGameEngine } from "./game/engine.js";
-import { Hud } from "./game/Hud.js";
-import { derivePlayerProps, getOrCreatePlayerId } from "./game/player.js";
-import type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
+import { memo, useEffect, useRef, useState } from "react";
+import type { ChatMessage, Player, PlayerInit } from "../schema/app";
+import styles from "./Game.module.css";
+import type { FuelType, PlayerMode } from "./game/constants";
+import type { Deposit } from "./game/engine";
+import { useGameEngine } from "./game/engine";
+import { Hud } from "./game/Hud";
+import { derivePlayerProps, getOrCreatePlayerId } from "./game/player";
 
 export type { PlayerMode, FuelType };
-export type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
+export type { ChatMessage, Player, PlayerInit } from "../schema/app";
 
 // ---------------------------------------------------------------------------
 // Game component
@@ -16,7 +17,11 @@ export type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
 interface GameProps {
   playerId?: string;
   physicsSpeed?: number;
-  remotePlayers?: RemotePlayer[];
+  /** Initial player mode. Defaults to "start" (shows start screen). Use "descending" to skip. */
+  initialMode?: PlayerMode;
+  /** Override the random spawn X position (for tests). */
+  spawnX?: number;
+  remotePlayers?: Player[];
   deposits?: Deposit[];
   inventory?: FuelType[];
   chatMessages?: ChatMessage[];
@@ -25,12 +30,14 @@ interface GameProps {
   onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
   onBurstDeposit?: (fuelType: string) => void;
   onSendMessage?: (text: string) => void;
-  onStateChange?: (state: GameState) => void;
+  onStateChange?: (state: PlayerInit) => void;
 }
 
 export const Game = memo(function Game({
   playerId: externalPlayerId,
   physicsSpeed,
+  initialMode,
+  spawnX,
   remotePlayers,
   deposits,
   inventory,
@@ -53,29 +60,12 @@ export const Game = memo(function Game({
   const chatOpenRef = useRef(false);
   chatOpenRef.current = chatOpen;
 
-  // Map RemotePlayer → RemotePlayerView (staleness already filtered in App.tsx)
-  const activeRemotes: RemotePlayerView[] = useMemo(() => {
-    if (!remotePlayers) return [];
-    return remotePlayers.map((rp) => ({
-      id: rp.id,
-      name: rp.name,
-      mode: rp.mode,
-      positionX: rp.positionX,
-      positionY: rp.positionY,
-      velocityY: rp.velocityY,
-      color: rp.color,
-      thrusting: rp.thrusting,
-      landerX: rp.landerX,
-      requiredFuelType: rp.requiredFuelType,
-      playerId: rp.playerId,
-      hasRequiredFuel: rp.hasRequiredFuel,
-    }));
-  }, [remotePlayers]);
-
   const engine = useGameEngine(canvasRef, {
     physicsSpeed,
+    initialMode,
+    spawnX,
     requiredFuelType: playerProps.requiredFuelType,
-    remotePlayers: activeRemotes,
+    remotePlayers,
     deposits,
     inventory,
     chatMessages,
@@ -86,29 +76,30 @@ export const Game = memo(function Game({
     onRefuel,
     onShareFuel,
     onBurstDeposit,
-    chatOpenRef,
+    chatOpen,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)
   useEffect(() => {
     if (!onStateChange) return;
     onStateChange({
+      playerId,
+      name: playerProps.name,
+      color: playerProps.color,
       mode: engine.mode,
+      online: true,
+      lastSeen: Math.floor(Date.now() / 1000),
       positionX: Math.floor(engine.positionX),
       positionY: Math.floor(engine.positionY),
       velocityX: Math.round(engine.velocityX),
       velocityY: Math.round(engine.velocityY),
-      fuel: Math.round(engine.fuel),
-      landerSpawnX: Math.floor(engine.landerX),
-      playerName: playerProps.name,
-      playerColor: playerProps.color,
       requiredFuelType: playerProps.requiredFuelType,
+      landerFuelLevel: Math.round(engine.fuel),
+      landerSpawnX: Math.floor(engine.landerX),
       thrusting: engine.thrusting,
     });
-  }, [engine, onStateChange, playerProps]);
+  }, [engine, onStateChange, playerProps, playerId]);
 
-  // Chat: all key handling at document level to work reliably in tests.
-  // Enter toggles chat (open → send/close, closed → open). Escape closes.
   const onSendMessageRef = useRef(onSendMessage);
   onSendMessageRef.current = onSendMessage;
 
@@ -153,21 +144,24 @@ export const Game = memo(function Game({
       data-player-y={engine.positionY}
       data-velocity-y={engine.velocityY}
       data-lander-x={engine.landerX}
-      data-lander-y={engine.landerY}
       data-deposit-count={engine.depositCount}
       data-inventory={engine.inventory.join(",")}
       data-remote-player-count={engine.remotePlayerCount}
       data-share-hint={engine.shareHint ? "true" : "false"}
       data-chat-open={chatOpen ? "true" : "false"}
-      style={{ position: "relative", width: "100vw", height: "100vh" }}
+      className={styles.container}
     >
-      <canvas ref={canvasRef} data-testid="game-canvas" style={{ display: "block" }} />
+      <canvas
+        ref={canvasRef}
+        data-testid="game-canvas"
+        className={styles.canvas}
+      />
       <Hud
         mode={engine.mode}
         fuel={engine.fuel}
         requiredFuelType={playerProps.requiredFuelType}
         inventory={engine.inventory}
-        remotePlayers={activeRemotes}
+        remotePlayers={remotePlayers ?? []}
         localPlayerName={playerProps.name}
         localPlayerColor={playerProps.color}
       />
@@ -178,21 +172,7 @@ export const Game = memo(function Game({
           type="text"
           maxLength={140}
           autoFocus
-          style={{
-            position: "absolute",
-            bottom: 40,
-            left: "50%",
-            transform: "translateX(-50%)",
-            width: 320,
-            padding: "6px 12px",
-            fontFamily: "monospace",
-            fontSize: 14,
-            color: "#00ffff",
-            background: "rgba(10, 10, 15, 0.8)",
-            border: "1px solid #ff00ff",
-            borderRadius: 4,
-            outline: "none",
-          }}
+          className={styles.chatInput}
           placeholder="Type a message..."
         />
       )}

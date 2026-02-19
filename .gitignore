@@ -21,6 +21,7 @@ dist/
 # Test
 coverage/
 __screenshots__
+test-results/
 
 # Local data
 data/

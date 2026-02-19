@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Game constants — single source of truth for balance tuning
+// Game constants
 // ---------------------------------------------------------------------------
 
 // Canvas
@@ -17,7 +17,7 @@ export const THRUST_POWER_X = 60; // Pixels/sec² applied horizontally when thru
 export const MAX_LANDING_VELOCITY = 80; // Max safe landing speed (pixels/sec)
 export const WALK_SPEED = 120; // Pixels/sec
 
-// Fuel (Phase 3 — declared here for reference)
+// Fuel
 export const FUEL_BURN_Y = 8; // Fuel units/sec for vertical thrust
 export const FUEL_BURN_X = 4; // Fuel units/sec for horizontal thrust
 export const INITIAL_FUEL = 40; // Enough to land, not enough to launch
@@ -91,13 +91,16 @@ export function leanAngle(screenX: number, screenW: number): number {
   return (screenX - screenW / 2) / MOON_RADIUS;
 }
 
-// Particles
-export const MAX_PARTICLES = 200;
-export const THRUST_EMIT_RATE = 3; // particles per frame while thrusting
-export const SPARKLE_BURST_COUNT = 10; // particles on deposit pickup
-export const PARTICLE_THRUST_LIFE = 0.4; // seconds
-export const PARTICLE_SPARKLE_LIFE = 0.5;
+// Deposit colours — shared by render and sprite systems
+export const DEPOSIT_COLOURS: Record<FuelType, string> = {
+  circle: COLOURS.cyan,
+  triangle: COLOURS.pink,
+  square: COLOURS.yellow,
+  pentagon: COLOURS.green,
+  hexagon: COLOURS.orange,
+  diamond: COLOURS.softPink,
+  octagon: COLOURS.purple,
+};
 
-// DB sync (Phase 2+)
+// DB sync
 export const DB_SYNC_INTERVAL_MS = 200;
-export const PRESENCE_HEARTBEAT_MS = 3000;

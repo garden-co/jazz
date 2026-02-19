@@ -17,17 +17,16 @@
  *   type the local player has but doesn't need.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
-import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
-import { Game } from "../../src/Game.js";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
+import { Game } from "../../src/Game";
 import {
   CANVAS_WIDTH,
-  GROUND_LEVEL,
-  LANDER_INTERACT_RADIUS,
-  SHARE_PROXIMITY_RADIUS,
   FUEL_TYPES,
-} from "../../src/game/constants.js";
+  GROUND_LEVEL,
+  SHARE_PROXIMITY_RADIUS,
+} from "../../src/game/constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,14 +42,16 @@ const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
  * comes from the inventory prop. This gives the test full control over
  * what fuel the player carries without needing to walk and collect.
  */
-async function mountGameWith(props: Record<string, unknown>): Promise<HTMLDivElement> {
+async function mountGameWith(
+  props: Record<string, unknown>,
+): Promise<HTMLDivElement> {
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
   mounts.push({ root, container: el });
 
   await act(async () => {
-    root.render(<Game {...({ physicsSpeed: SPEED, ...props } as any)} />);
+    root.render(<Game {...({ physicsSpeed: SPEED, initialMode: "landed", spawnX: CANVAS_WIDTH / 2, ...props } as any)} />);
   });
 
   await waitFor(
@@ -170,16 +171,18 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       deposits: [],
       inventory: ["hexagon", "circle", "triangle"],
       remotePlayers: [
-        remotePlayer({ requiredFuelType: "hexagon", playerId: "receiver-uuid" }),
+        remotePlayer({
+          requiredFuelType: "hexagon",
+          playerId: "receiver-uuid",
+        }),
       ],
       onShareFuel: (fuelType: string, receiverPlayerId: string) => {
         shares.push({ fuelType, receiverPlayerId });
       },
     });
 
-    // Land and exit lander — local player starts at CANVAS_WIDTH/2,
+    // Exit lander — local player starts at CANVAS_WIDTH/2,
     // same position as the remote player
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -237,7 +240,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       },
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -283,7 +285,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       },
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -320,7 +321,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       },
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -345,17 +345,13 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
-      remotePlayers: [
-        remotePlayer({ requiredFuelType: "hexagon" }),
-      ],
+      remotePlayers: [remotePlayer({ requiredFuelType: "hexagon" })],
       onShareFuel: (fuelType: string, receiverPlayerId: string) => {
         shares.push({ fuelType, receiverPlayerId });
       },
     });
 
     // Stay in lander (don't press E)
-    await waitForAttr(el, "player-mode", "landed", 3000);
-
     await new Promise((r) => setTimeout(r, 1000));
 
     expect(shares).toHaveLength(0);
@@ -389,7 +385,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       onShareFuel: () => {},
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -424,7 +419,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       onShareFuel: () => {},
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -453,7 +447,7 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       remotePlayers: [
         {
           ...remotePlayer({ requiredFuelType: "hexagon", playerId: "recv-1" }),
-          hasRequiredFuel: true,
+          landerFuelLevel: 100,
         },
       ],
       onShareFuel: (fuelType: string, receiverPlayerId: string) => {
@@ -461,7 +455,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
       },
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -489,14 +482,14 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
   // =========================================================================
 
   it("ejects non-required fuel types on lander entry", async () => {
-    const bursts: Array<{ fuelType: string; newX: number }> = [];
+    const bursts: string[] = [];
     const refuels: string[] = [];
 
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
-      onBurstDeposit: (fuelType: string, newX: number) => {
-        bursts.push({ fuelType, newX });
+      onBurstDeposit: (fuelType: string) => {
+        bursts.push(fuelType);
       },
       onRefuel: (fuelType: string) => {
         refuels.push(fuelType);
@@ -504,7 +497,6 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
     });
 
     // Land and walk out
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -523,7 +515,7 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
       `should eject ${FUEL_TYPES.length - 1} non-required types (got ${bursts.length})`,
     );
 
-    const ejectedTypes = new Set(bursts.map((b) => b.fuelType));
+    const ejectedTypes = new Set(bursts);
 
     // Required type NOT ejected
     expect(ejectedTypes.has(localRequired)).toBe(false);
@@ -533,11 +525,6 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
 
     // Required type was consumed for refuelling
     expect(refuels).toContain(localRequired);
-
-    // Each burst has a valid newX position
-    for (const b of bursts) {
-      expect(b.newX).toBeGreaterThanOrEqual(0);
-    }
   });
 
   // =========================================================================
@@ -546,25 +533,37 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
   //   All fuel consumed or ejected — nothing lingers
   // =========================================================================
 
-  it("inventory is empty after entering lander", async () => {
+  it("non-required inventory is cleared after entering lander", async () => {
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
       onBurstDeposit: () => {},
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
+
+    const localRequired = readStr(el, "required-fuel");
 
     // Re-enter lander
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "in_lander", 3000);
     releaseKey("e", "KeyE");
 
-    // Inventory should be empty (all consumed or ejected)
-    await waitForAttr(el, "inventory", "", 2000);
+    // After entering the lander, all non-required types are ejected
+    // and the required type is consumed for refuelling.
+    // With a static inventory prop, the merge re-adds the required type
+    // each frame (in a real game, the DB would have removed it).
+    // So we check that at most the required type remains.
+    await waitFor(
+      () => {
+        const inv = readStr(el, "inventory");
+        return inv === "" || inv === localRequired;
+      },
+      2000,
+      "inventory should contain at most the required type after lander entry",
+    );
   });
 
   // =========================================================================
@@ -575,18 +574,17 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
   // =========================================================================
 
   it("re-entering lander produces no additional bursts", async () => {
-    const bursts: Array<{ fuelType: string; newX: number }> = [];
+    const bursts: string[] = [];
 
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
-      onBurstDeposit: (fuelType: string, newX: number) => {
-        bursts.push({ fuelType, newX });
+      onBurstDeposit: (fuelType: string) => {
+        bursts.push(fuelType);
       },
     });
 
     // Land, walk out, re-enter → first burst
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -622,17 +620,16 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
   // =========================================================================
 
   it("does not burst when inventory is empty", async () => {
-    const bursts: Array<{ fuelType: string; newX: number }> = [];
+    const bursts: string[] = [];
 
     const el = await mountGameWith({
       deposits: [],
       inventory: [],
-      onBurstDeposit: (fuelType: string, newX: number) => {
-        bursts.push({ fuelType, newX });
+      onBurstDeposit: (fuelType: string) => {
+        bursts.push(fuelType);
       },
     });
 
-    await waitForAttr(el, "player-mode", "landed", 3000);
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");

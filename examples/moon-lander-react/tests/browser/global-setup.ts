@@ -2,11 +2,11 @@
  * Global setup for browser tests — spawns a real jazz server.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { ADMIN_SECRET, APP_ID, JWT_SECRET, TEST_PORT } from "./test-constants";
 
 export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
 
@@ -24,13 +24,18 @@ async function waitForHealth(port: number): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`Server failed to become ready on port ${port} within 10 seconds`);
+  throw new Error(
+    `Server failed to become ready on port ${port} within 10 seconds`,
+  );
 }
 
 export async function setup(): Promise<void> {
   dataDir = mkdtempSync(join(tmpdir(), "jazz-moon-lander-test-"));
 
-  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz");
+  const jazzBinary = join(
+    import.meta.dirname ?? __dirname,
+    "../../../../target/debug/jazz",
+  );
 
   serverProcess = spawn(
     jazzBinary,
