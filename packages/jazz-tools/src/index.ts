@@ -4,7 +4,6 @@
 export {
   table,
   col,
-  policy,
   migrate,
   getCollectedSchema,
   getCollectedMigration,

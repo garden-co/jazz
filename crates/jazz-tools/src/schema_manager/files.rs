@@ -858,7 +858,8 @@ mod tests {
         assert!(parse_versioned_schema_filename("schema_abc.sql").is_none()); // No version
         assert!(parse_versioned_schema_filename("schema_v1.sql").is_none()); // No hash
         assert!(parse_versioned_schema_filename("schema_v1_abc.sql").is_none()); // Hash too short
-        assert!(parse_versioned_schema_filename("schema_455a1f10a158.sql").is_none()); // Old format
+        assert!(parse_versioned_schema_filename("schema_455a1f10a158.sql").is_none());
+        // Old format
     }
 
     #[test]
@@ -898,7 +899,8 @@ mod tests {
             parse_migration_filename("migration_v1_v2_invalid_455a1f10a158_357c464c4c43.sql")
                 .is_none()
         );
-        assert!(parse_migration_filename("lens_455a1f10a158_357c464c4c43_fwd.sql").is_none()); // Old format
+        assert!(parse_migration_filename("lens_455a1f10a158_357c464c4c43_fwd.sql").is_none());
+        // Old format
     }
 
     #[test]

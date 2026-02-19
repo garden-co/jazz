@@ -5,8 +5,6 @@ import type {
   Schema,
   Table,
   SqlType,
-  PolicyExpr,
-  PolicyOperation,
   Lens,
   LensOp,
   AddOp,
@@ -117,24 +115,6 @@ class ArrayBuilder implements ColumnBuilder {
 // ============================================================================
 
 type MaybeOptional<T, Optional extends boolean> = Optional extends true ? T | null : T;
-type SessionPathInput = string | string[];
-type PolicyOperationInput = "select" | "insert" | "update" | "delete";
-
-type SelectPolicyInput = PolicyExpr | { using: PolicyExpr };
-type InsertPolicyInput = PolicyExpr | { withCheck: PolicyExpr };
-type UpdatePolicyInput = PolicyExpr | { using?: PolicyExpr; withCheck?: PolicyExpr };
-type DeletePolicyInput = PolicyExpr | { using: PolicyExpr };
-
-interface TablePermissionsInput {
-  select?: SelectPolicyInput;
-  insert?: InsertPolicyInput;
-  update?: UpdatePolicyInput;
-  delete?: DeletePolicyInput;
-}
-
-interface TableOptions {
-  permissions?: TablePermissionsInput;
-}
 
 class AddBuilder<Optional extends boolean = false> {
   string(opts: { default: MaybeOptional<string, Optional> }): AddOp {
@@ -218,157 +198,6 @@ export const col = {
   rename: (oldName: string): RenameOp => ({ _type: "rename", oldName }),
 };
 
-const POLICY_OPERATION_MAP: Record<PolicyOperationInput, PolicyOperation> = {
-  select: "Select",
-  insert: "Insert",
-  update: "Update",
-  delete: "Delete",
-};
-
-function normalizeSessionPath(path: SessionPathInput): string[] {
-  const parts = Array.isArray(path) ? path : path.split(".");
-  return parts.map((part) => part.trim()).filter((part) => part.length > 0);
-}
-
-function isPolicyExpr(input: unknown): input is PolicyExpr {
-  return typeof input === "object" && input !== null && "type" in input;
-}
-
-export const policy = {
-  allow(): PolicyExpr {
-    return { type: "True" };
-  },
-
-  deny(): PolicyExpr {
-    return { type: "False" };
-  },
-
-  eq(column: string, value: unknown): PolicyExpr {
-    return {
-      type: "Cmp",
-      column,
-      op: "Eq",
-      value: { type: "Literal", value },
-    };
-  },
-
-  eqSession(column: string, path: SessionPathInput): PolicyExpr {
-    return {
-      type: "Cmp",
-      column,
-      op: "Eq",
-      value: { type: "SessionRef", path: normalizeSessionPath(path) },
-    };
-  },
-
-  inSession(column: string, path: SessionPathInput): PolicyExpr {
-    return {
-      type: "In",
-      column,
-      session_path: normalizeSessionPath(path),
-    };
-  },
-
-  exists(table: string, condition: PolicyExpr): PolicyExpr {
-    return {
-      type: "Exists",
-      table,
-      condition,
-    };
-  },
-
-  isNull(column: string): PolicyExpr {
-    return { type: "IsNull", column };
-  },
-
-  isNotNull(column: string): PolicyExpr {
-    return { type: "IsNotNull", column };
-  },
-
-  inherits(operation: PolicyOperationInput, viaColumn: string): PolicyExpr {
-    return {
-      type: "Inherits",
-      operation: POLICY_OPERATION_MAP[operation],
-      via_column: viaColumn,
-    };
-  },
-
-  and(exprs: PolicyExpr[]): PolicyExpr {
-    if (exprs.length === 0) {
-      return { type: "True" };
-    }
-    if (exprs.length === 1) {
-      return exprs[0];
-    }
-    return { type: "And", exprs };
-  },
-
-  or(exprs: PolicyExpr[]): PolicyExpr {
-    if (exprs.length === 0) {
-      return { type: "False" };
-    }
-    if (exprs.length === 1) {
-      return exprs[0];
-    }
-    return { type: "Or", exprs };
-  },
-
-  not(expr: PolicyExpr): PolicyExpr {
-    return { type: "Not", expr };
-  },
-};
-
-function normalizePermissions(
-  permissions: TablePermissionsInput | undefined,
-): Table["policies"] | undefined {
-  if (!permissions) {
-    return undefined;
-  }
-
-  const policies: NonNullable<Table["policies"]> = {};
-
-  if (permissions.select) {
-    if (isPolicyExpr(permissions.select)) {
-      policies.select = { using: permissions.select };
-    } else {
-      policies.select = { using: permissions.select.using };
-    }
-  }
-
-  if (permissions.insert) {
-    if (isPolicyExpr(permissions.insert)) {
-      policies.insert = { with_check: permissions.insert };
-    } else {
-      policies.insert = { with_check: permissions.insert.withCheck };
-    }
-  }
-
-  if (permissions.update) {
-    if (isPolicyExpr(permissions.update)) {
-      policies.update = { using: permissions.update, with_check: permissions.update };
-    } else {
-      policies.update = {
-        using: permissions.update.using,
-        with_check: permissions.update.withCheck,
-      };
-    }
-  }
-
-  if (permissions.delete) {
-    if (isPolicyExpr(permissions.delete)) {
-      policies.delete = { using: permissions.delete };
-    } else {
-      policies.delete = { using: permissions.delete.using };
-    }
-  }
-
-  if (!policies.select && !policies.insert && !policies.update && !policies.delete) {
-    return undefined;
-  }
-
-  return policies;
-}
-
 // ============================================================================
 // Side-effect collection
 // ============================================================================
@@ -376,11 +205,14 @@ function normalizePermissions(
 let collectedTables: Table[] = [];
 let collectedMigrations: TableMigration[] = [];
 
-export function table(
-  name: string,
-  columns: Record<string, ColumnBuilder>,
-  options?: TableOptions,
-): void {
+export function table(name: string, columns: Record<string, ColumnBuilder>): void {
+  if (arguments.length > 2) {
+    throw new Error(
+      "Inline table permissions are no longer supported in current.ts. " +
+        "Define policies in schema/permissions.ts with definePermissions(...).",
+    );
+  }
+
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns)) {
     cols.push(builder._build(colName));
@@ -388,7 +220,6 @@ export function table(
   collectedTables.push({
     name,
     columns: cols,
-    policies: normalizePermissions(options?.permissions),
   });
 }
 

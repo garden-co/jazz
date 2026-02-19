@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   table,
   col,
-  policy,
   migrate,
   getCollectedSchema,
   getCollectedMigration,
@@ -171,25 +170,24 @@ describe("schemaToSql", () => {
 
   it("generates CREATE POLICY statements from table permissions", () => {
     resetCollectedState();
-    table(
-      "todos",
-      {
-        title: col.string(),
-        owner_id: col.string(),
-      },
-      {
-        permissions: {
-          select: policy.eqSession("owner_id", "user_id"),
-          insert: policy.eqSession("owner_id", "user_id"),
-          update: {
-            using: policy.eqSession("owner_id", "user_id"),
-            withCheck: policy.eqSession("owner_id", "user_id"),
-          },
-          delete: policy.eqSession("owner_id", "user_id"),
-        },
-      },
-    );
+    table("todos", {
+      title: col.string(),
+      owner_id: col.string(),
+    });
     const schema = getCollectedSchema();
+    const ownerMatchesSession: import("./schema.js").PolicyExpr = {
+      type: "Cmp",
+      column: "owner_id",
+      op: "Eq",
+      value: { type: "SessionRef", path: ["user_id"] },
+    };
+
+    schema.tables[0]!.policies = {
+      select: { using: ownerMatchesSession },
+      insert: { with_check: ownerMatchesSession },
+      update: { using: ownerMatchesSession, with_check: ownerMatchesSession },
+      delete: { using: ownerMatchesSession },
+    };
 
     const sql = schemaToSql(schema);
 

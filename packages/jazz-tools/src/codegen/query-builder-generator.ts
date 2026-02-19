@@ -115,7 +115,7 @@ function generateQueryBuilderClass(
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
   // Phantom fields used only for type inference.
-  lines.push(`  declare _rowType!: ${interfaceName};`);
+  lines.push(`  declare readonly _rowType: ${interfaceName};`);
   lines.push(`  declare readonly _initType: ${interfaceName}Init;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
   lines.push(`  private _includes: Partial<${includeConstraint}> = {};`);

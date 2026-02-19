@@ -9,7 +9,7 @@ use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
 use jazz_wasm::types::WasmValue;
-use jazz_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
+use jazz_wasm::{WasmQueryBuilder, current_timestamp, generate_id, parse_schema};
 
 #[wasm_bindgen_test]
 fn test_generate_id() {
