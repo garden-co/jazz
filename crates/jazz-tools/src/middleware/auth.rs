@@ -3,7 +3,7 @@
 //! # Auth Methods
 //!
 //! 1. **JWT Auth** (`Authorization: Bearer <JWT>`): Frontend/mobile clients authenticate
-//!    via JWT, validated with HMAC secret (testing) or JWKS (production).
+//!    via JWT validated with JWKS.
 //!
 //! 2. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): Backend clients
 //!    can impersonate any user by providing the backend secret and a session header.
@@ -26,7 +26,10 @@ use axum::{
 };
 use base64::Engine;
 use groove::query_manager::session::Session;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use jsonwebtoken::{
+    Algorithm, DecodingKey, Validation, decode, decode_header,
+    jwk::{Jwk, JwkSet, KeyAlgorithm},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -42,10 +45,10 @@ const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 /// Authentication configuration for the server.
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
-    /// HMAC secret for JWT validation (testing/development).
-    pub jwt_secret: Option<String>,
     /// URL to fetch JWKS keys (production).
     pub jwks_url: Option<String>,
+    /// Cached JWKS set fetched at server startup.
+    pub jwks_set: Option<JwkSet>,
     /// Secret for backend session impersonation.
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
@@ -55,10 +58,7 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
-        self.jwt_secret.is_some()
-            || self.jwks_url.is_some()
-            || self.backend_secret.is_some()
-            || self.admin_secret.is_some()
+        self.jwks_url.is_some() || self.backend_secret.is_some() || self.admin_secret.is_some()
     }
 }
 
@@ -98,8 +98,6 @@ pub enum JwtError {
     NoKeyConfigured,
     /// Invalid token format or signature.
     Invalid(String),
-    /// Token has expired.
-    Expired,
 }
 
 impl std::fmt::Display for JwtError {
@@ -107,7 +105,6 @@ impl std::fmt::Display for JwtError {
         match self {
             JwtError::NoKeyConfigured => write!(f, "No JWT validation key configured"),
             JwtError::Invalid(msg) => write!(f, "Invalid JWT: {}", msg),
-            JwtError::Expired => write!(f, "JWT has expired"),
         }
     }
 }
@@ -177,7 +174,6 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
                 "JWT validation not configured",
             )),
             Err(JwtError::Invalid(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid JWT")),
-            Err(JwtError::Expired) => Err((StatusCode::UNAUTHORIZED, "JWT has expired")),
         }
     }
 }
@@ -250,15 +246,78 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
 // Validation Functions
 // ============================================================================
 
+fn map_key_algorithm(alg: KeyAlgorithm) -> Option<Algorithm> {
+    match alg {
+        KeyAlgorithm::HS256 => Some(Algorithm::HS256),
+        KeyAlgorithm::HS384 => Some(Algorithm::HS384),
+        KeyAlgorithm::HS512 => Some(Algorithm::HS512),
+        KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+        KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
+        KeyAlgorithm::RSA1_5 | KeyAlgorithm::RSA_OAEP | KeyAlgorithm::RSA_OAEP_256 => None,
+    }
+}
+
+fn signature_only_validation(alg: Algorithm) -> Validation {
+    let mut validation = Validation::new(alg);
+    validation.required_spec_claims.clear();
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation
+}
+
+fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Vec<&'a Jwk> {
+    let mut candidates = Vec::new();
+
+    for jwk in &jwks.keys {
+        if let Some(expected_kid) = kid
+            && jwk.common.key_id.as_deref() != Some(expected_kid)
+        {
+            continue;
+        }
+
+        if let Some(key_alg) = jwk.common.key_algorithm {
+            match map_key_algorithm(key_alg) {
+                Some(mapped_alg) if mapped_alg == alg => {}
+                Some(_) | None => continue,
+            }
+        }
+
+        candidates.push(jwk);
+    }
+
+    candidates
+}
+
 /// Validate a JWT and extract session information.
 pub fn validate_jwt(token: &str, config: &AuthConfig) -> Result<Session, JwtError> {
-    // Try HMAC secret first (testing/development)
-    if let Some(secret) = &config.jwt_secret {
-        let key = DecodingKey::from_secret(secret.as_bytes());
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.validate_exp = true;
+    let jwks = config.jwks_set.as_ref().ok_or(JwtError::NoKeyConfigured)?;
+    let header = decode_header(token).map_err(|e| JwtError::Invalid(e.to_string()))?;
+    let candidates = select_jwk_candidates(jwks, header.kid.as_deref(), header.alg);
+    if candidates.is_empty() {
+        return Err(JwtError::Invalid("no matching key in JWKS".to_string()));
+    }
 
-        match decode::<JwtClaims>(token, &key, &validation) {
+    let validation = signature_only_validation(header.alg);
+    let mut last_error = None;
+
+    for jwk in candidates {
+        let decoding_key = match DecodingKey::from_jwk(jwk) {
+            Ok(key) => key,
+            Err(e) => {
+                last_error = Some(format!("failed to build decoding key: {e}"));
+                continue;
+            }
+        };
+
+        match decode::<JwtClaims>(token, &decoding_key, &validation) {
             Ok(data) => {
                 return Ok(Session {
                     user_id: data.claims.sub,
@@ -266,20 +325,14 @@ pub fn validate_jwt(token: &str, config: &AuthConfig) -> Result<Session, JwtErro
                 });
             }
             Err(e) => {
-                if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
-                    return Err(JwtError::Expired);
-                }
-                return Err(JwtError::Invalid(e.to_string()));
+                last_error = Some(e.to_string());
             }
         }
     }
 
-    // TODO: JWKS support for production
-    // if let Some(jwks_url) = &config.jwks_url {
-    //     // Fetch and cache JWKS keys, validate with RS256
-    // }
-
-    Err(JwtError::NoKeyConfigured)
+    Err(JwtError::Invalid(last_error.unwrap_or_else(|| {
+        "JWT signature verification failed".to_string()
+    })))
 }
 
 /// Extract session from headers with priority resolution.
@@ -337,15 +390,14 @@ pub fn extract_session(
             Err(JwtError::Invalid(_)) => {
                 return Err((StatusCode::UNAUTHORIZED, "Invalid JWT"));
             }
-            Err(JwtError::Expired) => {
-                return Err((StatusCode::UNAUTHORIZED, "JWT has expired"));
-            }
         }
     }
 
     // Priority 3: Local anonymous/demo token auth
     let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
-    let local_token = headers.get(LOCAL_TOKEN_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers
+        .get(LOCAL_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
 
     match (local_mode, local_token) {
         (Some(mode), Some(token)) => {
@@ -417,36 +469,39 @@ pub fn validate_admin_secret(
 mod tests {
     use super::*;
     use jsonwebtoken::{EncodingKey, Header, encode};
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const TEST_JWKS_KID: &str = "test-kid";
+    const TEST_JWKS_SECRET: &str = "test-secret-key-for-jwt";
 
     fn make_test_config() -> AuthConfig {
         AuthConfig {
-            jwt_secret: Some("test-secret-key-for-jwt".to_string()),
-            jwks_url: None,
+            jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
+            jwks_set: Some(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET)),
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
         }
     }
 
-    fn make_jwt(claims: &JwtClaims, secret: &str) -> String {
+    fn make_hs256_jwks(kid: &str, secret: &str) -> JwkSet {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes());
+        serde_json::from_value(serde_json::json!({
+            "keys": [
+                {
+                    "kty": "oct",
+                    "kid": kid,
+                    "alg": "HS256",
+                    "k": encoded
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn make_jwt(claims: &JwtClaims, secret: &str, kid: &str) -> String {
         let key = EncodingKey::from_secret(secret.as_bytes());
-        encode(&Header::default(), claims, &key).unwrap()
-    }
-
-    fn future_exp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600 // 1 hour from now
-    }
-
-    fn past_exp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 3600 // 1 hour ago
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        encode(&header, claims, &key).unwrap()
     }
 
     #[test]
@@ -455,29 +510,14 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             claims: serde_json::json!({"role": "admin"}),
-            exp: Some(future_exp()),
+            exp: None,
             iat: None,
         };
-        let token = make_jwt(&claims, "test-secret-key-for-jwt");
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
 
         let session = validate_jwt(&token, &config).unwrap();
         assert_eq!(session.user_id, "user-123");
         assert_eq!(session.claims["role"], "admin");
-    }
-
-    #[test]
-    fn test_jwt_validation_expired() {
-        let config = make_test_config();
-        let claims = JwtClaims {
-            sub: "user-123".to_string(),
-            claims: serde_json::json!({}),
-            exp: Some(past_exp()),
-            iat: None,
-        };
-        let token = make_jwt(&claims, "test-secret-key-for-jwt");
-
-        let result = validate_jwt(&token, &config);
-        assert!(matches!(result, Err(JwtError::Expired)));
     }
 
     #[test]
@@ -486,10 +526,10 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             claims: serde_json::json!({}),
-            exp: Some(future_exp()),
+            exp: None,
             iat: None,
         };
-        let token = make_jwt(&claims, "wrong-secret");
+        let token = make_jwt(&claims, "wrong-secret", TEST_JWKS_KID);
 
         let result = validate_jwt(&token, &config);
         assert!(matches!(result, Err(JwtError::Invalid(_))));
@@ -564,10 +604,10 @@ mod tests {
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
             claims: serde_json::json!({}),
-            exp: Some(future_exp()),
+            exp: None,
             iat: None,
         };
-        let token = make_jwt(&claims, "test-secret-key-for-jwt");
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
 
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
@@ -595,10 +635,10 @@ mod tests {
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
             claims: serde_json::json!({}),
-            exp: Some(future_exp()),
+            exp: None,
             iat: None,
         };
-        let token = make_jwt(&claims, "test-secret-key-for-jwt");
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
         let result = extract_session(&headers, &config).unwrap();
@@ -643,5 +683,30 @@ mod tests {
         let result = validate_admin_secret(Some("any-secret"), &config);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_extract_session_local_anonymous() {
+        let config = make_test_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
+        headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
+
+        let result = extract_session(&headers, &config).unwrap();
+        let session = result.unwrap();
+        assert!(session.user_id.starts_with("local:"));
+        assert_eq!(session.claims["auth_mode"], "local");
+        assert_eq!(session.claims["local_mode"], "anonymous");
+    }
+
+    #[test]
+    fn test_extract_session_local_requires_both_headers() {
+        let config = make_test_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
+
+        let result = extract_session(&headers, &config);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
     }
 }

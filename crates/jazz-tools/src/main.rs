@@ -112,8 +112,8 @@ async fn main() {
             admin_secret,
         } => {
             let auth_config = AuthConfig {
-                jwt_secret: None,
                 jwks_url,
+                jwks_set: None,
                 backend_secret,
                 admin_secret,
             };

@@ -8,6 +8,7 @@ use groove::runtime_tokio::TokioRuntime;
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::SurrealKvStorage;
 use groove::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
+use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
@@ -37,7 +38,7 @@ pub async fn run(
     app_id_str: &str,
     port: u16,
     data_dir: &str,
-    auth_config: AuthConfig,
+    mut auth_config: AuthConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse app ID
     let app_id = AppId::from_string(app_id_str)?;
@@ -75,11 +76,16 @@ pub async fn run(
         // Server destinations would be handled differently (e.g., HTTP push)
     });
 
+    // Preload JWKS when configured.
+    if let Some(jwks_url) = &auth_config.jwks_url {
+        let jwks = reqwest::get(jwks_url).await?.json::<JwkSet>().await?;
+        auth_config.jwks_set = Some(jwks);
+    }
+
     // Log auth configuration (without revealing secrets)
     if auth_config.is_configured() {
         info!(
-            "Auth configured: jwt={}, jwks={}, backend={}, admin={}",
-            auth_config.jwt_secret.is_some(),
+            "Auth configured: jwks={}, backend={}, admin={}",
             auth_config.jwks_url.is_some(),
             auth_config.backend_secret.is_some(),
             auth_config.admin_secret.is_some()

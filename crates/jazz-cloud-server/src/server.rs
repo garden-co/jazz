@@ -382,6 +382,8 @@ impl AppStatus {
 struct AppConfig {
     app_name: String,
     jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
@@ -393,11 +395,18 @@ struct MetaAppRow {
     app_id: AppId,
     app_name: String,
     jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
     created_at: u64,
     updated_at: u64,
+}
+
+#[derive(Debug, Clone)]
+struct MetaExternalIdentityRow {
+    principal_id: String,
 }
 
 struct MetaStore {
@@ -417,9 +426,20 @@ impl MetaStore {
                     .column("app_id", ColumnType::Uuid)
                     .column("app_name", ColumnType::Text)
                     .column("jwks_endpoint", ColumnType::Text)
+                    .column("allow_anonymous", ColumnType::Boolean)
+                    .column("allow_demo", ColumnType::Boolean)
                     .column("backend_secret_hash", ColumnType::Text)
                     .column("admin_secret_hash", ColumnType::Text)
                     .column("status", ColumnType::Text)
+                    .column("created_at", ColumnType::Timestamp)
+                    .column("updated_at", ColumnType::Timestamp),
+            )
+            .table(
+                TableSchema::builder("external_identities")
+                    .column("app_id", ColumnType::Uuid)
+                    .column("issuer", ColumnType::Text)
+                    .column("subject", ColumnType::Text)
+                    .column("principal_id", ColumnType::Text)
                     .column("created_at", ColumnType::Timestamp)
                     .column("updated_at", ColumnType::Timestamp),
             )
@@ -501,6 +521,8 @@ impl MetaStore {
         app_id: AppId,
         app_name: String,
         jwks_endpoint: String,
+        allow_anonymous: bool,
+        allow_demo: bool,
         backend_secret_hash: String,
         admin_secret_hash: String,
         status: AppStatus,
@@ -510,6 +532,8 @@ impl MetaStore {
             Value::Uuid(app_id.as_object_id()),
             Value::Text(app_name.clone()),
             Value::Text(jwks_endpoint.clone()),
+            Value::Boolean(allow_anonymous),
+            Value::Boolean(allow_demo),
             Value::Text(backend_secret_hash.clone()),
             Value::Text(admin_secret_hash.clone()),
             Value::Text(status.as_str().to_string()),
@@ -527,6 +551,8 @@ impl MetaStore {
             app_id,
             app_name,
             jwks_endpoint,
+            allow_anonymous,
+            allow_demo,
             backend_secret_hash,
             admin_secret_hash,
             status,
@@ -542,6 +568,11 @@ impl MetaStore {
                 "jwks_endpoint".to_string(),
                 Value::Text(row.jwks_endpoint.clone()),
             ),
+            (
+                "allow_anonymous".to_string(),
+                Value::Boolean(row.allow_anonymous),
+            ),
+            ("allow_demo".to_string(), Value::Boolean(row.allow_demo)),
             (
                 "backend_secret_hash".to_string(),
                 Value::Text(row.backend_secret_hash.clone()),
@@ -566,6 +597,63 @@ impl MetaStore {
         self.runtime
             .delete(object_id, None)
             .map_err(|e| format!("failed to delete meta app record: {e}"))
+    }
+
+    async fn get_external_identity(
+        &self,
+        app_id: AppId,
+        issuer: &str,
+        subject: &str,
+    ) -> Result<Option<MetaExternalIdentityRow>, String> {
+        let query = QueryBuilder::new("external_identities")
+            .filter_eq("app_id", Value::Uuid(app_id.as_object_id()))
+            .filter_eq("issuer", Value::Text(issuer.to_string()))
+            .filter_eq("subject", Value::Text(subject.to_string()))
+            .build();
+
+        let future = self
+            .runtime
+            .query(query, None, None)
+            .map_err(|e| format!("external identity query error: {e}"))?;
+        let mut rows = future
+            .await
+            .map_err(|e| format!("external identity query await error: {e}"))?;
+
+        if let Some((object_id, values)) = rows.pop() {
+            Ok(Some(Self::decode_external_identity_row(
+                object_id, &values,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn create_external_identity(
+        &self,
+        app_id: AppId,
+        issuer: &str,
+        subject: &str,
+        principal_id: &str,
+    ) -> Result<MetaExternalIdentityRow, String> {
+        let now = now_timestamp_us();
+        let values = vec![
+            Value::Uuid(app_id.as_object_id()),
+            Value::Text(issuer.to_string()),
+            Value::Text(subject.to_string()),
+            Value::Text(principal_id.to_string()),
+            Value::Timestamp(now),
+            Value::Timestamp(now),
+        ];
+
+        let object_id = self
+            .runtime
+            .insert("external_identities", values, None)
+            .map_err(|e| format!("failed to insert external identity: {e}"))?;
+
+        let _ = object_id;
+        Ok(MetaExternalIdentityRow {
+            principal_id: principal_id.to_string(),
+        })
     }
 
     fn decode_row(object_id: ObjectId, values: &[Value]) -> Result<MetaAppRow, String> {
@@ -602,8 +690,30 @@ impl MetaStore {
                 ));
             }
         };
+        let (allow_anonymous, allow_demo, idx_shift) = if values.len() >= 10 {
+            let allow_anonymous = match &values[3] {
+                Value::Boolean(v) => *v,
+                other => {
+                    return Err(format!(
+                        "meta row field allow_anonymous expected boolean, got {other:?}"
+                    ));
+                }
+            };
+            let allow_demo = match &values[4] {
+                Value::Boolean(v) => *v,
+                other => {
+                    return Err(format!(
+                        "meta row field allow_demo expected boolean, got {other:?}"
+                    ));
+                }
+            };
+            (allow_anonymous, allow_demo, 2)
+        } else {
+            // Backward-compat for older rows before auth mode flags existed.
+            (true, true, 0)
+        };
 
-        let backend_secret_hash = match &values[3] {
+        let backend_secret_hash = match &values[3 + idx_shift] {
             Value::Text(s) => s.clone(),
             other => {
                 return Err(format!(
@@ -612,7 +722,7 @@ impl MetaStore {
             }
         };
 
-        let admin_secret_hash = match &values[4] {
+        let admin_secret_hash = match &values[4 + idx_shift] {
             Value::Text(s) => s.clone(),
             other => {
                 return Err(format!(
@@ -621,7 +731,7 @@ impl MetaStore {
             }
         };
 
-        let status = match &values[5] {
+        let status = match &values[5 + idx_shift] {
             Value::Text(s) => AppStatus::from_str(s)
                 .ok_or_else(|| format!("meta row has invalid status value: {s}"))?,
             other => {
@@ -631,7 +741,7 @@ impl MetaStore {
             }
         };
 
-        let created_at = match &values[6] {
+        let created_at = match &values[6 + idx_shift] {
             Value::Timestamp(ts) => *ts,
             other => {
                 return Err(format!(
@@ -640,7 +750,7 @@ impl MetaStore {
             }
         };
 
-        let updated_at = match &values[7] {
+        let updated_at = match &values[7 + idx_shift] {
             Value::Timestamp(ts) => *ts,
             other => {
                 return Err(format!(
@@ -654,12 +764,37 @@ impl MetaStore {
             app_id: AppId::from_object_id(app_obj_id),
             app_name,
             jwks_endpoint,
+            allow_anonymous,
+            allow_demo,
             backend_secret_hash,
             admin_secret_hash,
             status,
             created_at,
             updated_at,
         })
+    }
+
+    fn decode_external_identity_row(
+        _object_id: ObjectId,
+        values: &[Value],
+    ) -> Result<MetaExternalIdentityRow, String> {
+        if values.len() < 6 {
+            return Err(format!(
+                "external identity row has invalid column count: expected at least 6, got {}",
+                values.len()
+            ));
+        }
+
+        let principal_id = match &values[3] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "external identity field principal_id expected text, got {other:?}"
+                ));
+            }
+        };
+
+        Ok(MetaExternalIdentityRow { principal_id })
     }
 }
 
@@ -917,7 +1052,9 @@ struct EventsParams {
 #[derive(Debug, Deserialize)]
 struct CreateAppRequest {
     app_name: String,
-    jwks_endpoint: String,
+    jwks_endpoint: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
 }
@@ -926,6 +1063,8 @@ struct CreateAppRequest {
 struct UpdateAppRequest {
     app_name: Option<String>,
     jwks_endpoint: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
     status: Option<AppStatus>,
     rotate_backend_secret: Option<bool>,
     rotate_admin_secret: Option<bool>,
@@ -936,6 +1075,8 @@ struct AppSummaryResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     status: AppStatus,
     worker: usize,
 }
@@ -945,6 +1086,8 @@ struct CreateAppResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     backend_secret: String,
     admin_secret: String,
     status: AppStatus,
@@ -956,10 +1099,21 @@ struct UpdateAppResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     status: AppStatus,
     worker: usize,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkExternalResponse {
+    app_id: String,
+    principal_id: String,
+    issuer: String,
+    subject: String,
+    created: bool,
 }
 
 pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -1043,6 +1197,10 @@ fn create_router(state: Arc<ServerState>) -> Router {
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
         .route(
+            "/apps/:app_id/auth/link-external",
+            post(link_external_handler),
+        )
+        .route(
             "/internal/apps",
             post(create_app_handler).get(list_apps_handler),
         )
@@ -1060,6 +1218,8 @@ fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
     AppConfig {
         app_name: row.app_name.clone(),
         jwks_endpoint: row.jwks_endpoint.clone(),
+        allow_anonymous: row.allow_anonymous,
+        allow_demo: row.allow_demo,
         backend_secret_hash: row.backend_secret_hash.clone(),
         admin_secret_hash: row.admin_secret_hash.clone(),
         status: row.status,
@@ -1100,6 +1260,13 @@ fn derive_local_principal_id(app_id: AppId, mode: LocalAuthMode, token: &str) ->
     format!("local:{encoded}")
 }
 
+fn derive_external_principal_id(app_id: AppId, issuer: &str, subject: &str) -> String {
+    let input = format!("{app_id}:external:{issuer}:{subject}");
+    let digest = Sha256::digest(input.as_bytes());
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    format!("external:{encoded}")
+}
+
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1112,15 +1279,124 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+async fn resolve_external_session(
+    state: &ServerState,
+    app_id: AppId,
+    verified: VerifiedJwt,
+) -> Result<Session, (StatusCode, &'static str)> {
+    let subject = verified.subject.trim();
+    if subject.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid bearer token subject"));
+    }
+
+    let issuer = verified
+        .issuer
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let principal_claim = verified
+        .principal_id_claim
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let mapped_principal = if let Some(iss) = issuer {
+        match state
+            .meta_store
+            .get_external_identity(app_id, iss, subject)
+            .await
+        {
+            Ok(Some(row)) => Some(row.principal_id),
+            Ok(None) => None,
+            Err(err) => {
+                warn!(
+                    app_id = %app_id,
+                    issuer = %iss,
+                    subject = %subject,
+                    error = %err,
+                    "failed to resolve external identity mapping"
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to resolve external identity",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    if let (Some(claim), Some(mapped)) = (principal_claim, mapped_principal.as_deref())
+        && claim != mapped
+    {
+        warn!(
+            app_id = %app_id,
+            claim_principal = %claim,
+            mapped_principal = %mapped,
+            issuer = issuer.unwrap_or("<missing>"),
+            subject = %subject,
+            "external principal claim mismatches persisted identity mapping"
+        );
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "External identity mapping conflict",
+        ));
+    }
+
+    let principal_id = if let Some(claim) = principal_claim {
+        claim.to_string()
+    } else if let Some(mapped) = mapped_principal {
+        mapped
+    } else if let Some(iss) = issuer {
+        derive_external_principal_id(app_id, iss, subject)
+    } else {
+        subject.to_string()
+    };
+
+    let claims = match verified.claims {
+        serde_json::Value::Object(mut map) => {
+            map.insert("auth_mode".to_string(), serde_json::json!("external"));
+            map.insert("subject".to_string(), serde_json::json!(subject));
+            if let Some(iss) = issuer {
+                map.insert("issuer".to_string(), serde_json::json!(iss));
+            }
+            serde_json::Value::Object(map)
+        }
+        other => serde_json::json!({
+            "auth_mode": "external",
+            "subject": subject,
+            "issuer": issuer,
+            "raw_claims": other,
+        }),
+    };
+
+    Ok(Session {
+        user_id: principal_id,
+        claims,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
     sub: String,
+    #[serde(default)]
+    iss: Option<String>,
+    #[serde(default)]
+    jazz_principal_id: Option<String>,
     #[serde(default = "default_session_claims")]
     claims: serde_json::Value,
 }
 
 fn default_session_claims() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedJwt {
+    subject: String,
+    issuer: Option<String>,
+    principal_id_claim: Option<String>,
+    claims: serde_json::Value,
 }
 
 #[derive(Debug)]
@@ -1184,7 +1460,7 @@ fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm
 fn verify_jwt_signature_with_jwks(
     token: &str,
     jwks: &JwkSet,
-) -> Result<Session, JwtVerificationError> {
+) -> Result<VerifiedJwt, JwtVerificationError> {
     let header = decode_header(token)
         .map_err(|err| JwtVerificationError::Fatal(format!("invalid JWT header: {err}")))?;
 
@@ -1211,8 +1487,10 @@ fn verify_jwt_signature_with_jwks(
 
         match decode::<JwtClaims>(token, &decoding_key, &validation) {
             Ok(token_data) => {
-                return Ok(Session {
-                    user_id: token_data.claims.sub,
+                return Ok(VerifiedJwt {
+                    subject: token_data.claims.sub,
+                    issuer: token_data.claims.iss,
+                    principal_id_claim: token_data.claims.jazz_principal_id,
                     claims: token_data.claims.claims,
                 });
             }
@@ -1285,7 +1563,11 @@ async fn validate_jwt_with_jwks(
     app_id: AppId,
     app_config: &AppConfig,
     token: &str,
-) -> Result<Session, (StatusCode, &'static str)> {
+) -> Result<VerifiedJwt, (StatusCode, &'static str)> {
+    if app_config.jwks_endpoint.trim().is_empty() {
+        return Err((StatusCode::FORBIDDEN, "External auth disabled for app"));
+    }
+
     let cached_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, false)
         .await
         .map_err(|err| {
@@ -1379,17 +1661,26 @@ async fn extract_session(
             return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
         }
 
-        let session = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
+        let verified = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
+        let session = resolve_external_session(state, app_id, verified).await?;
         return Ok(Some(session));
     }
 
     let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
-    let local_token = headers.get(LOCAL_TOKEN_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers
+        .get(LOCAL_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
 
     match (local_mode, local_token) {
         (Some(mode), Some(token)) => {
             let mode = LocalAuthMode::from_header(mode)
                 .ok_or((StatusCode::BAD_REQUEST, "Invalid local auth mode"))?;
+            if mode == LocalAuthMode::Anonymous && !app_config.allow_anonymous {
+                return Err((StatusCode::FORBIDDEN, "Anonymous auth disabled for app"));
+            }
+            if mode == LocalAuthMode::Demo && !app_config.allow_demo {
+                return Err((StatusCode::FORBIDDEN, "Demo auth disabled for app"));
+            }
             let token = token.trim();
             if token.is_empty() {
                 return Err((StatusCode::UNAUTHORIZED, "Empty local auth token"));
@@ -1477,6 +1768,8 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
         app_id: app.app_id.to_string(),
         app_name: cfg.app_name.clone(),
         jwks_endpoint: cfg.jwks_endpoint.clone(),
+        allow_anonymous: cfg.allow_anonymous,
+        allow_demo: cfg.allow_demo,
         status: cfg.status,
         worker,
     }
@@ -1682,18 +1975,20 @@ async fn create_app_handler(
         return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
     }
 
-    if request.app_name.trim().is_empty() || request.jwks_endpoint.trim().is_empty() {
+    let app_name = request.app_name.trim().to_string();
+    if app_name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request(
-                "app_name and jwks_endpoint are required",
-            )),
+            Json(ErrorResponse::bad_request("app_name is required")),
         )
             .into_response();
     }
+    let jwks_endpoint = request.jwks_endpoint.unwrap_or_default().trim().to_string();
 
     let backend_secret = request.backend_secret.unwrap_or_else(generate_secret);
     let admin_secret = request.admin_secret.unwrap_or_else(generate_secret);
+    let allow_anonymous = request.allow_anonymous.unwrap_or(true);
+    let allow_demo = request.allow_demo.unwrap_or(true);
 
     let backend_secret_hash = state.meta_store.hash_secret(&backend_secret);
     let admin_secret_hash = state.meta_store.hash_secret(&admin_secret);
@@ -1710,8 +2005,10 @@ async fn create_app_handler(
         .meta_store
         .create_app(
             app_id,
-            request.app_name,
-            request.jwks_endpoint,
+            app_name,
+            jwks_endpoint,
+            allow_anonymous,
+            allow_demo,
             backend_secret_hash,
             admin_secret_hash,
             AppStatus::Active,
@@ -1761,6 +2058,8 @@ async fn create_app_handler(
         app_id: app_id.to_string(),
         app_name: meta_row.app_name,
         jwks_endpoint: meta_row.jwks_endpoint,
+        allow_anonymous: meta_row.allow_anonymous,
+        allow_demo: meta_row.allow_demo,
         backend_secret,
         admin_secret,
         status: meta_row.status,
@@ -1893,6 +2192,12 @@ async fn update_app_handler(
     if let Some(jwks_endpoint) = request.jwks_endpoint {
         row.jwks_endpoint = jwks_endpoint;
     }
+    if let Some(allow_anonymous) = request.allow_anonymous {
+        row.allow_anonymous = allow_anonymous;
+    }
+    if let Some(allow_demo) = request.allow_demo {
+        row.allow_demo = allow_demo;
+    }
     if let Some(status) = request.status {
         row.status = status;
     }
@@ -1927,10 +2232,225 @@ async fn update_app_handler(
         app_id: app_id.to_string(),
         app_name: row.app_name,
         jwks_endpoint: row.jwks_endpoint,
+        allow_anonymous: row.allow_anonymous,
+        allow_demo: row.allow_demo,
         status: row.status,
         worker,
         backend_secret: new_backend_secret,
         admin_secret: new_admin_secret,
+    })
+    .into_response()
+}
+
+async fn link_external_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+
+    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers
+        .get(LOCAL_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let (mode, token) = match (local_mode, local_token) {
+        (Some(mode), Some(token)) => (mode, token.trim()),
+        (Some(_), None) | (None, Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
+                )),
+            )
+                .into_response();
+        }
+        (None, None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Local auth headers are required for link-external",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let mode = match LocalAuthMode::from_header(mode) {
+        Some(mode) => mode,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request("Invalid local auth mode")),
+            )
+                .into_response();
+        }
+    };
+
+    if token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request("Empty local auth token")),
+        )
+            .into_response();
+    }
+
+    if mode == LocalAuthMode::Anonymous && !cfg.allow_anonymous {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::unauthorized(
+                "Anonymous auth disabled for app",
+            )),
+        )
+            .into_response();
+    }
+    if mode == LocalAuthMode::Demo && !cfg.allow_demo {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::unauthorized("Demo auth disabled for app")),
+        )
+            .into_response();
+    }
+
+    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Authorization bearer token is required",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let token_bearer = match auth_value.strip_prefix("Bearer ") {
+        Some(token) if !token.trim().is_empty() => token.trim(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Invalid Authorization header format",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let verified = match validate_jwt_with_jwks(&state, app_id, &cfg, token_bearer).await {
+        Ok(verified) => verified,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    let issuer = match verified.issuer.as_deref().map(str::trim) {
+        Some(iss) if !iss.is_empty() => iss.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "JWT issuer (iss) is required for link-external",
+                )),
+            )
+                .into_response();
+        }
+    };
+    let subject = verified.subject.trim().to_string();
+    if subject.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
+        )
+            .into_response();
+    }
+
+    let local_principal_id = derive_local_principal_id(app_id, mode, token);
+
+    if let Some(claim_principal) = verified
+        .principal_id_claim
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        && claim_principal != local_principal_id
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::bad_request(
+                "JWT jazz_principal_id claim does not match local principal",
+            )),
+        )
+            .into_response();
+    }
+
+    let mut created = false;
+
+    match state
+        .meta_store
+        .get_external_identity(app_id, &issuer, &subject)
+        .await
+    {
+        Ok(Some(row)) => {
+            if row.principal_id != local_principal_id {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::bad_request(
+                        "external identity is already linked to a different principal",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+        Ok(None) => {
+            if let Err(err) = state
+                .meta_store
+                .create_external_identity(app_id, &issuer, &subject, &local_principal_id)
+                .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::internal(err)),
+                )
+                    .into_response();
+            }
+            created = true;
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(err)),
+            )
+                .into_response();
+        }
+    }
+
+    Json(LinkExternalResponse {
+        app_id: app_id.to_string(),
+        principal_id: local_principal_id,
+        issuer,
+        subject,
+        created,
     })
     .into_response()
 }
