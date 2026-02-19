@@ -466,6 +466,7 @@ impl Storage for SurrealKvStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        tracing::trace!(table, column, branch, ?row_id, "index_insert");
         let key = Self::index_entry_key(table, column, branch, value, row_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
         // Sentinel byte — existence is the signal.
@@ -481,6 +482,7 @@ impl Storage for SurrealKvStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        tracing::trace!(table, column, branch, ?row_id, "index_remove");
         let key = Self::index_entry_key(table, column, branch, value, row_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
         Self::txn_delete(&mut txn, &key)?;
@@ -494,6 +496,7 @@ impl Storage for SurrealKvStorage {
         branch: &str,
         value: &Value,
     ) -> Vec<ObjectId> {
+        tracing::trace!(table, column, branch, "index_lookup");
         let prefix = Self::index_value_prefix(table, column, branch, value);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
@@ -582,6 +585,7 @@ impl Storage for SurrealKvStorage {
     }
 
     fn flush(&self) {
+        let _span = tracing::debug_span!("SurrealKvStorage::flush").entered();
         let Ok(mut txn) = self.begin_write_txn(SurrealDurability::Immediate) else {
             return;
         };
@@ -591,6 +595,7 @@ impl Storage for SurrealKvStorage {
     }
 
     fn flush_wal(&self) {
+        let _span = tracing::debug_span!("SurrealKvStorage::flush_wal").entered();
         self.flush();
     }
 }

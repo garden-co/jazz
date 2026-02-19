@@ -7,7 +7,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 import { app } from "../../schema/app.js";
 import { createDb } from "jazz-tools";
 
@@ -26,29 +26,6 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`Timeout: ${message}`);
-}
-
-function base64url(input: string | Uint8Array): string {
-  const str = typeof input === "string" ? btoa(input) : btoa(String.fromCharCode(...input));
-  return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-async function signJwt(sub: string, secret: string): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = { sub, claims: {}, exp: Math.floor(Date.now() / 1000) + 3600 };
-  const enc = new TextEncoder();
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const data = enc.encode(`${headerB64}.${payloadB64}`);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, data);
-  return `${headerB64}.${payloadB64}.${base64url(new Uint8Array(sig))}`;
 }
 
 /** Submit a todo via the app's form. */
@@ -286,21 +263,21 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("syncs a todo between two app instances through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const token1 = await signJwt("ts-user-a", JWT_SECRET);
-    const token2 = await signJwt("ts-user-b", JWT_SECRET);
 
     const el1 = await mount({
       appId: APP_ID,
       dbName: uniqueDbName("sync-a"),
       serverUrl,
-      jwtToken: token1,
+      localAuthMode: "demo",
+      localAuthToken: "ts-sync-user-a",
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mount({
       appId: APP_ID,
       dbName: uniqueDbName("sync-b"),
       serverUrl,
-      jwtToken: token2,
+      localAuthMode: "demo",
+      localAuthToken: "ts-sync-user-b",
       adminSecret: ADMIN_SECRET,
     });
 

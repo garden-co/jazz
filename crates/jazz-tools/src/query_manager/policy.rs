@@ -30,6 +30,9 @@ pub enum PolicyValue {
     SessionRef(Vec<String>),
 }
 
+/// Reserved session path prefix used to encode outer-row references in correlated EXISTS clauses.
+pub const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
+
 /// Database operation type for policy evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Operation {
@@ -499,6 +502,101 @@ pub fn evaluate_cmp(
     }
 }
 
+/// Bind outer-row references encoded as `@session.__jazz_outer_row.<column>` to literals.
+///
+/// Returns `None` if a referenced outer column cannot be resolved.
+pub fn bind_outer_row_refs(
+    expr: &PolicyExpr,
+    outer_content: &[u8],
+    outer_descriptor: &RowDescriptor,
+) -> Option<PolicyExpr> {
+    match expr {
+        PolicyExpr::Cmp { column, op, value } => {
+            let bound_value = match value {
+                PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
+                PolicyValue::SessionRef(path) => {
+                    if let Some(outer_col) = outer_row_ref_column(path) {
+                        let col_index = outer_descriptor.column_index(outer_col)?;
+                        let resolved =
+                            decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                        PolicyValue::Literal(resolved)
+                    } else {
+                        PolicyValue::SessionRef(path.clone())
+                    }
+                }
+            };
+
+            Some(PolicyExpr::Cmp {
+                column: column.clone(),
+                op: op.clone(),
+                value: bound_value,
+            })
+        }
+        PolicyExpr::IsNull { column } => Some(PolicyExpr::IsNull {
+            column: column.clone(),
+        }),
+        PolicyExpr::IsNotNull { column } => Some(PolicyExpr::IsNotNull {
+            column: column.clone(),
+        }),
+        PolicyExpr::In {
+            column,
+            session_path,
+        } => {
+            if outer_row_ref_column(session_path).is_some() {
+                return None;
+            }
+            Some(PolicyExpr::In {
+                column: column.clone(),
+                session_path: session_path.clone(),
+            })
+        }
+        PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
+            table: table.clone(),
+            condition: Box::new(bind_outer_row_refs(
+                condition,
+                outer_content,
+                outer_descriptor,
+            )?),
+        }),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+        } => Some(PolicyExpr::Inherits {
+            operation: *operation,
+            via_column: via_column.clone(),
+        }),
+        PolicyExpr::And(exprs) => Some(PolicyExpr::And(
+            exprs
+                .iter()
+                .map(|expr| bind_outer_row_refs(expr, outer_content, outer_descriptor))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        PolicyExpr::Or(exprs) => Some(PolicyExpr::Or(
+            exprs
+                .iter()
+                .map(|expr| bind_outer_row_refs(expr, outer_content, outer_descriptor))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        PolicyExpr::Not(expr) => Some(PolicyExpr::Not(Box::new(bind_outer_row_refs(
+            expr,
+            outer_content,
+            outer_descriptor,
+        )?))),
+        PolicyExpr::True => Some(PolicyExpr::True),
+        PolicyExpr::False => Some(PolicyExpr::False),
+    }
+}
+
+fn outer_row_ref_column(path: &[String]) -> Option<&str> {
+    if path.len() != 2 {
+        return None;
+    }
+    if path[0] != OUTER_ROW_SESSION_PREFIX {
+        return None;
+    }
+    Some(path[1].as_str())
+}
+
 /// Evaluate an IN expression. Public for use by PolicyFilterNode.
 pub fn evaluate_in(
     column: &str,
@@ -782,9 +880,14 @@ fn evaluate_simple_recursive(
         }),
 
         PolicyExpr::Exists { table, condition } => {
+            let bound = match bind_outer_row_refs(condition, content, descriptor) {
+                Some(expr) => expr,
+                None => return SimpleEvalResult::fail(),
+            };
+
             SimpleEvalResult::with_complex(ComplexClause::Exists {
                 table: table.clone(),
-                condition: condition.clone(),
+                condition: Box::new(bound),
             })
         }
     }
@@ -856,6 +959,70 @@ mod tests {
 
         let or_expr = PolicyExpr::or(vec![PolicyExpr::True, PolicyExpr::False]);
         assert!(matches!(or_expr, PolicyExpr::Or(v) if v.len() == 2));
+    }
+
+    #[test]
+    fn test_exists_outer_row_refs_are_bound_to_literals() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Text),
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ]);
+        let content = encode_row(
+            &descriptor,
+            &[Value::Text("todo-1".into()), Value::Text("user-1".into())],
+        )
+        .unwrap();
+        let session = Session::new("user-1");
+
+        let expr = PolicyExpr::Exists {
+            table: "todo_shares".into(),
+            condition: Box::new(PolicyExpr::Cmp {
+                column: "todo_id".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![OUTER_ROW_SESSION_PREFIX.into(), "id".into()]),
+            }),
+        };
+
+        let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
+        assert!(result.passed);
+        assert_eq!(result.complex_clauses.len(), 1);
+
+        match &result.complex_clauses[0] {
+            ComplexClause::Exists { table, condition } => {
+                assert_eq!(table, "todo_shares");
+                assert!(matches!(
+                    condition.as_ref(),
+                    PolicyExpr::Cmp {
+                        column,
+                        op: CmpOp::Eq,
+                        value: PolicyValue::Literal(Value::Text(value))
+                    } if column == "todo_id" && value == "todo-1"
+                ));
+            }
+            _ => panic!("expected EXISTS complex clause"),
+        }
+    }
+
+    #[test]
+    fn test_exists_outer_row_ref_to_missing_column_fails() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Text)]);
+        let content = encode_row(&descriptor, &[Value::Text("todo-1".into())]).unwrap();
+        let session = Session::new("user-1");
+
+        let expr = PolicyExpr::Exists {
+            table: "todo_shares".into(),
+            condition: Box::new(PolicyExpr::Cmp {
+                column: "todo_id".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    OUTER_ROW_SESSION_PREFIX.into(),
+                    "missing_col".into(),
+                ]),
+            }),
+        };
+
+        let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
+        assert!(!result.passed);
     }
 
     // ========================================================================

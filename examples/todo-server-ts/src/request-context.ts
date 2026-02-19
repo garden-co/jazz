@@ -47,7 +47,6 @@ function buildFolderScopedQuery(folderId: string): string {
   });
 }
 
-// #region backend-request-session-ts
 export function sessionFromRequest(req: Request): Session {
   const auth = req.header("authorization");
   if (!auth?.startsWith("Bearer ")) {
@@ -58,24 +57,18 @@ export function sessionFromRequest(req: Request): Session {
   const identity = verifyJwtAndExtractIdentity(jwt);
   return { user_id: identity.userId, claims: identity.claims };
 }
-// #endregion backend-request-session-ts
 
-// #region backend-request-handler-ts
 export async function listTodosForRequester(req: Request, client: JazzClient) {
   const userClient = client.forSession(sessionFromRequest(req));
   const rows = await userClient.query(buildQuery("todos"));
   return rows;
 }
-// #endregion backend-request-handler-ts
 
-// #region permissions-simple-ts
 export async function listTodosWithSimplePolicy(req: Request, client: JazzClient) {
   const userClient = client.forSession(sessionFromRequest(req));
   return userClient.query(buildQuery("todos"));
 }
-// #endregion permissions-simple-ts
 
-// #region permissions-inherits-ts
 export async function listTodosWithInheritedPolicy(
   req: Request,
   client: JazzClient,
@@ -84,4 +77,3 @@ export async function listTodosWithInheritedPolicy(
   const userClient = client.forSession(sessionFromRequest(req));
   return userClient.query(buildFolderScopedQuery(folderId));
 }
-// #endregion permissions-inherits-ts

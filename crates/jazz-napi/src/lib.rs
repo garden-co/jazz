@@ -132,8 +132,94 @@ struct JsColumnDescriptor {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+enum JsPolicyValue {
+    Literal { value: NapiValue },
+    SessionRef { path: Vec<String> },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum JsCmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum JsPolicyOperation {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+enum JsPolicyExpr {
+    Cmp {
+        column: String,
+        op: JsCmpOp,
+        value: JsPolicyValue,
+    },
+    IsNull {
+        column: String,
+    },
+    IsNotNull {
+        column: String,
+    },
+    In {
+        column: String,
+        session_path: Vec<String>,
+    },
+    Exists {
+        table: String,
+        condition: Box<JsPolicyExpr>,
+    },
+    Inherits {
+        operation: JsPolicyOperation,
+        via_column: String,
+    },
+    And {
+        exprs: Vec<JsPolicyExpr>,
+    },
+    Or {
+        exprs: Vec<JsPolicyExpr>,
+    },
+    Not {
+        expr: Box<JsPolicyExpr>,
+    },
+    True,
+    False,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct JsOperationPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    using: Option<JsPolicyExpr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    with_check: Option<JsPolicyExpr>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct JsTablePolicies {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    select: Option<JsOperationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    insert: Option<JsOperationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<JsOperationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete: Option<JsOperationPolicy>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct JsTableSchema {
     columns: Vec<JsColumnDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policies: Option<JsTablePolicies>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -178,7 +264,104 @@ fn js_column_type_to_groove(ct: JsColumnType) -> groove::query_manager::types::C
 }
 
 fn js_schema_to_groove(js: JsSchema) -> Schema {
-    use groove::query_manager::types::{ColumnDescriptor, RowDescriptor, TableName, TableSchema};
+    use groove::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
+    use groove::query_manager::types::{
+        ColumnDescriptor, OperationPolicy, RowDescriptor, TableName, TablePolicies, TableSchema,
+    };
+
+    fn js_policy_value_to_groove(value: JsPolicyValue) -> PolicyValue {
+        match value {
+            JsPolicyValue::Literal { value } => {
+                PolicyValue::Literal(napi_value_to_groove(value).expect("invalid policy literal"))
+            }
+            JsPolicyValue::SessionRef { path } => PolicyValue::SessionRef(path),
+        }
+    }
+
+    fn js_policy_expr_to_groove(expr: JsPolicyExpr) -> PolicyExpr {
+        match expr {
+            JsPolicyExpr::Cmp { column, op, value } => PolicyExpr::Cmp {
+                column,
+                op: match op {
+                    JsCmpOp::Eq => CmpOp::Eq,
+                    JsCmpOp::Ne => CmpOp::Ne,
+                    JsCmpOp::Lt => CmpOp::Lt,
+                    JsCmpOp::Le => CmpOp::Le,
+                    JsCmpOp::Gt => CmpOp::Gt,
+                    JsCmpOp::Ge => CmpOp::Ge,
+                },
+                value: js_policy_value_to_groove(value),
+            },
+            JsPolicyExpr::IsNull { column } => PolicyExpr::IsNull { column },
+            JsPolicyExpr::IsNotNull { column } => PolicyExpr::IsNotNull { column },
+            JsPolicyExpr::In {
+                column,
+                session_path,
+            } => PolicyExpr::In {
+                column,
+                session_path,
+            },
+            JsPolicyExpr::Exists { table, condition } => PolicyExpr::Exists {
+                table,
+                condition: Box::new(js_policy_expr_to_groove(*condition)),
+            },
+            JsPolicyExpr::Inherits {
+                operation,
+                via_column,
+            } => PolicyExpr::Inherits {
+                operation: match operation {
+                    JsPolicyOperation::Select => Operation::Select,
+                    JsPolicyOperation::Insert => Operation::Insert,
+                    JsPolicyOperation::Update => Operation::Update,
+                    JsPolicyOperation::Delete => Operation::Delete,
+                },
+                via_column,
+            },
+            JsPolicyExpr::And { exprs } => {
+                PolicyExpr::And(exprs.into_iter().map(js_policy_expr_to_groove).collect())
+            }
+            JsPolicyExpr::Or { exprs } => {
+                PolicyExpr::Or(exprs.into_iter().map(js_policy_expr_to_groove).collect())
+            }
+            JsPolicyExpr::Not { expr } => {
+                PolicyExpr::Not(Box::new(js_policy_expr_to_groove(*expr)))
+            }
+            JsPolicyExpr::True => PolicyExpr::True,
+            JsPolicyExpr::False => PolicyExpr::False,
+        }
+    }
+
+    fn js_operation_policy_to_groove(policy: JsOperationPolicy) -> OperationPolicy {
+        OperationPolicy {
+            using: policy.using.map(js_policy_expr_to_groove),
+            with_check: policy.with_check.map(js_policy_expr_to_groove),
+        }
+    }
+
+    fn js_table_policies_to_groove(policies: Option<JsTablePolicies>) -> TablePolicies {
+        let Some(policies) = policies else {
+            return TablePolicies::default();
+        };
+
+        TablePolicies {
+            select: policies
+                .select
+                .map(js_operation_policy_to_groove)
+                .unwrap_or_default(),
+            insert: policies
+                .insert
+                .map(js_operation_policy_to_groove)
+                .unwrap_or_default(),
+            update: policies
+                .update
+                .map(js_operation_policy_to_groove)
+                .unwrap_or_default(),
+            delete: policies
+                .delete
+                .map(js_operation_policy_to_groove)
+                .unwrap_or_default(),
+        }
+    }
 
     let mut schema = Schema::new();
     for (table_name, table_schema) in js.tables {
@@ -197,16 +380,20 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                 cd
             })
             .collect();
+        let policies = js_table_policies_to_groove(table_schema.policies);
         schema.insert(
             TableName::new(&table_name),
-            TableSchema::new(RowDescriptor::new(columns)),
+            TableSchema::with_policies(RowDescriptor::new(columns), policies),
         );
     }
     schema
 }
 
 fn groove_schema_to_js(schema: &Schema) -> JsSchema {
-    use groove::query_manager::types::ColumnType;
+    use groove::query_manager::{
+        policy::{CmpOp, Operation, PolicyExpr, PolicyValue},
+        types::{ColumnType, OperationPolicy, TablePolicies},
+    };
 
     fn ct_to_js(ct: &ColumnType) -> JsColumnType {
         match ct {
@@ -263,6 +450,95 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
         }
     }
 
+    fn policy_value_to_js(value: &PolicyValue) -> JsPolicyValue {
+        match value {
+            PolicyValue::Literal(value) => JsPolicyValue::Literal {
+                value: NapiValue::from(value.clone()),
+            },
+            PolicyValue::SessionRef(path) => JsPolicyValue::SessionRef { path: path.clone() },
+        }
+    }
+
+    fn policy_expr_to_js(expr: &PolicyExpr) -> JsPolicyExpr {
+        match expr {
+            PolicyExpr::Cmp { column, op, value } => JsPolicyExpr::Cmp {
+                column: column.clone(),
+                op: match op {
+                    CmpOp::Eq => JsCmpOp::Eq,
+                    CmpOp::Ne => JsCmpOp::Ne,
+                    CmpOp::Lt => JsCmpOp::Lt,
+                    CmpOp::Le => JsCmpOp::Le,
+                    CmpOp::Gt => JsCmpOp::Gt,
+                    CmpOp::Ge => JsCmpOp::Ge,
+                },
+                value: policy_value_to_js(value),
+            },
+            PolicyExpr::IsNull { column } => JsPolicyExpr::IsNull {
+                column: column.clone(),
+            },
+            PolicyExpr::IsNotNull { column } => JsPolicyExpr::IsNotNull {
+                column: column.clone(),
+            },
+            PolicyExpr::In {
+                column,
+                session_path,
+            } => JsPolicyExpr::In {
+                column: column.clone(),
+                session_path: session_path.clone(),
+            },
+            PolicyExpr::Exists { table, condition } => JsPolicyExpr::Exists {
+                table: table.clone(),
+                condition: Box::new(policy_expr_to_js(condition)),
+            },
+            PolicyExpr::Inherits {
+                operation,
+                via_column,
+            } => JsPolicyExpr::Inherits {
+                operation: match operation {
+                    Operation::Select => JsPolicyOperation::Select,
+                    Operation::Insert => JsPolicyOperation::Insert,
+                    Operation::Update => JsPolicyOperation::Update,
+                    Operation::Delete => JsPolicyOperation::Delete,
+                },
+                via_column: via_column.clone(),
+            },
+            PolicyExpr::And(exprs) => JsPolicyExpr::And {
+                exprs: exprs.iter().map(policy_expr_to_js).collect(),
+            },
+            PolicyExpr::Or(exprs) => JsPolicyExpr::Or {
+                exprs: exprs.iter().map(policy_expr_to_js).collect(),
+            },
+            PolicyExpr::Not(expr) => JsPolicyExpr::Not {
+                expr: Box::new(policy_expr_to_js(expr)),
+            },
+            PolicyExpr::True => JsPolicyExpr::True,
+            PolicyExpr::False => JsPolicyExpr::False,
+        }
+    }
+
+    fn operation_policy_to_js(policy: &OperationPolicy) -> Option<JsOperationPolicy> {
+        if policy.using.is_none() && policy.with_check.is_none() {
+            return None;
+        }
+        Some(JsOperationPolicy {
+            using: policy.using.as_ref().map(policy_expr_to_js),
+            with_check: policy.with_check.as_ref().map(policy_expr_to_js),
+        })
+    }
+
+    fn table_policies_to_js(policies: &TablePolicies) -> Option<JsTablePolicies> {
+        if *policies == TablePolicies::default() {
+            return None;
+        }
+
+        Some(JsTablePolicies {
+            select: operation_policy_to_js(&policies.select),
+            insert: operation_policy_to_js(&policies.insert),
+            update: operation_policy_to_js(&policies.update),
+            delete: operation_policy_to_js(&policies.delete),
+        })
+    }
+
     let tables = schema
         .iter()
         .map(|(name, ts)| {
@@ -277,7 +553,13 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     references: c.references.map(|r| r.as_str().to_string()),
                 })
                 .collect();
-            (name.as_str().to_string(), JsTableSchema { columns })
+            (
+                name.as_str().to_string(),
+                JsTableSchema {
+                    columns,
+                    policies: table_policies_to_js(&ts.policies),
+                },
+            )
         })
         .collect();
     JsSchema { tables }
@@ -368,12 +650,20 @@ impl NapiSyncSender {
 
 impl SyncSender for NapiSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
-        if let Ok(cb) = self.callback.lock()
-            && let Some(ref tsfn) = *cb
-            && let Ok(json) = serde_json::to_string(&message)
-        {
-            tsfn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
-        }
+        let cb = match self.callback.lock() {
+            Ok(cb) => cb,
+            Err(_) => return,
+        };
+        let tsfn = match cb.as_ref() {
+            Some(tsfn) => tsfn,
+            None => return,
+        };
+        let json = match serde_json::to_string(&message) {
+            Ok(json) => json,
+            Err(_) => return,
+        };
+
+        tsfn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
     }
 }
 
@@ -463,9 +753,11 @@ impl NapiRuntime {
                 move |_ctx: napi::threadsafe_function::ThreadSafeCallContext<()>| {
                     // Reset flag first so new ticks can be scheduled
                     flag_for_tsfn.store(false, Ordering::SeqCst);
-                    if let Some(core_arc) = core_ref_for_tsfn.upgrade()
-                        && let Ok(mut core) = core_arc.lock()
-                    {
+                    let Some(core_arc) = core_ref_for_tsfn.upgrade() else {
+                        // Return empty vec — noop function doesn't use args
+                        return Ok(Vec::<napi::JsUnknown>::new());
+                    };
+                    if let Ok(mut core) = core_arc.lock() {
                         core.batched_tick();
                     }
                     // Return empty vec — noop function doesn't use args

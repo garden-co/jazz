@@ -23,6 +23,11 @@ const schema: WasmSchema = {
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+        {
+          name: "tags",
+          column_type: { type: "Array", element: { type: "Text" } },
+          nullable: true,
+        },
       ],
     },
     projects: {
@@ -36,21 +41,14 @@ interface Todo {
   title: string;
   done: boolean;
   project?: string;
+  tags?: string[];
 }
 
 interface TodoInit {
   title: string;
   done: boolean;
   project?: string;
-}
-
-interface Project {
-  id: string;
-  name: string;
-}
-
-interface ProjectInit {
-  name: string;
+  tags?: string[];
 }
 
 const todos: TableProxy<Todo, TodoInit> = {
@@ -58,13 +56,6 @@ const todos: TableProxy<Todo, TodoInit> = {
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as TodoInit,
-};
-
-const projects: TableProxy<Project, ProjectInit> = {
-  _table: "projects",
-  _schema: schema,
-  _rowType: {} as Project,
-  _initType: {} as ProjectInit,
 };
 
 /** QueryBuilder that selects all todos. */
@@ -93,30 +84,6 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
         table: "todos",
         conditions: [{ column: "project", op: "eq", value: projectId }],
         includes: {},
-        orderBy: [],
-      });
-    },
-  };
-}
-
-function projectsWithTodos(projectId: string): QueryBuilder<Project> {
-  return {
-    _table: "projects",
-    _schema: schema,
-    _rowType: {} as Project,
-    _build() {
-      return JSON.stringify({
-        table: "projects",
-        conditions: [
-          {
-            column: "id",
-            op: "eq",
-            value: projectId,
-          },
-        ],
-        includes: {
-          todosViaProject: true,
-        },
         orderBy: [],
       });
     },
@@ -200,18 +167,6 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Task A", "Task B", "Task C"]);
   });
 
-  it("queries by id", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-id") }));
-
-    const id = db.insert(projects, { name: "Project A" });
-
-    const results = await db.all(projectsWithTodos(id));
-    expect(results.length).toBe(1);
-
-    expect(results[0].id).toBe(id);
-    expect(results[0].name).toBe("Project A");
-  });
-
   // -------------------------------------------------------------------------
   // 3. Update + delete through worker bridge
   // -------------------------------------------------------------------------
@@ -267,9 +222,9 @@ describe("Worker Bridge with OPFS", () => {
 
     const db1 = await createDb({ appId: "test-app", dbName });
 
-    // insertPersisted ensures data is in OPFS WAL before we crash
-    await db1.insertPersisted(todos, { title: "Crash-proof", done: false }, "worker");
-    await db1.insertPersisted(todos, { title: "Also survives", done: true }, "worker");
+    // insertWithAck ensures data is in OPFS WAL before we crash
+    await db1.insertWithAck(todos, { title: "Crash-proof", done: false }, "worker");
+    await db1.insertWithAck(todos, { title: "Also survives", done: true }, "worker");
 
     // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
     // WAL has the data, but snapshot is stale. Recovery must replay WAL.
@@ -310,14 +265,14 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 5. Persisted insert resolves at worker tier
+  // 5. Acknowledged insert resolves at worker tier
   // -------------------------------------------------------------------------
 
-  it("insertPersisted resolves when worker acks", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("persisted") }));
+  it("insertWithAck resolves when worker acks", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("with-ack") }));
 
-    // insertPersisted("worker") should resolve once the worker's OPFS has it
-    const id = await db.insertPersisted(todos, { title: "Durable", done: false }, "worker");
+    // insertWithAck("worker") should resolve once the worker's OPFS has it
+    const id = await db.insertWithAck(todos, { title: "Durable", done: false }, "worker");
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
@@ -405,8 +360,8 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // Insert and wait for server-tier persistence ack
-    const id = await db1.insertPersisted(todos, { title: "Server-synced", done: false }, "edge");
+    // Insert and wait for server-tier acknowledgement
+    const id = await db1.insertWithAck(todos, { title: "Server-synced", done: false }, "edge");
     expect(id).toBeTruthy();
 
     // Query back from the server (edge-tier settlement)

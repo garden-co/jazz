@@ -337,6 +337,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         // Track one-shot queries that completed this tick
         let mut completed_one_shots: Vec<SubscriptionHandle> = Vec::new();
+        let mut callbacks_fired: u64 = 0;
 
         // 3. Call subscription callbacks AND handle one-shot queries
         for update in &subscription_updates {
@@ -368,9 +369,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                         descriptor: update.descriptor.clone(),
                     };
                     (state.callback)(delta);
+                    callbacks_fired += 1;
                 }
             }
         }
+        tracing::debug!(callbacks_fired, "subscription callbacks fired this tick");
 
         // 2b. Cleanup completed one-shot queries
         for handle in completed_one_shots {
@@ -394,6 +397,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
                     if acked_tier >= requested_tier {
+                        tracing::debug!(
+                            ?commit_id,
+                            ?acked_tier,
+                            ?requested_tier,
+                            "ack watcher resolved"
+                        );
                         let _ = sender.send(());
                     } else {
                         remaining.push((requested_tier, sender));
@@ -457,7 +466,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
-        self.storage.flush_wal();
+        {
+            let _span = tracing::debug_span!("flush_wal").entered();
+            self.storage.flush_wal();
+        }
     }
 
     /// Apply parked sync messages and tick.

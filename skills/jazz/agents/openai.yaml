@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jazz Engineering"
+  short_description: "Spec-first, red-green workflow for Jazz changes"
+  default_prompt: "Use $jazz to implement a spec-aligned change in this repository with red-then-green E2E tests."

@@ -38,7 +38,7 @@ Note: The original spec described separate endpoints (`/sync/subscribe`, `/sync/
 
 ## Tenancy Model
 
-The in-repo `jazz-cli server` process is single-app per process: `app_id` is fixed at startup and shared by that runtime/storage instance. There is no app-scoped route prefix inside this server (`/events` and `/sync` are process-local routes).
+The in-repo `jazz-tools server` process is single-app per process: `app_id` is fixed at startup and shared by that runtime/storage instance. There is no app-scoped route prefix inside this server (`/events` and `/sync` are process-local routes).
 
 Hosted onboarding currently provisions app IDs out-of-band; clients still use the same transport protocol against their assigned server URL.
 
