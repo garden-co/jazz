@@ -900,12 +900,13 @@ export class LocalNode {
     id: RawCoID,
     secret: AgentSecret,
     accountId?: RawAccountID | AgentID,
+    sessionID?: SessionID,
   ) {
     const agent = new ControlledAgent(secret, this.crypto);
 
     const newNode = new LocalNode(
       secret,
-      this.crypto.newRandomSessionID(accountId || agent.id),
+      sessionID || this.crypto.newRandomSessionID(accountId || agent.id),
       this.crypto,
     );
 
@@ -914,19 +915,33 @@ export class LocalNode {
     return newNode.expectCoValueLoaded(id);
   }
 
-  /** @internal */
-  async loadVerifiedStateFrom(otherNode: LocalNode, id: RawCoID) {
-    const connection = connectedPeers("source-" + id, "target-" + id, {
-      peer1role: "server",
-      peer2role: "client",
-    });
+  connectToNodeAsServer(otherNode: LocalNode, uniqueName: string) {
+    const connection = connectedPeers(
+      "source-" + uniqueName,
+      "target-" + uniqueName,
+      {
+        peer1role: "server",
+        peer2role: "client",
+      },
+    );
 
     this.syncManager.addPeer(connection[0], true);
     otherNode.syncManager.addPeer(connection[1], true);
 
+    const peerState = this.syncManager.peers[connection[0].id];
+
+    if (!peerState) {
+      throw new Error("Peer state not found");
+    }
+
+    return peerState;
+  }
+
+  /** @internal */
+  async loadVerifiedStateFrom(otherNode: LocalNode, id: RawCoID) {
     const coValue = this.getCoValue(id);
 
-    const peerState = this.syncManager.peers[connection[0].id];
+    const peerState = this.connectToNodeAsServer(otherNode, id);
 
     if (!peerState) {
       throw new Error("Peer state not found");

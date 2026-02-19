@@ -1163,6 +1163,28 @@ export class CoValueCore {
     );
   }
 
+  replaceVerifiedContent(verified: VerifiedState): void {
+    const knownStateBefore = this.knownState();
+    this._verified = verified;
+    this.isDeleted = false;
+
+    for (const [sessionID] of verified.sessionEntries()) {
+      if (isDeleteSessionID(sessionID)) {
+        this.isDeleted = true;
+        break;
+      }
+    }
+
+    this.resetDerivedTransactionState();
+    this._cachedContent?.rebuildFromCore();
+    this.scheduleNotifyUpdate();
+    this.invalidateDependants();
+    this.node.syncManager.syncLocalTransaction(
+      this._verified,
+      knownStateBefore,
+    );
+  }
+
   /**
    * Creates a new transaction with local changes and syncs it to all peers
    */
@@ -1346,6 +1368,25 @@ export class CoValueCore {
     }
 
     this.scheduleNotifyUpdate();
+  }
+
+  private resetDerivedTransactionState() {
+    this.branchStart = undefined;
+    this.mergeCommits = [];
+    this.branches = [];
+    this.earliestTxMadeAt = Number.MAX_SAFE_INTEGER;
+    this.latestTxMadeAt = 0;
+
+    this.verifiedTransactions = [];
+    this.toValidateTransactions = [];
+    this.toDecryptTransactions = [];
+    this.toParseMetaTransactions = [];
+    this.toProcessTransactions = [];
+
+    this.verifiedTransactionsKnownSessions = {};
+    this.lastVerifiedTransactionBySessionID = {};
+    this.parsingCache.clear();
+    this.#fwwWinners.clear();
   }
 
   verifiedTransactions: VerifiedTransaction[] = [];

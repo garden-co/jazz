@@ -1,10 +1,11 @@
 import { CorrectionCallback } from "../exports.js";
 import { logger } from "../logger.js";
 import { NewContentMessage } from "../sync.js";
+import type { ReplaceSessionHistoryInput } from "../storage/types.js";
 import { LinkedList } from "./LinkedList.js";
 
 type StoreQueueEntry = {
-  data: NewContentMessage;
+  data: NewContentMessage | ReplaceSessionHistoryInput;
   correctionCallback: CorrectionCallback;
 };
 
@@ -43,7 +44,10 @@ export class StoreQueue {
   private queue = new LinkedList<StoreQueueEntry>();
   closed = false;
 
-  public push(data: NewContentMessage, correctionCallback: CorrectionCallback) {
+  public push(
+    data: NewContentMessage | ReplaceSessionHistoryInput,
+    correctionCallback: CorrectionCallback,
+  ) {
     if (this.closed) {
       return;
     }
@@ -60,7 +64,7 @@ export class StoreQueue {
 
   processQueue(
     callback: (
-      data: NewContentMessage,
+      data: NewContentMessage | ReplaceSessionHistoryInput,
       correctionCallback: CorrectionCallback,
     ) => Promise<unknown>,
   ) {

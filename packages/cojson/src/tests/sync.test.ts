@@ -3,7 +3,7 @@ import { expectMap } from "../coValue.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
-import type { LoadMessage } from "../sync.js";
+import type { LoadMessage, NewContentMessage } from "../sync.js";
 import {
   TEST_NODE_CONFIG,
   blockMessageTypeOnOutgoingPeer,
@@ -20,6 +20,7 @@ import {
 } from "./testUtils.js";
 import { Stringified } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
+import { CO_VALUE_PRIORITY } from "../priority.js";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -107,6 +108,54 @@ test("Can sync a coValue with private transactions through a server to another c
 
     expect(loadedMap.get("hello")).toEqual("world");
   });
+});
+
+test.only("sending malformed encrypted changes should not throw", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  node.syncManager.disableTransactionVerification();
+
+  const group = node.createGroup();
+  const map = group.createMap();
+  const readKey = map.core.getCurrentReadKey();
+
+  const anotherGroup = node.createGroup();
+  const anotherMap = anotherGroup.createMap();
+  anotherMap.set("hello", "world", "trusting");
+
+  const change =
+    anotherMap.core.newContentSince()![0]!.new[node.currentSessionID]!;
+
+  node.syncManager.disableTransactionVerification();
+
+  expect(() => {
+    node.syncManager.handleNewContent(
+      {
+        action: "content",
+        id: map.id,
+        priority: CO_VALUE_PRIORITY.LOW,
+        new: {
+          [Crypto.newRandomSessionID(node.getCurrentAgent().id)]: {
+            after: 0,
+            newTransactions: [
+              {
+                privacy: "private",
+                madeAt: Date.now(),
+                keyUsed: anotherMap.core.getCurrentReadKey()!.id,
+                // @ts-expect-error - we know it's a private transaction
+                c1: change.newTransactions[0]!.encryptedChanges,
+              },
+            ],
+            lastSignature: change.lastSignature,
+          },
+        },
+      } as unknown as NewContentMessage,
+      "import",
+    );
+  }).not.toThrow();
+
+  expect(() => {
+    map.get("hello");
+  }).not.toThrow();
 });
 
 test("should keep the peer state when the peer closes if persistent is true", async () => {
