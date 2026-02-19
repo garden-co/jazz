@@ -1,76 +1,75 @@
 ---
 title: Authentication
-description: Anonymous, demo, and external JWT auth in Jazz 2, including upgrade/link flow and client setup.
+description: Anonymous, demo, and external JWT auth in Jazz 2, from zero-config onboarding to external provider upgrades.
 ---
 
 Jazz 2 supports three auth methods:
 
-1. `anonymous`: one synthetic user token per device (default local-first onboarding)
-2. `demo`: multiple synthetic users per device to simulate multi-user flows
+1. `anonymous`: one synthetic user token per device
+2. `demo`: multiple synthetic users per device for local multi-user simulation
 3. `external`: bearer JWT validated via JWKS
 
-## Session Resolution Order
+## 1. Start with Anonymous Auth (Zero Config)
 
-For both `jazz-tools server` and `jazz-cloud-server`:
-
-1. Backend impersonation (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
-2. External JWT (`Authorization: Bearer <jwt>`)
-3. Local auth (`X-Jazz-Local-Mode` + `X-Jazz-Local-Token`)
-4. No session
-
-## Client Setup
-
-### Anonymous / Demo Local Auth
-
-```ts
-import { JazzClient } from "jazz-tools";
-
-const client = await JazzClient.connect({
-  appId: process.env.JAZZ_APP_ID!,
-  schema,
-  serverUrl: process.env.JAZZ_SERVER_URL!,
-  localAuthMode: "anonymous", // or "demo"
-  localAuthToken: "device-token-123",
-});
-```
-
-### External JWT Auth
-
-```ts
-import { JazzClient } from "jazz-tools";
-
-const client = await JazzClient.connect({
-  appId: process.env.JAZZ_APP_ID!,
-  schema,
-  serverUrl: process.env.JAZZ_SERVER_URL!,
-  jwtToken: userJwt,
-});
-```
-
-### Link Local -> External (Upgrade)
-
-Use the built-in client call path:
-
-```ts
-const result = await client.linkExternalIdentity({
-  jwtToken: userJwt,
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
-
-console.log(result.created, result.principal_id);
-```
-
-After linking, external JWT sessions resolve to the same principal.
-
-## Demo User Switcher UI
-
-Switcher helpers are backed by `localStorage` and support profile switching in `demo` mode.
+Browser clients default to anonymous local auth when no JWT/backend auth is configured.
+On first load, Jazz auto-generates a device token and persists it in `localStorage`.
 
 <Tabs items={["React", "TypeScript"]}>
   <Tab value="React">
     ```tsx
-    import { JazzProvider, SyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools/react";
+    import { JazzProvider } from "jazz-tools/react";
+
+    export function App() {
+      return (
+        <JazzProvider
+          config={{
+            appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+            env: "dev",
+            userBranch: "main",
+          }}
+        >
+          <TodoApp />
+        </JazzProvider>
+      );
+    }
+    ```
+  </Tab>
+  <Tab value="TypeScript">
+    ```ts
+    import { createDb } from "jazz-tools";
+
+    const db = await createDb({
+      appId: process.env.JAZZ_APP_ID!,
+      env: "dev",
+      userBranch: "main",
+    });
+    ```
+  </Tab>
+</Tabs>
+
+If you want to force a specific device token, pass `localAuthToken` as an explicit override:
+
+```ts
+const db = await createDb({
+  appId: process.env.JAZZ_APP_ID!,
+  env: "dev",
+  userBranch: "main",
+  localAuthToken: "device-token-123", // localAuthMode defaults to "anonymous"
+});
+```
+
+## 2. Add Demo Auth with a Local Account Switcher
+
+When you want to test multi-user flows locally, switch to `demo` profiles and expose the switcher UI.
+
+<Tabs items={["React", "TypeScript"]}>
+  <Tab value="React">
+    ```tsx
+    import {
+      JazzProvider,
+      SyntheticUserSwitcher,
+      getActiveSyntheticAuth,
+    } from "jazz-tools/react";
 
     const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
     const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
@@ -97,7 +96,11 @@ Switcher helpers are backed by `localStorage` and support profile switching in `
   </Tab>
   <Tab value="TypeScript">
     ```ts
-    import { createDb, createSyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools";
+    import {
+      createDb,
+      createSyntheticUserSwitcher,
+      getActiveSyntheticAuth,
+    } from "jazz-tools";
 
     const appId = process.env.JAZZ_APP_ID!;
     const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
@@ -119,7 +122,76 @@ Switcher helpers are backed by `localStorage` and support profile switching in `
   </Tab>
 </Tabs>
 
-Switching profiles persists locally; by default the switcher refreshes the page after a profile change.
+Switching profiles persists locally; by default switchers refresh the page after profile change.
+
+## 3. Integrate External Auth and Upgrade Existing Users
+
+Once your auth provider is in place, send provider JWTs and link the current local identity to the external identity.
+
+### React Upgrade Hook
+
+Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created data:
+
+```tsx
+import { useState } from "react";
+import { JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
+
+const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
+
+function AuthGate() {
+  const [jwtToken, setJwtToken] = useState<string | undefined>();
+  const linkExternalIdentity = useLinkExternalIdentity({
+    appId,
+    serverUrl,
+    defaultMode: "anonymous",
+  });
+
+  async function onSignedIn(providerJwt: string) {
+    await linkExternalIdentity({ jwtToken: providerJwt });
+    setJwtToken(providerJwt);
+  }
+
+  return (
+    <JazzProvider
+      config={{
+        appId,
+        env: "dev",
+        userBranch: "main",
+        jwtToken,
+      }}
+    >
+      <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
+      <TodoApp />
+    </JazzProvider>
+  );
+}
+```
+
+### Non-React Upgrade Path
+
+Use `JazzClient.linkExternalIdentity(...)` directly:
+
+```ts
+const result = await client.linkExternalIdentity({
+  jwtToken: providerJwt,
+  localAuthMode: "anonymous", // or "demo"
+  localAuthToken: "device-token-123",
+});
+
+console.log(result.created, result.principal_id);
+```
+
+After linking, external JWT sessions resolve to the same principal.
+
+## Session Resolution Order
+
+For both `jazz-tools server` and `jazz-cloud-server`:
+
+1. Backend impersonation (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
+2. External JWT (`Authorization: Bearer <jwt>`)
+3. Local auth (`X-Jazz-Local-Mode` + `X-Jazz-Local-Token`)
+4. No session
 
 ## Server Setup
 
