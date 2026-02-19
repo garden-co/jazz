@@ -12,7 +12,7 @@ Read the status-quo specs in the order below — each builds on the ones before 
 
 ### 2. Storage
 
-**[Storage](status-quo/storage.md)** — How objects and indices are persisted. The `Storage` trait provides synchronous access to objects and indices. `MemoryStorage` for tests and browser main thread, `SurrealKvStorage` for native durability, and `OpfsBTreeStorage` for WASM + OPFS durability. Also covers platform bindings (groove-napi, groove-wasm) and deployment topology.
+**[Storage](status-quo/storage.md)** — How objects and indices are persisted. The `Storage` trait provides synchronous access to objects and indices. `MemoryStorage` for tests and browser main thread, `SurrealKvStorage` for native durability, and `OpfsBTreeStorage` for WASM + OPFS durability. Also covers platform bindings (jazz-napi, jazz-wasm) and deployment topology.
 
 ### 3. Query Engine
 

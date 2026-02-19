@@ -14,16 +14,25 @@ import type {
   RenameOp,
   MigrationOp,
   TableMigration,
+  ScalarSqlType,
+  TSTypeFromSqlType,
 } from "./schema.js";
 
 // ============================================================================
 // Column Builder (for schema context)
 // ============================================================================
 
-class ColumnBuilder {
+interface ColumnBuilder {
+  optional(): this;
+  _build(name: string): Column;
+  _sqlType: SqlType;
+  _references: string | undefined;
+}
+
+class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
 
-  constructor(private _sqlType: SqlType) {}
+  constructor(public _sqlType: ScalarSqlType) {}
 
   optional(): this {
     this._nullable = true;
@@ -37,13 +46,17 @@ class ColumnBuilder {
       nullable: this._nullable,
     };
   }
+
+  get _references(): string | undefined {
+    return undefined;
+  }
 }
 
 // ============================================================================
 // Ref Builder (for foreign key references in schema context)
 // ============================================================================
 
-class RefBuilder {
+class RefBuilder implements ColumnBuilder {
   private _nullable = false;
 
   constructor(private _targetTable: string) {}
@@ -56,10 +69,46 @@ class RefBuilder {
   _build(name: string): Column {
     return {
       name,
-      sqlType: "UUID",
+      sqlType: this._sqlType,
       nullable: this._nullable,
-      references: this._targetTable,
+      references: this._references,
     };
+  }
+
+  get _sqlType(): SqlType {
+    return "UUID";
+  }
+
+  get _references(): string | undefined {
+    return this._targetTable;
+  }
+}
+
+class ArrayBuilder implements ColumnBuilder {
+  private _nullable = false;
+
+  constructor(private _element: ColumnBuilder) {}
+
+  optional(): this {
+    this._nullable = true;
+    return this;
+  }
+
+  _build(name: string): Column {
+    return {
+      name,
+      sqlType: this._sqlType,
+      nullable: this._nullable,
+      references: this._references,
+    };
+  }
+
+  get _sqlType(): SqlType {
+    return { kind: "ARRAY" as const, element: this._element._sqlType };
+  }
+
+  get _references(): string | undefined {
+    return this._element._references;
   }
 }
 
@@ -104,6 +153,17 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "REAL", default: opts.default };
   }
 
+  array<T extends SqlType>(opts: {
+    of: T;
+    default: MaybeOptional<TSTypeFromSqlType<T>[], Optional>;
+  }): AddOp {
+    return {
+      _type: "add",
+      sqlType: { kind: "ARRAY", element: opts.of },
+      default: opts.default,
+    };
+  }
+
   optional(): AddBuilder<true> {
     return this as AddBuilder<true>;
   }
@@ -129,6 +189,14 @@ class DropBuilder {
   float(opts: { backwardsDefault: number }): DropOp {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
   }
+
+  array<T extends SqlType>(opts: { of: T; backwardsDefault: TSTypeFromSqlType<T>[] }): DropOp {
+    return {
+      _type: "drop",
+      sqlType: { kind: "ARRAY", element: opts.of },
+      backwardsDefault: opts.backwardsDefault,
+    };
+  }
 }
 
 // ============================================================================
@@ -137,11 +205,12 @@ class DropBuilder {
 
 export const col = {
   // Schema context
-  string: () => new ColumnBuilder("TEXT"),
-  boolean: () => new ColumnBuilder("BOOLEAN"),
-  int: () => new ColumnBuilder("INTEGER"),
-  float: () => new ColumnBuilder("REAL"),
+  string: () => new ScalarBuilder("TEXT"),
+  boolean: () => new ScalarBuilder("BOOLEAN"),
+  int: () => new ScalarBuilder("INTEGER"),
+  float: () => new ScalarBuilder("REAL"),
   ref: (targetTable: string) => new RefBuilder(targetTable),
+  array: (element: ColumnBuilder) => new ArrayBuilder(element),
 
   // Migration context
   add: () => new AddBuilder(),
@@ -309,7 +378,7 @@ let collectedMigrations: TableMigration[] = [];
 
 export function table(
   name: string,
-  columns: Record<string, ColumnBuilder | RefBuilder>,
+  columns: Record<string, ColumnBuilder>,
   options?: TableOptions,
 ): void {
   const cols: Column[] = [];
@@ -345,9 +414,19 @@ export function getCollectedMigration(): Lens | null {
   const operations: LensOp[] = migration.operations.map(({ column, op }) => {
     switch (op._type) {
       case "add":
-        return { type: "introduce" as const, column, value: op.default };
+        return {
+          type: "introduce" as const,
+          column,
+          sqlType: op.sqlType,
+          value: op.default,
+        };
       case "drop":
-        return { type: "drop" as const, column, value: op.backwardsDefault };
+        return {
+          type: "drop" as const,
+          column,
+          sqlType: op.sqlType,
+          value: op.backwardsDefault,
+        };
       case "rename":
         return { type: "rename" as const, column, value: op.oldName };
     }

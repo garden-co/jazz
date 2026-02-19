@@ -9,9 +9,11 @@ pre-commit:
       run: cargo clippy --workspace -- -D warnings
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md}"
+      exclude: "crates/jazz-rn/src/**"
       run: pnpm oxfmt {staged_files}
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
+      exclude: "crates/jazz-rn/src/**"
       run: pnpm oxlint --fix {staged_files}
       stage_fixed: true

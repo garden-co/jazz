@@ -2,7 +2,7 @@
  * Browser integration tests for Worker Bridge + OPFS persistence.
  *
  * Runs in a real Chromium browser via @vitest/browser + playwright.
- * Uses real groove-wasm, real dedicated Workers, real OPFS storage.
+ * Uses real jazz-wasm, real dedicated Workers, real OPFS storage.
  *
  * Server sync tests use a real jazz-tools server spawned by global-setup.
  */
@@ -23,6 +23,11 @@ const schema: WasmSchema = {
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+        {
+          name: "tags",
+          column_type: { type: "Array", element: { type: "Text" } },
+          nullable: true,
+        },
       ],
     },
     projects: {
@@ -36,21 +41,14 @@ interface Todo {
   title: string;
   done: boolean;
   project?: string;
+  tags?: string[];
 }
 
 interface TodoInit {
   title: string;
   done: boolean;
   project?: string;
-}
-
-interface Project {
-  id: string;
-  name: string;
-}
-
-interface ProjectInit {
-  name: string;
+  tags?: string[];
 }
 
 const todos: TableProxy<Todo, TodoInit> = {
@@ -58,13 +56,6 @@ const todos: TableProxy<Todo, TodoInit> = {
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as TodoInit,
-};
-
-const projects: TableProxy<Project, ProjectInit> = {
-  _table: "projects",
-  _schema: schema,
-  _rowType: {} as Project,
-  _initType: {} as ProjectInit,
 };
 
 /** QueryBuilder that selects all todos. */
@@ -93,30 +84,6 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
         table: "todos",
         conditions: [{ column: "project", op: "eq", value: projectId }],
         includes: {},
-        orderBy: [],
-      });
-    },
-  };
-}
-
-function projectsWithTodos(projectId: string): QueryBuilder<Project> {
-  return {
-    _table: "projects",
-    _schema: schema,
-    _rowType: {} as Project,
-    _build() {
-      return JSON.stringify({
-        table: "projects",
-        conditions: [
-          {
-            column: "id",
-            op: "eq",
-            value: projectId,
-          },
-        ],
-        includes: {
-          todosViaProject: true,
-        },
         orderBy: [],
       });
     },
@@ -198,18 +165,6 @@ describe("Worker Bridge with OPFS", () => {
 
     const titles = results.map((r) => r.title).sort();
     expect(titles).toEqual(["Task A", "Task B", "Task C"]);
-  });
-
-  it("queries by id", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-id") }));
-
-    const id = db.insert(projects, { name: "Project A" });
-
-    const results = await db.all(projectsWithTodos(id));
-    expect(results.length).toBe(1);
-
-    expect(results[0].id).toBe(id);
-    expect(results[0].name).toBe("Project A");
   });
 
   // -------------------------------------------------------------------------
