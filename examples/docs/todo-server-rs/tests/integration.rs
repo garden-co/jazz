@@ -12,6 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::sse::{Event, Sse};
+use base64::Engine;
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use groove::{
@@ -519,17 +520,62 @@ struct TestServer {
     port: u16,
     #[allow(dead_code)]
     data_dir: TempDir,
+    #[allow(dead_code)]
+    jwks_server: JwksServer,
 }
 
 /// Test admin secret for catalogue sync.
 const TEST_ADMIN_SECRET: &str = "test-admin-secret-12345";
 
-/// Test HMAC secret for JWT validation.
+/// Test HMAC secret for JWT validation via JWKS.
 const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
+const TEST_JWT_KID: &str = "test-jwks-kid";
+
+#[derive(Clone)]
+struct JwksState {
+    kid: String,
+    secret_b64: String,
+}
+
+struct JwksServer {
+    task: tokio::task::JoinHandle<()>,
+    url: String,
+}
+
+impl JwksServer {
+    async fn start(kid: &str, secret: &str) -> Self {
+        let state = JwksState {
+            kid: kid.to_string(),
+            secret_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes()),
+        };
+
+        let app = Router::new()
+            .route("/jwks", axum::routing::get(jwks_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind JWKS server");
+        let addr = listener.local_addr().expect("JWKS local addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve JWKS");
+        });
+
+        Self {
+            task,
+            url: format!("http://{addr}/jwks"),
+        }
+    }
+}
+
+impl Drop for JwksServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 /// Generate a test JWT for the given user ID.
 fn make_test_jwt(user_id: &str) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(serde::Serialize)]
@@ -549,13 +595,16 @@ fn make_test_jwt(user_id: &str) -> String {
         exp,
     };
     let key = EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes());
-    encode(&Header::default(), &claims, &key).unwrap()
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(TEST_JWT_KID.to_string());
+    encode(&header, &claims, &key).unwrap()
 }
 
 impl TestServer {
     /// Start a test server on the given port.
     async fn start(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start(TEST_JWT_KID, TEST_JWT_SECRET).await;
 
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
@@ -573,9 +622,8 @@ impl TestServer {
                 data_dir.path().to_str().unwrap(),
                 "--admin-secret",
                 TEST_ADMIN_SECRET,
-                "--jwt-secret",
-                TEST_JWT_SECRET,
             ])
+            .env("JAZZ_JWKS_URL", &jwks_server.url)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -585,6 +633,7 @@ impl TestServer {
             process,
             port,
             data_dir,
+            jwks_server,
         };
 
         // Wait for server to be ready
@@ -622,18 +671,18 @@ impl TestServer {
         let client = reqwest::Client::new();
         let url = format!("{}/health", self.base_url());
 
-        for i in 0..50 {
+        for i in 0..100 {
             match client.get(&url).send().await {
                 Ok(_) => return,
                 Err(e) => {
-                    if i == 49 {
+                    if i == 99 {
                         eprintln!("Last error: {:?}", e);
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("Server failed to become ready within 5 seconds");
+        panic!("Server failed to become ready within 10 seconds");
     }
 }
 
@@ -648,6 +697,21 @@ impl Drop for TestServer {
 fn get_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to port 0");
     listener.local_addr().unwrap().port()
+}
+
+async fn jwks_handler(
+    axum::extract::State(state): axum::extract::State<JwksState>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "keys": [
+            {
+                "kty": "oct",
+                "kid": state.kid,
+                "alg": "HS256",
+                "k": state.secret_b64,
+            }
+        ]
+    }))
 }
 
 /// Test that data syncs through server between clients via subscribe.

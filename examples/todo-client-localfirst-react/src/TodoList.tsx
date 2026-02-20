@@ -1,16 +1,20 @@
 import { useState } from "react";
-import { useDb, useAll } from "jazz-tools/react";
+import { useDb, useAll, useSession } from "jazz-tools/react";
 import { app } from "../schema/app.js";
 
 export function TodoList() {
+  // #region reading-reactive-hooks-react
   const db = useDb();
   const todos = useAll(app.todos);
+  // #endregion reading-reactive-hooks-react
+  const session = useSession();
+  const sessionUserId = session?.user_id ?? null;
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
-    db.insert(app.todos, { title: title.trim(), done: false });
+    if (!title.trim() || !sessionUserId) return;
+    db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
@@ -24,7 +28,9 @@ export function TodoList() {
           placeholder="What needs to be done?"
           required
         />
-        <button type="submit">Add</button>
+        <button type="submit" disabled={!sessionUserId}>
+          Add
+        </button>
       </form>
       <ul id="todo-list">
         {todos.map((todo) => (

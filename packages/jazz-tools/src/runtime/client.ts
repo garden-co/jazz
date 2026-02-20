@@ -13,7 +13,11 @@ import {
   generateClientId,
   buildEventsUrl,
   buildEndpointUrl,
+  applyUserAuthHeaders,
+  linkExternalIdentity as sendLinkExternalIdentityRequest,
+  type LinkExternalResponse,
 } from "./sync-transport.js";
+import { resolveLocalAuthDefaults } from "./local-auth.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -84,6 +88,14 @@ export interface Row {
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
+
+export interface LinkExternalIdentityOptions {
+  jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
+}
+
+export type LinkExternalIdentityResult = LinkExternalResponse;
 
 /**
  * QueryBuilder-compatible input accepted by query and subscribe APIs.
@@ -308,24 +320,26 @@ export class JazzClient {
    * @returns Connected JazzClient instance
    */
   static async connect(context: AppContext): Promise<JazzClient> {
+    const resolvedContext = resolveLocalAuthDefaults(context);
+
     // Load WASM module dynamically
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(context.schema);
+    const schemaJson = JSON.stringify(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      context.tier,
+      resolvedContext.appId,
+      resolvedContext.env ?? "dev",
+      resolvedContext.userBranch ?? "main",
+      resolvedContext.tier,
     );
 
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, resolvedContext);
 
     // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
+    if (resolvedContext.serverUrl) {
+      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
     }
 
     return client;
@@ -342,21 +356,23 @@ export class JazzClient {
    * @returns Connected JazzClient instance (created synchronously)
    */
   static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+    const resolvedContext = resolveLocalAuthDefaults(context);
+
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(context.schema);
+    const schemaJson = JSON.stringify(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      context.tier,
+      resolvedContext.appId,
+      resolvedContext.env ?? "dev",
+      resolvedContext.userBranch ?? "main",
+      resolvedContext.tier,
     );
 
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, resolvedContext);
 
     // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
+    if (resolvedContext.serverUrl) {
+      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
     }
 
     return client;
@@ -652,9 +668,13 @@ export class JazzClient {
       headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
       headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
     }
-    // Priority 2: Frontend JWT auth
-    else if (this.context.jwtToken) {
-      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
+    // Priority 2: frontend auth (JWT or local anonymous/demo token headers)
+    else {
+      applyUserAuthHeaders(headers, {
+        jwtToken: this.context.jwtToken,
+        localAuthMode: this.context.localAuthMode,
+        localAuthToken: this.context.localAuthToken,
+      });
     }
 
     return fetch(url, {
@@ -662,6 +682,49 @@ export class JazzClient {
       headers,
       body: JSON.stringify(body),
     });
+  }
+
+  /**
+   * Link an anonymous/demo local principal to an external JWT identity.
+   *
+   * Requires all three auth fields:
+   * - `jwtToken`
+   * - `localAuthMode`
+   * - `localAuthToken`
+   *
+   * Values default to the current AppContext auth fields unless overridden.
+   */
+  async linkExternalIdentity(
+    options: LinkExternalIdentityOptions = {},
+  ): Promise<LinkExternalIdentityResult> {
+    if (!this.context.serverUrl) {
+      throw new Error("No server connection");
+    }
+
+    const jwtToken = options.jwtToken ?? this.context.jwtToken;
+    const localAuthMode = options.localAuthMode ?? this.context.localAuthMode;
+    const localAuthToken = options.localAuthToken ?? this.context.localAuthToken;
+
+    if (!jwtToken) {
+      throw new Error("linkExternalIdentity requires jwtToken");
+    }
+    if (!localAuthMode) {
+      throw new Error("linkExternalIdentity requires localAuthMode");
+    }
+    if (!localAuthToken) {
+      throw new Error("linkExternalIdentity requires localAuthToken");
+    }
+
+    return sendLinkExternalIdentityRequest(
+      this.context.serverUrl,
+      {
+        jwtToken,
+        localAuthMode,
+        localAuthToken,
+        pathPrefix: this.context.serverPathPrefix,
+      },
+      "[client] ",
+    );
   }
 
   /**
@@ -719,6 +782,8 @@ export class JazzClient {
   private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
       clientId: this.serverClientId,
       pathPrefix: this.activeServerPathPrefix,
@@ -771,9 +836,11 @@ export class JazzClient {
     const headers: Record<string, string> = {
       Accept: "application/octet-stream",
     };
-    if (this.context.jwtToken) {
-      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
-    }
+    applyUserAuthHeaders(headers, {
+      jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+    });
 
     this.streamAbortController = new AbortController();
 

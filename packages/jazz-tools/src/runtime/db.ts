@@ -17,6 +17,7 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import { resolveLocalAuthDefaults } from "./local-auth.js";
 
 /**
  * Configuration for creating a Db instance.
@@ -36,6 +37,19 @@ export interface DbConfig {
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
+  /**
+   * Local auth mode for client-generated identities.
+   *
+   * Browser clients default to `"anonymous"` when no other auth is configured.
+   */
+  localAuthMode?: "anonymous" | "demo";
+  /**
+   * Client-generated auth token for anonymous/demo identity.
+   *
+   * If omitted while local auth is active in browser, Jazz generates and
+   * persists a per-app device token in localStorage.
+   */
+  localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -141,7 +155,7 @@ export class Db {
     const db = new Db(config, wasmModule);
 
     // Spawn dedicated worker
-    const worker = new Worker(new URL("../worker/groove-worker.ts", import.meta.url), {
+    const worker = new Worker(new URL("../worker/groove-worker.js", import.meta.url), {
       type: "module",
     });
     db.worker = worker;
@@ -193,6 +207,8 @@ export class Db {
         env: this.config.env,
         userBranch: this.config.userBranch,
         jwtToken: this.config.jwtToken,
+        localAuthMode: this.config.localAuthMode,
+        localAuthToken: this.config.localAuthToken,
         adminSecret: this.config.adminSecret,
       });
 
@@ -212,6 +228,8 @@ export class Db {
             serverUrl: this.config.serverUrl,
             serverPathPrefix: this.config.serverPathPrefix,
             jwtToken: this.config.jwtToken,
+            localAuthMode: this.config.localAuthMode,
+            localAuthToken: this.config.localAuthToken,
             adminSecret: this.config.adminSecret,
           })
           .then(() => undefined);
@@ -528,8 +546,9 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
+  const resolvedConfig = resolveLocalAuthDefaults(config);
   if (isBrowser()) {
-    return Db.createWithWorker(config);
+    return Db.createWithWorker(resolvedConfig);
   }
-  return Db.create(config);
+  return Db.create(resolvedConfig);
 }
