@@ -692,6 +692,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("limit(n: number)");
     expect(output).toContain("offset(n: number)");
     expect(output).toContain("withRecursive(options: {");
+    expect(output).toContain("whereRecursive(options: {");
     expect(output).toContain("_build(): string");
   });
 
@@ -767,6 +768,17 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("const clone = new TodoQueryBuilder<I>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
     expect(output).toContain("clone._recursiveVal = this._recursiveVal");
+  });
+
+  it("generates whereRecursive helper that composes start + step", () => {
+    table("todos", { title: col.string(), parent_id: col.ref("todos").optional() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("whereRecursive(options: {");
+    expect(output).toContain("const withStart = this.where(options.start);");
+    expect(output).toContain("return withStart.withRecursive({");
   });
 });
 

@@ -252,6 +252,33 @@ function generateQueryBuilderClass(
   lines.push(`  }`);
   lines.push(``);
 
+  // whereRecursive() method
+  lines.push(`  whereRecursive(options: {`);
+  lines.push(`    start: ${whereInputInterface};`);
+  lines.push(`    step: {`);
+  lines.push(`      from: string;`);
+  lines.push(`      correlate: { inner: string; outer: string };`);
+  lines.push(`      select?: ReadonlyArray<string>;`);
+  lines.push(`    };`);
+  lines.push(`    maxDepth?: number;`);
+  lines.push(`  }): ${interfaceName}QueryBuilder<I> {`);
+  lines.push(`    if (options.start === undefined) {`);
+  lines.push(`      throw new Error("whereRecursive(...) requires start where conditions.");`);
+  lines.push(`    }`);
+  lines.push(`    if (!options.step) {`);
+  lines.push(`      throw new Error("whereRecursive(...) requires step configuration.");`);
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    const withStart = this.where(options.start);`);
+  lines.push(`    return withStart.withRecursive({`);
+  lines.push(`      from: options.step.from,`);
+  lines.push(`      correlate: options.step.correlate,`);
+  lines.push(`      select: options.step.select,`);
+  lines.push(`      maxDepth: options.maxDepth,`);
+  lines.push(`    });`);
+  lines.push(`  }`);
+  lines.push(``);
+
   // _build() method
   lines.push(`  _build(): string {`);
   lines.push(`    return JSON.stringify({`);
