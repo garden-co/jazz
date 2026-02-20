@@ -546,6 +546,10 @@ impl MetaStore {
             .runtime
             .insert("apps", values, None)
             .map_err(|e| format!("failed to insert meta app record: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush meta app record: {e}"))?;
 
         Ok(MetaAppRow {
             object_id,
@@ -591,13 +595,23 @@ impl MetaStore {
 
         self.runtime
             .update(row.object_id, updates, None)
-            .map_err(|e| format!("failed to update meta app record: {e}"))
+            .map_err(|e| format!("failed to update meta app record: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush meta app update: {e}"))?;
+        Ok(())
     }
 
     async fn delete_app(&self, object_id: ObjectId) -> Result<(), String> {
         self.runtime
             .delete(object_id, None)
-            .map_err(|e| format!("failed to delete meta app record: {e}"))
+            .map_err(|e| format!("failed to delete meta app record: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush meta app delete: {e}"))?;
+        Ok(())
     }
 
     async fn get_external_identity(
@@ -650,6 +664,10 @@ impl MetaStore {
             .runtime
             .insert("external_identities", values, None)
             .map_err(|e| format!("failed to insert external identity: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush external identity: {e}"))?;
 
         let _ = object_id;
         Ok(MetaExternalIdentityRow {
@@ -1189,8 +1207,35 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
     info!("listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("shutdown signal received");
 }
 
 fn create_router(state: Arc<ServerState>) -> Router {

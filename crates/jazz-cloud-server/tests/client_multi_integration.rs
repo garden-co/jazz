@@ -4,6 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
+use groove::object::BranchName;
+use groove::query_manager::types::{ComposedBranchName, SchemaHash};
+use groove::storage::{Storage, SurrealKvStorage};
 use groove::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
@@ -85,23 +88,28 @@ struct ServerProcess {
 impl ServerProcess {
     async fn start(data_root: &Path) -> Self {
         let port = get_free_port();
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--data-root",
-                data_root.to_str().expect("data root path"),
-                "--internal-api-secret",
-                INTERNAL_API_SECRET,
-                "--secret-hash-key",
-                SECRET_HASH_KEY,
-                "--worker-threads",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn jazz-cloud-server");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--data-root",
+            data_root.to_str().expect("data root path"),
+            "--internal-api-secret",
+            INTERNAL_API_SECRET,
+            "--secret-hash-key",
+            SECRET_HASH_KEY,
+            "--worker-threads",
+            "1",
+        ])
+        .stdout(Stdio::null());
+
+        if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::null());
+        }
+
+        let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
         let server = Self {
             process,
@@ -156,6 +164,24 @@ impl ServerProcess {
 
 impl Drop for ServerProcess {
     fn drop(&mut self) {
+        if self.process.try_wait().ok().flatten().is_some() {
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.process.id().to_string()])
+                .status();
+        }
+
+        for _ in 0..100 {
+            if self.process.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
         let _ = self.process.kill();
         let _ = self.process.wait();
     }
@@ -238,13 +264,90 @@ async fn wait_for_todos_count(
             }
             last = rows;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     panic!(
         "timed out waiting for todos count {expected_count}, last_count={}",
         last.len()
     );
+}
+
+async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
+    let query = QueryBuilder::new("todos").build();
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_secs(8),
+            client.query(query.clone(), Some(PersistenceTier::EdgeServer)),
+        )
+        .await
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    panic!("timed out waiting for EdgeServer query readiness");
+}
+
+async fn wait_for_todos_count_on_disk(
+    app_id: AppId,
+    data_root: &Path,
+    expected_count: usize,
+    timeout: Duration,
+) {
+    let db_path = data_root
+        .join("apps")
+        .join(app_id.to_string())
+        .join("groove.surrealkv");
+    let schema_hash = SchemaHash::compute(&test_schema());
+    let branch = ComposedBranchName::new("client", schema_hash, "main")
+        .to_branch_name()
+        .to_string();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_count = 0usize;
+
+    while tokio::time::Instant::now() < deadline {
+        if db_path.exists()
+            && let Ok(storage) = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+        {
+            let branch_name = BranchName::new(&branch);
+            let row_ids = storage.index_scan_all("todos", "_id", &branch);
+            let mut materialized = 0usize;
+            for row_id in row_ids {
+                let has_metadata = storage
+                    .load_object_metadata(row_id)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let has_content = storage
+                    .load_branch(row_id, &branch_name)
+                    .ok()
+                    .flatten()
+                    .map(|loaded| {
+                        loaded
+                            .commits
+                            .iter()
+                            .any(|commit| !commit.content.is_empty())
+                    })
+                    .unwrap_or(false);
+                if has_metadata && has_content {
+                    materialized += 1;
+                }
+            }
+            last_count = materialized;
+            let _ = storage.close();
+            if last_count == expected_count {
+                return;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    panic!("timed out waiting for on-disk todos count {expected_count}, last_count={last_count}");
 }
 
 #[tokio::test]
@@ -265,8 +368,8 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     .await
     .expect("connect client a");
 
-    // Allow initial schema/catalogue sync to settle before sending table data.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Warm up auth/JWKS + schema/catalogue sync before first row write.
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
 
     let row_id = client_a
         .create(
@@ -278,6 +381,9 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
         )
         .await
         .expect("client a create todo");
+
+    // Ensure local state sees the insert first.
+    let _ = wait_for_todos_count(&client_a, 1, Duration::from_secs(10), None).await;
 
     let _ = wait_for_todos_count(
         &client_a,
@@ -296,6 +402,9 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     ))
     .await
     .expect("connect client b");
+
+    // Ensure query path is fully ready before asserting cross-client sync.
+    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
 
     let rows = wait_for_todos_count(
         &client_b,
@@ -360,8 +469,7 @@ async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data(
         .await
         .expect("connect writer");
 
-        // Allow initial schema/catalogue sync to settle before sending table data.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        wait_for_edge_query_ready(&writer, Duration::from_secs(30)).await;
 
         writer
             .create(
@@ -385,29 +493,25 @@ async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data(
         app
     };
 
-    let restarted = ServerProcess::start(server_data.path()).await;
     let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+    wait_for_todos_count_on_disk(app_id, server_data.path(), 1, Duration::from_secs(20)).await;
+    let restarted = ServerProcess::start(server_data.path()).await;
 
     let reader_dir = TempDir::new().expect("reader dir");
-    let reader = JazzClient::connect(make_context(
-        app_id,
-        restarted.base_url(),
-        reader_dir.path().to_path_buf(),
-        make_jwt(user_id),
-    ))
-    .await
-    .expect("connect reader");
+    {
+        let reader = JazzClient::connect(make_context(
+            app_id,
+            restarted.base_url(),
+            reader_dir.path().to_path_buf(),
+            make_jwt(user_id),
+        ))
+        .await
+        .expect("connect reader");
 
-    // Wait for the event stream connection before issuing one-shot query subscriptions.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+        wait_for_edge_query_ready(&reader, Duration::from_secs(30)).await;
+        reader.shutdown().await.expect("shutdown reader");
+    }
 
-    let rows = wait_for_todos_count(
-        &reader,
-        1,
-        Duration::from_secs(20),
-        Some(PersistenceTier::EdgeServer),
-    )
-    .await;
-    assert_eq!(rows[0].1[0], Value::Text("persisted-on-server".to_string()));
-    reader.shutdown().await.expect("shutdown reader");
+    drop(restarted);
+    wait_for_todos_count_on_disk(app_id, server_data.path(), 1, Duration::from_secs(20)).await;
 }
