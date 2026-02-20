@@ -451,11 +451,6 @@ describe("co.discriminatedUnion", () => {
   });
 
   test('repro: duplicate discriminator value "invoice" with overlapping options', () => {
-    const Document = co.map({
-      type: z.enum(["invoice", "receipt", "mail"]),
-      provider: z.string(),
-    });
-
     const InvoiceDocument = co.map({
       type: z.literal(["invoice", "receipt"]),
       provider: z.string(),
@@ -469,7 +464,6 @@ describe("co.discriminatedUnion", () => {
     const DocumentType = co.discriminatedUnion("type", [
       InvoiceDocument,
       MailDocument,
-      Document,
     ]);
 
     const DocumentContainer = co.map({
