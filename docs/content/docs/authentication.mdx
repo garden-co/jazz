@@ -17,20 +17,18 @@ On first load, Jazz auto-generates a device token and persists it in `localStora
 <Tabs items={["React", "TypeScript"]}>
   <Tab value="React">
     ```tsx
-    import { JazzProvider } from "jazz-tools/react";
+    import { createJazzClient, JazzProvider } from "jazz-tools/react";
+
+    const client = createJazzClient({ 
+      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+      env: "dev",
+      userBranch: "main",
+    });
 
     export function App() {
       return (
         <JazzProvider
-          config={{
-            appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-            env: "dev",
-            userBranch: "main",
-          }}
-        >
-          <TodoApp />
-        </JazzProvider>
-      );
+          client={client}><TodoApp /></JazzProvider>;
     }
     ```
 
@@ -81,13 +79,14 @@ When you want to test multi-user flows locally, switch to `demo` profiles and ex
         <>
           <SyntheticUserSwitcher appId={appId} defaultMode="demo" />
           <JazzProvider
-            config={{
-              appId,
-              env: "dev",
-              userBranch: "main",
-              localAuthMode: active.localAuthMode,
-              localAuthToken: active.localAuthToken,
-            }}
+            // const client = await createJazzClient({
+            //   appId,
+            //   env: "dev",
+            //   userBranch: "main",
+            //   localAuthMode: active.localAuthMode,
+            //   localAuthToken: active.localAuthToken,
+            // });
+            client={client}
           >
             <TodoApp />
           </JazzProvider>
@@ -138,7 +137,7 @@ Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created 
 
 ```tsx
 import { useState } from "react";
-import { JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
+    import { createJazzClient, JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
@@ -158,12 +157,13 @@ function AuthGate() {
 
   return (
     <JazzProvider
-      config={{
-        appId,
-        env: "dev",
-        userBranch: "main",
-        jwtToken,
-      }}
+      // const client = await createJazzClient({
+      //   appId,
+      //   env: "dev",
+      //   userBranch: "main",
+      //   jwtToken,
+      // });
+      client={client}
     >
       <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
       <TodoApp />

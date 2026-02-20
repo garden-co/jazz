@@ -26,6 +26,11 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./react-core": {
+      "types": "./dist/react-core/index.d.ts",
+      "react-native": "./dist/react-native/react-core.js",
+      "default": "./dist/react-core/index.js"
+    },
     "./permissions": {
       "types": "./dist/permissions/index.d.ts",
       "default": "./dist/permissions/index.js"
