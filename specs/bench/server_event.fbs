@@ -1,0 +1,19 @@
+namespace jazz.bench;
+
+table ObjectUpdatedPayload {
+  object_id: string;
+  metadata: string;
+  branch_name: string;
+  commits: [string];
+}
+
+table SyncPayload {
+  object_updated: ObjectUpdatedPayload;
+}
+
+table ServerEvent {
+  type: string;
+  payload: SyncPayload;
+}
+
+root_type ServerEvent;
