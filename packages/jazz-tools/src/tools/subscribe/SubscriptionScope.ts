@@ -143,10 +143,9 @@ export class SubscriptionScope<D extends CoValue> {
           }
 
           this.migrating = true;
+          const instance = instantiateRefEncodedFromRaw(this.schema, value);
           try {
-            applyCoValueMigrations(
-              instantiateRefEncodedFromRaw(this.schema, value),
-            );
+            applyCoValueMigrations(instance);
           } catch (error) {
             const reason =
               error instanceof Error ? error.message : String(error);
