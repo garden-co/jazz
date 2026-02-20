@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! E2E integration tests for jazz-tools server.
 //!
 //! These tests spawn the actual `jazz-tools` binary and interact via HTTP
@@ -10,34 +12,8 @@ use std::time::Duration;
 use bytes::BytesMut;
 use futures::StreamExt;
 use groove::jazz_transport::ServerEvent;
-use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
-
-const JWT_SECRET: &str = "test-jwt-secret-for-integration";
-
-#[derive(Debug, Serialize, Deserialize)]
-struct JwtClaims {
-    sub: String,
-    claims: serde_json::Value,
-    exp: u64,
-}
-
-/// Create a JWT token for test authentication.
-fn make_jwt(user_id: &str) -> String {
-    let claims = JwtClaims {
-        sub: user_id.to_string(),
-        claims: serde_json::json!({"role": "user"}),
-        exp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600,
-    };
-    let key = EncodingKey::from_secret(JWT_SECRET.as_bytes());
-    encode(&Header::default(), &claims, &key).unwrap()
-}
 
 /// Test server handle - kills process on drop.
 struct TestServer {
@@ -66,7 +42,6 @@ impl TestServer {
                 "--data-dir",
                 data_dir.path().to_str().unwrap(),
             ])
-            .env("JAZZ_JWT_SECRET", JWT_SECRET)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -192,11 +167,11 @@ async fn test_stream_connection_receives_connected_event() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to events endpoint with JWT auth
-    let token = make_jwt("stream-test-user");
+    // Connect to events endpoint with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("Authorization", format!("Bearer {}", token))
+        .header("X-Jazz-Local-Mode", "anonymous")
+        .header("X-Jazz-Local-Token", "stream-test-user")
         .send()
         .await
         .expect("connect to events");
@@ -232,10 +207,10 @@ async fn test_stream_heartbeat() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    let token = make_jwt("stream-heartbeat-user");
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("Authorization", format!("Bearer {}", token))
+        .header("X-Jazz-Local-Mode", "anonymous")
+        .header("X-Jazz-Local-Token", "stream-heartbeat-user")
         .send()
         .await
         .expect("connect to events");
@@ -265,11 +240,11 @@ async fn test_sync_payload_broadcast_to_stream_client() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to binary stream with JWT auth
-    let token = make_jwt("stream-broadcast-user");
+    // Connect to binary stream with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("Authorization", format!("Bearer {}", token))
+        .header("X-Jazz-Local-Mode", "anonymous")
+        .header("X-Jazz-Local-Token", "stream-broadcast-user")
         .send()
         .await
         .expect("connect to events");

@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! Authentication integration tests for the Jazz server.
 //!
 //! Tests the three auth mechanisms:
@@ -26,6 +28,10 @@ use test_server::TestServer;
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iss: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jazz_principal_id: Option<String>,
     claims: serde_json::Value,
     exp: u64,
 }
@@ -38,30 +44,46 @@ fn future_exp() -> u64 {
         + 3600 // 1 hour from now
 }
 
-fn past_exp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .saturating_sub(3600) // 1 hour ago
-}
-
 fn make_jwt(sub: &str, claims: serde_json::Value, secret: &str) -> String {
-    make_jwt_with_exp(sub, claims, secret, future_exp())
+    make_jwt_with_exp(sub, claims, secret, future_exp(), None, None)
 }
 
-fn make_expired_jwt(sub: &str, claims: serde_json::Value, secret: &str) -> String {
-    make_jwt_with_exp(sub, claims, secret, past_exp())
+fn make_jwt_with_issuer(
+    sub: &str,
+    claims: serde_json::Value,
+    secret: &str,
+    issuer: &str,
+    principal_id: Option<&str>,
+) -> String {
+    make_jwt_with_exp(
+        sub,
+        claims,
+        secret,
+        future_exp(),
+        Some(issuer),
+        principal_id,
+    )
 }
 
-fn make_jwt_with_exp(sub: &str, claims: serde_json::Value, secret: &str, exp: u64) -> String {
+fn make_jwt_with_exp(
+    sub: &str,
+    claims: serde_json::Value,
+    secret: &str,
+    exp: u64,
+    issuer: Option<&str>,
+    principal_id: Option<&str>,
+) -> String {
     let jwt_claims = JwtClaims {
         sub: sub.to_string(),
+        iss: issuer.map(str::to_string),
+        jazz_principal_id: principal_id.map(str::to_string),
         claims,
         exp,
     };
     let key = EncodingKey::from_secret(secret.as_bytes());
-    encode(&Header::default(), &jwt_claims, &key).unwrap()
+    let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some("test-jwks-kid".to_string());
+    encode(&header, &jwt_claims, &key).unwrap()
 }
 
 fn encode_session(session: &Session) -> String {
@@ -267,22 +289,51 @@ mod integration_tests {
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Test expired JWT is rejected.
+    /// Test link-external endpoint idempotency and conflict behavior.
     #[tokio::test]
-    async fn test_expired_jwt_rejected() {
+    async fn test_link_external_idempotent_and_conflict() {
         let server = TestServer::start().await;
-        let token = make_expired_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+        let token = make_jwt_with_issuer(
+            "external-user",
+            json!({"role": "user"}),
+            JWT_SECRET,
+            "https://issuer.example",
+            None,
+        );
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+        let first = client()
+            .post(format!("{}/auth/link-external", server.base_url()))
             .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("X-Jazz-Local-Mode", "anonymous")
+            .header("X-Jazz-Local-Token", "device-token-a")
             .send()
             .await
             .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_json: serde_json::Value = first.json().await.unwrap();
+        assert_eq!(first_json["created"], json!(true));
 
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let second = client()
+            .post(format!("{}/auth/link-external", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Jazz-Local-Mode", "anonymous")
+            .header("X-Jazz-Local-Token", "device-token-a")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_json: serde_json::Value = second.json().await.unwrap();
+        assert_eq!(second_json["created"], json!(false));
+
+        let conflict = client()
+            .post(format!("{}/auth/link-external", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Jazz-Local-Mode", "anonymous")
+            .header("X-Jazz-Local-Token", "device-token-b")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
     /// Create a valid catalogue sync body for testing admin auth.

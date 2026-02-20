@@ -9,9 +9,26 @@
 /** Auth and identity context for sync operations. */
 export interface SyncAuth {
   jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
   adminSecret?: string;
   clientId?: string;
   pathPrefix?: string;
+}
+
+export interface LinkExternalAuth {
+  jwtToken: string;
+  localAuthMode: "anonymous" | "demo";
+  localAuthToken: string;
+  pathPrefix?: string;
+}
+
+export interface LinkExternalResponse {
+  app_id?: string;
+  principal_id: string;
+  issuer: string;
+  subject: string;
+  created: boolean;
 }
 
 /** Callbacks for stream events. */
@@ -72,6 +89,25 @@ export function buildEventsUrl(serverUrl: string, clientId: string, pathPrefix?:
 }
 
 /**
+ * Apply end-user auth headers with stable precedence.
+ *
+ * Precedence:
+ * 1. Authorization bearer token
+ * 2. Local anonymous/demo token headers
+ */
+export function applyUserAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
+  if (auth.jwtToken) {
+    headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+    return;
+  }
+
+  if (auth.localAuthMode && auth.localAuthToken) {
+    headers["X-Jazz-Local-Mode"] = auth.localAuthMode;
+    headers["X-Jazz-Local-Token"] = auth.localAuthToken;
+  }
+}
+
+/**
  * Check if a sync payload is for a catalogue object (schema or lens).
  * Catalogue payloads use admin-secret auth instead of JWT.
  */
@@ -103,8 +139,8 @@ export async function sendSyncPayload(
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
-  } else if (auth.jwtToken) {
-    headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+  } else {
+    applyUserAuthHeaders(headers, auth);
   }
 
   const body = JSON.stringify({
@@ -128,6 +164,47 @@ export async function sendSyncPayload(
     const statusText = response.statusText ? ` ${response.statusText}` : "";
     throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
   }
+}
+
+/**
+ * Link a local anonymous/demo identity to an external JWT identity.
+ *
+ * This endpoint requires both auth forms on the same request:
+ * - `Authorization: Bearer <jwt>`
+ * - `X-Jazz-Local-Mode` + `X-Jazz-Local-Token`
+ */
+export async function linkExternalIdentity(
+  serverUrl: string,
+  auth: LinkExternalAuth,
+  logPrefix = "",
+): Promise<LinkExternalResponse> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${auth.jwtToken}`,
+    "X-Jazz-Local-Mode": auth.localAuthMode,
+    "X-Jazz-Local-Token": auth.localAuthToken,
+  };
+
+  let response: Response;
+  try {
+    response = await fetch(buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix), {
+      method: "POST",
+      headers,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`${logPrefix}Link external failed: ${msg}`);
+  }
+
+  if (!response.ok) {
+    const statusText = response.statusText ? ` ${response.statusText}` : "";
+    const body = await response.text().catch(() => "");
+    const bodySuffix = body ? `: ${body}` : "";
+    throw new Error(
+      `${logPrefix}Link external failed: ${response.status}${statusText}${bodySuffix}`,
+    );
+  }
+
+  return (await response.json()) as LinkExternalResponse;
 }
 
 /**
