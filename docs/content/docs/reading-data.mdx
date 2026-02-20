@@ -177,6 +177,44 @@ const memberships = await db.all(
   </Tab>
 </Tabs>
 
+## Advanced: Recursive Queries
+
+Recursive queries compute bounded transitive closures from a seed row set (for example, walking team ancestry or folder hierarchies).
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <Callout title="Current TS status">
+      Generated TypeScript query builders do not yet expose a first-class recursive query method.
+      Recursive query execution is currently available in the Rust query builder/runtime.
+    </Callout>
+
+    Today in TypeScript, use bounded iterative reads in app code for recursive reads.
+    For permission recursion, use `policy.recursive(...)` in the permissions DSL.
+
+  </Tab>
+  <Tab value="Rust">
+    ```rs
+    use groove::{QueryBuilder, Value};
+
+    let query = QueryBuilder::new("teams")
+        .select(&["team_id"])
+        .filter_eq("team_id", Value::Integer(1))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "team_id")
+                .select(&["parent_team"])
+                .max_depth(10)
+        })
+        .build();
+    ```
+
+    `with_recursive(...)` uses the current query output as the seed relation.
+    The runtime executes recursion through a dedicated `RecursiveRelationNode` that orchestrates a bounded, internally unrolled stack of step subgraphs.
+    `max_depth` defaults to `10` when omitted.
+
+  </Tab>
+</Tabs>
+
 ## Read Settled Tiers
 
 ### API Reference
