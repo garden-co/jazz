@@ -48,7 +48,9 @@ export class WorkerBridge {
       const msg = event.data;
       if (msg.type === "sync") {
         // Worker sends payload-only (it's the "server" for main thread)
-        this.runtime.onSyncMessageReceived(msg.payload);
+        for (const payload of msg.payload) {
+          this.runtime.onSyncMessageReceived(payload);
+        }
       }
     };
 
