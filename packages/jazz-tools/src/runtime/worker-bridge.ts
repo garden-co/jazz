@@ -7,7 +7,10 @@
  */
 
 import type { Runtime } from "./client.js";
-import type { InitMessage, WorkerToMainMessage } from "../worker/worker-protocol.js";
+import type {
+  InitMessage,
+  WorkerToMainMessage,
+} from "../worker/worker-protocol.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -38,6 +41,8 @@ export class WorkerBridge {
   private worker: Worker;
   private runtime: Runtime;
   private workerClientId: string | null = null;
+  private initState: "idle" | "pending" | "ready" | "failed" = "idle";
+  private initPromise: Promise<string> | null = null;
   private pendingSyncPayloadsForWorker: string[] = [];
   private syncBatchFlushQueued = false;
 
@@ -75,6 +80,12 @@ export class WorkerBridge {
    * Waits for the worker to respond with init-ok.
    */
   async init(options: WorkerBridgeOptions): Promise<string> {
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+
+    this.initState = "pending";
+
     const initMsg: InitMessage = {
       type: "init",
       schemaJson: options.schemaJson,
@@ -91,23 +102,34 @@ export class WorkerBridge {
       clientId: "", // Worker generates its own client ID for main thread
     };
 
-    this.worker.postMessage(initMsg);
-
-    const response = await waitForMessage<WorkerToMainMessage>(
+    const responsePromise = waitForMessage<WorkerToMainMessage>(
       this.worker,
       (msg) => msg.type === "init-ok" || msg.type === "error",
     );
+    this.worker.postMessage(initMsg);
 
-    if (response.type === "error") {
-      throw new Error(`Worker init failed: ${response.message}`);
-    }
+    this.initPromise = responsePromise
+      .then((response) => {
+        if (response.type === "error") {
+          throw new Error(`Worker init failed: ${response.message}`);
+        }
 
-    if (response.type === "init-ok") {
-      this.workerClientId = response.clientId;
-      return response.clientId;
-    }
+        if (response.type === "init-ok") {
+          this.workerClientId = response.clientId;
+          this.initState = "ready";
+          this.flushPendingSyncToWorker();
+          return response.clientId;
+        }
 
-    throw new Error("Unexpected worker response");
+        throw new Error("Unexpected worker response");
+      })
+      .catch((error) => {
+        this.initState = "failed";
+        this.pendingSyncPayloadsForWorker = [];
+        throw error;
+      });
+
+    return this.initPromise;
   }
 
   /**
@@ -127,9 +149,14 @@ export class WorkerBridge {
    * @param worker The Worker instance (needed for listening to shutdown-ok)
    */
   async shutdown(worker: Worker): Promise<void> {
+    const shutdownAckPromise = waitForMessage<WorkerToMainMessage>(
+      worker,
+      (msg) => msg.type === "shutdown-ok",
+      5000,
+    );
     this.worker.postMessage({ type: "shutdown" });
     try {
-      await waitForMessage<WorkerToMainMessage>(worker, (msg) => msg.type === "shutdown-ok", 5000);
+      await shutdownAckPromise;
     } catch {
       // Timeout — worker may have already closed
     }
@@ -149,14 +176,24 @@ export class WorkerBridge {
     this.syncBatchFlushQueued = true;
     queueMicrotask(() => {
       this.syncBatchFlushQueued = false;
-      const payloads = this.pendingSyncPayloadsForWorker;
-      this.pendingSyncPayloadsForWorker = [];
-      if (payloads.length === 0) return;
+      this.flushPendingSyncToWorker();
+    });
+  }
 
-      this.worker.postMessage({
-        type: "sync",
-        payload: payloads,
-      });
+  private flushPendingSyncToWorker(): void {
+    if (
+      this.initState !== "ready" ||
+      this.pendingSyncPayloadsForWorker.length === 0
+    ) {
+      return;
+    }
+
+    const payloads = this.pendingSyncPayloadsForWorker;
+    this.pendingSyncPayloadsForWorker = [];
+
+    this.worker.postMessage({
+      type: "sync",
+      payload: payloads,
     });
   }
 }
