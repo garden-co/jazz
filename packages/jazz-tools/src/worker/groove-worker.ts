@@ -39,7 +39,23 @@ let streamConnecting = false;
 let streamAttached = false;
 let isShuttingDown = false;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
+let pendingSyncPayloadsForMain: string[] = [];
+let syncBatchFlushQueued = false;
 let initComplete = false;
+
+function enqueueSyncMessageForMain(payload: string): void {
+  pendingSyncPayloadsForMain.push(payload);
+  if (syncBatchFlushQueued) return;
+
+  syncBatchFlushQueued = true;
+  queueMicrotask(() => {
+    syncBatchFlushQueued = false;
+    const payloads = pendingSyncPayloadsForMain;
+    pendingSyncPayloadsForMain = [];
+    if (payloads.length === 0) return;
+    post({ type: "sync", payload: payloads });
+  });
+}
 
 function post(msg: WorkerToMainMessage): void {
   self.postMessage(msg);
@@ -113,7 +129,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
       if (parsed.destination && "Client" in parsed.destination) {
         // Client-bound → send payload to main thread
-        post({ type: "sync", payload: JSON.stringify(parsed.payload) });
+        enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
       } else if (parsed.destination && "Server" in parsed.destination) {
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
@@ -271,10 +287,13 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       break;
 
     case "sync": {
+      const payloads = msg.payload;
       if (runtime && mainClientId && initComplete) {
-        runtime.onSyncMessageReceivedFromClient(mainClientId, msg.payload);
+        for (const payload of payloads) {
+          runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
+        }
       } else {
-        pendingSyncMessages.push(msg.payload);
+        pendingSyncMessages.push(...payloads);
       }
       break;
     }
