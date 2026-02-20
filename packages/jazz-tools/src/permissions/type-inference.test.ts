@@ -83,8 +83,8 @@ describe("permissions type inference", () => {
           ]),
         ),
         policy.todos.allowUpdate
-          .whereOld(allowedTo.update("projectId"))
-          .whereNew(allowedTo.update("projectId")),
+          .whereOld(allowedTo.update("projectId", { maxDepth: 4 }))
+          .whereNew(allowedTo.update("projectId", { maxDepth: 4 })),
       ];
     });
   });

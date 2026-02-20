@@ -534,6 +534,7 @@ impl Parser {
                 Ok(PolicyExpr::Inherits {
                     operation,
                     via_column,
+                    max_depth: None,
                 })
             }
             Some(Token::Ident(_)) => {
@@ -1104,11 +1105,20 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         PolicyExpr::Inherits {
             operation,
             via_column,
-        } => format!(
-            "INHERITS {} VIA {}",
-            operation_to_sql(*operation),
-            via_column
-        ),
+            max_depth,
+        } => match max_depth {
+            Some(depth) => format!(
+                "INHERITS {} VIA {} MAX DEPTH {}",
+                operation_to_sql(*operation),
+                via_column,
+                depth
+            ),
+            None => format!(
+                "INHERITS {} VIA {}",
+                operation_to_sql(*operation),
+                via_column
+            ),
+        },
         PolicyExpr::And(exprs) => exprs
             .iter()
             .map(|e| format!("({})", policy_expr_to_sql(e)))

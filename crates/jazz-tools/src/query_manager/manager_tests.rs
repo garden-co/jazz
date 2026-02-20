@@ -145,7 +145,8 @@ fn recursive_query_expands_transitive_team_edges() {
 
     // Seed team and edge data:
     // 1 -> 2 -> 3 -> 1 (cycle)
-    qm.insert(&mut storage, "teams", &[Value::Integer(1)]).unwrap();
+    qm.insert(&mut storage, "teams", &[Value::Integer(1)])
+        .unwrap();
     qm.insert(
         &mut storage,
         "team_edges",

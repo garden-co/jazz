@@ -548,6 +548,7 @@ impl QueryManager {
                 ComplexClause::Inherits {
                     operation,
                     via_column,
+                    max_depth: _,
                 } => {
                     // Get the FK column to find the parent
                     let col_idx = match descriptor.column_index(via_column) {
@@ -602,6 +603,7 @@ impl QueryManager {
                         session,
                         &self.schema,
                         &branch,
+                        1,
                     ) {
                         graphs.push(graph);
                     }

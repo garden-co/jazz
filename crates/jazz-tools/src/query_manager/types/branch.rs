@@ -170,6 +170,7 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
         PolicyExpr::Inherits {
             operation,
             via_column,
+            max_depth,
         } => {
             hasher.update(&[6]);
             match operation {
@@ -188,6 +189,15 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
             }
             hasher.update(via_column.as_bytes());
             hasher.update(&[0]);
+            match max_depth {
+                Some(depth) => {
+                    hasher.update(&[1]);
+                    hasher.update(&(*depth as u64).to_le_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
         }
         PolicyExpr::And(exprs) => {
             hasher.update(&[7]);
