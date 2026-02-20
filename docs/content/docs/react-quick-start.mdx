@@ -4,7 +4,8 @@ description: Build a local-first React app with Jazz. Schema, provider, reactive
 ---
 
 <Callout title="WIP, development is ongoing" type="warning">
-  This guide is likely to already be outdated, as we're moving quickly. It's primarily designed for the Garden team and early adopters. 
+  This guide is likely to already be outdated, as we're moving quickly. It's primarily designed for
+  the Garden team and early adopters.
 </Callout>
 
 ## Install
@@ -36,12 +37,12 @@ table("todos", {
 
 There are a number of column types available which cover most common use cases:
 
-| DSL | SQL type | TypeScript type |
-|-----|----------|-----------------|
-| `col.string()` | TEXT | `string` |
-| `col.boolean()` | BOOLEAN | `boolean` |
-| `col.int()` | INTEGER | `number` |
-| `col.float()` | REAL | `number` |
+| DSL                | SQL type  | TypeScript type   |
+| ------------------ | --------- | ----------------- |
+| `col.string()`     | TEXT      | `string`          |
+| `col.boolean()`    | BOOLEAN   | `boolean`         |
+| `col.int()`        | INTEGER   | `number`          |
+| `col.float()`      | REAL      | `number`          |
 | `col.ref("table")` | UUID (FK) | `string` (row ID) |
 
 Any column can be made nullable with `.optional()`.
@@ -55,6 +56,7 @@ npx jazz-tools build
 ```
 
 #### Output:
+
 - `schema/current.sql` — the equivalent SQL
 - `schema/app.ts` — typed interfaces, query builders, and the `app` object you import everywhere
 
@@ -67,8 +69,8 @@ The generated `app` export gives you a typed entry point for every table:
 ```ts
 import { app } from "../schema/app.js";
 
-app.todos          // query builder for the todos table
-app.projects       // query builder for the projects table
+app.todos; // query builder for the todos table
+app.projects; // query builder for the projects table
 ```
 
 ## Wrap your app in JazzProvider
@@ -83,7 +85,7 @@ function App() {
     <JazzProvider
       config={{
         appId: "my-app",
-        serverUrl: "http://127.0.0.1:4200",  // optional — omit for offline-only
+        serverUrl: "http://127.0.0.1:4200", // optional — omit for offline-only
         // local anonymous auth is default in browser clients
       }}
       fallback={<p>Loading...</p>}
@@ -96,17 +98,17 @@ function App() {
 
 ### DbConfig reference
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `appId` | yes | Application identifier. Isolates storage between apps. |
-| `serverUrl` | no | Jazz sync server URL. Omit for fully local/offline mode. |
-| `localAuthMode` | no | Local synthetic auth mode: `"anonymous"` or `"demo"`. Browser default is `"anonymous"`. |
-| `localAuthToken` | no | Explicit local synthetic token override. If omitted in browser, Jazz auto-generates and persists one. |
-| `jwtToken` | no | External auth bearer JWT. Requires server-side JWKS configuration. |
-| `adminSecret` | no | Admin secret for schema catalogue sync. |
-| `dbName` | no | OPFS database name (browser). Defaults to `appId`. |
-| `env` | no | Environment label (e.g. `"dev"`, `"prod"`). |
-| `userBranch` | no | Branch name. Defaults to `"main"`. |
+| Field            | Required | Description                                                                                           |
+| ---------------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| `appId`          | yes      | Application identifier. Isolates storage between apps.                                                |
+| `serverUrl`      | no       | Jazz sync server URL. Omit for fully local/offline mode.                                              |
+| `localAuthMode`  | no       | Local synthetic auth mode: `"anonymous"` or `"demo"`. Browser default is `"anonymous"`.               |
+| `localAuthToken` | no       | Explicit local synthetic token override. If omitted in browser, Jazz auto-generates and persists one. |
+| `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration.                                    |
+| `adminSecret`    | no       | Admin secret for schema catalogue sync.                                                               |
+| `dbName`         | no       | OPFS database name (browser). Defaults to `appId`.                                                    |
+| `env`            | no       | Environment label (e.g. `"dev"`, `"prod"`).                                                           |
+| `userBranch`     | no       | Branch name. Defaults to `"main"`.                                                                    |
 
 `config` is read once at mount. If you need to change it (e.g. after login), remount the provider with a new `key`.
 
@@ -138,18 +140,14 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
 
 ```tsx
 // Only incomplete todos, alphabetical, max 50
-const todos = useAll(
-  app.todos
-    .where({ done: false })
-    .orderBy("title", "asc")
-    .limit(50)
-);
+const todos = useAll(app.todos.where({ done: false }).orderBy("title", "asc").limit(50));
 ```
 
 <Callout title="Fluent and immutable?">
-  When you are building queries, you can create complex queries by chaining methods (fluency). 
+  When you are building queries, you can create complex queries by chaining methods (fluency).
 
-  Each chained call returns a new query object rather than modifying the original. So if you do `const base = query.where({ active: true })` and then `const sorted = base.orderBy("name")`, `base` is unchanged (immutability), and you have two separate queries.
+Each chained call returns a new query object rather than modifying the original. So if you do `const base = query.where({ active: true })` and then `const sorted = base.orderBy("name")`, `base` is unchanged (immutability), and you have two separate queries.
+
 </Callout>
 
 ### Where operators
@@ -158,29 +156,29 @@ Simple equality uses a plain value. For other comparisons, pass an operator obje
 
 ```tsx
 // Equality (shorthand)
-app.todos.where({ done: false })
+app.todos.where({ done: false });
 
 // Explicit operators
-app.todos.where({ title: { contains: "milk" } })
-app.todos.where({ project: { ne: someProjectId } })
+app.todos.where({ title: { contains: "milk" } });
+app.todos.where({ project: { ne: someProjectId } });
 ```
 
 Available operators by type:
 
-| Type | Operators |
-|------|-----------|
-| string | `eq`, `ne`, `contains` |
-| boolean | plain value only |
-| number | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
-| timestamp | `eq`, `gt`, `gte`, `lt`, `lte` |
-| uuid | `eq`, `ne`, `in` |
-| ref (FK) | `eq`, `ne`, `isNull` (when nullable) |
+| Type      | Operators                            |
+| --------- | ------------------------------------ |
+| string    | `eq`, `ne`, `contains`               |
+| boolean   | plain value only                     |
+| number    | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| timestamp | `eq`, `gt`, `gte`, `lt`, `lte`       |
+| uuid      | `eq`, `ne`, `in`                     |
+| ref (FK)  | `eq`, `ne`, `isNull` (when nullable) |
 
 By default `useAll` returns results immediately from the local replica (empty array until the first sync completes). You can optionally wait for a specific [persistence tier](#persistence-tiers) before delivering data.
 
 ## Write data with useDb
 
-`useDb` returns the `Db` handle for mutations. All mutations are *synchronous*, although sync is not: they write to the in-memory WASM runtime instantly and sync to the server in the background.
+`useDb` returns the `Db` handle for mutations. All mutations are _synchronous_, although sync is not: they write to the in-memory WASM runtime instantly and sync to the server in the background.
 
 ```tsx title="src/TodoList.tsx"
 import { useDb, useAll } from "jazz-tools/react";
@@ -217,14 +215,17 @@ When you need to confirm a write has reached a specific durability level before 
 
 Jazz data propagates through a series of tiers, from the fastest (local) to the most durable (central server). Both reads and writes can specify which tier to wait for.
 
-| Tier | Where | When to use |
-|------|-------|-------------|
-| `"worker"` | Browser OPFS (local) | Default. Optimistic updates, data survives page refresh. |
-| `"edge"` | Nearest sync server | Confirm data has left the device. Loading spinners, close-app guards. |
-| `"core"` | Central server | Globally consistent state. Authoritative reads and writes. |
+| Tier       | Where                | When to use                                                           |
+| ---------- | -------------------- | --------------------------------------------------------------------- |
+| `"worker"` | Browser OPFS (local) | Default. Optimistic updates, data survives page refresh.              |
+| `"edge"`   | Nearest sync server  | Confirm data has left the device. Loading spinners, close-app guards. |
+| `"core"`   | Central server       | Globally consistent state. Authoritative reads and writes.            |
 
 <Callout title="Which tier to use?">
-  `worker` (or no tier) is the right default for most UI interactions. Use `edge` when you need to confirm data has synced to the nearest server, e.g. for loading indicators or guarding against tab closure. Use `core` when you need globally consistent state. You can set tiers on a per-query basis, so choose the right level for each operation.
+  `worker` (or no tier) is the right default for most UI interactions. Use `edge` when you need to
+  confirm data has synced to the nearest server, e.g. for loading indicators or guarding against tab
+  closure. Use `core` when you need globally consistent state. You can set tiers on a per-query
+  basis, so choose the right level for each operation.
 </Callout>
 
 ### Reading with a tier
@@ -265,15 +266,12 @@ const todo = await db.one(app.todos.where({ id: someId }));
 Outside of components (or when you need the delta), use `db.subscribeAll` directly. The callback receives a delta with the full result set plus granular add/update/remove lists:
 
 ```ts
-const unsubscribe = db.subscribeAll(
-  app.todos.where({ done: false }),
-  (delta) => {
-    delta.all;     // Todo[]  — full current result set
-    delta.added;   // { item: Todo, index: number }[]
-    delta.updated; // { oldItem: Todo, newItem: Todo, oldIndex: number, newIndex: number }[]
-    delta.removed; // { item: Todo, index: number }[]
-  },
-);
+const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), (delta) => {
+  delta.all; // Todo[]  — full current result set
+  delta.added; // { item: Todo, index: number }[]
+  delta.updated; // { oldItem: Todo, newItem: Todo, oldIndex: number, newIndex: number }[]
+  delta.removed; // { item: Todo, index: number }[]
+});
 
 // Later:
 unsubscribe();
@@ -293,9 +291,7 @@ If your schema has `col.ref()` columns, codegen produces typed include interface
 // });
 
 // Load each todo's project and parent in one shot
-const todos = useAll(
-  app.todos.include({ project: true, parent: true })
-);
+const todos = useAll(app.todos.include({ project: true, parent: true }));
 
 // todos[0].project → Project | undefined
 // todos[0].parent  → Todo | undefined
@@ -304,9 +300,7 @@ const todos = useAll(
 **Reverse relations** are generated automatically. A `project` FK on `todos` creates a `todosViaProject` reverse relation on `projects`:
 
 ```ts
-const projects = useAll(
-  app.projects.include({ todosViaProject: true })
-);
+const projects = useAll(app.projects.include({ todosViaProject: true }));
 
 // projects[0].todosViaProject → Todo[]
 ```
@@ -318,16 +312,16 @@ You can nest includes and even pass a query builder to filter related rows:
 const todos = useAll(
   app.todos.include({
     project: {
-      todosViaProject: true,  // nested include
+      todosViaProject: true, // nested include
     },
-  })
+  }),
 );
 
 // Filtered: only include incomplete child todos
 const todos = useAll(
   app.todos.include({
     todosViaParent: app.todos.where({ done: false }),
-  })
+  }),
 );
 ```
 
@@ -336,11 +330,7 @@ const todos = useAll(
 `.where()` calls are additive. Multiple calls produce AND semantics:
 
 ```ts
-const results = useAll(
-  app.todos
-    .where({ done: false })
-    .where({ title: { contains: "docs" } })
-);
+const results = useAll(app.todos.where({ done: false }).where({ title: { contains: "docs" } }));
 // Equivalent to: done = false AND title LIKE '%docs%'
 ```
 
@@ -353,7 +343,7 @@ const results = useAll(
     .include({ project: true, parent: true })
     .orderBy("title", "asc")
     .limit(20)
-    .offset(0)
+    .offset(0),
 );
 ```
 
@@ -399,11 +389,7 @@ If needed, you can explicitly override the local token:
 Use the synthetic user switcher to create/swap local demo profiles:
 
 ```tsx
-import {
-  JazzProvider,
-  SyntheticUserSwitcher,
-  getActiveSyntheticAuth,
-} from "jazz-tools/react";
+import { JazzProvider, SyntheticUserSwitcher, getActiveSyntheticAuth } from "jazz-tools/react";
 
 const appId = "my-app";
 const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
@@ -451,10 +437,7 @@ function App() {
   }
 
   return (
-    <JazzProvider
-      key={jwtToken ?? "local"}
-      config={{ appId, serverUrl, jwtToken }}
-    >
+    <JazzProvider key={jwtToken ?? "local"} config={{ appId, serverUrl, jwtToken }}>
       <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
       <TodoList />
     </JazzProvider>
