@@ -78,7 +78,7 @@ export interface InitOkMessage {
 /** Forward a sync payload from worker to main thread. */
 export interface SyncToMainMessage {
   type: "sync";
-  payload: string; // JSON-encoded SyncPayload
+  payload: string[]; // JSON-encoded SyncPayloads
 }
 
 /** Worker encountered an error. */
