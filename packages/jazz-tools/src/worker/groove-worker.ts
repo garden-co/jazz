@@ -287,10 +287,13 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       break;
 
     case "sync": {
+      const payloads = msg.payload;
       if (runtime && mainClientId && initComplete) {
-        runtime.onSyncMessageReceivedFromClient(mainClientId, msg.payload);
+        for (const payload of payloads) {
+          runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
+        }
       } else {
-        pendingSyncMessages.push(msg.payload);
+        pendingSyncMessages.push(...payloads);
       }
       break;
     }
