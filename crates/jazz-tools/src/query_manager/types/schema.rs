@@ -493,7 +493,22 @@ pub fn validate_policy_no_cycles(
         PolicyExpr::Inherits {
             via_column,
             operation,
+            max_depth,
         } => {
+            if let Some(requested_depth) = max_depth
+                && crate::query_manager::policy::normalize_recursive_max_depth(Some(
+                    *requested_depth,
+                ))
+                .is_none()
+            {
+                return Err(format!(
+                    "INHERITS max_depth {} exceeds hard cap {} for table '{}'",
+                    requested_depth,
+                    crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
+                    current_table.0
+                ));
+            }
+
             // Get target table from FK column
             let col_idx = descriptor.column_index(via_column).ok_or_else(|| {
                 format!(
@@ -513,8 +528,13 @@ pub fn validate_policy_no_cycles(
                         )
                     })?;
 
+            let bounded = max_depth.is_some();
+
             // Cycle check
             if visited.contains(target_table) {
+                if bounded {
+                    return Ok(());
+                }
                 let path: Vec<_> = visited.iter().map(|t| t.0.as_str()).collect();
                 return Err(format!(
                     "INHERITS cycle detected: {} → {} (path: {})",
@@ -522,6 +542,11 @@ pub fn validate_policy_no_cycles(
                     target_table.0,
                     path.join(" → ")
                 ));
+            }
+
+            // Bounded INHERITS is cycle-safe by runtime depth limit.
+            if bounded {
+                return Ok(());
             }
 
             // Recurse into target table's policy

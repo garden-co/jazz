@@ -254,6 +254,27 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("supports bounded recursive inherits depth override", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({
+      type: "Inherits",
+      operation: "Select",
+      via_column: "projectId",
+      max_depth: 3,
+    });
+  });
+
+  it("rejects invalid recursive depth overrides", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
+      ]),
+    ).toThrow(/maxdepth must be a positive integer/i);
+  });
+
   it("rejects allowedTo when column is not a foreign key", () => {
     expect(() =>
       definePermissions(app, ({ policy, allowedTo }) => [

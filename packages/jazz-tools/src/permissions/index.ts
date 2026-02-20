@@ -33,6 +33,10 @@ interface SessionRefValue {
   readonly path: string[];
 }
 
+interface RecursiveDepthOptions {
+  maxDepth?: number;
+}
+
 interface RowRefValue {
   readonly __jazzPermissionKind: "row-ref";
   readonly column: string;
@@ -72,10 +76,10 @@ export type WhereInputOrCallback<WhereInput, Row> =
 export type SessionContext = Record<string, SessionRefValue>;
 
 export interface AllowedToContext {
-  read(fkColumn: string): PolicyExpr;
-  insert(fkColumn: string): PolicyExpr;
-  update(fkColumn: string): PolicyExpr;
-  delete(fkColumn: string): PolicyExpr;
+  read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
+  insert(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
+  update(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
+  delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
 }
 
 interface ExistsBuilder<WhereInput> {
@@ -270,34 +274,40 @@ function createSessionContext(): SessionContext {
 }
 
 function createAllowedToContext(): AllowedToContext {
+  const inheritsExpr = (
+    operation: "Select" | "Insert" | "Update" | "Delete",
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr => {
+    const maxDepth = options?.maxDepth;
+    if (maxDepth !== undefined) {
+      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a positive integer.`);
+      }
+    }
+    const expr: PolicyExpr = {
+      type: "Inherits",
+      operation,
+      via_column: fkColumn,
+    };
+    if (maxDepth !== undefined) {
+      expr.max_depth = maxDepth;
+    }
+    return expr;
+  };
+
   return {
-    read(fkColumn: string): PolicyExpr {
-      return {
-        type: "Inherits",
-        operation: "Select",
-        via_column: fkColumn,
-      };
+    read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+      return inheritsExpr("Select", fkColumn, options);
     },
-    insert(fkColumn: string): PolicyExpr {
-      return {
-        type: "Inherits",
-        operation: "Insert",
-        via_column: fkColumn,
-      };
+    insert(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+      return inheritsExpr("Insert", fkColumn, options);
     },
-    update(fkColumn: string): PolicyExpr {
-      return {
-        type: "Inherits",
-        operation: "Update",
-        via_column: fkColumn,
-      };
+    update(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+      return inheritsExpr("Update", fkColumn, options);
     },
-    delete(fkColumn: string): PolicyExpr {
-      return {
-        type: "Inherits",
-        operation: "Delete",
-        via_column: fkColumn,
-      };
+    delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+      return inheritsExpr("Delete", fkColumn, options);
     },
   };
 }

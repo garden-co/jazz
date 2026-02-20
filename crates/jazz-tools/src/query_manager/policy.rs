@@ -33,6 +33,23 @@ pub enum PolicyValue {
 /// Reserved session path prefix used to encode outer-row references in correlated EXISTS clauses.
 pub const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
 
+/// Default recursion depth for recursive permission checks.
+pub const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT: usize = 10;
+/// Hard cap recursion depth for recursive permission checks.
+pub const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP: usize = 64;
+
+/// Resolve requested recursion depth for policy recursion.
+///
+/// Returns `None` when depth is invalid or exceeds hard cap.
+pub fn normalize_recursive_max_depth(requested: Option<usize>) -> Option<usize> {
+    let depth = requested.unwrap_or(RECURSIVE_POLICY_MAX_DEPTH_DEFAULT);
+    if depth == 0 || depth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+        None
+    } else {
+        Some(depth)
+    }
+}
+
 /// Database operation type for policy evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Operation {
@@ -92,6 +109,10 @@ pub enum PolicyExpr {
     Inherits {
         operation: Operation,
         via_column: String,
+        /// Optional recursion depth override for recursive INHERITS evaluation.
+        ///
+        /// If omitted, runtime uses [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        max_depth: Option<usize>,
     },
 
     /// Logical AND of multiple expressions.
@@ -142,6 +163,20 @@ impl PolicyExpr {
         PolicyExpr::Inherits {
             operation,
             via_column: via_column.into(),
+            max_depth: None,
+        }
+    }
+
+    /// Create an INHERITS expression with an explicit recursion depth.
+    pub fn inherits_with_depth(
+        operation: Operation,
+        via_column: impl Into<String>,
+        max_depth: usize,
+    ) -> Self {
+        PolicyExpr::Inherits {
+            operation,
+            via_column: via_column.into(),
+            max_depth: Some(max_depth),
         }
     }
 
@@ -243,7 +278,7 @@ where
     F: FnMut(ObjectId) -> Option<Vec<u8>>,
 {
     // Prevent infinite recursion
-    if depth > 32 {
+    if depth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
         return false;
     }
 
@@ -294,7 +329,10 @@ where
         PolicyExpr::Inherits {
             operation,
             via_column,
-        } => evaluate_inherits(*operation, via_column, content, descriptor, ctx, depth),
+            max_depth,
+        } => evaluate_inherits(
+            *operation, via_column, *max_depth, content, descriptor, ctx, depth,
+        ),
     }
 }
 
@@ -302,6 +340,7 @@ where
 fn evaluate_inherits<F>(
     operation: Operation,
     via_column: &str,
+    max_depth: Option<usize>,
     content: &[u8],
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
@@ -310,6 +349,13 @@ fn evaluate_inherits<F>(
 where
     F: FnMut(ObjectId) -> Option<Vec<u8>>,
 {
+    let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
+        return false;
+    };
+    if depth >= effective_max_depth {
+        return false;
+    }
+
     // Get the FK column index
     let col_index = match descriptor.column_index(via_column) {
         Some(idx) => idx,
@@ -394,7 +440,7 @@ fn evaluate_expr_simple(
     session: &Session,
     depth: usize,
 ) -> bool {
-    if depth > 32 {
+    if depth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
         return false;
     }
 
@@ -561,9 +607,11 @@ pub fn bind_outer_row_refs(
         PolicyExpr::Inherits {
             operation,
             via_column,
+            max_depth,
         } => Some(PolicyExpr::Inherits {
             operation: *operation,
             via_column: via_column.clone(),
+            max_depth: *max_depth,
         }),
         PolicyExpr::And(exprs) => Some(PolicyExpr::And(
             exprs
@@ -681,6 +729,7 @@ pub enum ComplexClause {
     Inherits {
         operation: Operation,
         via_column: String,
+        max_depth: Option<usize>,
     },
     /// EXISTS clause - check if subquery returns rows.
     Exists {
@@ -752,7 +801,7 @@ fn evaluate_simple_recursive(
     depth: usize,
 ) -> SimpleEvalResult {
     // Prevent infinite recursion
-    if depth > 32 {
+    if depth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
         return SimpleEvalResult::fail();
     }
 
@@ -874,9 +923,11 @@ fn evaluate_simple_recursive(
         PolicyExpr::Inherits {
             operation,
             via_column,
+            max_depth,
         } => SimpleEvalResult::with_complex(ComplexClause::Inherits {
             operation: *operation,
             via_column: via_column.clone(),
+            max_depth: *max_depth,
         }),
 
         PolicyExpr::Exists { table, condition } => {
@@ -933,8 +984,21 @@ mod tests {
         let expr = PolicyExpr::inherits(Operation::Select, "folder_id");
         assert!(matches!(
             expr,
-            PolicyExpr::Inherits { operation: Operation::Select, via_column }
-            if via_column == "folder_id"
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column,
+                max_depth: None,
+            } if via_column == "folder_id"
+        ));
+
+        let expr = PolicyExpr::inherits_with_depth(Operation::Select, "folder_id", 7);
+        assert!(matches!(
+            expr,
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column,
+                max_depth: Some(7),
+            } if via_column == "folder_id"
         ));
     }
 
@@ -1144,8 +1208,11 @@ mod tests {
         assert_eq!(result.complex_clauses.len(), 1);
         assert!(matches!(
             &result.complex_clauses[0],
-            ComplexClause::Inherits { operation: Operation::Select, via_column }
-            if via_column == "parent_id"
+            ComplexClause::Inherits {
+                operation: Operation::Select,
+                via_column,
+                max_depth: None,
+            } if via_column == "parent_id"
         ));
     }
 

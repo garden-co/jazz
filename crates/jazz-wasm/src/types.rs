@@ -206,6 +206,8 @@ pub enum WasmPolicyExpr {
     Inherits {
         operation: WasmPolicyOperation,
         via_column: String,
+        #[tsify(optional)]
+        max_depth: Option<u32>,
     },
     And {
         exprs: Vec<WasmPolicyExpr>,
@@ -399,9 +401,11 @@ impl From<groove::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
             groove::query_manager::policy::PolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth,
             } => WasmPolicyExpr::Inherits {
                 operation: operation.into(),
                 via_column,
+                max_depth: max_depth.map(|v| v as u32),
             },
             groove::query_manager::policy::PolicyExpr::And(exprs) => WasmPolicyExpr::And {
                 exprs: exprs.into_iter().map(Into::into).collect(),
@@ -452,9 +456,11 @@ impl TryFrom<WasmPolicyExpr> for groove::query_manager::policy::PolicyExpr {
             WasmPolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth,
             } => groove::query_manager::policy::PolicyExpr::Inherits {
                 operation: operation.into(),
                 via_column,
+                max_depth: max_depth.map(|v| v as usize),
             },
             WasmPolicyExpr::And { exprs } => groove::query_manager::policy::PolicyExpr::And(
                 exprs

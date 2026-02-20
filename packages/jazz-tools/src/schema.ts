@@ -81,6 +81,7 @@ export type PolicyExpr =
       type: "Inherits";
       operation: PolicyOperation;
       via_column: string;
+      max_depth?: number;
     }
   | {
       type: "And";

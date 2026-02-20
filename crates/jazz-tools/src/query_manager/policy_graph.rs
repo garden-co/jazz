@@ -48,6 +48,19 @@ impl PolicyGraph {
         schema: &Schema,
         branch: &str,
     ) -> Option<Self> {
+        Self::for_using_check_with_depth(table, object_id, policy, session, schema, branch, 0)
+    }
+
+    /// Create a graph for USING check with an explicit initial recursion depth.
+    pub fn for_using_check_with_depth(
+        table: &TableName,
+        object_id: ObjectId,
+        policy: &PolicyExpr,
+        session: &Session,
+        schema: &Schema,
+        branch: &str,
+        initial_depth: usize,
+    ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.descriptor.clone();
 
@@ -72,13 +85,14 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate policy against row
-        let policy_node = PolicyFilterNode::new_with_branch(
+        let policy_node = PolicyFilterNode::new_with_branch_and_depth(
             descriptor.clone(),
             policy.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
             branch,
+            initial_depth,
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -109,15 +123,17 @@ impl PolicyGraph {
         session: &Session,
         schema: &Schema,
         branch: &str,
+        initial_depth: usize,
     ) -> Option<Self> {
         // INHERITS is essentially the same as a USING check on the parent table
-        Self::for_using_check(
+        Self::for_using_check_with_depth(
             parent_table,
             parent_id,
             parent_policy,
             session,
             schema,
             branch,
+            initial_depth,
         )
     }
 

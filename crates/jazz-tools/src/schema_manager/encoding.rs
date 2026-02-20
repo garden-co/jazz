@@ -502,6 +502,7 @@ const POLICY_EXPR_OR: u8 = 8;
 const POLICY_EXPR_NOT: u8 = 9;
 const POLICY_EXPR_TRUE: u8 = 10;
 const POLICY_EXPR_FALSE: u8 = 11;
+const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -600,10 +601,18 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
         PolicyExpr::Inherits {
             operation,
             via_column,
+            max_depth,
         } => {
-            buf.push(POLICY_EXPR_INHERITS);
+            buf.push(if max_depth.is_some() {
+                POLICY_EXPR_INHERITS_WITH_DEPTH
+            } else {
+                POLICY_EXPR_INHERITS
+            });
             encode_policy_operation(buf, *operation);
             write_string(buf, via_column);
+            if let Some(depth) = max_depth {
+                write_u32(buf, *depth as u32);
+            }
         }
         PolicyExpr::And(exprs) => {
             buf.push(POLICY_EXPR_AND);
@@ -674,6 +683,17 @@ fn decode_policy_expr(
             Ok(PolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth: None,
+            })
+        }
+        POLICY_EXPR_INHERITS_WITH_DEPTH => {
+            let operation = decode_policy_operation(data, offset)?;
+            let via_column = read_string(data, offset, "policy_inherits_via_column")?;
+            let max_depth = read_u32(data, offset)? as usize;
+            Ok(PolicyExpr::Inherits {
+                operation,
+                via_column,
+                max_depth: Some(max_depth),
             })
         }
         POLICY_EXPR_AND => {
