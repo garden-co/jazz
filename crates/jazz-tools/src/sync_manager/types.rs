@@ -222,7 +222,7 @@ pub enum SyncPayload {
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
         query_id: QueryId,
-        query: Query,
+        query: Box<Query>,
         session: Option<Session>,
     },
 

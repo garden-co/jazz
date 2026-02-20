@@ -290,7 +290,7 @@ impl SyncManager {
                     .push(PendingQuerySubscription {
                         client_id,
                         query_id: *query_id,
-                        query: query.clone(),
+                        query: query.as_ref().clone(),
                         session: session.clone(),
                     });
             }

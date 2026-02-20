@@ -920,6 +920,12 @@ impl RecursiveBuilder {
     }
 }
 
+impl Default for RecursiveBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

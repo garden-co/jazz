@@ -181,6 +181,8 @@ enum JsPolicyExpr {
     Inherits {
         operation: JsPolicyOperation,
         via_column: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
     },
     And {
         exprs: Vec<JsPolicyExpr>,
@@ -308,6 +310,7 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
             JsPolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth,
             } => PolicyExpr::Inherits {
                 operation: match operation {
                     JsPolicyOperation::Select => Operation::Select,
@@ -316,6 +319,7 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                     JsPolicyOperation::Delete => Operation::Delete,
                 },
                 via_column,
+                max_depth,
             },
             JsPolicyExpr::And { exprs } => {
                 PolicyExpr::And(exprs.into_iter().map(js_policy_expr_to_groove).collect())
@@ -493,6 +497,7 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             PolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth,
             } => JsPolicyExpr::Inherits {
                 operation: match operation {
                     Operation::Select => JsPolicyOperation::Select,
@@ -501,6 +506,7 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     Operation::Delete => JsPolicyOperation::Delete,
                 },
                 via_column: via_column.clone(),
+                max_depth: *max_depth,
             },
             PolicyExpr::And(exprs) => JsPolicyExpr::And {
                 exprs: exprs.iter().map(policy_expr_to_js).collect(),
