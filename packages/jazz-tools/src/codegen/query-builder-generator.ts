@@ -122,6 +122,13 @@ function generateQueryBuilderClass(
   lines.push(`  private _orderBys: Array<[string, "asc" | "desc"]> = [];`);
   lines.push(`  private _limitVal?: number;`);
   lines.push(`  private _offsetVal?: number;`);
+  lines.push(`  private _recursiveVal?: {`);
+  lines.push(`    table: string;`);
+  lines.push(`    inner_column: string;`);
+  lines.push(`    outer_column: string;`);
+  lines.push(`    select_columns: string[] | null;`);
+  lines.push(`    max_depth: number;`);
+  lines.push(`  };`);
   lines.push(``);
 
   // where() method
@@ -184,6 +191,67 @@ function generateQueryBuilderClass(
   lines.push(`  }`);
   lines.push(``);
 
+  // withRecursive() method
+  lines.push(`  withRecursive(options: {`);
+  lines.push(`    from: string;`);
+  lines.push(`    correlate: { inner: string; outer: string };`);
+  lines.push(`    select?: ReadonlyArray<string>;`);
+  lines.push(`    maxDepth?: number;`);
+  lines.push(`  }): ${interfaceName}QueryBuilder<I> {`);
+  lines.push(`    const clone = this._clone();`);
+  lines.push(``);
+  lines.push(`    if (typeof options.from !== "string" || !options.from.trim()) {`);
+  lines.push(
+    `      throw new Error("withRecursive(...) requires from to be a non-empty table name.");`,
+  );
+  lines.push(`    }`);
+  lines.push(
+    `    if (typeof options.correlate?.inner !== "string" || !options.correlate.inner.trim()) {`,
+  );
+  lines.push(
+    `      throw new Error("withRecursive(...) requires correlate.inner to be a non-empty column name.");`,
+  );
+  lines.push(`    }`);
+  lines.push(
+    `    if (typeof options.correlate?.outer !== "string" || !options.correlate.outer.trim()) {`,
+  );
+  lines.push(
+    `      throw new Error("withRecursive(...) requires correlate.outer to be a non-empty column name.");`,
+  );
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    const maxDepth = options.maxDepth ?? 10;`);
+  lines.push(`    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {`);
+  lines.push(`      throw new Error("withRecursive(...) maxDepth must be a positive integer.");`);
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    if (options.select !== undefined) {`);
+  lines.push(`      if (!Array.isArray(options.select) || options.select.length === 0) {`);
+  lines.push(
+    `        throw new Error("withRecursive(...) select must be a non-empty array when provided.");`,
+  );
+  lines.push(`      }`);
+  lines.push(
+    `      if (options.select.some((column) => typeof column !== "string" || !column.trim())) {`,
+  );
+  lines.push(
+    `        throw new Error("withRecursive(...) select entries must be non-empty column names.");`,
+  );
+  lines.push(`      }`);
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    clone._recursiveVal = {`);
+  lines.push(`      table: options.from,`);
+  lines.push(`      inner_column: options.correlate.inner,`);
+  lines.push(`      outer_column: options.correlate.outer,`);
+  lines.push(`      select_columns: options.select ? [...options.select] : null,`);
+  lines.push(`      max_depth: maxDepth,`);
+  lines.push(`    };`);
+  lines.push(``);
+  lines.push(`    return clone;`);
+  lines.push(`  }`);
+  lines.push(``);
+
   // _build() method
   lines.push(`  _build(): string {`);
   lines.push(`    return JSON.stringify({`);
@@ -193,6 +261,7 @@ function generateQueryBuilderClass(
   lines.push(`      orderBy: this._orderBys,`);
   lines.push(`      limit: this._limitVal,`);
   lines.push(`      offset: this._offsetVal,`);
+  lines.push(`      recursive: this._recursiveVal,`);
   lines.push(`    });`);
   lines.push(`  }`);
   lines.push(``);
@@ -205,6 +274,9 @@ function generateQueryBuilderClass(
   lines.push(`    clone._orderBys = [...this._orderBys];`);
   lines.push(`    clone._limitVal = this._limitVal;`);
   lines.push(`    clone._offsetVal = this._offsetVal;`);
+  lines.push(
+    `    clone._recursiveVal = this._recursiveVal ? { ...this._recursiveVal, select_columns: this._recursiveVal.select_columns ? [...this._recursiveVal.select_columns] : null } : undefined;`,
+  );
   lines.push(`    return clone;`);
   lines.push(`  }`);
 

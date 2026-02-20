@@ -183,13 +183,17 @@ Recursive queries compute bounded transitive closures from a seed row set (for e
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
-    <Callout title="Current TS status">
-      Generated TypeScript query builders do not yet expose a first-class recursive query method.
-      Recursive query execution is currently available in the Rust query builder/runtime.
-    </Callout>
+    ```ts
+    const query = app.teams.where({ team_id: { eq: 1 } }).withRecursive({
+      from: "team_edges",
+      correlate: { inner: "child_team", outer: "team_id" },
+      select: ["parent_team"],
+      maxDepth: 10,
+    });
+    ```
 
-    Today in TypeScript, use bounded iterative reads in app code for recursive reads.
-    For permission recursion, use `policy.recursive(...)` in the permissions DSL.
+    `withRecursive(...)` adds a bounded recursive relation expansion to the query.
+    `maxDepth` defaults to `10` when omitted.
 
   </Tab>
   <Tab value="Rust">

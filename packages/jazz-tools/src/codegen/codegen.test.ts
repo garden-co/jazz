@@ -691,6 +691,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("orderBy(column: keyof Todo");
     expect(output).toContain("limit(n: number)");
     expect(output).toContain("offset(n: number)");
+    expect(output).toContain("withRecursive(options: {");
     expect(output).toContain("_build(): string");
   });
 
@@ -753,6 +754,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("orderBy: this._orderBys,");
     expect(output).toContain("limit: this._limitVal,");
     expect(output).toContain("offset: this._offsetVal,");
+    expect(output).toContain("recursive: this._recursiveVal,");
   });
 
   it("generates private _clone method for immutability", () => {
@@ -764,6 +766,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("private _clone(): TodoQueryBuilder<I> {");
     expect(output).toContain("const clone = new TodoQueryBuilder<I>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
+    expect(output).toContain("clone._recursiveVal = this._recursiveVal");
   });
 });
 
