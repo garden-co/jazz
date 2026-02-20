@@ -2461,7 +2461,7 @@ describe("CoMap migration", () => {
     expect(loadedPersonFromAnotherAccount.name).toEqual("Bob");
   });
 
-  test("should throw an error if a migration is async", async () => {
+  test("should return unavailable if a migration is async", async () => {
     const Person = co
       .map({
         name: z.string(),
@@ -2475,9 +2475,51 @@ describe("CoMap migration", () => {
       version: 1,
     });
 
-    await expect(Person.load(person.$jazz.id)).rejects.toThrow(
-      "Migration function cannot be async",
+    const loaded = await Person.load(person.$jazz.id);
+    expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+  });
+
+  test("should return unavailable when migration tries to create content as reader", async () => {
+    const Extra = co.map({
+      value: z.string(),
+    });
+
+    const Person = co
+      .map({
+        name: z.string(),
+        version: z.literal([1, 2]),
+        extra: Extra.optional(),
+      })
+      .withMigration((person) => {
+        if (person.version === 1) {
+          person.$jazz.set(
+            "extra",
+            Extra.create(
+              {
+                value: "created in migration",
+              },
+              person.$jazz.owner,
+            ),
+          );
+          person.$jazz.set("version", 2);
+        }
+      });
+
+    const group = Group.create();
+    const person = Person.create(
+      {
+        name: "Bob",
+        version: 1,
+      },
+      group,
     );
+
+    group.addMember("everyone", "reader");
+    const reader = await createJazzTestAccount();
+    const loaded = await Person.load(person.$jazz.id, {
+      loadAs: reader,
+    });
+    expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("should run only once", async () => {
