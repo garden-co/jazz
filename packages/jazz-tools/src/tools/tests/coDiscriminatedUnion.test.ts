@@ -450,6 +450,43 @@ describe("co.discriminatedUnion", () => {
     expect(loadedAnimal.type).toEqual("collie");
   });
 
+  test('repro: duplicate discriminator value "invoice" with overlapping options', () => {
+    const Document = co.map({
+      type: z.enum(["invoice", "receipt", "mail"]),
+      provider: z.string(),
+    });
+
+    const InvoiceDocument = co.map({
+      type: z.literal(["invoice", "receipt"]),
+      provider: z.string(),
+    });
+
+    const MailDocument = co.map({
+      ...InvoiceDocument.shape,
+      provider: z.literal("mail"),
+    });
+
+    const DocumentType = co.discriminatedUnion("type", [
+      InvoiceDocument,
+      MailDocument,
+      Document,
+    ]);
+
+    const DocumentContainer = co.map({
+      document: DocumentType,
+    });
+
+    const doc = DocumentContainer.create({
+      document: MailDocument.create({
+        type: "invoice",
+        provider: "mail",
+      }),
+    });
+
+    expect(doc.document.type).toEqual("invoice");
+    expect(doc.document.provider).toEqual("mail");
+  });
+
   test("load co.discriminatedUnion with deep resolve using loadCoValue", async () => {
     const Person = co.map({
       name: z.string(),

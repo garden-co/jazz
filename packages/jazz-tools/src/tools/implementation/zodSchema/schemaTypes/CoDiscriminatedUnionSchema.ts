@@ -64,14 +64,57 @@ export class CoDiscriminatedUnionSchema<
     }
 
     const { discriminator, options } = this.getDefinition();
-    this.#validationSchema = z.discriminatedUnion(
-      discriminator,
-      // @ts-expect-error
-      options.map((schema) => {
-        const validationSchema = schema.getValidationSchema();
-        return extractPlainSchema(validationSchema);
-      }),
-    );
+    const plainSchemas = options.map((schema) => {
+      const validationSchema = schema.getValidationSchema();
+      return extractPlainSchema(validationSchema);
+    });
+
+    let hasOverlappingDiscriminatorValues = false;
+    const seenDiscriminatorValues = new Set<unknown>();
+
+    for (const option of options) {
+      const discriminatorValues =
+        option.getDefinition().discriminatorMap?.[discriminator];
+
+      if (!discriminatorValues) {
+        continue;
+      }
+
+      for (const value of discriminatorValues) {
+        if (seenDiscriminatorValues.has(value)) {
+          hasOverlappingDiscriminatorValues = true;
+          break;
+        }
+
+        seenDiscriminatorValues.add(value);
+      }
+
+      if (hasOverlappingDiscriminatorValues) {
+        break;
+      }
+    }
+
+    if (hasOverlappingDiscriminatorValues) {
+      this.#validationSchema = z.union(plainSchemas);
+      return this.#validationSchema;
+    }
+
+    try {
+      this.#validationSchema = z.discriminatedUnion(
+        discriminator,
+        // @ts-expect-error zod cannot infer dynamic array as tuple
+        plainSchemas,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("Duplicate discriminator value")
+      ) {
+        this.#validationSchema = z.union(plainSchemas);
+      } else {
+        throw error;
+      }
+    }
 
     return this.#validationSchema;
   };
