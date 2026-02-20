@@ -28,7 +28,7 @@ export interface InitMessage {
 /** Forward a sync payload from main thread to worker. */
 export interface SyncToWorkerMessage {
   type: "sync";
-  payload: string; // JSON-encoded SyncPayload
+  payload: string[]; // JSON-encoded SyncPayloads
 }
 
 /** Update auth credentials (e.g., token refresh). */
