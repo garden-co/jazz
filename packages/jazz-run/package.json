@@ -5,6 +5,10 @@
   "license": "MIT",
   "version": "0.20.10",
   "exports": {
+    ".": {
+      "types": "./dist/exports.d.ts",
+      "default": "./dist/exports.js"
+    },
     "./startSyncServer": {
       "types": "./dist/startSyncServer.d.ts",
       "default": "./dist/startSyncServer.js"
