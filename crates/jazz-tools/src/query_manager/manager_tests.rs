@@ -27,6 +27,23 @@ fn test_schema() -> Schema {
     schema
 }
 
+fn recursive_team_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("team_id", ColumnType::Integer)]).into(),
+    );
+    schema.insert(
+        TableName::new("team_edges"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("child_team", ColumnType::Integer),
+            ColumnDescriptor::new("parent_team", ColumnType::Integer),
+        ])
+        .into(),
+    );
+    schema
+}
+
 /// Helper to create QueryManager with schema on default branch.
 fn create_query_manager(
     sync_manager: SyncManager,
@@ -118,6 +135,59 @@ fn insert_and_query() {
         .build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn recursive_query_expands_transitive_team_edges() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_team_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Seed team and edge data:
+    // 1 -> 2 -> 3 -> 1 (cycle)
+    qm.insert(&mut storage, "teams", &[Value::Integer(1)]).unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Integer(1), Value::Integer(2)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Integer(2), Value::Integer(3)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Integer(3), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("teams")
+        .select(&["team_id"])
+        .filter_eq("team_id", Value::Integer(1))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "team_id")
+                .select(&["parent_team"])
+                .max_depth(10)
+        })
+        .build();
+
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    let mut ids: Vec<i32> = results
+        .into_iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Integer(i)) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable();
+
+    assert_eq!(ids, vec![1, 2, 3], "Should compute recursive closure");
 }
 
 #[test]
