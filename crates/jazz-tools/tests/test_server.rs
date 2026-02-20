@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! Test server infrastructure for self-spawning integration tests.
 //!
 //! Spawns the jazz-tools binary as a subprocess and waits for it to become ready.

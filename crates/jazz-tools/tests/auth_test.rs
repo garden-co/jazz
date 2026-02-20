@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! Authentication integration tests for the Jazz server.
 //!
 //! Tests the three auth mechanisms:

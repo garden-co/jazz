@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! E2E integration tests for jazz-tools server.
 //!
 //! These tests spawn the actual `jazz-tools` binary and interact via HTTP
