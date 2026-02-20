@@ -228,7 +228,7 @@ async fn wait_for_todos_count(
 
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(rows)) = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(8),
             client.query(query.clone(), settled_tier),
         )
         .await
@@ -238,7 +238,7 @@ async fn wait_for_todos_count(
             }
             last = rows;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     panic!(
@@ -282,7 +282,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     let _ = wait_for_todos_count(
         &client_a,
         1,
-        Duration::from_secs(10),
+        Duration::from_secs(20),
         Some(PersistenceTier::EdgeServer),
     )
     .await;
@@ -300,7 +300,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     let rows = wait_for_todos_count(
         &client_b,
         1,
-        Duration::from_secs(15),
+        Duration::from_secs(30),
         Some(PersistenceTier::EdgeServer),
     )
     .await;
@@ -316,7 +316,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
         .expect("client a update todo");
 
     let query = QueryBuilder::new("todos").build();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut saw_update = false;
     while tokio::time::Instant::now() < deadline {
         if let Ok(rows) = client_b

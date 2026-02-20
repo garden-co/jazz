@@ -3415,6 +3415,7 @@ name = "todo-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "http-body-util",
  "jazz-tools",
@@ -3438,6 +3439,7 @@ name = "todo-server-docs"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "http-body-util",
  "jazz-tools",

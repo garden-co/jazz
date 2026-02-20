@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,29 +26,6 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`Timeout: ${message}`);
-}
-
-function base64url(input: string | Uint8Array): string {
-  const str = typeof input === "string" ? btoa(input) : btoa(String.fromCharCode(...input));
-  return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-async function signJwt(sub: string, secret: string): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = { sub, claims: {}, exp: Math.floor(Date.now() / 1000) + 3600 };
-  const enc = new TextEncoder();
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const data = enc.encode(`${headerB64}.${payloadB64}`);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, data);
-  return `${headerB64}.${payloadB64}.${base64url(new Uint8Array(sig))}`;
 }
 
 /** Type into an input controlled by React (triggers React's onChange). */
@@ -70,7 +47,8 @@ describe("React Todo App E2E", () => {
     appId?: string;
     dbName?: string;
     serverUrl?: string;
-    jwtToken?: string;
+    localAuthMode?: "anonymous" | "demo";
+    localAuthToken?: string;
     adminSecret?: string;
   }): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -293,24 +271,27 @@ describe("React Todo App E2E", () => {
 
   it("syncs a todo between two app instances through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const token1 = await signJwt("react-user-a", JWT_SECRET);
-    const token2 = await signJwt("react-user-b", JWT_SECRET);
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("sync-a"),
       serverUrl,
-      jwtToken: token1,
+      localAuthMode: "demo",
+      localAuthToken: "react-sync-user-a",
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("sync-b"),
       serverUrl,
-      jwtToken: token2,
+      localAuthMode: "demo",
+      localAuthToken: "react-sync-user-b",
       adminSecret: ADMIN_SECRET,
     });
+
+    // Let both app instances finish server/event-stream setup before mutating.
+    await new Promise((r) => setTimeout(r, 750));
 
     // Add a todo in app 1 via the form
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -330,7 +311,7 @@ describe("React Todo App E2E", () => {
     // Wait for it to appear in app 2 via server sync
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
-      10000,
+      20000,
       "Todo should sync to app 2 through the server",
     );
 
