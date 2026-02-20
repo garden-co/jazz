@@ -79,6 +79,7 @@ export class SubscriptionScope<D extends CoValue> {
   private version = 0;
   private migrated = false;
   private migrating = false;
+  private migrationFailed = false;
   closed = false;
 
   private silenceUpdates = false;
@@ -116,6 +117,11 @@ export class SubscriptionScope<D extends CoValue> {
       (value) => {
         lastUpdate = value;
 
+        if (this.migrationFailed) {
+          this.handleUpdate(CoValueLoadingState.UNAVAILABLE);
+          return;
+        }
+
         if (skipRetry && value === CoValueLoadingState.UNAVAILABLE) {
           this.handleUpdate(value);
           return;
@@ -137,9 +143,18 @@ export class SubscriptionScope<D extends CoValue> {
           }
 
           this.migrating = true;
-          applyCoValueMigrations(
-            instantiateRefEncodedFromRaw(this.schema, value),
-          );
+          const instance = instantiateRefEncodedFromRaw(this.schema, value);
+          try {
+            applyCoValueMigrations(instance);
+          } catch (error) {
+            const reason =
+              error instanceof Error ? error.message : String(error);
+            this.migrationFailed = true;
+            this.migrated = true;
+            console.error(`Migration failed for ${this.id}: ${reason}`);
+            this.handleUpdate(CoValueLoadingState.UNAVAILABLE);
+            return;
+          }
           this.migrated = true;
           this.handleUpdate(lastUpdate);
           return;
