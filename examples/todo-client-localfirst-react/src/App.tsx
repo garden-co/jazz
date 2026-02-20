@@ -1,10 +1,12 @@
 import {
+  createJazzClient,
   JazzProvider,
   SyntheticUserSwitcher,
   getActiveSyntheticAuth,
-  type JazzProviderProps,
 } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
+
+type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -13,8 +15,8 @@ function readEnvAppId(): string | undefined {
 
 // #region context-setup-react
 function defaultConfig(
-  overrides: Partial<JazzProviderProps["config"]> = {},
-): NonNullable<JazzProviderProps["config"]> {
+  overrides: Partial<JazzProviderClientConfig> = {},
+): JazzProviderClientConfig {
   const appId = overrides.appId ?? readEnvAppId() ?? "todo-react-example";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
@@ -29,13 +31,18 @@ function defaultConfig(
 }
 // #endregion context-setup-react
 
-export function App({ config, fallback }: Partial<JazzProviderProps> = {}) {
-  const resolvedConfig = defaultConfig(config);
+const resolvedConfig = defaultConfig();
+const client = createJazzClient(resolvedConfig);
 
+export function App() {
   return (
     <>
-      <SyntheticUserSwitcher appId={resolvedConfig.appId} defaultMode="demo" />
-      <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+      <SyntheticUserSwitcher
+        appId={resolvedConfig.appId}
+        defaultMode="demo"
+        onProfileChange={() => window.location.reload()}
+      />
+      <JazzProvider client={client}>
         <h1>Todos</h1>
         <TodoList />
       </JazzProvider>
