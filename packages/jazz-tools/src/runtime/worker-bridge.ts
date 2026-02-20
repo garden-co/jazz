@@ -38,6 +38,8 @@ export class WorkerBridge {
   private worker: Worker;
   private runtime: Runtime;
   private workerClientId: string | null = null;
+  private pendingSyncPayloadsForWorker: string[] = [];
+  private syncBatchFlushQueued = false;
 
   constructor(worker: Worker, runtime: Runtime) {
     this.worker = worker;
@@ -48,7 +50,9 @@ export class WorkerBridge {
       const msg = event.data;
       if (msg.type === "sync") {
         // Worker sends payload-only (it's the "server" for main thread)
-        this.runtime.onSyncMessageReceived(msg.payload);
+        for (const payload of msg.payload) {
+          this.runtime.onSyncMessageReceived(payload);
+        }
       }
     };
 
@@ -57,10 +61,7 @@ export class WorkerBridge {
       const parsed = JSON.parse(envelope);
       // Only forward server-bound messages (worker IS the server)
       if (parsed.destination && "Server" in parsed.destination) {
-        this.worker.postMessage({
-          type: "sync",
-          payload: JSON.stringify(parsed.payload),
-        });
+        this.enqueueSyncMessageForWorker(JSON.stringify(parsed.payload));
       }
     });
 
@@ -139,6 +140,24 @@ export class WorkerBridge {
    */
   getWorkerClientId(): string | null {
     return this.workerClientId;
+  }
+
+  private enqueueSyncMessageForWorker(payload: string): void {
+    this.pendingSyncPayloadsForWorker.push(payload);
+    if (this.syncBatchFlushQueued) return;
+
+    this.syncBatchFlushQueued = true;
+    queueMicrotask(() => {
+      this.syncBatchFlushQueued = false;
+      const payloads = this.pendingSyncPayloadsForWorker;
+      this.pendingSyncPayloadsForWorker = [];
+      if (payloads.length === 0) return;
+
+      this.worker.postMessage({
+        type: "sync",
+        payload: payloads,
+      });
+    });
   }
 }
 
