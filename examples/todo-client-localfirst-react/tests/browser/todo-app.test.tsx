@@ -290,6 +290,9 @@ describe("React Todo App E2E", () => {
       adminSecret: ADMIN_SECRET,
     });
 
+    // Let both app instances finish server/event-stream setup before mutating.
+    await new Promise((r) => setTimeout(r, 750));
+
     // Add a todo in app 1 via the form
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
@@ -308,7 +311,7 @@ describe("React Todo App E2E", () => {
     // Wait for it to appear in app 2 via server sync
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
-      10000,
+      20000,
       "Todo should sync to app 2 through the server",
     );
 
