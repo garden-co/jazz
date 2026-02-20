@@ -4971,7 +4971,7 @@ fn server_builds_query_graph_on_subscription() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5042,7 +5042,7 @@ fn server_pushes_new_matches() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5105,7 +5105,7 @@ fn server_does_not_push_non_matching() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5309,7 +5309,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5362,7 +5362,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id,
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5439,7 +5439,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });

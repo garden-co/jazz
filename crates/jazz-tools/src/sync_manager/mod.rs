@@ -358,7 +358,7 @@ impl SyncManager {
             destination: Destination::Server(server_id),
             payload: SyncPayload::QuerySubscription {
                 query_id,
-                query,
+                query: Box::new(query),
                 session,
             },
         });
