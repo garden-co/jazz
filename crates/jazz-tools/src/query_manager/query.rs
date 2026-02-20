@@ -264,6 +264,24 @@ impl ArraySubquerySpec {
     }
 }
 
+/// Specification for a recursive relation expansion.
+///
+/// The current query acts as the seed relation. Each recursive step evaluates
+/// `table` with `inner_column = seed_value`, then projects `select_columns`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursiveSpec {
+    /// Inner table to query at each step.
+    pub table: TableName,
+    /// Column in inner table to correlate with previous frontier rows.
+    pub inner_column: String,
+    /// Column from the recursive output relation used as the next frontier value.
+    pub outer_column: String,
+    /// Columns selected from each step (None = all columns).
+    pub select_columns: Option<Vec<String>>,
+    /// Maximum recursion depth (levels beyond the seed level).
+    pub max_depth: usize,
+}
+
 /// A query specification (DNF: disjunction of conjunctions).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
@@ -299,6 +317,9 @@ pub struct Query {
     /// Array subqueries (correlated subqueries producing array columns).
     #[serde(default)]
     pub array_subqueries: Vec<ArraySubquerySpec>,
+    /// Optional recursive relation expansion.
+    #[serde(default)]
+    pub recursive: Option<RecursiveSpec>,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -321,6 +342,7 @@ impl Query {
             include_deleted: false,
             select_columns: None,
             array_subqueries: Vec::new(),
+            recursive: None,
         }
     }
 
@@ -339,6 +361,11 @@ impl Query {
     /// Check if this query has array subqueries.
     pub fn has_array_subqueries(&self) -> bool {
         !self.array_subqueries.is_empty()
+    }
+
+    /// Check if this query has a recursive expansion.
+    pub fn has_recursive(&self) -> bool {
+        self.recursive.is_some()
     }
 
     /// Check if this is a join query.
@@ -655,6 +682,19 @@ impl QueryBuilder {
         self
     }
 
+    /// Add a recursive relation expansion.
+    ///
+    /// The current query output is used as the seed relation.
+    pub fn with_recursive<F>(mut self, builder_fn: F) -> Self
+    where
+        F: FnOnce(RecursiveBuilder) -> RecursiveBuilder,
+    {
+        let builder = RecursiveBuilder::new();
+        let configured = builder_fn(builder);
+        self.query.recursive = Some(configured.build());
+        self
+    }
+
     /// Build the query.
     ///
     /// Branches should be specified via `.branch()` or `.branches()`.
@@ -809,6 +849,73 @@ impl ArraySubqueryBuilder {
             order_by: self.order_by,
             limit: self.limit,
             nested_arrays: self.nested_arrays,
+        }
+    }
+}
+
+/// Builder for configuring recursive relation expansions.
+#[derive(Debug)]
+pub struct RecursiveBuilder {
+    table: Option<TableName>,
+    inner_column: String,
+    outer_column: String,
+    select_columns: Option<Vec<String>>,
+    max_depth: usize,
+}
+
+impl RecursiveBuilder {
+    /// Create a new recursive builder.
+    pub fn new() -> Self {
+        Self {
+            table: None,
+            inner_column: String::new(),
+            outer_column: String::new(),
+            select_columns: None,
+            max_depth: 10,
+        }
+    }
+
+    /// Set the inner step table.
+    pub fn from(mut self, table: impl Into<TableName>) -> Self {
+        self.table = Some(table.into());
+        self
+    }
+
+    /// Set the recursive correlation mapping.
+    ///
+    /// # Arguments
+    /// * `inner_column` - Column in the inner step table to filter by frontier value
+    /// * `outer_column` - Column in the recursive output relation used for next frontier
+    pub fn correlate(
+        mut self,
+        inner_column: impl Into<String>,
+        outer_column: impl Into<String>,
+    ) -> Self {
+        self.inner_column = inner_column.into();
+        self.outer_column = outer_column.into();
+        self
+    }
+
+    /// Select columns projected by each recursive step.
+    pub fn select(mut self, columns: &[&str]) -> Self {
+        self.select_columns = Some(columns.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    /// Set maximum recursion depth.
+    pub fn max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    /// Build the recursive spec.
+    pub fn build(self) -> RecursiveSpec {
+        RecursiveSpec {
+            table: self.table.unwrap_or_else(|| TableName::new("")),
+            inner_column: self.inner_column,
+            outer_column: self.outer_column,
+            select_columns: self.select_columns,
+            max_depth: self.max_depth,
         }
     }
 }
@@ -1155,6 +1262,41 @@ mod tests {
     }
 
     // ========================================================================
+    // Recursive relation tests
+    // ========================================================================
+
+    #[test]
+    fn query_with_recursive_spec() {
+        let query = QueryBuilder::new("teams")
+            .select(&["team_id"])
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "team_id")
+                    .select(&["parent_team"])
+                    .max_depth(12)
+            })
+            .build();
+
+        assert!(query.has_recursive());
+        let recursive = query.recursive.as_ref().expect("recursive spec");
+        assert_eq!(recursive.table.as_str(), "team_edges");
+        assert_eq!(recursive.inner_column, "child_team");
+        assert_eq!(recursive.outer_column, "team_id");
+        assert_eq!(
+            recursive.select_columns,
+            Some(vec!["parent_team".to_string()])
+        );
+        assert_eq!(recursive.max_depth, 12);
+    }
+
+    #[test]
+    fn query_without_recursive_by_default() {
+        let query = QueryBuilder::new("teams").build();
+        assert!(!query.has_recursive());
+        assert!(query.recursive.is_none());
+    }
+
+    // ========================================================================
     // Branch tests
     // ========================================================================
 
@@ -1262,6 +1404,25 @@ mod tests {
         let query = QueryBuilder::new("orgs")
             .branch("main")
             .with_array("users", |b| b.from("users").correlate("id", "org_id"))
+            .build();
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_recursive_serialization() {
+        let query = QueryBuilder::new("teams")
+            .select(&["team_id"])
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "team_id")
+                    .select(&["parent_team"])
+                    .max_depth(10)
+            })
+            .branch("main")
             .build();
 
         let json = serde_json::to_string(&query).expect("serialize");

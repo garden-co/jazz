@@ -22,6 +22,7 @@ use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::graph_nodes::project::ProjectNode;
+use super::graph_nodes::recursive_relation::RecursiveRelationNode;
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
@@ -43,6 +44,7 @@ pub enum GraphNode {
     Join(JoinNode),
     Materialize(MaterializeNode),
     Project(ProjectNode),
+    RecursiveRelation(RecursiveRelationNode),
     Filter(FilterNode),
     PolicyFilter(PolicyFilterNode),
     Sort(SortNode),
@@ -80,6 +82,8 @@ pub struct QueryGraph {
     pub array_subquery_tables: Vec<(NodeId, TableName)>, // (node_id, inner_table)
     /// PolicyFilter nodes and their INHERITS-referenced tables (for marking dirty on table updates).
     pub policy_filter_tables: Vec<(NodeId, TableName)>, // (node_id, inherits_table)
+    /// RecursiveRelation nodes and their step dependency tables (for marking dirty on table updates).
+    pub recursive_relation_tables: Vec<(NodeId, TableName)>, // (node_id, step_table)
     /// Per-table descriptors in join order (for flattening multi-element tuples).
     pub table_descriptors: Vec<RowDescriptor>,
     /// Combined descriptor for output (all columns from all tables).
@@ -96,6 +100,7 @@ impl QueryGraph {
             index_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
             policy_filter_tables: Vec::new(),
+            recursive_relation_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
         }
@@ -412,6 +417,22 @@ impl QueryGraph {
             phase2_input = project_id;
         }
 
+        // Recursive relation expansion (if configured).
+        if let Some(recursive_spec) = &query.recursive
+            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+                recursive_spec,
+                &current_descriptor,
+                schema,
+                branches,
+            )
+        {
+            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
+            graph.add_edge(node_id, phase2_input);
+            graph.recursive_relation_tables.push((node_id, step_table));
+            phase2_input = node_id;
+            current_descriptor = new_descriptor;
+        }
+
         // Output node
         let output_tuple_desc =
             TupleDescriptor::single_with_materialization("", current_descriptor, true);
@@ -649,6 +670,22 @@ impl QueryGraph {
             phase2_input = project_id;
         }
 
+        // Recursive relation expansion (if configured).
+        if let Some(recursive_spec) = &query.recursive
+            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+                recursive_spec,
+                &current_descriptor,
+                schema,
+                &branches,
+            )
+        {
+            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
+            graph.add_edge(node_id, phase2_input);
+            graph.recursive_relation_tables.push((node_id, step_table));
+            phase2_input = node_id;
+            current_descriptor = new_descriptor;
+        }
+
         // Output node
         let output_tuple_desc =
             TupleDescriptor::single_with_materialization("", current_descriptor, true);
@@ -792,6 +829,72 @@ impl QueryGraph {
         } else {
             Some(RowDescriptor::new(columns))
         }
+    }
+
+    /// Compile a recursive relation specification into a RecursiveRelationNode.
+    fn compile_recursive_relation(
+        &self,
+        spec: &crate::query_manager::query::RecursiveSpec,
+        current_descriptor: &RowDescriptor,
+        schema: &Schema,
+        branches: &[String],
+    ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
+        let step_table_schema = schema.get(&spec.table)?;
+        let step_table_descriptor = step_table_schema.descriptor.clone();
+
+        let outer_col_name = spec
+            .outer_column
+            .split('.')
+            .next_back()
+            .unwrap_or(&spec.outer_column);
+        let correlation_col = current_descriptor.column_index(outer_col_name)?;
+
+        // Build step query for each recursive level.
+        let mut step_query = Query::new(spec.table);
+        step_query.branches = branches.to_vec();
+        step_query.select_columns = spec.select_columns.clone();
+
+        // Build descriptor for step output.
+        let step_output_descriptor = if let Some(cols) = &spec.select_columns {
+            let columns = cols
+                .iter()
+                .filter_map(|name| {
+                    step_table_descriptor
+                        .columns
+                        .iter()
+                        .find(|c| c.name.as_str() == name)
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            RowDescriptor::new(columns)
+        } else {
+            step_table_descriptor
+        };
+
+        // MVP constraint: recursive step projection must align with the seed descriptor by shape.
+        if !descriptors_compatible_by_shape(current_descriptor, &step_output_descriptor) {
+            return None;
+        }
+
+        let step_template = SubgraphTemplate::new(
+            step_query,
+            spec.inner_column.clone(),
+            spec.select_columns.clone().unwrap_or_default(),
+            step_output_descriptor,
+        );
+
+        let input_descriptor =
+            TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+        let node = RecursiveRelationNode::new(
+            input_descriptor,
+            current_descriptor.clone(),
+            step_template,
+            correlation_col,
+            spec.max_depth,
+            schema.clone(),
+        );
+
+        Some((node, current_descriptor.clone(), spec.table))
     }
 
     /// Compile a join query into a graph.
@@ -990,7 +1093,7 @@ impl QueryGraph {
     }
 
     /// Mark all index scan nodes for a table dirty.
-    /// Also marks array subquery nodes dirty if the table is their inner table.
+    /// Also marks array/recursive subquery nodes dirty if the table is their inner table.
     /// Also marks PolicyFilter nodes dirty if the table is INHERITS-referenced.
     pub fn mark_dirty_for_table(&mut self, table: &str) {
         // Mark index scan nodes and propagate downstream
@@ -1056,6 +1159,27 @@ impl QueryGraph {
             // Propagate dirty marks to downstream nodes
             self.mark_downstream_dirty(node_id);
         }
+
+        // Mark RecursiveRelation nodes whose step table changed
+        let affected_recursive_relations: Vec<NodeId> = self
+            .recursive_relation_tables
+            .iter()
+            .filter_map(|(node_id, step_table)| {
+                if step_table.as_str() == table {
+                    Some(*node_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for node_id in affected_recursive_relations {
+            self.mark_dirty(node_id);
+            if let Some(GraphNode::RecursiveRelation(node)) = self.get_node_mut(node_id) {
+                node.mark_inner_dirty();
+            }
+            self.mark_downstream_dirty(node_id);
+        }
     }
 
     /// Check if this graph involves a table (as index scan, array subquery inner table, or INHERITS reference).
@@ -1069,6 +1193,10 @@ impl QueryGraph {
                 .any(|(_, t)| t.as_str() == table)
             || self
                 .policy_filter_tables
+                .iter()
+                .any(|(_, t)| t.as_str() == table)
+            || self
+                .recursive_relation_tables
                 .iter()
                 .any(|(_, t)| t.as_str() == table)
     }
@@ -1200,6 +1328,7 @@ impl QueryGraph {
                 Some(GraphNode::Alias(_)) => "Alias",
                 Some(GraphNode::Join(_)) => "Join",
                 Some(GraphNode::Project(_)) => "Project",
+                Some(GraphNode::RecursiveRelation(_)) => "RecursiveRelation",
                 Some(GraphNode::Materialize(_)) => "Materialize",
                 Some(GraphNode::Filter(_)) => "Filter",
                 Some(GraphNode::PolicyFilter(_)) => "PolicyFilter",
@@ -1302,6 +1431,31 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Project(project_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(project_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::RecursiveRelation(_)) => {
+                    let input_delta = self
+                        .get_inputs(node_id)
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::RecursiveRelation(recursive_node)) =
+                        self.get_node_mut(node_id)
+                    {
+                        let delta = recursive_node.process_with_context(
+                            input_delta,
+                            storage,
+                            &mut row_loader,
+                        );
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -1609,6 +1763,11 @@ impl QueryGraph {
             size += std::mem::size_of::<NodeId>() + table.as_str().len();
         }
 
+        // Recursive relation tables
+        for (_, table) in &self.recursive_relation_tables {
+            size += std::mem::size_of::<NodeId>() + table.as_str().len();
+        }
+
         // Table descriptors - estimate 200 bytes per descriptor
         size += self.table_descriptors.len() * 200;
 
@@ -1617,6 +1776,17 @@ impl QueryGraph {
 
         size
     }
+}
+
+fn descriptors_compatible_by_shape(left: &RowDescriptor, right: &RowDescriptor) -> bool {
+    if left.columns.len() != right.columns.len() {
+        return false;
+    }
+
+    left.columns
+        .iter()
+        .zip(right.columns.iter())
+        .all(|(l, r)| l.column_type == r.column_type)
 }
 
 /// Build remaining predicate from conditions not covered by index scans.
@@ -2017,6 +2187,13 @@ mod tests {
             .any(|c| matches!(c.node, GraphNode::ArraySubquery(_)))
     }
 
+    fn has_recursive_relation_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::RecursiveRelation(_)))
+    }
+
     #[test]
     fn compile_query_with_array_subquery() {
         let schema = join_schema();
@@ -2104,5 +2281,69 @@ mod tests {
         // Or should fail entirely - depends on design choice
         // Current implementation silently skips invalid array subqueries
         assert!(graph.is_some());
+    }
+
+    fn recursive_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("teams"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("team_id", ColumnType::Integer)]).into(),
+        );
+        schema.insert(
+            TableName::new("team_edges"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("child_team", ColumnType::Integer),
+                ColumnDescriptor::new("parent_team", ColumnType::Integer),
+            ])
+            .into(),
+        );
+        schema
+    }
+
+    #[test]
+    fn compile_query_with_recursive_relation() {
+        let schema = recursive_schema();
+        let query = QueryBuilder::new("teams")
+            .select(&["team_id"])
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "team_id")
+                    .select(&["parent_team"])
+                    .max_depth(10)
+            })
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Should have a RecursiveRelationNode"
+        );
+        assert_eq!(graph.recursive_relation_tables.len(), 1);
+        assert_eq!(
+            graph.recursive_relation_tables[0].1.as_str(),
+            "team_edges",
+            "Should track recursive step dependency table"
+        );
+    }
+
+    #[test]
+    fn compile_query_with_recursive_relation_mismatched_shape_is_skipped() {
+        let schema = recursive_schema();
+        let query = QueryBuilder::new("teams")
+            .select(&["team_id"])
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "team_id")
+                    // two columns don't match seed shape (one column)
+                    .select(&["child_team", "parent_team"])
+                    .max_depth(10)
+            })
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert!(
+            !has_recursive_relation_node(&graph),
+            "Mismatched recursive projection shape should be skipped in MVP compiler"
+        );
     }
 }
