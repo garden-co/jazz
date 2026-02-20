@@ -598,11 +598,9 @@ pub fn bind_outer_row_refs(
         }
         PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
             table: table.clone(),
-            condition: Box::new(bind_outer_row_refs(
-                condition,
-                outer_content,
-                outer_descriptor,
-            )?),
+            // Keep nested EXISTS conditions unbound at this level so they can be
+            // correlated against their immediate outer row when evaluated.
+            condition: condition.clone(),
         }),
         PolicyExpr::Inherits {
             operation,
@@ -1087,6 +1085,76 @@ mod tests {
 
         let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_nested_exists_outer_refs_bind_per_level() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Text)]);
+        let content = encode_row(&descriptor, &[Value::Text("todo-1".into())]).unwrap();
+        let session = Session::new("user-1");
+
+        let expr = PolicyExpr::Exists {
+            table: "todo_shares".into(),
+            condition: Box::new(PolicyExpr::And(vec![
+                PolicyExpr::Cmp {
+                    column: "todo_id".into(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(vec![
+                        OUTER_ROW_SESSION_PREFIX.into(),
+                        "id".into(),
+                    ]),
+                },
+                PolicyExpr::Exists {
+                    table: "team_edges".into(),
+                    condition: Box::new(PolicyExpr::Cmp {
+                        column: "child_team".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            "team_id".into(),
+                        ]),
+                    }),
+                },
+            ])),
+        };
+
+        let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
+        assert!(result.passed);
+        assert_eq!(result.complex_clauses.len(), 1);
+
+        match &result.complex_clauses[0] {
+            ComplexClause::Exists { condition, .. } => {
+                let PolicyExpr::And(exprs) = condition.as_ref() else {
+                    panic!("expected bound EXISTS condition to be an AND");
+                };
+                assert!(matches!(
+                    &exprs[0],
+                    PolicyExpr::Cmp {
+                        column,
+                        op: CmpOp::Eq,
+                        value: PolicyValue::Literal(Value::Text(v))
+                    } if column == "todo_id" && v == "todo-1"
+                ));
+
+                assert!(matches!(
+                    &exprs[1],
+                    PolicyExpr::Exists { condition, .. }
+                        if matches!(
+                            condition.as_ref(),
+                            PolicyExpr::Cmp {
+                                column,
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(path),
+                            } if column == "child_team"
+                                && path == &vec![
+                                    OUTER_ROW_SESSION_PREFIX.to_string(),
+                                    "team_id".to_string()
+                                ]
+                        )
+                ));
+            }
+            _ => panic!("expected EXISTS complex clause"),
+        }
     }
 
     // ========================================================================

@@ -32,6 +32,44 @@ interface TodoShareWhere {
   canRead?: boolean;
 }
 
+interface Team {
+  id: string;
+  kind: string;
+  identity_key?: string;
+}
+
+interface TeamWhere {
+  id?: string;
+  kind?: string;
+  identity_key?: string;
+}
+
+interface TeamTeamEdge {
+  id: string;
+  child_team: string;
+  parent_team: string;
+}
+
+interface TeamTeamEdgeWhere {
+  id?: string;
+  child_team?: string;
+  parent_team?: string;
+}
+
+interface ResourceAccessEdge {
+  id: string;
+  team: string;
+  resource: string;
+  grant_role: string;
+}
+
+interface ResourceAccessEdgeWhere {
+  id?: string;
+  team?: string;
+  resource?: string;
+  grant_role?: string;
+}
+
 class TodoQueryBuilder {
   declare readonly _rowType: Todo;
   where(_input: TodoWhere): TodoQueryBuilder {
@@ -46,9 +84,33 @@ class TodoShareQueryBuilder {
   }
 }
 
+class TeamQueryBuilder {
+  declare readonly _rowType: Team;
+  where(_input: TeamWhere): TeamQueryBuilder {
+    return this;
+  }
+}
+
+class TeamTeamEdgeQueryBuilder {
+  declare readonly _rowType: TeamTeamEdge;
+  where(_input: TeamTeamEdgeWhere): TeamTeamEdgeQueryBuilder {
+    return this;
+  }
+}
+
+class ResourceAccessEdgeQueryBuilder {
+  declare readonly _rowType: ResourceAccessEdge;
+  where(_input: ResourceAccessEdgeWhere): ResourceAccessEdgeQueryBuilder {
+    return this;
+  }
+}
+
 const app = {
   todos: new TodoQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
+  teams: new TeamQueryBuilder(),
+  team_team_edges: new TeamTeamEdgeQueryBuilder(),
+  resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
     tables: {
       todos: {
@@ -78,6 +140,48 @@ const app = {
           { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
         ],
       },
+      teams: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          { name: "kind", column_type: { type: "Text" }, nullable: false },
+          { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+      team_team_edges: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
+      },
+      resource_access_edges: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "resource",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "todos",
+          },
+          { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
     },
   },
 };
@@ -85,6 +189,9 @@ const app = {
 const appWithoutSchema = {
   todos: new TodoQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
+  teams: new TeamQueryBuilder(),
+  team_team_edges: new TeamTeamEdgeQueryBuilder(),
+  resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
 };
 
 describe("permissions DSL", () => {
@@ -273,6 +380,113 @@ describe("permissions DSL", () => {
         policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
       ]),
     ).toThrow(/maxdepth must be a positive integer/i);
+  });
+
+  it("compiles policy.recursive start/step with policy.exists(relation)", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      const reachableTeams = policy.recursive({
+        start: policy.teams
+          .where({
+            kind: "individual",
+            identity_key: session.userId,
+          })
+          .select({ team: "id" }),
+        step: ({ self }) =>
+          self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
+            team: "parent_team",
+          }),
+        maxDepth: 3,
+      });
+
+      const hasResourceRole = (resource: unknown, role: string) =>
+        policy.exists(
+          reachableTeams.join(policy.resource_access_edges, { left: "team", right: "team" }).where({
+            "resource_access_edges.resource": resource,
+            grant_role: role,
+          }),
+        );
+
+      return [policy.todos.allowRead.where((todo) => hasResourceRole(todo.id, "viewer"))];
+    });
+
+    const using = compiled.todos.select?.using;
+    expect(using?.type).toBe("Exists");
+    if (!using || using.type !== "Exists") {
+      throw new Error("Expected compiled recursive expression to be EXISTS.");
+    }
+    expect(using.table).toBe("resource_access_edges");
+    expect(using.condition.type).toBe("And");
+    if (using.condition.type !== "And") {
+      throw new Error("Expected anchor EXISTS condition to be AND.");
+    }
+
+    expect(using.condition.exprs).toContainEqual({
+      type: "Cmp",
+      column: "resource",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["__jazz_outer_row", "id"],
+      },
+    });
+    expect(using.condition.exprs).toContainEqual({
+      type: "Cmp",
+      column: "grant_role",
+      op: "Eq",
+      value: {
+        type: "Literal",
+        value: "viewer",
+      },
+    });
+
+    const recursiveExpr = using.condition.exprs.find((expr) => expr.type === "Or");
+    expect(recursiveExpr?.type).toBe("Or");
+    if (!recursiveExpr || recursiveExpr.type !== "Or") {
+      throw new Error("Expected recursive reachability OR expression.");
+    }
+    expect(recursiveExpr.exprs).toHaveLength(4);
+  });
+
+  it("rejects invalid policy.recursive start/step shapes", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        const reachableTeams = policy.recursive({
+          start: policy.teams.where({ kind: "individual" }),
+          step: ({ self }) =>
+            self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
+              team: "parent_team",
+            }),
+        });
+        return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+      }),
+    ).toThrow(/start must project exactly one column/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => {
+        const reachableTeams = policy.recursive({
+          start: policy.teams.where({ identity_key: session.userId }).select({ team: "id" }),
+          step: ({ self }) =>
+            self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
+              wrong_alias: "parent_team",
+            }),
+        });
+        return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+      }),
+    ).toThrow(/step select alias must match start alias/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => {
+        const reachableTeams = policy.recursive({
+          start: policy.teams.where({ identity_key: session.userId }).select({ team: "id" }),
+          step: ({ self }) =>
+            self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
+              team: "parent_team",
+            }),
+          maxDepth: 999,
+        });
+        return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+      }),
+    ).toThrow(/exceeds hard cap/i);
   });
 
   it("rejects allowedTo when column is not a foreign key", () => {
