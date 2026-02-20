@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! jazz-tools create app [--name <NAME>]    # Returns AppId (random or deterministic from name)
-//! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data]
+//! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory]
 //! ```
 
 mod commands;
@@ -64,9 +64,13 @@ enum Commands {
         #[arg(short, long, default_value = "1625")]
         port: u16,
 
-        /// Data directory for persistent storage
+        /// Data directory for persistent storage (ignored if --in-memory)
         #[arg(short, long, default_value = "./data")]
         data_dir: String,
+
+        /// Use a temporary directory for storage (ephemeral, created on the fly)
+        #[arg(long)]
+        in_memory: bool,
 
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
@@ -127,12 +131,24 @@ async fn main() {
             app_id,
             port,
             data_dir,
+            in_memory,
             jwks_url,
             allow_anonymous,
             allow_demo,
             backend_secret,
             admin_secret,
         } => {
+            let data_dir = if in_memory {
+                let tmp =
+                    std::env::temp_dir().join(format!("jazz-server-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&tmp).expect("failed to create temp dir for --in-memory");
+                tmp.into_os_string()
+                    .into_string()
+                    .expect("temp path is valid UTF-8")
+            } else {
+                data_dir
+            };
+
             let node_env_mode = resolve_node_env_mode();
             let allow_anonymous = match node_env_mode {
                 NodeEnvMode::Production => allow_anonymous,
