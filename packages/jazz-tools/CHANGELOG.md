@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.20.11
+
+### Patch Changes
+
+- 191ce7a: Mark CoValue migration failures as unavailable instead of throwing behavior.
+
+  When a migration throws (for example, async migrations or write attempts without permissions), loading now resolves to a CoValue with `$jazz.loadingState === "unavailable"`.
+  - cojson@0.20.11
+  - cojson-storage-indexeddb@0.20.11
+  - cojson-transport-ws@0.20.11
+
 ## 0.20.10
 
 ### Patch Changes

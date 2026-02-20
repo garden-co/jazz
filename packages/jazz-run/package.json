@@ -3,7 +3,7 @@
   "bin": "./dist/index.js",
   "type": "module",
   "license": "MIT",
-  "version": "0.20.10",
+  "version": "0.20.11",
   "exports": {
     "./startSyncServer": {
       "types": "./dist/startSyncServer.d.ts",
@@ -29,12 +29,12 @@
     "@effect/printer-ansi": "^0.34.5",
     "@effect/schema": "^0.71.1",
     "@effect/typeclass": "^0.25.5",
-    "cojson": "workspace:0.20.10",
-    "cojson-storage-sqlite": "workspace:0.20.10",
-    "cojson-transport-ws": "workspace:0.20.10",
+    "cojson": "workspace:0.20.11",
+    "cojson-storage-sqlite": "workspace:0.20.11",
+    "cojson-transport-ws": "workspace:0.20.11",
     "effect": "^3.6.5",
-    "jazz-tools": "workspace:0.20.10",
-    "jazz-webhook": "workspace:0.20.10",
+    "jazz-tools": "workspace:0.20.11",
+    "jazz-webhook": "workspace:0.20.11",
     "ws": "^8.14.2"
   },
   "devDependencies": {

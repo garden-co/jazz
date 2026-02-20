@@ -1,6 +1,6 @@
 {
   "name": "cojson-core-napi-linux-arm64-gnu",
-  "version": "0.20.10",
+  "version": "0.20.11",
   "cpu": [
     "arm64"
   ],
