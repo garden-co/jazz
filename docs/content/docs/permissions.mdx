@@ -80,6 +80,159 @@ TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete
   </Tab>
 </Tabs>
 
+## Advanced: Recursive INHERITS
+
+Use depth-bounded `INHERITS` when foreign keys can form recursive chains (for example, `folders.parent_id -> folders.id`).
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    ```ts
+    import { definePermissions } from "jazz-tools/permissions";
+    import { app } from "./app.js";
+
+    export default definePermissions(app, ({ policy, allowedTo }) => [
+      // Default recursive depth is 10.
+      policy.folders.allowRead.where(allowedTo.read("parentId")),
+
+      // Explicit override for recursive/self-referential chains.
+      policy.folders.allowUpdate
+        .whereOld(allowedTo.update("parentId", { maxDepth: 5 }))
+        .whereNew(allowedTo.update("parentId", { maxDepth: 5 })),
+    ]);
+    ```
+
+    `maxDepth` must be a positive integer.
+    Unbounded self-referential `INHERITS` cycles are rejected by schema validation; use `maxDepth` for bounded traversal.
+
+  </Tab>
+  <Tab value="Rust">
+    ```rs
+    use groove::query_manager::policy::{Operation, PolicyExpr};
+    use groove::query_manager::types::TablePolicies;
+
+    let folder_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::inherits_with_depth(Operation::Select, "parent_id", 10),
+    ]));
+    ```
+
+    `PolicyExpr::inherits(...)` uses default depth `10`.
+    `PolicyExpr::inherits_with_depth(...)` overrides it.
+    Runtime hard cap is `64`.
+
+  </Tab>
+</Tabs>
+
+## Advanced: Complex Recursive Policies (`start` / `step`)
+
+When simple `allowedTo.*(...)` is not expressive enough, define an explicit recursive relation with `policy.recursive({ start, step })` and anchor it with `policy.exists(...)`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    ```ts
+    import { definePermissions } from "jazz-tools/permissions";
+    import { app } from "./app.js";
+
+    export default definePermissions(app, ({ policy, session }) => {
+      const reachableTeams = policy.recursive({
+        start: policy.teams
+          .where({
+            kind: "individual",
+            identity_key: session.userId,
+          })
+          .select({ team: "id" }),
+        step: ({ self }) =>
+          self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
+            team: "parent_team",
+          }),
+        maxDepth: 10,
+      });
+
+      return [
+        policy.todos.allowRead.where((todo) =>
+          policy.exists(
+            reachableTeams.join(policy.resource_access_edges, { left: "team", right: "team" }).where({
+              "resource_access_edges.resource": todo.id,
+              grant_role: "viewer",
+            }),
+          ),
+        ),
+      ];
+    });
+    ```
+
+    MVP constraints:
+
+    - `start` must begin from `policy.<table>`, with no joins, and exactly one `select({ alias: column })`.
+    - `step` must use the provided `self`, include exactly one join, and project the same alias as `start`.
+    - `policy.exists(...)` currently supports at most one join after a recursive relation.
+    - Recursion is compiled by bounded unrolling (default depth `10`, hard cap `64`).
+
+  </Tab>
+  <Tab value="Rust">
+    ```rs
+    use groove::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue, OUTER_ROW_SESSION_PREFIX};
+    use groove::query_manager::types::Value;
+
+    // Rust currently has no high-level policy.recursive(start/step) helper.
+    // Build the equivalent form directly as bounded nested EXISTS clauses.
+    fn reachable_team(max_depth: usize, anchor_team_col: &str) -> PolicyExpr {
+        fn path(depth: usize, target: PolicyValue) -> PolicyExpr {
+            if depth == 0 {
+                return PolicyExpr::Exists {
+                    table: "teams".into(),
+                    condition: Box::new(PolicyExpr::and(vec![
+                        PolicyExpr::eq_literal("kind", Value::Text("individual".into())),
+                        PolicyExpr::eq_session("identity_key", vec!["user_id".into()]),
+                        PolicyExpr::Cmp {
+                            column: "id".into(),
+                            op: CmpOp::Eq,
+                            value: target,
+                        },
+                    ])),
+                };
+            }
+
+            PolicyExpr::Exists {
+                table: "team_team_edges".into(),
+                condition: Box::new(PolicyExpr::and(vec![
+                    PolicyExpr::Cmp {
+                        column: "parent_team".into(),
+                        op: CmpOp::Eq,
+                        value: target,
+                    },
+                    path(
+                        depth - 1,
+                        PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            "child_team".into(),
+                        ]),
+                    ),
+                ])),
+            }
+        }
+
+        PolicyExpr::or(
+            (0..=max_depth)
+                .map(|depth| {
+                    path(
+                        depth,
+                        PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            anchor_team_col.to_string(),
+                        ]),
+                    )
+                })
+                .collect(),
+        )
+    }
+    ```
+
+    This mirrors the TypeScript compiler strategy: naive bounded unrolling into nested `EXISTS` and `CMP` expressions.
+
+  </Tab>
+</Tabs>
+
 ## Policy enforcement and request context
 
 Jazz permissions use relationship-based policy evaluation with requester session context.
