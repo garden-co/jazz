@@ -25,6 +25,44 @@ interface ProjectWhere {
   ownerId?: string;
 }
 
+interface Team {
+  id: string;
+  kind: string;
+  identity_key?: string;
+}
+
+interface TeamWhere {
+  id?: string;
+  kind?: string;
+  identity_key?: string;
+}
+
+interface TeamEdge {
+  id: string;
+  child_team: string;
+  parent_team: string;
+}
+
+interface TeamEdgeWhere {
+  id?: string;
+  child_team?: string;
+  parent_team?: string;
+}
+
+interface ResourceGrant {
+  id: string;
+  team: string;
+  resource: string;
+  grant_role: string;
+}
+
+interface ResourceGrantWhere {
+  id?: string;
+  team?: string;
+  resource?: string;
+  grant_role?: string;
+}
+
 class TodoQueryBuilder {
   declare readonly _rowType: Todo;
   where(_input: TodoWhere): TodoQueryBuilder {
@@ -39,9 +77,33 @@ class ProjectQueryBuilder {
   }
 }
 
+class TeamQueryBuilder {
+  declare readonly _rowType: Team;
+  where(_input: TeamWhere): TeamQueryBuilder {
+    return this;
+  }
+}
+
+class TeamEdgeQueryBuilder {
+  declare readonly _rowType: TeamEdge;
+  where(_input: TeamEdgeWhere): TeamEdgeQueryBuilder {
+    return this;
+  }
+}
+
+class ResourceGrantQueryBuilder {
+  declare readonly _rowType: ResourceGrant;
+  where(_input: ResourceGrantWhere): ResourceGrantQueryBuilder {
+    return this;
+  }
+}
+
 const app = {
   todos: new TodoQueryBuilder(),
   projects: new ProjectQueryBuilder(),
+  teams: new TeamQueryBuilder(),
+  team_team_edges: new TeamEdgeQueryBuilder(),
+  resource_access_edges: new ResourceGrantQueryBuilder(),
   wasmSchema: {
     tables: {
       todos: {
@@ -63,6 +125,48 @@ const app = {
           { name: "ownerId", column_type: { type: "Text" }, nullable: false },
         ],
       },
+      teams: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          { name: "kind", column_type: { type: "Text" }, nullable: false },
+          { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+      team_team_edges: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
+      },
+      resource_access_edges: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "resource",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "todos",
+          },
+          { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
     },
   },
 } as const;
@@ -72,6 +176,24 @@ describe("permissions type inference", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
 
+      const reachableTeams = policy.recursive({
+        start: policy.teams
+          .where({ kind: "individual", identity_key: session.userId })
+          .select({ team: "id" }),
+        step: ({ self }) =>
+          self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
+            team: "parent_team",
+          }),
+      });
+
+      const hasViewerGrant = (resource: unknown) =>
+        policy.exists(
+          reachableTeams.join(policy.resource_access_edges, { left: "team", right: "team" }).where({
+            "resource_access_edges.resource": resource,
+            grant_role: "viewer",
+          }),
+        );
+
       return [
         policy.todos.allowRead.where((todo) =>
           anyOf([
@@ -80,6 +202,7 @@ describe("permissions type inference", () => {
               id: todo.projectId,
               ownerId: session.userId,
             }),
+            hasViewerGrant(todo.id),
           ]),
         ),
         policy.todos.allowUpdate
