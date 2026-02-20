@@ -8,7 +8,7 @@ pre-commit:
       glob: "*.rs"
       run: cargo clippy --workspace -- -D warnings
     oxfmt:
-      glob: "*.{ts,tsx,js,jsx,md}"
+      glob: "*.{ts,tsx,js,jsx,md,mdx}"
       exclude: "crates/jazz-rn/src/**"
       run: pnpm oxfmt {staged_files}
       stage_fixed: true
