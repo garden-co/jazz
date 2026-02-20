@@ -22,7 +22,7 @@
   "main": "pkg/jazz_wasm.js",
   "types": "pkg/jazz_wasm.d.ts",
   "scripts": {
-    "build": "wasm-pack build --target web"
+    "build": "wasm-pack build --target web --profiling"
   },
   "dependencies": {
     "wasm-pack": "^0.14.0"
