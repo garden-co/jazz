@@ -17,14 +17,14 @@ struct QueryEnvelope<'a> {
 struct LinearJoinInfo {
     base_table: TableName,
     base_scope: String,
-    conditions: Vec<Condition>,
+    disjuncts: Vec<Conjunction>,
     joins: Vec<JoinSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeCorePlan {
     table: TableName,
-    conditions: Vec<Condition>,
+    disjuncts: Vec<Conjunction>,
     joins: Vec<JoinSpec>,
     result_element_index: Option<usize>,
     recursive: Option<RecursiveSpec>,
@@ -101,21 +101,75 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
     }
 }
 
-fn relation_predicate_to_conditions(predicate: &PredicateExpr) -> Option<Vec<Condition>> {
-    if matches!(predicate, PredicateExpr::True) {
-        return Some(Vec::new());
+fn dnf_true() -> Vec<Conjunction> {
+    vec![Conjunction::new()]
+}
+
+fn and_disjuncts(lhs: Vec<Conjunction>, rhs: Vec<Conjunction>) -> Vec<Conjunction> {
+    let mut out = Vec::new();
+    for left in lhs {
+        for right in &rhs {
+            let mut merged = left.clone();
+            merged.conditions.extend(right.conditions.clone());
+            out.push(merged);
+        }
     }
+    out
+}
 
-    let mut terms = Vec::new();
-    flatten_predicate_terms(predicate, &mut terms);
-
-    let mut conditions = Vec::with_capacity(terms.len());
-    for term in terms {
-        let condition = predicate_term_to_condition(term)?;
-        conditions.push(condition);
+fn relation_predicate_to_disjuncts(predicate: &PredicateExpr) -> Option<Vec<Conjunction>> {
+    match predicate {
+        PredicateExpr::True => Some(dnf_true()),
+        PredicateExpr::Cmp { .. }
+        | PredicateExpr::IsNull { .. }
+        | PredicateExpr::IsNotNull { .. } => {
+            let condition = predicate_term_to_condition(predicate)?;
+            Some(vec![Conjunction {
+                conditions: vec![condition],
+            }])
+        }
+        PredicateExpr::In { left, values } => {
+            if values.is_empty() {
+                return None;
+            }
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                let literal = match value {
+                    ValueRef::Literal(v) => v.clone(),
+                    _ => return None,
+                };
+                out.push(Conjunction {
+                    conditions: vec![Condition::Eq {
+                        column: to_runtime_column(&left.column),
+                        value: literal,
+                    }],
+                });
+            }
+            Some(out)
+        }
+        PredicateExpr::And(exprs) => {
+            let mut current = dnf_true();
+            for expr in exprs {
+                let rhs = relation_predicate_to_disjuncts(expr)?;
+                current = and_disjuncts(current, rhs);
+                if current.is_empty() {
+                    return None;
+                }
+            }
+            Some(current)
+        }
+        PredicateExpr::Or(exprs) => {
+            let mut out = Vec::new();
+            for expr in exprs {
+                out.extend(relation_predicate_to_disjuncts(expr)?);
+            }
+            if out.is_empty() {
+                return None;
+            }
+            Some(out)
+        }
+        PredicateExpr::False | PredicateExpr::Not(_) => None,
     }
-
-    Some(conditions)
 }
 
 fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
@@ -123,13 +177,16 @@ fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
         RelExpr::TableScan { table } => Some(LinearJoinInfo {
             base_table: *table,
             base_scope: table.as_str().to_string(),
-            conditions: Vec::new(),
+            disjuncts: dnf_true(),
             joins: Vec::new(),
         }),
         RelExpr::Filter { input, predicate } => {
             let mut inner = extract_linear_join_info(input)?;
-            let conditions = relation_predicate_to_conditions(predicate)?;
-            inner.conditions.extend(conditions);
+            let filter_disjuncts = relation_predicate_to_disjuncts(predicate)?;
+            inner.disjuncts = and_disjuncts(inner.disjuncts, filter_disjuncts);
+            if inner.disjuncts.is_empty() {
+                return None;
+            }
             Some(inner)
         }
         RelExpr::Join {
@@ -278,7 +335,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
 
     Some(RuntimeCorePlan {
         table: seed_info.base_table,
-        conditions: seed_info.conditions,
+        disjuncts: seed_info.disjuncts,
         joins: Vec::new(),
         result_element_index: None,
         recursive: Some(recursive),
@@ -301,8 +358,11 @@ fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
         }
         RelExpr::Filter { input, predicate } => {
             let mut inner = parse_gather_join_info(input)?;
-            let mut conditions = relation_predicate_to_conditions(predicate)?;
-            inner.plan.conditions.append(&mut conditions);
+            let filter_disjuncts = relation_predicate_to_disjuncts(predicate)?;
+            inner.plan.disjuncts = and_disjuncts(inner.plan.disjuncts, filter_disjuncts);
+            if inner.plan.disjuncts.is_empty() {
+                return None;
+            }
             Some(inner)
         }
         RelExpr::Join {
@@ -365,7 +425,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             let linear = extract_linear_join_info(input)?;
             Some(RuntimeCorePlan {
                 table: linear.base_table,
-                conditions: linear.conditions,
+                disjuncts: linear.disjuncts,
                 joins: linear.joins.clone(),
                 result_element_index: Some(linear.joins.len()),
                 recursive: None,
@@ -379,7 +439,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             let linear = extract_linear_join_info(core)?;
             Some(RuntimeCorePlan {
                 table: linear.base_table,
-                conditions: linear.conditions,
+                disjuncts: linear.disjuncts,
                 joins: linear.joins,
                 result_element_index: None,
                 recursive: None,
@@ -446,9 +506,10 @@ pub(crate) fn lower_relation_to_execution_query(
     lowered.table = core_plan.table;
     lowered.alias = None;
     lowered.branches = branches.to_vec();
-    lowered.disjuncts = vec![Conjunction {
-        conditions: core_plan.conditions,
-    }];
+    if core_plan.disjuncts.is_empty() {
+        return None;
+    }
+    lowered.disjuncts = core_plan.disjuncts;
     lowered.joins = core_plan.joins;
     lowered.order_by = envelope.order_by;
     lowered.offset = envelope.offset;

@@ -2686,6 +2686,40 @@ mod tests {
     }
 
     #[test]
+    fn compile_relation_ir_with_or_filter_produces_union_plan() {
+        let schema = test_schema();
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            predicate: PredicateExpr::Or(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Alice".to_string())),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Bob".to_string())),
+                },
+            ]),
+        };
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("OR filter relation should compile");
+
+        assert_eq!(graph.index_scan_nodes.len(), 2);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Union(_))),
+            "OR relation filters should lower to multi-disjunct union plans",
+        );
+    }
+
+    #[test]
     fn compile_query_with_relation_ir_project_join_order_limit_shape() {
         let schema = recursive_hop_schema();
         let relation = RelExpr::Limit {
@@ -2889,18 +2923,11 @@ mod tests {
             input: Box::new(RelExpr::TableScan {
                 table: TableName::new("users"),
             }),
-            predicate: PredicateExpr::Or(vec![
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("name"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Text("Alice".to_string())),
-                },
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("name"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Text("Bob".to_string())),
-                },
-            ]),
+            predicate: PredicateExpr::Not(Box::new(PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("name"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Text("Alice".to_string())),
+            })),
         };
         let branches = vec!["main".to_string()];
         let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None);
