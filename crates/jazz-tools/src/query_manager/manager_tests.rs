@@ -263,35 +263,12 @@ fn recursive_query_with_hop_expands_transitive_closure() {
 }
 
 #[test]
-fn recursive_query_with_join_project_step_expands_transitive_closure() {
+fn recursive_query_with_legacy_join_project_step_is_rejected() {
     let sync_manager = SyncManager::new();
     let schema = recursive_hop_team_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
-    let team1 = qm
-        .insert(&mut storage, "teams", &[Value::Text("team-1".into())])
-        .unwrap();
-    let team2 = qm
-        .insert(&mut storage, "teams", &[Value::Text("team-2".into())])
-        .unwrap();
-    let team3 = qm
-        .insert(&mut storage, "teams", &[Value::Text("team-3".into())])
-        .unwrap();
-
-    qm.insert(
-        &mut storage,
-        "team_edges",
-        &[Value::Uuid(team1.row_id), Value::Uuid(team2.row_id)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "team_edges",
-        &[Value::Uuid(team2.row_id), Value::Uuid(team3.row_id)],
-    )
-    .unwrap();
-
-    let query = qm
+    let query_result = qm
         .query("teams")
         .filter_eq("name", Value::Text("team-1".into()))
         .with_recursive(|r| {
@@ -303,18 +280,12 @@ fn recursive_query_with_join_project_step_expands_transitive_closure() {
                 .result_element_index(1)
                 .max_depth(10)
         })
-        .build();
+        .try_build();
 
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    let mut names: Vec<String> = results
-        .into_iter()
-        .filter_map(|(_, values)| match values.first() {
-            Some(Value::Text(name)) => Some(name.clone()),
-            _ => None,
-        })
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["team-1", "team-2", "team-3"]);
+    assert!(
+        query_result.is_err(),
+        "legacy recursive join-projection shape should be rejected"
+    );
 }
 
 #[test]
@@ -4703,6 +4674,26 @@ fn policy_schema() -> Schema {
     schema
 }
 
+fn join_policy_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_name", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
+        ),
+    );
+    schema
+}
+
 #[test]
 fn policy_filters_select_results() {
     let sync_manager = SyncManager::new();
@@ -4881,6 +4872,55 @@ fn table_without_policy_returns_all_rows() {
     );
 }
 
+#[test]
+fn join_query_applies_policy_filter_on_joined_table() {
+    let sync_manager = SyncManager::new();
+    let schema = join_policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
+        .unwrap();
+    qm.insert(&mut storage, "users", &[Value::Text("bob".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("Alice post".into()),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[Value::Text("bob".into()), Value::Text("Bob post".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("join subscription should emit initial delta");
+    assert_eq!(
+        update.delta.added.len(),
+        1,
+        "join query should apply policy filter on joined table rows"
+    );
+}
+
 // ========================================================================
 // Branch-aware query tests
 // ========================================================================
@@ -4995,6 +5035,59 @@ fn query_multi_branch_requires_explicit_branch() {
     let query = qm.query("users").build();
     assert!(query.branches.is_empty());
     assert!(!query.is_multi_branch());
+}
+
+#[test]
+fn join_query_with_multiple_branches_reads_all_branches() {
+    let sync_manager = SyncManager::new();
+    let schema = join_policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let main_branch = get_branch(&qm);
+    let draft_branch = "draft";
+
+    qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[Value::Text("alice".into()), Value::Text("main post".into())],
+    )
+    .unwrap();
+
+    qm.insert_on_branch(
+        &mut storage,
+        "users",
+        draft_branch,
+        &[Value::Text("dora".into())],
+    )
+    .unwrap();
+    qm.insert_on_branch(
+        &mut storage,
+        "posts",
+        draft_branch,
+        &[Value::Text("dora".into()), Value::Text("draft post".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .branches(&[main_branch.as_str(), draft_branch])
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("join subscription should emit initial delta");
+    assert_eq!(
+        update.delta.added.len(),
+        2,
+        "join query across branches should include rows from each branch"
+    );
 }
 
 #[test]
@@ -5363,18 +5456,24 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     server_qm.process(&mut storage);
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let error_to_client = outbox.iter().find(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
+    let error_reason = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
             (
                 Destination::Client(id),
-                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, .. }),
-            ) if *id == client_id && *query_id == QueryId(42)
-        )
-    });
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
+            ) if *id == client_id && *query_id == QueryId(42) => Some(reason.clone()),
+            _ => None,
+        });
+    let reason = error_reason
+        .expect("Server should send an error payload when query subscription compilation fails");
     assert!(
-        error_to_client.is_some(),
-        "Server should send an error payload when query subscription compilation fails"
+        reason.contains("query_id 42"),
+        "error reason should include query id context: {reason}"
+    );
+    assert!(
+        reason.contains("no_such_table"),
+        "error reason should include compile error context: {reason}"
     );
 }
 
