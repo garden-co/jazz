@@ -134,6 +134,11 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
@@ -153,15 +158,13 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
-      - name: Verify packed jazz-wasm payload
+      - name: Build jazz-napi npm package
+        run: pnpm --filter jazz-napi build
+
+      - name: Verify jazz-napi publish artifacts
         run: |
-          TMP_DIR=$(mktemp -d)
-          pnpm --filter jazz-wasm pack --pack-destination "${TMP_DIR}"
-          TARBALL=$(ls "${TMP_DIR}"/jazz-wasm-*.tgz | head -n 1)
-          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.wasm"
-          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.js"
-          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.js"
-          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.d.ts"
+          test -f crates/jazz-napi/jazz-napi.node
+          test -f crates/jazz-napi/index.d.ts
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
@@ -184,9 +187,34 @@ jobs:
         if: ${{ inputs.version != '' }}
         run: npm --prefix packages/jazz-tools version "${{ inputs.version }}" --no-git-tag-version
 
-      - name: Verify prerelease version
+      - name: Lock-step npm package versions
         run: |
-          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(p.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${p.version}`);}console.log(`Publishing ${p.name}@${p.version}`);'
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
+          npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+
+      - name: Verify lock-stepped prerelease versions
+        run: |
+          node -e 'const fs=require("fs");const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(tools.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${tools.version}`);}if(!(tools.version===wasm.version&&tools.version===napi.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version}`);}console.log(`Publishing lock-stepped versions at ${tools.version}`);'
+
+      - name: Verify packed jazz-wasm payload
+        run: |
+          TMP_DIR=$(mktemp -d)
+          pnpm --filter jazz-wasm pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-wasm-*.tgz | head -n 1)
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.js"
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.js"
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.d.ts"
+
+      - name: Verify packed jazz-napi payload
+        run: |
+          TMP_DIR=$(mktemp -d)
+          pnpm --filter jazz-napi pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-napi-*.tgz | head -n 1)
+          tar -tf "${TARBALL}" | grep -q "package/jazz-napi.node"
+          tar -tf "${TARBALL}" | grep -q "package/index.js"
+          tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
 
       - name: Verify packed jazz-tools manifest
         run: |
@@ -202,6 +230,15 @@ jobs:
             echo "jazz-wasm@${WASM_VERSION} already exists on npm; skipping publish."
           else
             pnpm --filter jazz-wasm publish --tag alpha --access public --no-git-checks
+          fi
+
+      - name: Publish jazz-napi (alpha tag)
+        run: |
+          NAPI_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-napi/package.json","utf8")).version')
+          if npm view "jazz-napi@${NAPI_VERSION}" version >/dev/null 2>&1; then
+            echo "jazz-napi@${NAPI_VERSION} already exists on npm; skipping publish."
+          else
+            pnpm --filter jazz-napi publish --tag alpha --access public --no-git-checks
           fi
 
       - name: Publish jazz-tools (alpha tag)
