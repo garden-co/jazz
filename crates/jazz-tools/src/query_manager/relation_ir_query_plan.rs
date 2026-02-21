@@ -1,6 +1,6 @@
 use super::graph_nodes::sort::SortDirection;
 use super::query::{
-    ArraySubquerySpec, Condition, Conjunction, JoinSpec, Query, RecursiveHopSpec, RecursiveSpec,
+    ArraySubquerySpec, Condition, Conjunction, JoinSpec, RecursiveHopSpec, RecursiveSpec,
 };
 use super::relation_ir::{
     JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr, RelExpr,
@@ -32,6 +32,22 @@ struct RuntimeCorePlan {
     joins: Vec<JoinSpec>,
     result_element_index: Option<usize>,
     recursive: Option<RecursiveSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExecutionQueryPlan {
+    pub table: TableName,
+    pub branches: Vec<String>,
+    pub disjuncts: Vec<Conjunction>,
+    pub joins: Vec<JoinSpec>,
+    pub recursive: Option<RecursiveSpec>,
+    pub result_element_index: Option<usize>,
+    pub order_by: Vec<(String, SortDirection)>,
+    pub offset: usize,
+    pub limit: Option<usize>,
+    pub include_deleted: bool,
+    pub array_subqueries: Vec<ArraySubquerySpec>,
+    pub select_columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -649,33 +665,31 @@ fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
     }
 }
 
-pub(crate) fn lower_relation_to_execution_query(
+pub(crate) fn lower_relation_to_execution_plan(
     relation: &RelExpr,
     branches: &[String],
     include_deleted: bool,
     array_subqueries: Vec<ArraySubquerySpec>,
     select_columns: Option<Vec<String>>,
-) -> Option<Query> {
+) -> Option<ExecutionQueryPlan> {
     let envelope = unwrap_query_envelope(relation);
     let core_plan = parse_runtime_core_plan(envelope.core)?;
-
-    let mut lowered = Query::new(core_plan.table);
-    lowered.table = core_plan.table;
-    lowered.alias = None;
-    lowered.branches = branches.to_vec();
     if core_plan.disjuncts.is_empty() {
         return None;
     }
-    lowered.disjuncts = core_plan.disjuncts;
-    lowered.joins = core_plan.joins;
-    lowered.order_by = envelope.order_by;
-    lowered.offset = envelope.offset;
-    lowered.limit = envelope.limit;
-    lowered.result_element_index = core_plan.result_element_index;
-    lowered.recursive = core_plan.recursive;
-    lowered.include_deleted = include_deleted;
-    lowered.array_subqueries = array_subqueries;
-    lowered.select_columns = select_columns;
-    lowered.relation_ir = None;
-    Some(lowered)
+
+    Some(ExecutionQueryPlan {
+        table: core_plan.table,
+        branches: branches.to_vec(),
+        disjuncts: core_plan.disjuncts,
+        joins: core_plan.joins,
+        recursive: core_plan.recursive,
+        result_element_index: core_plan.result_element_index,
+        order_by: envelope.order_by,
+        offset: envelope.offset,
+        limit: envelope.limit,
+        include_deleted,
+        array_subqueries,
+        select_columns,
+    })
 }

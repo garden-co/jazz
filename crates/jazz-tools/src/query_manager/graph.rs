@@ -26,14 +26,14 @@ use super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
 };
 use super::graph_nodes::select_element::SelectElementNode;
-use super::graph_nodes::sort::SortNode;
+use super::graph_nodes::sort::{SortDirection, SortKey, SortNode};
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
-use super::query::{ArraySubquerySpec, Condition, Query};
+use super::query::{ArraySubquerySpec, Condition, Conjunction, Query};
 use super::relation_ir::RelExpr;
-use super::relation_ir_query_plan::lower_relation_to_execution_query;
+use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, Row, RowDelta, RowDescriptor,
@@ -263,14 +263,14 @@ impl QueryGraph {
         session: Option<Session>,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
-        let query = lower_relation_to_execution_query(
+        let plan = lower_relation_to_execution_plan(
             relation,
             branches,
             features.include_deleted,
             features.array_subqueries,
             features.select_columns,
         )?;
-        Self::compile_with_session(&query, schema, session)
+        Self::compile_execution_plan_with_session(&plan, schema, session)
     }
 
     /// Compile relation IR directly into a graph with schema context.
@@ -299,14 +299,480 @@ impl QueryGraph {
         schema_context: &SchemaContext,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
-        let query = lower_relation_to_execution_query(
+        let plan = lower_relation_to_execution_plan(
             relation,
             branches,
             features.include_deleted,
             features.array_subqueries,
             features.select_columns,
         )?;
-        Self::compile_with_schema_context(&query, schema, session, schema_context)
+        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+    }
+
+    fn compile_execution_plan_with_session(
+        plan: &ExecutionQueryPlan,
+        schema: &Schema,
+        session: Option<Session>,
+    ) -> Option<Self> {
+        // Get branches (default to "main" if not specified)
+        let default_branches = vec!["main".to_string()];
+        let branches: &[String] = if plan.branches.is_empty() {
+            &default_branches
+        } else {
+            &plan.branches
+        };
+
+        if !plan.joins.is_empty() {
+            // TODO: Add policy support for joins
+            return Self::compile_join_plan(plan, schema, branches);
+        }
+
+        let table_schema = schema.get(&plan.table)?;
+        let descriptor = table_schema.descriptor.clone();
+        let select_policy = table_schema.policies.select.using.clone();
+        let mut graph = QueryGraph::new(plan.table, descriptor.clone());
+
+        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
+        // For multi-branch queries, we create scans for each branch and union them
+        let mut phase1_outputs: Vec<NodeId> = Vec::new();
+        let mut index_columns: Vec<String> = Vec::new();
+
+        for branch in branches {
+            for disjunct in &plan.disjuncts {
+                // Find best index condition for this disjunct
+                let (scan_column, scan_condition) =
+                    if let Some(cond) = disjunct.best_index_condition() {
+                        let column = cond.column().to_string();
+                        let scan_cond = condition_to_scan(cond);
+                        (column, scan_cond)
+                    } else {
+                        // No index condition, use "_id" for full scan
+                        ("_id".to_string(), ScanCondition::All)
+                    };
+
+                index_columns.push(scan_column.clone());
+                let scan_column_name = ColumnName::new(&scan_column);
+
+                let scan_node = IndexScanNode::new_with_branch(
+                    plan.table,
+                    scan_column_name,
+                    branch,
+                    scan_condition,
+                    descriptor.clone(),
+                );
+                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((scan_id, plan.table, scan_column_name));
+                phase1_outputs.push(scan_id);
+            }
+
+            // If include_deleted is set, also scan _id_deleted index for this branch
+            if plan.include_deleted {
+                let deleted_column = ColumnName::new("_id_deleted");
+                let deleted_scan_node = IndexScanNode::new_with_branch(
+                    plan.table,
+                    deleted_column,
+                    branch,
+                    ScanCondition::All,
+                    descriptor.clone(),
+                );
+                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((deleted_scan_id, plan.table, deleted_column));
+                phase1_outputs.push(deleted_scan_id);
+            }
+        }
+
+        // If multiple outputs, add Union node
+        let phase1_output = if phase1_outputs.len() > 1 {
+            let union_node = UnionNode::new();
+            let union_id = graph.add_node(GraphNode::Union(union_node));
+            for scan_id in &phase1_outputs {
+                graph.add_edge(union_id, *scan_id);
+            }
+            union_id
+        } else if !phase1_outputs.is_empty() {
+            phase1_outputs[0]
+        } else {
+            return None;
+        };
+
+        // Materialize node (boundary between Phase 1 and Phase 2)
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let materialize_node = MaterializeNode::new_all(tuple_desc);
+        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
+        graph.add_edge(materialize_id, phase1_output);
+
+        let mut phase2_input = materialize_id;
+        let mut current_descriptor = descriptor.clone();
+
+        // Policy filter node (if session provided and table has SELECT policy)
+        if let (Some(session), Some(policy)) = (&session, select_policy) {
+            let policy_node = PolicyFilterNode::new(
+                current_descriptor.clone(),
+                policy,
+                session.clone(),
+                schema.clone(),
+                plan.table.as_str(),
+            );
+            let inherits_tables: Vec<TableName> = policy_node
+                .inherits_tables()
+                .iter()
+                .map(TableName::new)
+                .collect();
+            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+            graph.add_edge(policy_id, phase2_input);
+            for inherits_table in inherits_tables {
+                graph.policy_filter_tables.push((policy_id, inherits_table));
+            }
+            phase2_input = policy_id;
+        }
+
+        // Array subqueries: insert ArraySubqueryNode for each array subquery
+        for subquery_spec in &plan.array_subqueries {
+            if let Some((node, new_descriptor)) =
+                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, branches)
+            {
+                let node_id = graph.add_node(GraphNode::ArraySubquery(node));
+                graph.add_edge(node_id, phase2_input);
+                graph
+                    .array_subquery_tables
+                    .push((node_id, subquery_spec.table));
+                phase2_input = node_id;
+                current_descriptor = new_descriptor;
+            }
+        }
+
+        // Phase 2: Filter node (only if there are remaining conditions not covered by index)
+        let predicate = build_remaining_predicate_from_disjuncts(
+            &plan.disjuncts,
+            &index_columns,
+            &current_descriptor,
+        );
+        if !matches!(predicate, Predicate::True) {
+            let filter_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
+            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
+            graph.add_edge(filter_id, phase2_input);
+            phase2_input = filter_id;
+        }
+
+        // Sort node (if order_by specified)
+        if !plan.order_by.is_empty() {
+            let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
+            if !sort_keys.is_empty() {
+                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
+                    "",
+                    current_descriptor.clone(),
+                    true,
+                );
+                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
+                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+                graph.add_edge(sort_id, phase2_input);
+                phase2_input = sort_id;
+            }
+        }
+
+        // LimitOffset node (if limit or offset specified)
+        if plan.limit.is_some() || plan.offset > 0 {
+            let limit_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let limit_offset_node =
+                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase2_input);
+            phase2_input = limit_offset_id;
+        }
+
+        // Project node (if select_columns specified)
+        if let Some(columns) = &plan.select_columns {
+            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+            let project_node = ProjectNode::new(current_descriptor.clone(), &col_refs);
+            current_descriptor = project_node.output_descriptor().clone();
+            let project_id = graph.add_node(GraphNode::Project(project_node));
+            graph.add_edge(project_id, phase2_input);
+            phase2_input = project_id;
+        }
+
+        // Recursive relation expansion (if configured).
+        if let Some(recursive_spec) = &plan.recursive
+            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+                recursive_spec,
+                &current_descriptor,
+                schema,
+                branches,
+            )
+        {
+            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
+            graph.add_edge(node_id, phase2_input);
+            graph.recursive_relation_tables.push((node_id, step_table));
+            phase2_input = node_id;
+            current_descriptor = new_descriptor;
+        }
+
+        // Output node
+        let output_tuple_desc =
+            TupleDescriptor::single_with_materialization("", current_descriptor, true);
+        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase2_input);
+        graph.output_node = output_id;
+
+        Some(graph)
+    }
+
+    fn compile_execution_plan_with_schema_context(
+        plan: &ExecutionQueryPlan,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Option<Self> {
+        // Build branch -> schema hash map for column translation
+        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
+        for branch_name in schema_context.all_branch_names() {
+            let branch_str = branch_name.as_str().to_string();
+            if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+                branch_schema_map.insert(branch_str, composed.schema_hash);
+            }
+        }
+
+        // Expand branches to include all live schema branches if not specified
+        let branches: Vec<String> = if plan.branches.is_empty() {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        } else {
+            plan.branches.clone()
+        };
+
+        if !plan.joins.is_empty() {
+            return Self::compile_join_plan(plan, schema, &branches);
+        }
+
+        let table_schema = schema.get(&plan.table)?;
+        let descriptor = table_schema.descriptor.clone();
+        let select_policy = table_schema.policies.select.using.clone();
+        let mut graph = QueryGraph::new(plan.table, descriptor.clone());
+        let table_str = plan.table.as_str();
+
+        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
+        // For multi-branch queries, we create scans for each branch and union them
+        // Column names are translated for old schema branches
+        let mut phase1_outputs: Vec<NodeId> = Vec::new();
+        let mut index_columns: Vec<String> = Vec::new();
+
+        for branch in &branches {
+            // Get schema hash for this branch to determine if column translation is needed
+            let branch_schema_hash = branch_schema_map.get(branch).copied();
+
+            for disjunct in &plan.disjuncts {
+                // Find best index condition for this disjunct
+                let (scan_column, scan_condition) =
+                    if let Some(cond) = disjunct.best_index_condition() {
+                        let column = cond.column().to_string();
+                        let scan_cond = condition_to_scan(cond);
+                        (column, scan_cond)
+                    } else {
+                        // No index condition, use "_id" for full scan
+                        ("_id".to_string(), ScanCondition::All)
+                    };
+
+                // Translate column name for old schema branches
+                let translated_column = if let Some(target_hash) = branch_schema_hash {
+                    if target_hash != schema_context.current_hash {
+                        // This branch uses an old schema - translate column name
+                        translate_column_for_index(
+                            schema_context,
+                            table_str,
+                            &scan_column,
+                            &target_hash,
+                        )
+                        .unwrap_or_else(|| scan_column.clone())
+                    } else {
+                        scan_column.clone()
+                    }
+                } else {
+                    scan_column.clone()
+                };
+
+                index_columns.push(scan_column.clone());
+                let scan_column_name = ColumnName::new(&translated_column);
+
+                let scan_node = IndexScanNode::new_with_branch(
+                    plan.table,
+                    scan_column_name,
+                    branch,
+                    scan_condition,
+                    descriptor.clone(),
+                );
+                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((scan_id, plan.table, scan_column_name));
+                phase1_outputs.push(scan_id);
+            }
+
+            // If include_deleted is set, also scan _id_deleted index for this branch
+            if plan.include_deleted {
+                let deleted_column = ColumnName::new("_id_deleted");
+                let deleted_scan_node = IndexScanNode::new_with_branch(
+                    plan.table,
+                    deleted_column,
+                    branch,
+                    ScanCondition::All,
+                    descriptor.clone(),
+                );
+                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((deleted_scan_id, plan.table, deleted_column));
+                phase1_outputs.push(deleted_scan_id);
+            }
+        }
+
+        // If multiple outputs, add Union node
+        let phase1_output = if phase1_outputs.len() > 1 {
+            let union_node = UnionNode::new();
+            let union_id = graph.add_node(GraphNode::Union(union_node));
+            for scan_id in &phase1_outputs {
+                graph.add_edge(union_id, *scan_id);
+            }
+            union_id
+        } else if !phase1_outputs.is_empty() {
+            phase1_outputs[0]
+        } else {
+            return None;
+        };
+
+        // Materialize node (boundary between Phase 1 and Phase 2)
+        // Lens transforms are applied in the row_loader, so MaterializeNode uses current schema
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let materialize_node = MaterializeNode::new_all(tuple_desc);
+        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
+        graph.add_edge(materialize_id, phase1_output);
+
+        let mut phase2_input = materialize_id;
+        let mut current_descriptor = descriptor.clone();
+
+        // Policy filter node (if session provided and table has SELECT policy)
+        if let (Some(session), Some(policy)) = (&session, select_policy) {
+            let policy_node = PolicyFilterNode::new(
+                current_descriptor.clone(),
+                policy,
+                session.clone(),
+                schema.clone(),
+                plan.table.as_str(),
+            );
+            let inherits_tables: Vec<TableName> = policy_node
+                .inherits_tables()
+                .iter()
+                .map(TableName::new)
+                .collect();
+            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+            graph.add_edge(policy_id, phase2_input);
+            for inherits_table in inherits_tables {
+                graph.policy_filter_tables.push((policy_id, inherits_table));
+            }
+            phase2_input = policy_id;
+        }
+
+        // Array subqueries: insert ArraySubqueryNode for each array subquery
+        for subquery_spec in &plan.array_subqueries {
+            if let Some((node, new_descriptor)) =
+                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, &branches)
+            {
+                let node_id = graph.add_node(GraphNode::ArraySubquery(node));
+                graph.add_edge(node_id, phase2_input);
+                graph
+                    .array_subquery_tables
+                    .push((node_id, subquery_spec.table));
+                phase2_input = node_id;
+                current_descriptor = new_descriptor;
+            }
+        }
+
+        // Phase 2: Filter node (only if there are remaining conditions not covered by index)
+        let predicate = build_remaining_predicate_from_disjuncts(
+            &plan.disjuncts,
+            &index_columns,
+            &current_descriptor,
+        );
+        if !matches!(predicate, Predicate::True) {
+            let filter_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
+            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
+            graph.add_edge(filter_id, phase2_input);
+            phase2_input = filter_id;
+        }
+
+        // Sort node (if order_by specified)
+        if !plan.order_by.is_empty() {
+            let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
+            if !sort_keys.is_empty() {
+                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
+                    "",
+                    current_descriptor.clone(),
+                    true,
+                );
+                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
+                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+                graph.add_edge(sort_id, phase2_input);
+                phase2_input = sort_id;
+            }
+        }
+
+        // LimitOffset node (if limit or offset specified)
+        if plan.limit.is_some() || plan.offset > 0 {
+            let limit_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let limit_offset_node =
+                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase2_input);
+            phase2_input = limit_offset_id;
+        }
+
+        // Project node (if select_columns specified)
+        if let Some(columns) = &plan.select_columns {
+            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+            let project_node = ProjectNode::new(current_descriptor.clone(), &col_refs);
+            current_descriptor = project_node.output_descriptor().clone();
+            let project_id = graph.add_node(GraphNode::Project(project_node));
+            graph.add_edge(project_id, phase2_input);
+            phase2_input = project_id;
+        }
+
+        // Recursive relation expansion (if configured).
+        if let Some(recursive_spec) = &plan.recursive
+            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+                recursive_spec,
+                &current_descriptor,
+                schema,
+                &branches,
+            )
+        {
+            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
+            graph.add_edge(node_id, phase2_input);
+            graph.recursive_relation_tables.push((node_id, step_table));
+            phase2_input = node_id;
+            current_descriptor = new_descriptor;
+        }
+
+        // Output node
+        let output_tuple_desc =
+            TupleDescriptor::single_with_materialization("", current_descriptor, true);
+        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase2_input);
+        graph.output_node = output_id;
+
+        Some(graph)
     }
 
     /// Compile a query into a graph with optional session-based policy filtering.
@@ -1025,6 +1491,234 @@ impl QueryGraph {
         );
 
         Some((node, current_descriptor.clone(), spec.table))
+    }
+
+    fn compile_join_plan(
+        plan: &ExecutionQueryPlan,
+        schema: &Schema,
+        branches: &[String],
+    ) -> Option<Self> {
+        let base_table_schema = schema.get(&plan.table)?;
+        let base_descriptor = base_table_schema.descriptor.clone();
+        let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
+
+        // For joins, we use the first branch only for now
+        // TODO: Support multi-branch joins with LWW merge
+        let branch = branches.first().map(|s| s.as_str()).unwrap_or("main");
+
+        // Track all table names and descriptors for TupleDescriptor
+        let mut table_names = vec![plan.table.as_str().to_string()];
+        let mut table_descriptors = vec![base_descriptor.clone()];
+        let mut seen_tables: HashSet<String> = HashSet::new();
+        seen_tables.insert(plan.table.as_str().to_string());
+
+        // Build pipeline for base table: IndexScan -> Materialize
+        let id_column = ColumnName::new("_id");
+        let base_scan = IndexScanNode::new_with_branch(
+            plan.table,
+            id_column,
+            branch,
+            ScanCondition::All,
+            base_descriptor.clone(),
+        );
+        let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
+        graph
+            .index_scan_nodes
+            .push((base_scan_id, plan.table, id_column));
+
+        let base_tuple_desc = TupleDescriptor::single_with_materialization(
+            plan.table.as_str(),
+            base_descriptor.clone(),
+            true,
+        );
+        let base_mat = MaterializeNode::new_all(base_tuple_desc);
+        let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
+        graph.add_edge(base_mat_id, base_scan_id);
+
+        // Track current left side descriptor (accumulates columns from joins)
+        let mut left_id = base_mat_id;
+        let mut left_descriptor = base_descriptor.clone();
+
+        if let Some(recursive_spec) = &plan.recursive
+            && let Some((node, new_descriptor, step_table)) =
+                graph.compile_recursive_relation(recursive_spec, &left_descriptor, schema, branches)
+        {
+            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
+            graph.add_edge(node_id, left_id);
+            graph.recursive_relation_tables.push((node_id, step_table));
+            left_id = node_id;
+            left_descriptor = new_descriptor;
+            if let Some(first) = table_descriptors.first_mut() {
+                *first = left_descriptor.clone();
+            }
+        }
+
+        // Process each join
+        for join_spec in &plan.joins {
+            let join_table_name = join_spec.table.as_str().to_string();
+            if seen_tables.contains(&join_table_name) {
+                // Self/circular join chains are not yet supported in the execution graph.
+                return None;
+            }
+            let (left_col, right_col) = join_spec.on.as_ref()?;
+
+            let right_table_schema = schema.get(&join_spec.table)?;
+            let right_descriptor = right_table_schema.descriptor.clone();
+
+            // Build pipeline for right table: IndexScan -> Materialize (same branch)
+            let right_scan = IndexScanNode::new_with_branch(
+                join_spec.table,
+                id_column,
+                branch,
+                ScanCondition::All,
+                right_descriptor.clone(),
+            );
+            let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
+            graph
+                .index_scan_nodes
+                .push((right_scan_id, join_spec.table, id_column));
+
+            let right_tuple_desc = TupleDescriptor::single_with_materialization(
+                join_spec.effective_name(),
+                right_descriptor.clone(),
+                true,
+            );
+            let right_mat = MaterializeNode::new_all(right_tuple_desc);
+            let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
+            graph.add_edge(right_mat_id, right_scan_id);
+
+            // Build tuple descriptors with table/alias labels so qualified ON refs can resolve.
+            let left_tuple_desc = TupleDescriptor::from_tables(
+                &table_names
+                    .iter()
+                    .cloned()
+                    .zip(table_descriptors.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+            .with_all_materialized();
+            let right_tuple_desc = TupleDescriptor::single_with_materialization(
+                join_spec.effective_name(),
+                right_descriptor.clone(),
+                true,
+            );
+
+            let join_node = JoinNode::new_with_refs(
+                left_tuple_desc,
+                right_tuple_desc,
+                JoinColumnRef::parse(left_col),
+                JoinColumnRef::parse(right_col),
+            )?;
+            let join_id = graph.add_node(GraphNode::Join(join_node));
+
+            // JoinNode takes left and right as inputs
+            // Using convention: first edge is left, second is right
+            graph.add_edge(join_id, left_id);
+            graph.add_edge(join_id, right_mat_id);
+
+            // Update for next join in chain
+            left_id = join_id;
+
+            // Track table name and descriptor for TupleDescriptor
+            table_names.push(join_spec.effective_name().to_string());
+            table_descriptors.push(right_descriptor.clone());
+            seen_tables.insert(join_table_name);
+
+            // Combine descriptors for downstream nodes
+            left_descriptor = RowDescriptor::combine(&[left_descriptor, right_descriptor]);
+        }
+
+        // Build combined descriptor and TupleDescriptor from all tables
+        let combined_descriptor = RowDescriptor::combine(&table_descriptors);
+        // For FilterNode, all elements are materialized at this point (after Materialize nodes)
+        let tuple_descriptor = TupleDescriptor::from_tables(
+            &table_names
+                .iter()
+                .cloned()
+                .zip(table_descriptors.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+        .with_all_materialized();
+        graph.table_descriptors = table_descriptors;
+        let mut output_descriptor = combined_descriptor.clone();
+        let mut output_tuple_descriptor = tuple_descriptor.clone();
+
+        let mut phase2_input = left_id;
+
+        // Project node (if select_columns specified)
+        if let Some(columns) = &plan.select_columns {
+            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+            let project_node = ProjectNode::new(combined_descriptor.clone(), &col_refs);
+            output_descriptor = project_node.output_descriptor().clone();
+            let project_id = graph.add_node(GraphNode::Project(project_node));
+            graph.add_edge(project_id, phase2_input);
+            phase2_input = project_id;
+            output_tuple_descriptor =
+                TupleDescriptor::single_with_materialization("", output_descriptor.clone(), true);
+        }
+
+        // Filter node (if conditions exist)
+        // Use TupleDescriptor to enable filtering on columns from any joined table
+        let predicate = disjuncts_to_predicate(&plan.disjuncts, &combined_descriptor);
+        if !matches!(predicate, Predicate::True) {
+            let filter_node =
+                FilterNode::with_tuple_descriptor(tuple_descriptor.clone(), predicate);
+            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
+            graph.add_edge(filter_id, phase2_input);
+            phase2_input = filter_id;
+        }
+
+        // Sort node (if order_by specified)
+        if !plan.order_by.is_empty() {
+            let sort_keys = sort_keys_from_order_by(&plan.order_by, &combined_descriptor);
+            if !sort_keys.is_empty() {
+                let sort_node =
+                    SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
+                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+                graph.add_edge(sort_id, phase2_input);
+                phase2_input = sort_id;
+            }
+        }
+
+        // LimitOffset node (if limit or offset specified)
+        if plan.limit.is_some() || plan.offset > 0 {
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                tuple_descriptor.clone(),
+                plan.limit,
+                plan.offset,
+            );
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase2_input);
+            phase2_input = limit_offset_id;
+        }
+
+        // Optional output projection to a specific joined element.
+        if let Some(element_index) = plan.result_element_index {
+            let select_input_descriptor = TupleDescriptor::from_tables(
+                &table_names
+                    .iter()
+                    .cloned()
+                    .zip(graph.table_descriptors.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+            .with_all_materialized();
+            let select_node = SelectElementNode::new(select_input_descriptor, element_index)?;
+            output_descriptor = select_node.output_descriptor().clone();
+            output_tuple_descriptor =
+                TupleDescriptor::single_with_materialization("", output_descriptor.clone(), true);
+            let select_id = graph.add_node(GraphNode::SelectElement(select_node));
+            graph.add_edge(select_id, phase2_input);
+            phase2_input = select_id;
+        }
+
+        // Output node
+        graph.combined_descriptor = output_descriptor;
+        let output_node =
+            OutputNode::with_tuple_descriptor(output_tuple_descriptor, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase2_input);
+        graph.output_node = output_id;
+
+        Some(graph)
     }
 
     /// Compile a join query into a graph.
@@ -1993,16 +2687,52 @@ fn descriptors_compatible_by_shape(left: &RowDescriptor, right: &RowDescriptor) 
         .all(|(l, r)| l.column_type == r.column_type)
 }
 
-/// Build remaining predicate from conditions not covered by index scans.
-/// Returns Predicate::True if all conditions are fully covered.
-fn build_remaining_predicate(
-    query: &Query,
+fn disjuncts_to_predicate(disjuncts: &[Conjunction], descriptor: &RowDescriptor) -> Predicate {
+    if disjuncts.is_empty() {
+        return Predicate::True;
+    }
+
+    let non_empty: Vec<_> = disjuncts
+        .iter()
+        .filter(|d| !d.conditions.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return Predicate::True;
+    }
+    if non_empty.len() == 1 {
+        return non_empty[0].to_predicate(descriptor);
+    }
+
+    Predicate::Or(
+        non_empty
+            .iter()
+            .map(|d| d.to_predicate(descriptor))
+            .collect(),
+    )
+}
+
+fn sort_keys_from_order_by(
+    order_by: &[(String, SortDirection)],
+    descriptor: &RowDescriptor,
+) -> Vec<SortKey> {
+    order_by
+        .iter()
+        .filter_map(|(col, dir)| {
+            descriptor.column_index(col).map(|idx| SortKey {
+                col_index: idx,
+                direction: *dir,
+            })
+        })
+        .collect()
+}
+
+fn build_remaining_predicate_from_disjuncts(
+    disjuncts: &[Conjunction],
     index_columns: &[String],
     descriptor: &RowDescriptor,
 ) -> Predicate {
     // Check if all disjuncts are fully covered by their respective index scans
-    let all_fully_covered = query
-        .disjuncts
+    let all_fully_covered = disjuncts
         .iter()
         .zip(index_columns.iter())
         .all(|(disjunct, index_col)| disjunct.is_fully_covered_by_index(index_col));
@@ -2012,8 +2742,7 @@ fn build_remaining_predicate(
     }
 
     // Build remaining predicates for each disjunct
-    let remaining_predicates: Vec<Predicate> = query
-        .disjuncts
+    let remaining_predicates: Vec<Predicate> = disjuncts
         .iter()
         .zip(index_columns.iter())
         .map(|(disjunct, index_col)| disjunct.remaining_predicate(index_col, descriptor))
@@ -2026,8 +2755,18 @@ fn build_remaining_predicate(
         Predicate::True
     } else {
         // Fall back to full predicate for partial coverage cases
-        query.to_predicate(descriptor)
+        disjuncts_to_predicate(disjuncts, descriptor)
     }
+}
+
+/// Build remaining predicate from conditions not covered by index scans.
+/// Returns Predicate::True if all conditions are fully covered.
+fn build_remaining_predicate(
+    query: &Query,
+    index_columns: &[String],
+    descriptor: &RowDescriptor,
+) -> Predicate {
+    build_remaining_predicate_from_disjuncts(&query.disjuncts, index_columns, descriptor)
 }
 
 /// Convert a condition to a scan condition.
