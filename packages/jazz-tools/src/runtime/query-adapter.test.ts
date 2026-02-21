@@ -715,20 +715,50 @@ describe("translateQuery", () => {
     });
   });
 
-  it("ignores non-runtime builder metadata fields", () => {
+  it("translates gather metadata to runtime recursive query", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
+        },
+      },
+    };
+
     const builderJson = JSON.stringify({
       table: "todos",
       conditions: [],
       includes: {},
       orderBy: [],
-      hops: ["project"],
       gather: {
         max_depth: 10,
+        step_table: "todos",
+        step_current_column: "id",
+        step_conditions: [],
+        step_hops: ["parent"],
       },
     });
 
-    const result = JSON.parse(translateQuery(builderJson, basicSchema));
-    expect(result.recursive).toBeUndefined();
+    const result = JSON.parse(translateQuery(builderJson, schema));
+    expect(result.recursive).toEqual({
+      table: "todos",
+      inner_column: "_id",
+      outer_column: "_id",
+      select_columns: ["parent_id"],
+      filters: [],
+      hop: {
+        table: "todos",
+        via_column: "parent_id",
+      },
+      max_depth: 10,
+    });
     expect(result.joins).toEqual([]);
   });
 
@@ -752,6 +782,78 @@ describe("translateQuery", () => {
 
       expect(() => translateQuery(builderJson, basicSchema)).toThrow(
         "Unexpected array value for scalar column",
+      );
+    });
+
+    it("throws when gather step does not use a forward hop", () => {
+      const schema: WasmSchema = {
+        tables: {
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              {
+                name: "parent_id",
+                column_type: { type: "Uuid" },
+                nullable: true,
+                references: "todos",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        gather: {
+          max_depth: 10,
+          step_table: "todos",
+          step_current_column: "id",
+          step_conditions: [],
+          step_hops: ["todosViaParent"],
+        },
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "gather(...) currently only supports forward hopTo(...) relations.",
+      );
+    });
+
+    it("throws when gather query also includes include(...)", () => {
+      const schema: WasmSchema = {
+        tables: {
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              {
+                name: "parent_id",
+                column_type: { type: "Uuid" },
+                nullable: true,
+                references: "todos",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: { parent: true },
+        orderBy: [],
+        gather: {
+          max_depth: 10,
+          step_table: "todos",
+          step_current_column: "id",
+          step_conditions: [],
+          step_hops: ["parent"],
+        },
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "gather(...) does not yet support include(...).",
       );
     });
   });

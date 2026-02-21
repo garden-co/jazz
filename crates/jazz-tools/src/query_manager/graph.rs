@@ -22,7 +22,9 @@ use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::graph_nodes::project::ProjectNode;
-use super::graph_nodes::recursive_relation::RecursiveRelationNode;
+use super::graph_nodes::recursive_relation::{
+    CorrelationSource, RecursiveHop, RecursiveRelationNode,
+};
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
@@ -847,12 +849,23 @@ impl QueryGraph {
             .split('.')
             .next_back()
             .unwrap_or(&spec.outer_column);
-        let correlation_col = current_descriptor.column_index(outer_col_name)?;
+        let correlation_source = match outer_col_name {
+            "id" | "_id" => CorrelationSource::ObjectId,
+            _ => CorrelationSource::Column(current_descriptor.column_index(outer_col_name)?),
+        };
+        if spec.hop.is_none() && matches!(correlation_source, CorrelationSource::ObjectId) {
+            return None;
+        }
 
         // Build step query for each recursive level.
         let mut step_query = Query::new(spec.table);
         step_query.branches = branches.to_vec();
         step_query.select_columns = spec.select_columns.clone();
+        if !spec.filters.is_empty() {
+            step_query.disjuncts = vec![crate::query_manager::query::Conjunction {
+                conditions: spec.filters.clone(),
+            }];
+        }
 
         // Build descriptor for step output.
         let step_output_descriptor = if let Some(cols) = &spec.select_columns {
@@ -871,10 +884,24 @@ impl QueryGraph {
             step_table_descriptor
         };
 
-        // MVP constraint: recursive step projection must align with the seed descriptor by shape.
-        if !descriptors_compatible_by_shape(current_descriptor, &step_output_descriptor) {
-            return None;
-        }
+        let hop = if let Some(hop_spec) = &spec.hop {
+            let target_schema = schema.get(&hop_spec.table)?;
+            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.descriptor) {
+                return None;
+            }
+
+            let step_column_index = step_output_descriptor.column_index(&hop_spec.via_column)?;
+            Some(RecursiveHop {
+                table: hop_spec.table,
+                step_column_index,
+            })
+        } else {
+            // MVP constraint: recursive step projection must align with the seed descriptor by shape.
+            if !descriptors_compatible_by_shape(current_descriptor, &step_output_descriptor) {
+                return None;
+            }
+            None
+        };
 
         let step_template = SubgraphTemplate::new(
             step_query,
@@ -889,7 +916,8 @@ impl QueryGraph {
             input_descriptor,
             current_descriptor.clone(),
             step_template,
-            correlation_col,
+            correlation_source,
+            hop,
             spec.max_depth,
             schema.clone(),
         );
@@ -2300,6 +2328,23 @@ mod tests {
         schema
     }
 
+    fn recursive_hop_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("teams"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        );
+        schema.insert(
+            TableName::new("team_edges"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("child_team", ColumnType::Uuid),
+                ColumnDescriptor::new("parent_team", ColumnType::Uuid),
+            ])
+            .into(),
+        );
+        schema
+    }
+
     #[test]
     fn compile_query_with_recursive_relation() {
         let schema = recursive_schema();
@@ -2344,6 +2389,27 @@ mod tests {
         assert!(
             !has_recursive_relation_node(&graph),
             "Mismatched recursive projection shape should be skipped in MVP compiler"
+        );
+    }
+
+    #[test]
+    fn compile_query_with_recursive_hop_relation() {
+        let schema = recursive_hop_schema();
+        let query = QueryBuilder::new("teams")
+            .filter_eq("name", Value::Text("seed".into()))
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "_id")
+                    .select(&["parent_team"])
+                    .hop("teams", "parent_team")
+                    .max_depth(10)
+            })
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Recursive hop queries should compile to RecursiveRelationNode"
         );
     }
 }

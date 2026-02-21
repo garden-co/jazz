@@ -590,110 +590,6 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
 
-    // gather: bounded recursive walk over hopTo step queries.
-    if (builtQuery.gather) {
-      const gather = builtQuery.gather;
-      const seenIds = new Set<string>();
-      let frontier: string[] = [];
-
-      const seedQuery: NormalizedBuiltQuery = {
-        ...builtQuery,
-        includes: {},
-        orderBy: [],
-        limit: undefined,
-        offset: undefined,
-        hops: [],
-        gather: undefined,
-      };
-      const seedRows = await client.query(
-        translateQuery(toBuilderJson(seedQuery), query._schema),
-        settledTier,
-      );
-      const seedObjects = transformRows<Record<string, unknown>>(
-        seedRows,
-        query._schema,
-        query._table,
-        {},
-      );
-      for (const row of seedObjects) {
-        if (typeof row.id !== "string" || seenIds.has(row.id)) {
-          continue;
-        }
-        seenIds.add(row.id);
-        frontier.push(row.id);
-      }
-
-      const stepInclude = includeTreeFromHops(gather.step_hops);
-      for (let depth = 1; depth <= gather.max_depth && frontier.length > 0; depth += 1) {
-        const stepQuery: NormalizedBuiltQuery = {
-          table: gather.step_table,
-          conditions: [
-            ...gather.step_conditions,
-            {
-              column: gather.step_current_column,
-              op: "in",
-              value: frontier,
-            },
-          ],
-          includes: stepInclude,
-          orderBy: [],
-          limit: undefined,
-          offset: undefined,
-          hops: [],
-          gather: undefined,
-        };
-
-        const stepRows = await client.query(
-          translateQuery(toBuilderJson(stepQuery), query._schema),
-          settledTier,
-        );
-        const stepObjects = transformRows<Record<string, unknown>>(
-          stepRows,
-          query._schema,
-          gather.step_table,
-          stepInclude,
-        );
-        const nextObjects = dedupeRowsById(flattenHopPath(stepObjects, gather.step_hops));
-
-        const nextFrontier: string[] = [];
-        for (const row of nextObjects) {
-          const id = row.id;
-          if (typeof id !== "string" || seenIds.has(id)) {
-            continue;
-          }
-          seenIds.add(id);
-          nextFrontier.push(id);
-        }
-        frontier = nextFrontier;
-      }
-
-      if (seenIds.size === 0) {
-        return [];
-      }
-
-      const finalQuery: NormalizedBuiltQuery = {
-        table: query._table,
-        conditions: [
-          {
-            column: "id",
-            op: "in",
-            value: [...seenIds],
-          },
-        ],
-        includes: builtQuery.includes,
-        orderBy: builtQuery.orderBy,
-        limit: builtQuery.limit,
-        offset: builtQuery.offset,
-        hops: [],
-        gather: undefined,
-      };
-      const finalRows = await client.query(
-        translateQuery(toBuilderJson(finalQuery), query._schema),
-        settledTier,
-      );
-      return transformRows<T>(finalRows, query._schema, query._table, builtQuery.includes);
-    }
-
     // hopTo: execute source query with generated includes, then flatten hopped relation path.
     if (builtQuery.hops.length > 0) {
       const hopIncludes = includeTreeFromHops(builtQuery.hops);
@@ -718,10 +614,7 @@ export class Db {
       return dedupeRowsById(flattenHopPath(sourceObjects, builtQuery.hops)) as T[];
     }
 
-    const rows = await client.query(
-      translateQuery(toBuilderJson(builtQuery), query._schema),
-      settledTier,
-    );
+    const rows = await client.query(translateQuery(builderJson, query._schema), settledTier);
     return transformRows<T>(rows, query._schema, query._table, builtQuery.includes);
   }
 
@@ -772,10 +665,10 @@ export class Db {
     const client = this.getClient(query._schema);
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    if (builtQuery.hops.length > 0 || builtQuery.gather) {
-      throw new Error("subscribeAll(...) does not yet support hopTo(...) or gather(...).");
+    if (builtQuery.hops.length > 0) {
+      throw new Error("subscribeAll(...) does not yet support hopTo(...).");
     }
-    const wasmQuery = translateQuery(toBuilderJson(builtQuery), query._schema);
+    const wasmQuery = translateQuery(builderJson, query._schema);
 
     const transform = (row: WasmRow): T => {
       return transformRows<T>([row], query._schema, query._table, builtQuery.includes ?? {})[0];

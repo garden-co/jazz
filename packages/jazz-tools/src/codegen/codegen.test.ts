@@ -789,7 +789,7 @@ describe("generateQueryBuilderClasses", () => {
 
     expect(output).toContain("gather(options: {");
     expect(output).toContain("const stepOutput = options.step({ current: currentToken });");
-    expect(output).toContain("if (stepHops.length === 0) {");
+    expect(output).toContain("if (stepHops.length !== 1) {");
     expect(output).toContain("const withStart = this.where(options.start);");
     expect(output).toContain("clone._gatherVal = {");
   });

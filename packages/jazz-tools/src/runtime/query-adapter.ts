@@ -2,10 +2,10 @@
  * Translate QueryBuilder JSON to WASM Query format.
  *
  * QueryBuilder produces a simple JSON structure:
- * { table, conditions, includes, orderBy, limit, offset }
+ * { table, conditions, includes, orderBy, limit, offset, gather? }
  *
  * WASM runtime expects a more complex structure:
- * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins }
+ * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins, recursive? }
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
@@ -21,6 +21,26 @@ interface BuilderOutput {
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
+  gather?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+}
+
+interface RecursiveOutput {
+  table: string;
+  inner_column: string;
+  outer_column: string;
+  select_columns: string[] | null;
+  filters: object[];
+  hop: {
+    table: string;
+    via_column: string;
+  };
+  max_depth: number;
 }
 
 function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
@@ -30,6 +50,11 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;
+}
+
+function stripQualifier(column: string): string {
+  const parts = column.split(".");
+  return parts[parts.length - 1] ?? column;
 }
 
 /**
@@ -82,14 +107,15 @@ function toCondition(
   schema: WasmSchema,
   table: string,
 ): object {
-  const columnType = getColumnType(schema, table, cond.column);
+  const column = stripQualifier(cond.column);
+  const columnType = getColumnType(schema, table, column);
   if (!columnType) {
-    throw new Error(`Unknown column "${cond.column}" in table "${table}"`);
+    throw new Error(`Unknown column "${column}" in table "${table}"`);
   }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const value = toWasmValue(cond.value, valueTypeForCondition);
-  const runtimeColumn = toRuntimeColumn(cond.column);
+  const runtimeColumn = toRuntimeColumn(column);
 
   switch (cond.op) {
     case "eq":
@@ -188,6 +214,61 @@ function toArraySubqueries(
   return subqueries;
 }
 
+function toRecursiveFromGather(
+  gather: BuilderOutput["gather"],
+  seedTable: string,
+  schema: WasmSchema,
+  relations: Map<string, Relation[]>,
+): RecursiveOutput | undefined {
+  if (!gather) {
+    return undefined;
+  }
+  if (!schema.tables[gather.step_table]) {
+    throw new Error(`Unknown gather step table "${gather.step_table}"`);
+  }
+  if (!Number.isInteger(gather.max_depth) || gather.max_depth <= 0) {
+    throw new Error("gather(...) max_depth must be a positive integer.");
+  }
+
+  const stepHops = Array.isArray(gather.step_hops)
+    ? gather.step_hops.filter((hop): hop is string => typeof hop === "string")
+    : [];
+  if (stepHops.length !== 1) {
+    throw new Error("gather(...) currently requires exactly one hopTo(...) step.");
+  }
+
+  const stepRelations = relations.get(gather.step_table) ?? [];
+  const hopName = stepHops[0];
+  const hopRelation = stepRelations.find((rel) => rel.name === hopName);
+  if (!hopRelation) {
+    throw new Error(`Unknown relation "${hopName}" on table "${gather.step_table}"`);
+  }
+  if (hopRelation.type !== "forward") {
+    throw new Error("gather(...) currently only supports forward hopTo(...) relations.");
+  }
+  if (hopRelation.toTable !== seedTable) {
+    throw new Error(
+      `gather(...) step must hop back to "${seedTable}" rows, got "${hopRelation.toTable}".`,
+    );
+  }
+
+  const innerColumn = toRuntimeColumn(stripQualifier(gather.step_current_column));
+  const stepConditions = Array.isArray(gather.step_conditions) ? gather.step_conditions : [];
+
+  return {
+    table: gather.step_table,
+    inner_column: innerColumn,
+    outer_column: "_id",
+    select_columns: [hopRelation.fromColumn],
+    filters: stepConditions.map((condition) => toCondition(condition, schema, gather.step_table)),
+    hop: {
+      table: hopRelation.toTable,
+      via_column: hopRelation.fromColumn,
+    },
+    max_depth: gather.max_depth,
+  };
+}
+
 /**
  * Translate QueryBuilder JSON to WASM Query JSON.
  *
@@ -198,6 +279,10 @@ function toArraySubqueries(
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const builder: BuilderOutput = JSON.parse(builderJson);
   const relations = analyzeRelations(schema);
+  if (builder.gather && Object.keys(builder.includes ?? {}).length > 0) {
+    throw new Error("gather(...) does not yet support include(...).");
+  }
+  const recursive = toRecursiveFromGather(builder.gather, builder.table, schema, relations);
 
   const query = {
     table: builder.table,
@@ -216,6 +301,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     include_deleted: false,
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations),
     joins: [],
+    recursive,
   };
 
   return JSON.stringify(query);

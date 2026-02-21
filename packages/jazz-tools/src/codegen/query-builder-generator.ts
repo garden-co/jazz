@@ -219,6 +219,12 @@ function generateQueryBuilderClass(
   lines.push(`    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {`);
   lines.push(`      throw new Error("gather(...) maxDepth must be a positive integer.");`);
   lines.push(`    }`);
+  lines.push(`    if (Object.keys(this._includes).length > 0) {`);
+  lines.push(`      throw new Error("gather(...) does not support include(...) in MVP.");`);
+  lines.push(`    }`);
+  lines.push(`    if (this._hops.length > 0) {`);
+  lines.push(`      throw new Error("gather(...) must be called before hopTo(...).");`);
+  lines.push(`    }`);
   lines.push(``);
   lines.push(`    const currentToken = "__jazz_gather_current__";`);
   lines.push(`    const stepOutput = options.step({ current: currentToken });`);
@@ -248,23 +254,23 @@ function generateQueryBuilderClass(
   lines.push(`    const stepHops = Array.isArray(stepBuilt.hops)`);
   lines.push(`      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")`);
   lines.push(`      : [];`);
-  lines.push(`    if (stepHops.length === 0) {`);
-  lines.push(`      throw new Error("gather(...) step must end with hopTo(...).");`);
+  lines.push(`    if (stepHops.length !== 1) {`);
+  lines.push(`      throw new Error("gather(...) step must include exactly one hopTo(...).");`);
   lines.push(`    }`);
   lines.push(``);
-  lines.push(`    const currentIndex = stepBuilt.conditions.findIndex(`);
+  lines.push(`    const currentConditions = stepBuilt.conditions.filter(`);
   lines.push(`      (condition) => condition.op === "eq" && condition.value === currentToken,`);
   lines.push(`    );`);
-  lines.push(`    if (currentIndex < 0) {`);
+  lines.push(`    if (currentConditions.length !== 1) {`);
   lines.push(
     `      throw new Error("gather(...) step must include exactly one where condition bound to current.");`,
   );
   lines.push(`    }`);
   lines.push(``);
-  lines.push(`    const currentCondition = stepBuilt.conditions[currentIndex];`);
-  lines.push(
-    `    const stepConditions = stepBuilt.conditions.filter((_, index) => index !== currentIndex);`,
-  );
+  lines.push(`    const currentCondition = currentConditions[0];`);
+  lines.push(`    const stepConditions = stepBuilt.conditions.filter(`);
+  lines.push(`      (condition) => !(condition.op === "eq" && condition.value === currentToken),`);
+  lines.push(`    );`);
   lines.push(``);
   lines.push(`    const withStart = this.where(options.start);`);
   lines.push(`    const clone = withStart._clone();`);
