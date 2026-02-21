@@ -123,9 +123,9 @@ Use depth-bounded `INHERITS` when foreign keys can form recursive chains (for ex
   </Tab>
 </Tabs>
 
-## Advanced: Complex Recursive Policies (`start` / `step`)
+## Advanced: Complex Recursive Policies (`gather` / `hopTo`)
 
-When simple `allowedTo.*(...)` is not expressive enough, define an explicit recursive relation with `policy.recursive({ start, step })` and anchor it with `policy.exists(...)`.
+When simple `allowedTo.*(...)` is not expressive enough, build an explicit recursive relation with `policy.<table>.gather({ start, step })` and anchor it with `policy.exists(...)`.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
@@ -134,24 +134,20 @@ When simple `allowedTo.*(...)` is not expressive enough, define an explicit recu
     import { app } from "./app.js";
 
     export default definePermissions(app, ({ policy, session }) => {
-      const reachableTeams = policy.recursive({
-        start: policy.teams
-          .where({
-            kind: "individual",
-            identity_key: session.userId,
-          })
-          .select({ team: "id" }),
-        step: ({ self }) =>
-          self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
-            team: "parent_team",
-          }),
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.userId,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
         maxDepth: 10,
       });
 
       return [
         policy.todos.allowRead.where((todo) =>
           policy.exists(
-            reachableTeams.join(policy.resource_access_edges, { left: "team", right: "team" }).where({
+            reachableTeams.hopTo("resource_access_edgesViaTeam").where({
               "resource_access_edges.resource": todo.id,
               grant_role: "viewer",
             }),
@@ -163,72 +159,67 @@ When simple `allowedTo.*(...)` is not expressive enough, define an explicit recu
 
     MVP constraints:
 
-    - `start` must begin from `policy.<table>`, with no joins, and exactly one `select({ alias: column })`.
-    - `step` must use the provided `self`, include exactly one join, and project the same alias as `start`.
-    - `policy.exists(...)` currently supports at most one join after a recursive relation.
-    - Recursion is compiled by bounded unrolling (default depth `10`, hard cap `64`).
+    - `gather(...)` must start from `policy.<table>`.
+    - `step` must include exactly one `where({ ...: current })` condition and exactly one `hopTo(...)`.
+    - `step` must hop back to the same output table as the `gather(...)` root.
+    - Recursion is depth-bounded (default `10`, hard cap `64`).
+    - Post-recursive relation filtering is composed normally, e.g. `reachableTeams.hopTo(...).where(...)` inside `policy.exists(...)`.
 
   </Tab>
   <Tab value="Rust">
     ```rs
-    use groove::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue, OUTER_ROW_SESSION_PREFIX};
-    use groove::query_manager::types::Value;
+    use groove::query_manager::policy::PolicyExpr;
+    use groove::query_manager::relation_ir::{
+        ColumnRef, KeyRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+    };
+    use groove::query_manager::types::{TablePolicies, Value};
 
-    // Rust currently has no high-level policy.recursive(start/step) helper.
-    // Build the equivalent form directly as bounded nested EXISTS clauses.
-    fn reachable_team(max_depth: usize, anchor_team_col: &str) -> PolicyExpr {
-        fn path(depth: usize, target: PolicyValue) -> PolicyExpr {
-            if depth == 0 {
-                return PolicyExpr::Exists {
-                    table: "teams".into(),
-                    condition: Box::new(PolicyExpr::and(vec![
-                        PolicyExpr::eq_literal("kind", Value::Text("individual".into())),
-                        PolicyExpr::eq_session("identity_key", vec!["user_id".into()]),
-                        PolicyExpr::Cmp {
-                            column: "id".into(),
-                            op: CmpOp::Eq,
-                            value: target,
-                        },
-                    ])),
-                };
-            }
+    // Rust currently exposes this as ExistsRel + RelExpr::Gather.
+    let reachable_teams = RelExpr::Gather {
+        seed: Box::new(RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: "teams".into(),
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("kind"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("individual".into())),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("identity_key"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+            ]),
+        }),
+        step: Box::new(RelExpr::Project {
+            input: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: "team_team_edges".into(),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("child_team"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::RowId(RowIdRef::Frontier),
+                },
+            }),
+            columns: vec![groove::query_manager::relation_ir::ProjectColumn {
+                alias: "id".into(),
+                expr: groove::query_manager::relation_ir::ProjectExpr::Column(
+                    ColumnRef::unscoped("parent_team"),
+                ),
+            }],
+        }),
+        frontier_key: KeyRef::RowId(RowIdRef::Current),
+        max_depth: 10,
+        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+    };
 
-            PolicyExpr::Exists {
-                table: "team_team_edges".into(),
-                condition: Box::new(PolicyExpr::and(vec![
-                    PolicyExpr::Cmp {
-                        column: "parent_team".into(),
-                        op: CmpOp::Eq,
-                        value: target,
-                    },
-                    path(
-                        depth - 1,
-                        PolicyValue::SessionRef(vec![
-                            OUTER_ROW_SESSION_PREFIX.into(),
-                            "child_team".into(),
-                        ]),
-                    ),
-                ])),
-            }
-        }
-
-        PolicyExpr::or(
-            (0..=max_depth)
-                .map(|depth| {
-                    path(
-                        depth,
-                        PolicyValue::SessionRef(vec![
-                            OUTER_ROW_SESSION_PREFIX.into(),
-                            anchor_team_col.to_string(),
-                        ]),
-                    )
-                })
-                .collect(),
-        )
-    }
+    let policies = TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+        rel: reachable_teams,
+    });
     ```
-
-    This mirrors the TypeScript compiler strategy: naive bounded unrolling into nested `EXISTS` and `CMP` expressions.
 
   </Tab>
 </Tabs>

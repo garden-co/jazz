@@ -187,6 +187,8 @@ pub enum SyncError {
         object_id: ObjectId,
         branch_name: BranchName,
     },
+    /// Query subscription was rejected (e.g. query compilation failed).
+    QuerySubscriptionRejected { query_id: QueryId, reason: String },
 }
 
 // ============================================================================
