@@ -429,11 +429,6 @@ impl Query {
         self.recursive.is_some()
     }
 
-    /// Check if this query carries relation IR.
-    pub fn has_relation_ir(&self) -> bool {
-        true
-    }
-
     /// Rebuild relation IR from the query DSL fields.
     pub fn refresh_relation_ir(&mut self) -> Result<(), QueryBuildError> {
         self.relation_ir =
@@ -533,6 +528,11 @@ impl QueryBuilder {
     /// ```
     pub fn branches(mut self, branches: &[&str]) -> Self {
         self.query.branches = branches.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub(crate) fn branches_owned(mut self, branches: Vec<String>) -> Self {
+        self.query.branches = branches;
         self
     }
 
@@ -729,6 +729,14 @@ impl QueryBuilder {
         self
     }
 
+    /// Project join output to one tuple element by join order index.
+    ///
+    /// `0` selects base table rows, `1` selects the first joined table, etc.
+    pub fn result_element_index(mut self, index: usize) -> Self {
+        self.query.result_element_index = Some(index);
+        self
+    }
+
     /// Add an array subquery (correlated subquery producing an array column).
     ///
     /// The closure receives an `ArraySubqueryBuilder` to configure the subquery.
@@ -752,6 +760,14 @@ impl QueryBuilder {
         let builder = ArraySubqueryBuilder::new(column_name);
         let configured = builder_fn(builder);
         self.query.array_subqueries.push(configured.build());
+        self
+    }
+
+    pub(crate) fn with_array_subqueries(
+        mut self,
+        array_subqueries: Vec<ArraySubquerySpec>,
+    ) -> Self {
+        self.query.array_subqueries = array_subqueries;
         self
     }
 
@@ -1593,7 +1609,10 @@ mod tests {
         let json = serde_json::to_string(&query).expect("serialize");
         let decoded: Query = serde_json::from_str(&json).expect("deserialize");
 
-        assert!(decoded.has_relation_ir());
+        assert!(matches!(
+            decoded.relation_ir,
+            crate::query_manager::relation_ir::RelExpr::TableScan { .. }
+        ));
         assert_eq!(query, decoded);
     }
 

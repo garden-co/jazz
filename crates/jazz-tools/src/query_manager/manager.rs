@@ -11,7 +11,7 @@ use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
 
-use super::graph::QueryGraph;
+use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::Operation;
 use super::policy_graph::PolicyGraph;
@@ -364,8 +364,8 @@ impl QueryManager {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
-    ) -> Option<QueryGraph> {
-        QueryGraph::compile_with_schema_context(query, schema, session, schema_context)
+    ) -> Result<QueryGraph, QueryCompileError> {
+        QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
     }
 
     /// Mark all subscriptions for recompilation.
@@ -402,7 +402,7 @@ impl QueryManager {
                     sub.session.clone(),
                     &self.schema_context,
                 );
-                if let Some(new_graph) = new_graph {
+                if let Ok(new_graph) = new_graph {
                     sub.graph = new_graph;
                 }
                 sub.needs_recompile = false;
@@ -419,7 +419,7 @@ impl QueryManager {
                     sub.session.clone(),
                     &self.schema_context,
                 );
-                if let Some(new_graph) = new_graph {
+                if let Ok(new_graph) = new_graph {
                     sub.graph = new_graph;
                 }
                 sub.needs_recompile = false;

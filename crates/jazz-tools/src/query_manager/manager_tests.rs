@@ -2833,7 +2833,7 @@ fn join_compiles_but_not_executed_yet() {
     // Once execute() supports joins, this test can be extended.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Build a join query
     let query = qm
@@ -2851,7 +2851,7 @@ fn join_compiles_but_not_executed_yet() {
 fn join_query_with_projection_compiles() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("users")
@@ -2871,7 +2871,7 @@ fn join_query_with_projection_compiles() {
 fn join_query_with_alias_compiles() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("users")
@@ -2901,7 +2901,7 @@ fn self_join_query_compiles() {
     );
 
     let sync_manager = SyncManager::new();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("employees")
@@ -2948,7 +2948,7 @@ fn multi_join_query_compiles() {
     );
 
     let sync_manager = SyncManager::new();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("orders")
@@ -3274,15 +3274,12 @@ fn join_subscription_can_project_joined_element_output() {
         )
         .unwrap();
 
-    let mut query = qm
+    let query = qm
         .query("users")
         .join("posts")
         .on("id", "author_id")
+        .result_element_index(1)
         .build();
-    query.result_element_index = Some(1);
-    query
-        .refresh_relation_ir()
-        .expect("join projection query should normalize");
 
     let sub_id = qm.subscribe(query).unwrap();
     qm.process(&mut storage);
@@ -4985,7 +4982,7 @@ fn query_multi_branch_requires_explicit_branch() {
     // Verify Query.branches field exists and works
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Multi-branch query with explicit branches
     let query = qm.query("users").branches(&["main", "draft"]).build();
@@ -5477,7 +5474,7 @@ fn subscribe_with_sync_sends_to_servers() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let (mut client_qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5564,7 +5561,7 @@ fn unsubscribe_with_sync_sends_to_servers() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let (mut client_qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));

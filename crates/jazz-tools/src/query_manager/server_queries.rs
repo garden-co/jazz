@@ -59,7 +59,7 @@ impl QueryManager {
                 &self.schema_context,
             );
 
-            let Some(mut graph) = graph else {
+            let Ok(mut graph) = graph else {
                 // Query compilation failed (e.g., missing table)
                 // TODO: Send error back to client
                 continue;

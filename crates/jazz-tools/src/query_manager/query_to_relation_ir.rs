@@ -418,13 +418,13 @@ mod tests {
 
     #[test]
     fn normalize_join_query_with_result_element_index_projects_last_join_alias() {
-        let mut query = QueryBuilder::new("users")
+        let query = QueryBuilder::new("users")
             .alias("u")
             .join("posts")
             .alias("p")
             .on("u.id", "p.author_id")
+            .result_element_index(1)
             .build();
-        query.result_element_index = Some(1);
 
         let relation =
             normalize_query_to_rel_expr(&query).expect("join query should normalize to relation");
@@ -754,11 +754,11 @@ mod tests {
 
     #[test]
     fn normalize_query_with_non_terminal_result_element_index_is_supported() {
-        let mut query = QueryBuilder::new("users")
+        let query = QueryBuilder::new("users")
             .join("posts")
             .on("users.id", "posts.author_id")
+            .result_element_index(0)
             .build();
-        query.result_element_index = Some(0);
 
         let relation = normalize_query_to_rel_expr(&query)
             .expect("non-terminal result element index should normalize to project");
