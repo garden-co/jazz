@@ -3198,6 +3198,60 @@ fn join_filter_on_joined_table_column() {
 }
 
 #[test]
+fn join_subscription_can_project_joined_element_output() {
+    let sync_manager = SyncManager::new();
+    let schema = join_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    let post = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Hello World".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+    let mut query = qm
+        .query("users")
+        .join("posts")
+        .on("id", "author_id")
+        .build();
+    query.result_element_index = Some(1);
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Expected projected join update");
+
+    assert_eq!(delta.added.len(), 1);
+    let row = &delta.added[0];
+    assert_eq!(
+        row.id, post.row_id,
+        "Projected join output should be keyed by joined row id"
+    );
+    assert!(
+        row.data
+            .windows("Hello World".len())
+            .any(|window| window == "Hello World".as_bytes()),
+        "Projected join output should contain joined-table payload"
+    );
+}
+
+#[test]
 fn join_subscription_supports_implicit_base_id_keys() {
     let sync_manager = SyncManager::new();
     let schema = join_schema_with_implicit_base_id();

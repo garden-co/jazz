@@ -338,6 +338,12 @@ pub struct Query {
     /// Optional recursive relation expansion.
     #[serde(default)]
     pub recursive: Option<RecursiveSpec>,
+    /// Optional output tuple element index for join queries.
+    ///
+    /// When set, join query output is projected to this tuple element
+    /// instead of returning flattened combined rows.
+    #[serde(default)]
+    pub result_element_index: Option<usize>,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -361,6 +367,7 @@ impl Query {
             select_columns: None,
             array_subqueries: Vec::new(),
             recursive: None,
+            result_element_index: None,
         }
     }
 

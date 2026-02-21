@@ -21,6 +21,7 @@ interface BuilderOutput {
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
+  hops?: string[];
   gather?: {
     max_depth: number;
     step_table: string;
@@ -41,6 +42,17 @@ interface RecursiveOutput {
     via_column: string;
   };
   max_depth: number;
+}
+
+interface JoinOutput {
+  table: string;
+  alias: string | null;
+  on: [string, string];
+}
+
+interface HopPlan {
+  joins: JoinOutput[];
+  result_element_index: number | null;
 }
 
 function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
@@ -269,6 +281,51 @@ function toRecursiveFromGather(
   };
 }
 
+function toJoinPlanFromHops(
+  seedTable: string,
+  hops: readonly string[],
+  relations: Map<string, Relation[]>,
+): HopPlan {
+  if (hops.length === 0) {
+    return { joins: [], result_element_index: null };
+  }
+
+  const joins: JoinOutput[] = [];
+  let currentTable = seedTable;
+  let currentAlias = seedTable;
+
+  for (let i = 0; i < hops.length; i += 1) {
+    const hopName = hops[i];
+    const tableRelations = relations.get(currentTable) ?? [];
+    const relation = tableRelations.find((candidate) => candidate.name === hopName);
+    if (!relation) {
+      throw new Error(`Unknown relation "${hopName}" on table "${currentTable}"`);
+    }
+
+    const hopAlias = `__hop_${i}`;
+    if (relation.type === "forward") {
+      joins.push({
+        table: relation.toTable,
+        alias: hopAlias,
+        on: [`${currentAlias}.${relation.fromColumn}`, `${hopAlias}.id`],
+      });
+    } else {
+      joins.push({
+        table: relation.toTable,
+        alias: hopAlias,
+        on: [`${currentAlias}.id`, `${hopAlias}.${relation.toColumn}`],
+      });
+    }
+    currentTable = relation.toTable;
+    currentAlias = hopAlias;
+  }
+
+  return {
+    joins,
+    result_element_index: hops.length,
+  };
+}
+
 /**
  * Translate QueryBuilder JSON to WASM Query JSON.
  *
@@ -279,9 +336,20 @@ function toRecursiveFromGather(
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const builder: BuilderOutput = JSON.parse(builderJson);
   const relations = analyzeRelations(schema);
+  const hops = Array.isArray(builder.hops)
+    ? builder.hops.filter((hop): hop is string => typeof hop === "string")
+    : [];
   if (builder.gather && Object.keys(builder.includes ?? {}).length > 0) {
     throw new Error("gather(...) does not yet support include(...).");
   }
+  if (hops.length > 0 && builder.gather) {
+    throw new Error("gather(...).hopTo(...) is not yet supported.");
+  }
+  if (hops.length > 0 && Object.keys(builder.includes ?? {}).length > 0) {
+    throw new Error("hopTo(...) does not yet support include(...).");
+  }
+
+  const hopPlan = toJoinPlanFromHops(builder.table, hops, relations);
   const recursive = toRecursiveFromGather(builder.gather, builder.table, schema, relations);
 
   const query = {
@@ -300,7 +368,10 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     limit: builder.limit ?? null,
     include_deleted: false,
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations),
-    joins: [],
+    joins: hopPlan.joins,
+    ...(hopPlan.result_element_index !== null
+      ? { result_element_index: hopPlan.result_element_index }
+      : {}),
     recursive,
   };
 
