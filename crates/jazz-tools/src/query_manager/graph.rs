@@ -240,6 +240,9 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
     ) -> Option<Self> {
+        let lowered_query = query.lowered_from_relation_ir();
+        let query = lowered_query.as_ref().unwrap_or(query);
+
         // Get branches (default to "main" if not specified)
         let default_branches = vec!["main".to_string()];
         let branches: &[String] = if query.branches.is_empty() {
@@ -460,6 +463,9 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
+        let lowered_query = query.lowered_from_relation_ir();
+        let query = lowered_query.as_ref().unwrap_or(query);
+
         // Build branch -> schema hash map for column translation
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
         for branch_name in schema_context.all_branch_names() {
@@ -1961,6 +1967,10 @@ fn condition_to_scan(cond: &Condition) -> ScanCondition {
 mod tests {
     use super::*;
     use crate::query_manager::query::QueryBuilder;
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
+        ProjectExpr, RelExpr, RowIdRef, ValueRef,
+    };
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
     fn test_schema() -> Schema {
@@ -2509,5 +2519,94 @@ mod tests {
             has_recursive_relation_node(&graph),
             "Recursive join-projection queries should compile to RecursiveRelationNode"
         );
+    }
+
+    #[test]
+    fn compile_query_with_relation_ir_gather_uses_recursive_node() {
+        let schema = recursive_hop_schema();
+        let relation = RelExpr::Gather {
+            seed: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("teams"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("teams", "name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("seed".to_string())),
+                },
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("team_edges"),
+                        }),
+                        predicate: PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("team_edges", "child_team"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Frontier),
+                        },
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                    }],
+                    join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                }],
+            }),
+            frontier_key: KeyRef::RowId(RowIdRef::Current),
+            max_depth: 8,
+            dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+        };
+
+        let mut query = QueryBuilder::new("teams").branch("main").build();
+        query.relation_ir = Some(relation);
+        query.recursive = None;
+        query.joins.clear();
+        query.select_columns = None;
+
+        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Gather relation IR should compile to RecursiveRelationNode"
+        );
+        assert_eq!(graph.recursive_relation_tables.len(), 1);
+        assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
+    }
+
+    #[test]
+    fn compile_query_with_unsupported_relation_ir_falls_back_to_legacy_query() {
+        let schema = test_schema();
+        let mut query = QueryBuilder::new("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        query.relation_ir = Some(RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            predicate: PredicateExpr::Or(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Alice".to_string())),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Bob".to_string())),
+                },
+            ]),
+        });
+
+        let graph =
+            QueryGraph::compile(&query, &schema).expect("legacy query should still compile");
+        assert_eq!(graph.index_scan_nodes.len(), 1);
     }
 }
