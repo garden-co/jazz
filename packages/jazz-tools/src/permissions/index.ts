@@ -926,17 +926,21 @@ function projectHopResult(scope: string): RelProjectColumn[] {
   ];
 }
 
-function compileTableRelationToRelExpr(plan: TableRelationPlan): RelExpr {
-  let relation: RelExpr = {
-    type: "TableScan",
-    table: plan.table,
-  };
-  let defaultScope = plan.table;
+function applyRelationTail(options: {
+  base: RelExpr;
+  initialScope: string;
+  joins: RelationJoinSpec[];
+  filters: RelationFilterEntry[];
+  selectMap?: Record<string, string>;
+  joinAlias: (join: RelationJoinSpec, index: number) => string;
+}): RelExpr {
+  let relation = options.base;
+  let defaultScope = options.initialScope;
   let hasHopJoin = false;
 
-  for (let i = 0; i < plan.joins.length; i += 1) {
-    const join = plan.joins[i];
-    const rightScope = join.viaHop ? `__hop_${i}` : `__join_${i}`;
+  for (let i = 0; i < options.joins.length; i += 1) {
+    const join = options.joins[i];
+    const rightScope = options.joinAlias(join, i);
     relation = {
       type: "Join",
       left: relation,
@@ -951,19 +955,21 @@ function compileTableRelationToRelExpr(plan: TableRelationPlan): RelExpr {
     hasHopJoin ||= Boolean(join.viaHop);
   }
 
-  const predicates = plan.filters.flatMap((filter) =>
+  const predicates = options.filters.flatMap((filter) =>
     relationFilterToPredicates(filter, defaultScope),
   );
   relation = applyRelFilter(relation, predicates);
 
-  if (plan.selectMap && Object.keys(plan.selectMap).length > 0) {
-    const columns: RelProjectColumn[] = Object.entries(plan.selectMap).map(([alias, column]) => ({
-      alias,
-      expr: {
-        type: "Column",
-        column: relationColumnRef(column, defaultScope),
-      },
-    }));
+  if (options.selectMap && Object.keys(options.selectMap).length > 0) {
+    const columns: RelProjectColumn[] = Object.entries(options.selectMap).map(
+      ([alias, column]) => ({
+        alias,
+        expr: {
+          type: "Column",
+          column: relationColumnRef(column, defaultScope),
+        },
+      }),
+    );
     relation = {
       type: "Project",
       input: relation,
@@ -978,6 +984,20 @@ function compileTableRelationToRelExpr(plan: TableRelationPlan): RelExpr {
   }
 
   return relation;
+}
+
+function compileTableRelationToRelExpr(plan: TableRelationPlan): RelExpr {
+  return applyRelationTail({
+    base: {
+      type: "TableScan",
+      table: plan.table,
+    },
+    initialScope: plan.table,
+    joins: plan.joins,
+    filters: plan.filters,
+    selectMap: plan.selectMap,
+    joinAlias: (join, index) => (join.viaHop ? `__hop_${index}` : `__join_${index}`),
+  });
 }
 
 function compileRecursiveRelationToRelExpr(plan: RecursiveRelationPlan): RelExpr {
@@ -1037,7 +1057,7 @@ function compileRecursiveRelationToRelExpr(plan: RecursiveRelationPlan): RelExpr
     columns: projectHopResult(recursiveHopScope),
   };
 
-  let relation: RelExpr = {
+  const relation: RelExpr = {
     type: "Gather",
     seed,
     step: stepProjected,
@@ -1045,40 +1065,13 @@ function compileRecursiveRelationToRelExpr(plan: RecursiveRelationPlan): RelExpr
     maxDepth: plan.maxDepth,
     dedupeKey: [{ type: "RowId", source: "Current" }],
   };
-
-  let defaultScope = plan.alias;
-  let hasHopJoin = false;
-  for (let i = 0; i < plan.joins.length; i += 1) {
-    const join = plan.joins[i];
-    const rightScope = join.viaHop ? `__recursive_join_${i}` : `__recursive_join_${i}`;
-    relation = {
-      type: "Join",
-      left: relation,
-      right: {
-        type: "TableScan",
-        table: join.table,
-      },
-      on: [joinConditionFromSpec(join, defaultScope, rightScope)],
-      joinKind: "Inner",
-    };
-    defaultScope = rightScope;
-    hasHopJoin ||= Boolean(join.viaHop);
-  }
-
-  const postPredicates = plan.filters.flatMap((filter) =>
-    relationFilterToPredicates(filter, defaultScope),
-  );
-  relation = applyRelFilter(relation, postPredicates);
-
-  if (hasHopJoin) {
-    relation = {
-      type: "Project",
-      input: relation,
-      columns: projectHopResult(defaultScope),
-    };
-  }
-
-  return relation;
+  return applyRelationTail({
+    base: relation,
+    initialScope: plan.alias,
+    joins: plan.joins,
+    filters: plan.filters,
+    joinAlias: (_join, index) => `__recursive_join_${index}`,
+  });
 }
 
 function compileRelationPlanToRelExpr(plan: RelationPlan): RelExpr {

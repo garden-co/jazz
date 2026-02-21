@@ -1039,7 +1039,7 @@ describe("translateQuery", () => {
       );
     });
 
-    it("throws when gather query also includes hopTo(...)", () => {
+    it("lowers gather query followed by hopTo(...)", () => {
       const schema: WasmSchema = {
         tables: {
           teams: {
@@ -1079,9 +1079,16 @@ describe("translateQuery", () => {
         },
       });
 
-      expect(() => translateQuery(builderJson, schema)).toThrow(
-        "gather(...).hopTo(...) is not yet supported.",
-      );
+      const result = JSON.parse(translateQuery(builderJson, schema));
+      expect(result.relation_ir?.type).toBe("Project");
+      if (result.relation_ir?.type !== "Project") {
+        throw new Error("Expected projected relation IR.");
+      }
+      expect(result.relation_ir.input.type).toBe("Join");
+      if (result.relation_ir.input.type !== "Join") {
+        throw new Error("Expected gather hop join relation IR.");
+      }
+      expect(result.relation_ir.input.left.type).toBe("Gather");
     });
 
     it("throws when hop query also includes include(...)", () => {

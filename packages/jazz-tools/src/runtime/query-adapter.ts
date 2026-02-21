@@ -480,9 +480,6 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   if (builder.gather && Object.keys(builder.includes ?? {}).length > 0) {
     throw new Error("gather(...) does not yet support include(...).");
   }
-  if (hops.length > 0 && builder.gather) {
-    throw new Error("gather(...).hopTo(...) is not yet supported.");
-  }
   if (hops.length > 0 && Object.keys(builder.includes ?? {}).length > 0) {
     throw new Error("hopTo(...) does not yet support include(...).");
   }
@@ -495,9 +492,8 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
 
   if (builder.gather) {
     relation = gatherToRelExpr(builder.gather, builder.table, relation, relations, schema);
-  } else {
-    relation = lowerHopsToRelExpr(relation, builder.table, hops, relations, schema);
   }
+  relation = lowerHopsToRelExpr(relation, builder.table, hops, relations, schema);
 
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
     relation = {
