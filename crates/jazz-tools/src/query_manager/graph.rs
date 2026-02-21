@@ -33,7 +33,7 @@ use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNo
 use super::index::ScanCondition;
 use super::query::{Condition, Query};
 use super::relation_ir::RelExpr;
-use super::relation_ir_query_plan::{lower_query_relation_ir, lower_relation_to_execution_query};
+use super::relation_ir_query_plan::lower_relation_to_execution_query;
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, Row, RowDelta, RowDescriptor,
@@ -247,6 +247,21 @@ impl QueryGraph {
         Self::compile_with_session(&query, schema, session)
     }
 
+    /// Compile relation IR directly into a graph with schema context.
+    pub fn compile_relation_ir_with_schema_context(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[String],
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Option<Self> {
+        let mut template = Query::new("__relation_ir");
+        template.branches = branches.to_vec();
+
+        let query = lower_relation_to_execution_query(&template, relation)?;
+        Self::compile_with_schema_context(&query, schema, session, schema_context)
+    }
+
     /// Compile a query into a graph with optional session-based policy filtering.
     ///
     /// When a session is provided and the table has a SELECT policy, a PolicyFilterNode
@@ -256,12 +271,9 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
     ) -> Option<Self> {
-        let relation_query = if query.has_relation_ir() {
-            Some(lower_query_relation_ir(query)?)
-        } else {
-            None
-        };
-        let query = relation_query.as_ref().unwrap_or(query);
+        if query.has_relation_ir() {
+            return None;
+        }
 
         // Get branches (default to "main" if not specified)
         let default_branches = vec!["main".to_string()];
@@ -483,12 +495,9 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        let relation_query = if query.has_relation_ir() {
-            Some(lower_query_relation_ir(query)?)
-        } else {
-            None
-        };
-        let query = relation_query.as_ref().unwrap_or(query);
+        if query.has_relation_ir() {
+            return None;
+        }
 
         // Build branch -> schema hash map for column translation
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
@@ -2561,6 +2570,20 @@ mod tests {
     }
 
     #[test]
+    fn compile_query_with_relation_ir_requires_explicit_entrypoint() {
+        let schema = recursive_hop_schema();
+        let mut query = QueryBuilder::new("placeholder").branch("main").build();
+        query.relation_ir = Some(RelExpr::TableScan {
+            table: TableName::new("teams"),
+        });
+
+        assert!(
+            QueryGraph::compile(&query, &schema).is_none(),
+            "relation IR queries should use compile_relation_ir entrypoint",
+        );
+    }
+
+    #[test]
     fn compile_query_with_relation_ir_project_join_order_limit_shape() {
         let schema = recursive_hop_schema();
         let relation = RelExpr::Limit {
@@ -2599,13 +2622,9 @@ mod tests {
             limit: 5,
         };
 
-        let mut query = QueryBuilder::new("placeholder").branch("main").build();
-        query.relation_ir = Some(relation);
-        query.recursive = None;
-        query.joins.clear();
-        query.select_columns = None;
-
-        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
         assert!(
             graph
                 .nodes
@@ -2674,13 +2693,9 @@ mod tests {
             dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
         };
 
-        let mut query = QueryBuilder::new("teams").branch("main").build();
-        query.relation_ir = Some(relation);
-        query.recursive = None;
-        query.joins.clear();
-        query.select_columns = None;
-
-        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
         assert!(
             has_recursive_relation_node(&graph),
             "Gather relation IR should compile to RecursiveRelationNode"
@@ -2750,13 +2765,9 @@ mod tests {
             }],
         };
 
-        let mut query = QueryBuilder::new("teams").branch("main").build();
-        query.relation_ir = Some(relation);
-        query.recursive = None;
-        query.joins.clear();
-        query.select_columns = None;
-
-        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
         assert!(
             has_recursive_relation_node(&graph),
             "Gather relation IR with post-join should compile to RecursiveRelationNode"
@@ -2772,10 +2783,7 @@ mod tests {
     #[test]
     fn compile_query_with_unsupported_relation_ir_is_rejected() {
         let schema = test_schema();
-        let mut query = QueryBuilder::new("users")
-            .filter_eq("score", Value::Integer(100))
-            .build();
-        query.relation_ir = Some(RelExpr::Filter {
+        let relation = RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
                 table: TableName::new("users"),
             }),
@@ -2791,9 +2799,9 @@ mod tests {
                     right: ValueRef::Literal(Value::Text("Bob".to_string())),
                 },
             ]),
-        });
-
-        let graph = QueryGraph::compile(&query, &schema);
+        };
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None);
         assert!(
             graph.is_none(),
             "unsupported relation_ir should not silently fallback"

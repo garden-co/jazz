@@ -387,12 +387,23 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                if let Some(new_graph) = QueryGraph::compile_with_schema_context(
-                    &sub.query,
-                    &self.schema,
-                    sub.session.clone(),
-                    &self.schema_context,
-                ) {
+                let new_graph = if let Some(relation) = sub.query.relation_ir.as_ref() {
+                    QueryGraph::compile_relation_ir_with_schema_context(
+                        relation,
+                        &self.schema,
+                        &sub.query.branches,
+                        sub.session.clone(),
+                        &self.schema_context,
+                    )
+                } else {
+                    QueryGraph::compile_with_schema_context(
+                        &sub.query,
+                        &self.schema,
+                        sub.session.clone(),
+                        &self.schema_context,
+                    )
+                };
+                if let Some(new_graph) = new_graph {
                     sub.graph = new_graph;
                 }
                 sub.needs_recompile = false;
@@ -403,12 +414,23 @@ impl QueryManager {
         for sub in self.server_subscriptions.values_mut() {
             if sub.needs_recompile {
                 // Recompile the graph
-                if let Some(new_graph) = QueryGraph::compile_with_schema_context(
-                    &sub.query,
-                    &self.schema,
-                    sub.session.clone(),
-                    &self.schema_context,
-                ) {
+                let new_graph = if let Some(relation) = sub.query.relation_ir.as_ref() {
+                    QueryGraph::compile_relation_ir_with_schema_context(
+                        relation,
+                        &self.schema,
+                        &sub.query.branches,
+                        sub.session.clone(),
+                        &self.schema_context,
+                    )
+                } else {
+                    QueryGraph::compile_with_schema_context(
+                        &sub.query,
+                        &self.schema,
+                        sub.session.clone(),
+                        &self.schema_context,
+                    )
+                };
+                if let Some(new_graph) = new_graph {
                     sub.graph = new_graph;
                 }
                 sub.needs_recompile = false;

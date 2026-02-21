@@ -456,8 +456,3 @@ pub(crate) fn lower_relation_to_execution_query(
     lowered.relation_ir = None;
     Some(lowered)
 }
-
-pub(crate) fn lower_query_relation_ir(query: &Query) -> Option<Query> {
-    let relation = query.relation_ir.as_ref()?;
-    lower_relation_to_execution_query(query, relation)
-}

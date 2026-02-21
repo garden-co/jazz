@@ -53,12 +53,22 @@ impl QueryManager {
             };
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
-            let graph = QueryGraph::compile_with_schema_context(
-                &sub.query,
-                &schema_for_compile,
-                sub.session.clone(),
-                &self.schema_context,
-            );
+            let graph = if let Some(relation) = sub.query.relation_ir.as_ref() {
+                QueryGraph::compile_relation_ir_with_schema_context(
+                    relation,
+                    &schema_for_compile,
+                    &sub.query.branches,
+                    sub.session.clone(),
+                    &self.schema_context,
+                )
+            } else {
+                QueryGraph::compile_with_schema_context(
+                    &sub.query,
+                    &schema_for_compile,
+                    sub.session.clone(),
+                    &self.schema_context,
+                )
+            };
 
             let Some(mut graph) = graph else {
                 // Query compilation failed (e.g., missing table)
