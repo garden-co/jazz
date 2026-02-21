@@ -241,7 +241,11 @@ impl QueryGraph {
         session: Option<Session>,
     ) -> Option<Self> {
         let lowered_query = query.lowered_from_relation_ir();
-        let query = lowered_query.as_ref().unwrap_or(query);
+        let query = if query.has_relation_ir() {
+            lowered_query.as_ref()?
+        } else {
+            query
+        };
 
         // Get branches (default to "main" if not specified)
         let default_branches = vec!["main".to_string()];
@@ -464,7 +468,11 @@ impl QueryGraph {
         schema_context: &SchemaContext,
     ) -> Option<Self> {
         let lowered_query = query.lowered_from_relation_ir();
-        let query = lowered_query.as_ref().unwrap_or(query);
+        let query = if query.has_relation_ir() {
+            lowered_query.as_ref()?
+        } else {
+            query
+        };
 
         // Build branch -> schema hash map for column translation
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
@@ -2582,7 +2590,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_query_with_unsupported_relation_ir_falls_back_to_legacy_query() {
+    fn compile_query_with_unsupported_relation_ir_is_rejected() {
         let schema = test_schema();
         let mut query = QueryBuilder::new("users")
             .filter_eq("score", Value::Integer(100))
@@ -2605,8 +2613,10 @@ mod tests {
             ]),
         });
 
-        let graph =
-            QueryGraph::compile(&query, &schema).expect("legacy query should still compile");
-        assert_eq!(graph.index_scan_nodes.len(), 1);
+        let graph = QueryGraph::compile(&query, &schema);
+        assert!(
+            graph.is_none(),
+            "unsupported relation_ir should not silently fallback"
+        );
     }
 }
