@@ -136,7 +136,7 @@ importers:
         version: 5.9.3
 
   crates/jazz-wasm:
-    dependencies:
+    devDependencies:
       wasm-pack:
         specifier: ^0.14.0
         version: 0.14.0
