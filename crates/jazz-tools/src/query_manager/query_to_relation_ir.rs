@@ -12,12 +12,10 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
     if query.has_relation_ir() {
         return None;
     }
-    if query.has_recursive() && query.result_element_index.is_some() {
-        return None;
-    }
 
     let mut relation = RelExpr::TableScan { table: query.table };
     let mut current_scope = query.effective_name().to_string();
+    let mut scope_order = vec![current_scope.clone()];
     let predicate = normalize_disjuncts(&query.disjuncts)?;
     if let Some(recursive) = query.recursive.as_ref() {
         if query.joins.is_empty() {
@@ -43,6 +41,7 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
                     join_kind: JoinKind::Inner,
                 };
                 current_scope = right_scope;
+                scope_order.push(current_scope.clone());
             }
             if !matches!(predicate, PredicateExpr::True) {
                 relation = RelExpr::Filter {
@@ -65,6 +64,7 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
                 join_kind: JoinKind::Inner,
             };
             current_scope = right_scope;
+            scope_order.push(current_scope.clone());
         }
         if !matches!(predicate, PredicateExpr::True) {
             relation = RelExpr::Filter {
@@ -75,14 +75,7 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
     }
 
     if let Some(index) = query.result_element_index {
-        if query.joins.is_empty() || index != query.joins.len() {
-            return None;
-        }
-        let projected_scope = query
-            .joins
-            .last()
-            .map(|join| join.effective_name().to_string())
-            .unwrap_or_else(|| query.effective_name().to_string());
+        let projected_scope = scope_order.get(index)?.clone();
         relation = RelExpr::Project {
             input: Box::new(relation),
             columns: vec![ProjectColumn {
@@ -700,16 +693,36 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_with_non_terminal_result_element_index_is_unsupported() {
+    fn normalize_query_with_non_terminal_result_element_index_is_supported() {
         let mut query = QueryBuilder::new("users")
             .join("posts")
             .on("users.id", "posts.author_id")
             .build();
         query.result_element_index = Some(0);
 
-        assert!(
-            normalize_query_to_rel_expr(&query).is_none(),
-            "only projection to the terminal join element is currently representable"
+        let relation = normalize_query_to_rel_expr(&query)
+            .expect("non-terminal result element index should normalize to project");
+        assert_eq!(
+            relation,
+            RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::TableScan {
+                        table: TableName::new("users"),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("posts"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("users", "id"),
+                        right: ColumnRef::scoped("posts", "author_id"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("users", "id")),
+                }],
+            }
         );
     }
 }
