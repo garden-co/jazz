@@ -120,15 +120,26 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
 }
 
 fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelExpr> {
-    if spec.outer_column != "id" && spec.outer_column != "_id" {
-        return None;
-    }
+    let outer_column = spec
+        .outer_column
+        .split('.')
+        .next_back()
+        .unwrap_or(&spec.outer_column)
+        .to_string();
+    let frontier_value = match outer_column.as_str() {
+        "id" | "_id" => ValueRef::RowId(RowIdRef::Frontier),
+        _ => ValueRef::FrontierColumn(ColumnRef::unscoped(outer_column.clone())),
+    };
+    let frontier_key = match outer_column.as_str() {
+        "id" | "_id" => KeyRef::RowId(RowIdRef::Current),
+        _ => KeyRef::Column(ColumnRef::unscoped(outer_column.clone())),
+    };
 
     let step_scope = spec.table.as_str().to_string();
     let mut step_terms = vec![PredicateExpr::Cmp {
         left: ColumnRef::scoped(step_scope.clone(), spec.inner_column.clone()),
         op: PredicateCmpOp::Eq,
-        right: ValueRef::RowId(RowIdRef::Frontier),
+        right: frontier_value,
     }];
     for condition in &spec.filters {
         step_terms.push(normalize_condition(condition)?);
@@ -237,9 +248,9 @@ fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelEx
     Some(RelExpr::Gather {
         seed: Box::new(seed),
         step: Box::new(step),
-        frontier_key: KeyRef::RowId(RowIdRef::Current),
+        frontier_key: frontier_key.clone(),
         max_depth: spec.max_depth,
-        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+        dedupe_key: vec![frontier_key],
     })
 }
 
@@ -602,6 +613,59 @@ mod tests {
                     left: ColumnRef::scoped("team_edges", "child_team"),
                     op: PredicateCmpOp::Eq,
                     right: ValueRef::RowId(RowIdRef::Frontier),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_query_with_recursive_spec_column_frontier_produces_gather() {
+        let query = QueryBuilder::new("teams")
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "team_id")
+                    .select(&["parent_team"])
+                    .max_depth(4)
+            })
+            .build();
+        let relation = normalize_query_to_rel_expr(&query)
+            .expect("recursive column-frontier spec should normalize to gather");
+
+        let RelExpr::Gather {
+            frontier_key,
+            dedupe_key,
+            step,
+            ..
+        } = relation
+        else {
+            panic!("expected gather relation")
+        };
+        assert_eq!(frontier_key, KeyRef::Column(ColumnRef::unscoped("team_id")));
+        assert_eq!(
+            dedupe_key,
+            vec![KeyRef::Column(ColumnRef::unscoped("team_id"))]
+        );
+
+        let RelExpr::Project { input, columns } = *step else {
+            panic!("expected project step");
+        };
+        assert_eq!(
+            columns,
+            vec![ProjectColumn {
+                alias: "parent_team".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("team_edges", "parent_team")),
+            }]
+        );
+        assert_eq!(
+            *input,
+            RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("team_edges"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("team_edges", "child_team"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::FrontierColumn(ColumnRef::unscoped("team_id")),
                 },
             }
         );

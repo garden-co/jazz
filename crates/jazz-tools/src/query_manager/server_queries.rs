@@ -52,7 +52,7 @@ impl QueryManager {
             };
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
-            let graph = Self::compile_graph_with_relation_fallback(
+            let graph = Self::compile_graph_from_relation_ir(
                 &sub.query,
                 &schema_for_compile,
                 sub.session.clone(),

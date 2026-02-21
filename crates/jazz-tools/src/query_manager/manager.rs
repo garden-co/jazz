@@ -360,7 +360,7 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn compile_graph_with_relation_fallback(
+    pub(super) fn compile_graph_from_relation_ir(
         query: &Query,
         schema: &Schema,
         session: Option<Session>,
@@ -381,24 +381,19 @@ impl QueryManager {
             );
         }
 
-        if let Some(normalized_relation) = normalize_query_to_rel_expr(query)
-            && let Some(graph) = QueryGraph::compile_relation_ir_with_schema_context_and_features(
-                &normalized_relation,
-                schema,
-                &query.branches,
-                session.clone(),
-                schema_context,
-                RelationCompileFeatures {
-                    include_deleted: query.include_deleted,
-                    array_subqueries: query.array_subqueries.clone(),
-                    select_columns: query.select_columns.clone(),
-                },
-            )
-        {
-            return Some(graph);
-        }
-
-        QueryGraph::compile_with_schema_context(query, schema, session, schema_context)
+        let normalized_relation = normalize_query_to_rel_expr(query)?;
+        QueryGraph::compile_relation_ir_with_schema_context_and_features(
+            &normalized_relation,
+            schema,
+            &query.branches,
+            session,
+            schema_context,
+            RelationCompileFeatures {
+                include_deleted: query.include_deleted,
+                array_subqueries: query.array_subqueries.clone(),
+                select_columns: query.select_columns.clone(),
+            },
+        )
     }
 
     /// Mark all subscriptions for recompilation.
@@ -429,7 +424,7 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                let new_graph = Self::compile_graph_with_relation_fallback(
+                let new_graph = Self::compile_graph_from_relation_ir(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
@@ -446,7 +441,7 @@ impl QueryManager {
         for sub in self.server_subscriptions.values_mut() {
             if sub.needs_recompile {
                 // Recompile the graph
-                let new_graph = Self::compile_graph_with_relation_fallback(
+                let new_graph = Self::compile_graph_from_relation_ir(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
