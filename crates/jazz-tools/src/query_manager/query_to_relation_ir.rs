@@ -9,10 +9,6 @@ use super::relation_ir::{
 ///
 /// Returns `None` for query constructs that don't yet have a faithful relation-IR lowering.
 pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
-    if query.has_relation_ir() {
-        return None;
-    }
-
     let mut relation = RelExpr::TableScan { table: query.table };
     let mut current_scope = query.effective_name().to_string();
     let mut scope_order = vec![current_scope.clone()];

@@ -790,13 +790,9 @@ impl QueryGraph {
         } else {
             &query.branches
         };
-        let relation = if let Some(relation) = query.relation_ir.as_ref() {
-            relation.clone()
-        } else {
-            super::query_to_relation_ir::normalize_query_to_rel_expr(query)?
-        };
+        let relation = query.relation_ir.as_ref()?;
         Self::compile_relation_ir_with_features(
-            &relation,
+            relation,
             schema,
             branches,
             session,
@@ -829,13 +825,9 @@ impl QueryGraph {
         } else {
             query.branches.clone()
         };
-        let relation = if let Some(relation) = query.relation_ir.as_ref() {
-            relation.clone()
-        } else {
-            super::query_to_relation_ir::normalize_query_to_rel_expr(query)?
-        };
+        let relation = query.relation_ir.as_ref()?;
         Self::compile_relation_ir_with_schema_context_and_features(
-            &relation,
+            relation,
             schema,
             &branches,
             session,
@@ -880,6 +872,7 @@ impl QueryGraph {
         base_query.limit = spec.limit;
         base_query.select_columns = spec.select_columns.clone();
         base_query.array_subqueries = spec.nested_arrays.clone();
+        base_query.refresh_relation_ir();
 
         // Build combined descriptor: base table + all joined tables + nested array columns
         let mut combined_columns = inner_descriptor.columns.clone();
@@ -1020,6 +1013,7 @@ impl QueryGraph {
                 conditions: spec.filters.clone(),
             }];
         }
+        step_query.refresh_relation_ir();
 
         // Build descriptor for step output.
         let mut step_table_descriptors = vec![step_table_descriptor.clone()];
