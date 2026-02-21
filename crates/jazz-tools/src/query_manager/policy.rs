@@ -7,6 +7,7 @@
 use super::encoding::{
     column_bytes, column_is_null, compare_column_to_value, decode_column, encode_value,
 };
+use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
 
@@ -102,6 +103,11 @@ pub enum PolicyExpr {
         table: String,
         condition: Box<PolicyExpr>,
     },
+
+    /// Check if a relation expression returns any rows.
+    ///
+    /// This is the declarative relation-IR form emitted by policy.exists(relation).
+    ExistsRel { rel: RelExpr },
 
     /// Inherit permission from a related row.
     /// Looks up the row referenced by `via_column` (foreign key) and checks
@@ -325,6 +331,10 @@ where
             // EXISTS is an internal representation, not directly used
             true
         }
+        PolicyExpr::ExistsRel { .. } => {
+            // EXISTS REL requires graph/context evaluation, not direct scalar eval.
+            true
+        }
 
         PolicyExpr::Inherits {
             operation,
@@ -470,6 +480,7 @@ fn evaluate_expr_simple(
             .any(|e| evaluate_expr_simple(e, content, descriptor, session, depth)),
         PolicyExpr::Not(inner) => !evaluate_expr_simple(inner, content, descriptor, session, depth),
         PolicyExpr::Exists { .. } => true,
+        PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::Inherits { .. } => true, // No row loader - permissive
     }
 }
@@ -602,6 +613,7 @@ pub fn bind_outer_row_refs(
             // correlated against their immediate outer row when evaluated.
             condition: condition.clone(),
         }),
+        PolicyExpr::ExistsRel { rel } => Some(PolicyExpr::ExistsRel { rel: rel.clone() }),
         PolicyExpr::Inherits {
             operation,
             via_column,
@@ -641,6 +653,245 @@ fn outer_row_ref_column(path: &[String]) -> Option<&str> {
         return None;
     }
     Some(path[1].as_str())
+}
+
+/// Bind relation references that depend on session or outer-row context.
+///
+/// Rewrites:
+/// - `SessionRef(path)` => `Literal(resolve_session_value(path))`
+/// - `OuterColumn(col)` => `Literal(outer_row[col])`
+/// - `RowId(Outer)` => `Literal(outer_row_id)` when provided
+///
+/// Returns `None` on any unresolved reference.
+pub fn bind_relation_refs(
+    rel: &RelExpr,
+    outer_content: &[u8],
+    outer_descriptor: &RowDescriptor,
+    session: &Session,
+    outer_row_id: Option<ObjectId>,
+) -> Option<RelExpr> {
+    fn bind_value_ref(
+        value_ref: &ValueRef,
+        outer_content: &[u8],
+        outer_descriptor: &RowDescriptor,
+        session: &Session,
+        outer_row_id: Option<ObjectId>,
+    ) -> Option<ValueRef> {
+        match value_ref {
+            ValueRef::Literal(value) => Some(ValueRef::Literal(value.clone())),
+            ValueRef::SessionRef(path) => {
+                let resolved = resolve_session_value(path, session)?;
+                Some(ValueRef::Literal(resolved))
+            }
+            ValueRef::OuterColumn(column) => {
+                let col_index = outer_descriptor.column_index(&column.column)?;
+                let resolved = decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                Some(ValueRef::Literal(resolved))
+            }
+            ValueRef::FrontierColumn(column) => Some(ValueRef::FrontierColumn(column.clone())),
+            ValueRef::RowId(RowIdRef::Outer) => {
+                let outer_id = outer_row_id?;
+                Some(ValueRef::Literal(Value::Uuid(outer_id)))
+            }
+            ValueRef::RowId(source) => Some(ValueRef::RowId(*source)),
+        }
+    }
+
+    fn bind_predicate(
+        predicate: &PredicateExpr,
+        outer_content: &[u8],
+        outer_descriptor: &RowDescriptor,
+        session: &Session,
+        outer_row_id: Option<ObjectId>,
+    ) -> Option<PredicateExpr> {
+        match predicate {
+            PredicateExpr::Cmp { left, op, right } => Some(PredicateExpr::Cmp {
+                left: left.clone(),
+                op: *op,
+                right: bind_value_ref(
+                    right,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?,
+            }),
+            PredicateExpr::IsNull { column } => Some(PredicateExpr::IsNull {
+                column: column.clone(),
+            }),
+            PredicateExpr::IsNotNull { column } => Some(PredicateExpr::IsNotNull {
+                column: column.clone(),
+            }),
+            PredicateExpr::In { left, values } => Some(PredicateExpr::In {
+                left: left.clone(),
+                values: values
+                    .iter()
+                    .map(|value| {
+                        bind_value_ref(
+                            value,
+                            outer_content,
+                            outer_descriptor,
+                            session,
+                            outer_row_id,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            PredicateExpr::And(exprs) => Some(PredicateExpr::And(
+                exprs
+                    .iter()
+                    .map(|expr| {
+                        bind_predicate(expr, outer_content, outer_descriptor, session, outer_row_id)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            PredicateExpr::Or(exprs) => Some(PredicateExpr::Or(
+                exprs
+                    .iter()
+                    .map(|expr| {
+                        bind_predicate(expr, outer_content, outer_descriptor, session, outer_row_id)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            PredicateExpr::Not(inner) => Some(PredicateExpr::Not(Box::new(bind_predicate(
+                inner,
+                outer_content,
+                outer_descriptor,
+                session,
+                outer_row_id,
+            )?))),
+            PredicateExpr::True => Some(PredicateExpr::True),
+            PredicateExpr::False => Some(PredicateExpr::False),
+        }
+    }
+
+    fn bind_rel_expr(
+        rel: &RelExpr,
+        outer_content: &[u8],
+        outer_descriptor: &RowDescriptor,
+        session: &Session,
+        outer_row_id: Option<ObjectId>,
+    ) -> Option<RelExpr> {
+        match rel {
+            RelExpr::TableScan { table } => Some(RelExpr::TableScan { table: *table }),
+            RelExpr::Filter { input, predicate } => Some(RelExpr::Filter {
+                input: Box::new(bind_rel_expr(
+                    input,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                predicate: bind_predicate(
+                    predicate,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?,
+            }),
+            RelExpr::Join {
+                left,
+                right,
+                on,
+                join_kind,
+            } => Some(RelExpr::Join {
+                left: Box::new(bind_rel_expr(
+                    left,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                right: Box::new(bind_rel_expr(
+                    right,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                on: on.clone(),
+                join_kind: *join_kind,
+            }),
+            RelExpr::Project { input, columns } => Some(RelExpr::Project {
+                input: Box::new(bind_rel_expr(
+                    input,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                columns: columns.clone(),
+            }),
+            RelExpr::Gather {
+                seed,
+                step,
+                frontier_key,
+                max_depth,
+                dedupe_key,
+            } => Some(RelExpr::Gather {
+                seed: Box::new(bind_rel_expr(
+                    seed,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                step: Box::new(bind_rel_expr(
+                    step,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                frontier_key: frontier_key.clone(),
+                max_depth: *max_depth,
+                dedupe_key: dedupe_key.clone(),
+            }),
+            RelExpr::Distinct { input, key } => Some(RelExpr::Distinct {
+                input: Box::new(bind_rel_expr(
+                    input,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                key: key.clone(),
+            }),
+            RelExpr::OrderBy { input, terms } => Some(RelExpr::OrderBy {
+                input: Box::new(bind_rel_expr(
+                    input,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                terms: terms.clone(),
+            }),
+            RelExpr::Offset { input, offset } => Some(RelExpr::Offset {
+                input: Box::new(bind_rel_expr(
+                    input,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                offset: *offset,
+            }),
+            RelExpr::Limit { input, limit } => Some(RelExpr::Limit {
+                input: Box::new(bind_rel_expr(
+                    input,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?),
+                limit: *limit,
+            }),
+        }
+    }
+
+    bind_rel_expr(rel, outer_content, outer_descriptor, session, outer_row_id)
 }
 
 /// Evaluate an IN expression. Public for use by PolicyFilterNode.
@@ -734,6 +985,8 @@ pub enum ComplexClause {
         table: String,
         condition: Box<PolicyExpr>,
     },
+    /// EXISTS relation clause with declarative relation IR.
+    ExistsRel { rel: RelExpr },
 }
 
 /// Result of evaluating simple parts of a policy expression.
@@ -939,6 +1192,13 @@ fn evaluate_simple_recursive(
                 condition: Box::new(bound),
             })
         }
+        PolicyExpr::ExistsRel { rel } => {
+            let bound = match bind_relation_refs(rel, content, descriptor, session, None) {
+                Some(expr) => expr,
+                None => return SimpleEvalResult::fail(),
+            };
+            SimpleEvalResult::with_complex(ComplexClause::ExistsRel { rel: bound })
+        }
     }
 }
 
@@ -1085,6 +1345,48 @@ mod tests {
 
         let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_exists_rel_outer_column_binds_to_literal() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Text)]);
+        let content = encode_row(&descriptor, &[Value::Text("todo-1".into())]).unwrap();
+        let session = Session::new("user-1");
+
+        let expr = PolicyExpr::ExistsRel {
+            rel: RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("todo_shares"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: crate::query_manager::relation_ir::ColumnRef::unscoped("todo_id"),
+                    op: crate::query_manager::relation_ir::PredicateCmpOp::Eq,
+                    right: ValueRef::OuterColumn(
+                        crate::query_manager::relation_ir::ColumnRef::unscoped("id"),
+                    ),
+                },
+            },
+        };
+
+        let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
+        assert!(result.passed);
+        assert_eq!(result.complex_clauses.len(), 1);
+        match &result.complex_clauses[0] {
+            ComplexClause::ExistsRel { rel } => {
+                let RelExpr::Filter { predicate, .. } = rel else {
+                    panic!("expected bound filter relation")
+                };
+                assert!(matches!(
+                    predicate,
+                    PredicateExpr::Cmp {
+                        left,
+                        op: crate::query_manager::relation_ir::PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text(value)),
+                    } if left.column == "todo_id" && value == "todo-1"
+                ));
+            }
+            _ => panic!("expected ExistsRel complex clause"),
+        }
     }
 
     #[test]

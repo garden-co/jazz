@@ -2059,9 +2059,10 @@ function compileCondition(
     return condition;
   }
   if (isExistsRelationCondition(condition)) {
-    const compiled = compileRelationExists(condition.relation);
-    assertInheritsColumns(compiled, table, fkColumnsByTable);
-    return compiled;
+    return {
+      type: "ExistsRel",
+      rel: relationToIr(condition.relation),
+    };
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });

@@ -167,6 +167,15 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
             hasher.update(&[0]);
             hash_policy_expr(hasher, condition);
         }
+        PolicyExpr::ExistsRel { rel } => {
+            hasher.update(&[12]);
+            if let Ok(encoded) = serde_json::to_vec(rel) {
+                hasher.update(&(encoded.len() as u64).to_le_bytes());
+                hasher.update(&encoded);
+            } else {
+                hasher.update(&0u64.to_le_bytes());
+            }
+        }
         PolicyExpr::Inherits {
             operation,
             via_column,

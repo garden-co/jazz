@@ -503,6 +503,7 @@ const POLICY_EXPR_NOT: u8 = 9;
 const POLICY_EXPR_TRUE: u8 = 10;
 const POLICY_EXPR_FALSE: u8 = 11;
 const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
+const POLICY_EXPR_EXISTS_REL: u8 = 13;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -598,6 +599,15 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             write_string(buf, table);
             encode_policy_expr(buf, condition);
         }
+        PolicyExpr::ExistsRel { rel } => {
+            buf.push(POLICY_EXPR_EXISTS_REL);
+            if let Ok(encoded) = serde_json::to_vec(rel) {
+                write_u32(buf, encoded.len() as u32);
+                buf.extend_from_slice(&encoded);
+            } else {
+                write_u32(buf, 0);
+            }
+        }
         PolicyExpr::Inherits {
             operation,
             via_column,
@@ -676,6 +686,16 @@ fn decode_policy_expr(
                 table,
                 condition: Box::new(condition),
             })
+        }
+        POLICY_EXPR_EXISTS_REL => {
+            let len = read_u32(data, offset)? as usize;
+            let bytes = read_bytes(data, offset, len)?;
+            let rel = serde_json::from_slice(bytes).map_err(|err| {
+                CatalogueEncodingError::DecodeError {
+                    message: format!("invalid policy exists_rel relation: {err}"),
+                }
+            })?;
+            Ok(PolicyExpr::ExistsRel { rel })
         }
         POLICY_EXPR_INHERITS => {
             let operation = decode_policy_operation(data, offset)?;

@@ -178,6 +178,9 @@ enum JsPolicyExpr {
         table: String,
         condition: Box<JsPolicyExpr>,
     },
+    ExistsRel {
+        rel: serde_json::Value,
+    },
     Inherits {
         operation: JsPolicyOperation,
         via_column: String,
@@ -306,6 +309,10 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
             JsPolicyExpr::Exists { table, condition } => PolicyExpr::Exists {
                 table,
                 condition: Box::new(js_policy_expr_to_groove(*condition)),
+            },
+            JsPolicyExpr::ExistsRel { rel } => match serde_json::from_value(rel) {
+                Ok(rel) => PolicyExpr::ExistsRel { rel },
+                Err(_) => PolicyExpr::False,
             },
             JsPolicyExpr::Inherits {
                 operation,
@@ -493,6 +500,9 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             PolicyExpr::Exists { table, condition } => JsPolicyExpr::Exists {
                 table: table.clone(),
                 condition: Box::new(policy_expr_to_js(condition)),
+            },
+            PolicyExpr::ExistsRel { rel } => JsPolicyExpr::ExistsRel {
+                rel: serde_json::to_value(rel).unwrap_or(serde_json::Value::Null),
             },
             PolicyExpr::Inherits {
                 operation,
