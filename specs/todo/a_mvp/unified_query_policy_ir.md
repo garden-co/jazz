@@ -28,9 +28,10 @@ Current state is functionally close but architecturally split:
 1. Query path
 
 - `packages/jazz-tools/src/codegen/query-builder-generator.ts` generates `gather`/`hopTo` on app builders.
-- `packages/jazz-tools/src/runtime/query-adapter.ts` lowers builder JSON to runtime query JSON (`joins`, `result_element_index`, `recursive`).
+- `packages/jazz-tools/src/runtime/query-adapter.ts` now emits relation-IR-first payloads (legacy `joins`/`recursive` fields are no longer semantically lowered in TS).
 - Rust query IR (`crates/jazz-tools/src/query_manager/query.rs`) has `Query`, `RecursiveSpec`, join specs, and `result_element_index`.
-- Rust execution (`crates/jazz-tools/src/query_manager/graph.rs`, `crates/jazz-tools/src/query_manager/graph_nodes/recursive_relation.rs`) compiles/executes recursive node.
+- Rust execution (`crates/jazz-tools/src/query_manager/graph.rs`, `crates/jazz-tools/src/query_manager/graph_nodes/recursive_relation.rs`) lowers supported `relation_ir` shapes and compiles/executes recursive node.
+- If `relation_ir` is present but unsupported by Rust lowering, compilation now fails (no silent fallback to legacy query fields).
 
 2. Policy path
 
@@ -44,6 +45,7 @@ Current state is functionally close but architecturally split:
 - Recursion semantics are duplicated across TS and Rust.
 - Policy relation features are artificially constrained by TS-side expression expansion.
 - Harder to guarantee parity across `all`, `subscribeAll`, and permission checks.
+- Relation IR lowering in Rust is still shape-limited; complex compositions (for example `Gather` followed by additional join/filter/project hops) are not yet fully compiled.
 
 ## Desired End State
 
