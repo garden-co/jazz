@@ -11,8 +11,7 @@
   "types": "index.d.ts",
   "files": [
     "index.js",
-    "index.d.ts",
-    "jazz-napi.node"
+    "index.d.ts"
   ],
   "publishConfig": {
     "access": "public",
@@ -20,13 +19,21 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "build:debug": "napi build"
+    "build:debug": "napi build --platform"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2"
   },
   "napi": {
     "name": "jazz-napi",
-    "triples": {}
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin"
+      ]
+    }
   }
 }
