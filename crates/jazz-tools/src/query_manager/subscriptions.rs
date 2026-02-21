@@ -64,12 +64,14 @@ impl QueryManager {
 
         // Compile query graph with schema context
         let graph = if let Some(relation) = query.relation_ir.as_ref() {
-            QueryGraph::compile_relation_ir_with_schema_context(
+            QueryGraph::compile_relation_ir_with_schema_context_and_features(
                 relation,
                 &self.schema,
                 &query.branches,
                 session.clone(),
                 &self.schema_context,
+                query.include_deleted,
+                query.array_subqueries.clone(),
             )
         } else {
             QueryGraph::compile_with_schema_context(
@@ -146,12 +148,14 @@ impl QueryManager {
 
         // Compile query graph with explicit schema context
         let graph = if let Some(relation) = query.relation_ir.as_ref() {
-            QueryGraph::compile_relation_ir_with_schema_context(
+            QueryGraph::compile_relation_ir_with_schema_context_and_features(
                 relation,
                 schema,
                 &query.branches,
                 session.clone(),
                 schema_context,
+                query.include_deleted,
+                query.array_subqueries.clone(),
             )
         } else {
             QueryGraph::compile_with_schema_context(&query, schema, session.clone(), schema_context)

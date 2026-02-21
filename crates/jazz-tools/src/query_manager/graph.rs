@@ -31,7 +31,7 @@ use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
-use super::query::{Condition, Query};
+use super::query::{ArraySubquerySpec, Condition, Query};
 use super::relation_ir::RelExpr;
 use super::relation_ir_query_plan::lower_relation_to_execution_query;
 use super::session::Session;
@@ -240,10 +240,30 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
     ) -> Option<Self> {
-        let mut template = Query::new("__relation_ir");
-        template.branches = branches.to_vec();
+        Self::compile_relation_ir_with_features(
+            relation,
+            schema,
+            branches,
+            session,
+            false,
+            Vec::new(),
+        )
+    }
 
-        let query = lower_relation_to_execution_query(&template, relation)?;
+    pub(crate) fn compile_relation_ir_with_features(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[String],
+        session: Option<Session>,
+        include_deleted: bool,
+        array_subqueries: Vec<ArraySubquerySpec>,
+    ) -> Option<Self> {
+        let query = lower_relation_to_execution_query(
+            relation,
+            branches,
+            include_deleted,
+            array_subqueries,
+        )?;
         Self::compile_with_session(&query, schema, session)
     }
 
@@ -255,10 +275,32 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        let mut template = Query::new("__relation_ir");
-        template.branches = branches.to_vec();
+        Self::compile_relation_ir_with_schema_context_and_features(
+            relation,
+            schema,
+            branches,
+            session,
+            schema_context,
+            false,
+            Vec::new(),
+        )
+    }
 
-        let query = lower_relation_to_execution_query(&template, relation)?;
+    pub(crate) fn compile_relation_ir_with_schema_context_and_features(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[String],
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        include_deleted: bool,
+        array_subqueries: Vec<ArraySubquerySpec>,
+    ) -> Option<Self> {
+        let query = lower_relation_to_execution_query(
+            relation,
+            branches,
+            include_deleted,
+            array_subqueries,
+        )?;
         Self::compile_with_schema_context(&query, schema, session, schema_context)
     }
 
@@ -2581,6 +2623,66 @@ mod tests {
             QueryGraph::compile(&query, &schema).is_none(),
             "relation IR queries should use compile_relation_ir entrypoint",
         );
+    }
+
+    #[test]
+    fn compile_relation_ir_with_include_deleted_adds_deleted_scan() {
+        let schema = test_schema();
+        let relation = RelExpr::TableScan {
+            table: TableName::new("users"),
+        };
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir_with_features(
+            &relation,
+            &schema,
+            &branches,
+            None,
+            true,
+            Vec::new(),
+        )
+        .expect("Graph should compile");
+
+        assert!(
+            graph
+                .index_scan_nodes
+                .iter()
+                .any(|(_, _, column)| { column.as_str() == "_id_deleted" }),
+            "include_deleted should add an _id_deleted scan in relation-ir compile path",
+        );
+    }
+
+    #[test]
+    fn compile_relation_ir_with_array_subqueries_adds_array_nodes() {
+        let schema = join_schema();
+        let relation = RelExpr::TableScan {
+            table: TableName::new("users"),
+        };
+        let branches = vec!["main".to_string()];
+
+        let query_with_arrays = QueryBuilder::new("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .select(&["id", "title"])
+            })
+            .build();
+
+        let graph = QueryGraph::compile_relation_ir_with_features(
+            &relation,
+            &schema,
+            &branches,
+            None,
+            false,
+            query_with_arrays.array_subqueries,
+        )
+        .expect("Graph should compile");
+
+        assert!(
+            has_array_subquery_node(&graph),
+            "relation-ir compile path should preserve array subqueries",
+        );
+        assert_eq!(graph.array_subquery_tables.len(), 1);
+        assert_eq!(graph.array_subquery_tables[0].1.as_str(), "posts");
     }
 
     #[test]
