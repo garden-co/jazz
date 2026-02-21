@@ -236,13 +236,25 @@ function toArraySubqueries(
 
 function conditionToRelPredicate(
   cond: { column: string; op: string; value: unknown },
+  schema: WasmSchema,
+  table: string,
   scope?: string,
 ): RelPredicateExpr {
   const columnRef = relColumn(stripQualifier(cond.column), scope);
+  const column = stripQualifier(cond.column);
+  const columnType = getColumnType(schema, table, column);
+  if (!columnType) {
+    throw new Error(`Unknown column "${column}" in table "${table}"`);
+  }
+  const valueTypeForCondition =
+    cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const rightLiteral =
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { type: "RowId" as const, source: "Frontier" as const }
-      : { type: "Literal" as const, value: cond.value };
+      : {
+          type: "Literal" as const,
+          value: toWasmValue(cond.value, valueTypeForCondition),
+        };
   switch (cond.op) {
     case "eq":
       return { type: "Cmp", left: columnRef, op: "Eq", right: rightLiteral };
@@ -284,7 +296,7 @@ function conditionToRelPredicate(
     case "isNull":
       return { type: "IsNull", column: columnRef };
     case "contains":
-      return { type: "Contains", left: columnRef, value: { type: "Literal", value: cond.value } };
+      return { type: "Contains", left: columnRef, value: rightLiteral };
     case "in":
       if (!Array.isArray(cond.value)) {
         throw new Error('"in" operator requires an array value');
@@ -292,7 +304,10 @@ function conditionToRelPredicate(
       return {
         type: "In",
         left: columnRef,
-        values: cond.value.map((value) => ({ type: "Literal", value })),
+        values: cond.value.map((value) => ({
+          type: "Literal",
+          value: toWasmValue(value, columnType),
+        })),
       };
     default:
       throw new Error(`Unknown operator: ${cond.op}`);
@@ -309,17 +324,19 @@ function isFrontierRowIdToken(value: unknown): value is { __jazz_ir_frontier_row
 
 function conditionsToRelPredicate(
   conditions: Array<{ column: string; op: string; value: unknown }>,
+  schema: WasmSchema,
+  table: string,
   scope?: string,
 ): RelPredicateExpr {
   if (conditions.length === 0) {
     return { type: "True" };
   }
   if (conditions.length === 1) {
-    return conditionToRelPredicate(conditions[0], scope);
+    return conditionToRelPredicate(conditions[0], schema, table, scope);
   }
   return {
     type: "And",
-    exprs: conditions.map((condition) => conditionToRelPredicate(condition, scope)),
+    exprs: conditions.map((condition) => conditionToRelPredicate(condition, schema, table, scope)),
   };
 }
 
@@ -430,7 +447,12 @@ function gatherToRelExpr(
       value: { __jazz_ir_frontier_row_id: true },
     },
   ];
-  const stepPredicate = conditionsToRelPredicate(stepPredicateConditions, stepScope);
+  const stepPredicate = conditionsToRelPredicate(
+    stepPredicateConditions,
+    schema,
+    gather.step_table,
+    stepScope,
+  );
   const stepFiltered = applyFilter(stepBase, stepPredicate);
 
   const recursiveHopAlias = "__recursive_hop_0";
@@ -487,7 +509,7 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   let relation: RelExpr = { type: "TableScan", table: builder.table };
   relation = applyFilter(
     relation,
-    conditionsToRelPredicate(builder.conditions ?? [], builder.table),
+    conditionsToRelPredicate(builder.conditions ?? [], schema, builder.table, builder.table),
   );
 
   if (builder.gather) {
