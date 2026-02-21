@@ -11,12 +11,11 @@ use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
 
-use super::graph::{QueryGraph, RelationCompileFeatures};
+use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::Operation;
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
-use super::query_to_relation_ir::normalize_query_to_rel_expr;
 use super::session::Session;
 use super::types::{
     ComposedBranchName, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
@@ -360,40 +359,13 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn compile_graph_from_relation_ir(
+    pub(super) fn compile_graph(
         query: &Query,
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<QueryGraph> {
-        if let Some(relation) = query.relation_ir.as_ref() {
-            return QueryGraph::compile_relation_ir_with_schema_context_and_features(
-                relation,
-                schema,
-                &query.branches,
-                session,
-                schema_context,
-                RelationCompileFeatures {
-                    include_deleted: query.include_deleted,
-                    array_subqueries: query.array_subqueries.clone(),
-                    select_columns: None,
-                },
-            );
-        }
-
-        let normalized_relation = normalize_query_to_rel_expr(query)?;
-        QueryGraph::compile_relation_ir_with_schema_context_and_features(
-            &normalized_relation,
-            schema,
-            &query.branches,
-            session,
-            schema_context,
-            RelationCompileFeatures {
-                include_deleted: query.include_deleted,
-                array_subqueries: query.array_subqueries.clone(),
-                select_columns: query.select_columns.clone(),
-            },
-        )
+        QueryGraph::compile_with_schema_context(query, schema, session, schema_context)
     }
 
     /// Mark all subscriptions for recompilation.
@@ -424,7 +396,7 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                let new_graph = Self::compile_graph_from_relation_ir(
+                let new_graph = Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
@@ -441,7 +413,7 @@ impl QueryManager {
         for sub in self.server_subscriptions.values_mut() {
             if sub.needs_recompile {
                 // Recompile the graph
-                let new_graph = Self::compile_graph_from_relation_ir(
+                let new_graph = Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),

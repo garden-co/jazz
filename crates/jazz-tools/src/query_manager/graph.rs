@@ -784,17 +784,17 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
     ) -> Option<Self> {
-        if query.has_relation_ir() {
-            return None;
-        }
-
         let default_branches = vec!["main".to_string()];
         let branches: &[String] = if query.branches.is_empty() {
             &default_branches
         } else {
             &query.branches
         };
-        let relation = super::query_to_relation_ir::normalize_query_to_rel_expr(query)?;
+        let relation = if let Some(relation) = query.relation_ir.as_ref() {
+            relation.clone()
+        } else {
+            super::query_to_relation_ir::normalize_query_to_rel_expr(query)?
+        };
         Self::compile_relation_ir_with_features(
             &relation,
             schema,
@@ -820,10 +820,6 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        if query.has_relation_ir() {
-            return None;
-        }
-
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
                 .all_branch_names()
@@ -833,7 +829,11 @@ impl QueryGraph {
         } else {
             query.branches.clone()
         };
-        let relation = super::query_to_relation_ir::normalize_query_to_rel_expr(query)?;
+        let relation = if let Some(relation) = query.relation_ir.as_ref() {
+            relation.clone()
+        } else {
+            super::query_to_relation_ir::normalize_query_to_rel_expr(query)?
+        };
         Self::compile_relation_ir_with_schema_context_and_features(
             &relation,
             schema,
@@ -2710,7 +2710,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_query_with_relation_ir_requires_explicit_entrypoint() {
+    fn compile_query_with_relation_ir_uses_unified_entrypoint() {
         let schema = recursive_hop_schema();
         let mut query = QueryBuilder::new("placeholder").branch("main").build();
         query.relation_ir = Some(RelExpr::TableScan {
@@ -2718,8 +2718,8 @@ mod tests {
         });
 
         assert!(
-            QueryGraph::compile(&query, &schema).is_none(),
-            "relation IR queries should use compile_relation_ir entrypoint",
+            QueryGraph::compile(&query, &schema).is_some(),
+            "relation IR queries should compile through the same compile() entrypoint",
         );
     }
 
