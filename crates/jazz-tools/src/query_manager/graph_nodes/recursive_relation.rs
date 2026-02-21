@@ -12,7 +12,7 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::{
-    RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
+    Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
 };
 use crate::storage::Storage;
 
@@ -161,6 +161,9 @@ impl RecursiveRelationNode {
         if self.hop.is_some() {
             return self.recompute_with_hop(io, row_loader);
         }
+        if matches!(self.correlation_source, CorrelationSource::ObjectId) {
+            return self.recompute_with_object_id(io, row_loader);
+        }
 
         let mut seen_contents = AHashSet::<Vec<u8>>::new();
         let mut frontier_contents = Vec::<Vec<u8>>::new();
@@ -199,6 +202,71 @@ impl RecursiveRelationNode {
         seen_contents
             .into_iter()
             .map(tuple_from_normalized_content)
+            .collect()
+    }
+
+    fn recompute_with_object_id(
+        &self,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+    ) -> AHashSet<Tuple> {
+        let mut seen_rows = AHashMap::<ObjectId, (Vec<u8>, CommitId)>::new();
+        let mut frontier = Vec::<ObjectId>::new();
+
+        for tuple in self.seed_tuples.values() {
+            if let Some((id, content, commit_id)) = self.normalize_seed_tuple_with_id(tuple) {
+                let is_new = !seen_rows.contains_key(&id);
+                seen_rows.insert(id, (content, commit_id));
+                if is_new {
+                    frontier.push(id);
+                }
+            }
+        }
+
+        let step_desc = self.step_template.output_descriptor().clone();
+
+        for _level in 0..self.max_depth {
+            if frontier.is_empty() {
+                break;
+            }
+
+            let mut next_frontier = Vec::<ObjectId>::new();
+
+            for row_id in frontier {
+                let corr = Value::Uuid(row_id);
+
+                for step_row in self.evaluate_step_rows(&corr, io, row_loader) {
+                    let Some((next_id, next_content, next_commit_id)) =
+                        self.normalize_step_row(&step_desc, &step_row)
+                    else {
+                        continue;
+                    };
+
+                    match seen_rows.get(&next_id) {
+                        Some((existing_content, _)) if *existing_content == next_content => {}
+                        Some(_) => {
+                            seen_rows.insert(next_id, (next_content, next_commit_id));
+                        }
+                        None => {
+                            seen_rows.insert(next_id, (next_content, next_commit_id));
+                            next_frontier.push(next_id);
+                        }
+                    }
+                }
+            }
+
+            frontier = next_frontier;
+        }
+
+        seen_rows
+            .into_iter()
+            .map(|(id, (content, commit_id))| {
+                Tuple::new(vec![TupleElement::Row {
+                    id,
+                    content,
+                    commit_id,
+                }])
+            })
             .collect()
     }
 
@@ -343,6 +411,19 @@ impl RecursiveRelationNode {
             None => return Vec::new(),
         };
         instance.graph.settle(io, row_loader).added
+    }
+
+    fn normalize_step_row(
+        &self,
+        step_descriptor: &RowDescriptor,
+        step_row: &Row,
+    ) -> Option<(ObjectId, Vec<u8>, CommitId)> {
+        let values = decode_row(step_descriptor, &step_row.data).ok()?;
+        if values.len() != self.output_descriptor.columns.len() {
+            return None;
+        }
+        let normalized_content = encode_row(&self.output_descriptor, &values).ok()?;
+        Some((step_row.id, normalized_content, step_row.commit_id))
     }
 }
 

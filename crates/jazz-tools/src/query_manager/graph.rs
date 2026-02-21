@@ -855,14 +855,19 @@ impl QueryGraph {
             "id" | "_id" => CorrelationSource::ObjectId,
             _ => CorrelationSource::Column(current_descriptor.column_index(outer_col_name)?),
         };
-        if spec.hop.is_none() && matches!(correlation_source, CorrelationSource::ObjectId) {
+        if spec.hop.is_some() && (!spec.joins.is_empty() || spec.result_element_index.is_some()) {
+            return None;
+        }
+        if spec.result_element_index.is_some() && spec.select_columns.is_some() {
             return None;
         }
 
         // Build step query for each recursive level.
         let mut step_query = Query::new(spec.table);
         step_query.branches = branches.to_vec();
+        step_query.joins = spec.joins.clone();
         step_query.select_columns = spec.select_columns.clone();
+        step_query.result_element_index = spec.result_element_index;
         if !spec.filters.is_empty() {
             step_query.disjuncts = vec![crate::query_manager::query::Conjunction {
                 conditions: spec.filters.clone(),
@@ -870,11 +875,17 @@ impl QueryGraph {
         }
 
         // Build descriptor for step output.
-        let step_output_descriptor = if let Some(cols) = &spec.select_columns {
+        let mut step_table_descriptors = vec![step_table_descriptor.clone()];
+        for join_spec in &spec.joins {
+            let joined_descriptor = schema.get(&join_spec.table)?.descriptor.clone();
+            step_table_descriptors.push(joined_descriptor);
+        }
+        let combined_step_descriptor = RowDescriptor::combine(&step_table_descriptors);
+        let mut step_output_descriptor = if let Some(cols) = &spec.select_columns {
             let columns = cols
                 .iter()
                 .filter_map(|name| {
-                    step_table_descriptor
+                    combined_step_descriptor
                         .columns
                         .iter()
                         .find(|c| c.name.as_str() == name)
@@ -883,8 +894,11 @@ impl QueryGraph {
                 .collect::<Vec<_>>();
             RowDescriptor::new(columns)
         } else {
-            step_table_descriptor
+            combined_step_descriptor
         };
+        if let Some(element_index) = spec.result_element_index {
+            step_output_descriptor = step_table_descriptors.get(element_index)?.clone();
+        }
 
         let hop = if let Some(hop_spec) = &spec.hop {
             let target_schema = schema.get(&hop_spec.table)?;
@@ -2471,6 +2485,29 @@ mod tests {
         assert!(
             has_recursive_relation_node(&graph),
             "Recursive hop queries should compile to RecursiveRelationNode"
+        );
+    }
+
+    #[test]
+    fn compile_query_with_recursive_join_projection_relation() {
+        let schema = recursive_hop_schema();
+        let query = QueryBuilder::new("teams")
+            .filter_eq("name", Value::Text("seed".into()))
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "_id")
+                    .join("teams")
+                    .alias("__recursive_hop_0")
+                    .on("team_edges.parent_team", "__recursive_hop_0.id")
+                    .result_element_index(1)
+                    .max_depth(10)
+            })
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Recursive join-projection queries should compile to RecursiveRelationNode"
         );
     }
 }
