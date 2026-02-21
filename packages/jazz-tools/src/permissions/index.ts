@@ -108,7 +108,7 @@ export interface PermissionRelation {
   hopTo(relation: string): PermissionRelation;
   gather(options: {
     start: Record<string, unknown>;
-    step: (ctx: { current: unknown }) => PermissionRelation;
+    step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation;
 }
@@ -232,7 +232,7 @@ class PermissionRelationBuilder implements PermissionRelation {
 
   gather(options: {
     start: Record<string, unknown>;
-    step: (ctx: { current: unknown }) => PermissionRelation;
+    step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation {
     if (this.state.kind !== "table") {
@@ -429,8 +429,14 @@ type PermissionWhereInput<T> =
   T extends Array<infer U>
     ? Array<PermissionWhereInput<U>>
     : T extends object
-      ? { [K in keyof T]?: PermissionWhereInput<T[K]> | SessionRefValue | RowRefValue }
-      : T | SessionRefValue | RowRefValue;
+      ? {
+          [K in keyof T]?:
+            | PermissionWhereInput<T[K]>
+            | SessionRefValue
+            | RowRefValue
+            | RecursiveCurrentValue;
+        }
+      : T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
 
 class UpdateRuleBuilder<WhereInput, Row> {
   private oldCondition?: Condition;
