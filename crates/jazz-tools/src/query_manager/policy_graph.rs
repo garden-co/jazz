@@ -16,7 +16,6 @@ use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::index::ScanCondition;
 use super::policy::PolicyExpr;
-use super::query::Query;
 use super::session::Session;
 use super::types::ColumnName;
 use super::types::{Schema, TableName, TupleDescriptor, Value};
@@ -208,11 +207,8 @@ impl PolicyGraph {
         schema: &Schema,
         branch: &str,
     ) -> Option<Self> {
-        let mut query = Query::new("__policy_exists_rel");
-        query.branches = vec![branch.to_string()];
-        query.relation_ir = Some(rel.clone());
-
-        let mut graph = QueryGraph::compile(&query, schema)?;
+        let branches = vec![branch.to_string()];
+        let mut graph = QueryGraph::compile_relation_ir(rel, schema, &branches, None)?;
         let output_descriptor = match graph
             .nodes
             .get(graph.output_node.0 as usize)
