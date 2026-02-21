@@ -2965,17 +2965,15 @@ fn multi_join_query_compiles() {
 }
 
 #[test]
-fn join_subscription_fails_without_on_clause() {
+fn join_without_on_clause_fails_query_build() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, _storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
-    let query = qm.query("users").join("posts").build();
-    let result = qm.subscribe(query);
-
+    let result = qm.query("users").join("posts").try_build();
     assert!(
-        matches!(result, Err(QueryError::QueryCompilationError(_))),
-        "Join queries without ON should fail during subscription compilation"
+        result.is_err(),
+        "Join queries without ON should fail at build time"
     );
 }
 
@@ -3282,7 +3280,9 @@ fn join_subscription_can_project_joined_element_output() {
         .on("id", "author_id")
         .build();
     query.result_element_index = Some(1);
-    query.refresh_relation_ir();
+    query
+        .refresh_relation_ir()
+        .expect("join projection query should normalize");
 
     let sub_id = qm.subscribe(query).unwrap();
     qm.process(&mut storage);

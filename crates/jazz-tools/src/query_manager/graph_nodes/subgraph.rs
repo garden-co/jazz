@@ -146,7 +146,7 @@ impl SubgraphTemplate {
         // Copy nested array subqueries from base query
         query.array_subqueries = self.base_query.array_subqueries.clone();
         query.result_element_index = self.base_query.result_element_index;
-        query.refresh_relation_ir();
+        query.refresh_relation_ir().ok()?;
 
         let graph = QueryGraph::compile(&query, schema)?;
 

@@ -790,9 +790,8 @@ impl QueryGraph {
         } else {
             &query.branches
         };
-        let relation = query.relation_ir.as_ref()?;
         Self::compile_relation_ir_with_features(
-            relation,
+            &query.relation_ir,
             schema,
             branches,
             session,
@@ -825,9 +824,8 @@ impl QueryGraph {
         } else {
             query.branches.clone()
         };
-        let relation = query.relation_ir.as_ref()?;
         Self::compile_relation_ir_with_schema_context_and_features(
-            relation,
+            &query.relation_ir,
             schema,
             &branches,
             session,
@@ -872,7 +870,7 @@ impl QueryGraph {
         base_query.limit = spec.limit;
         base_query.select_columns = spec.select_columns.clone();
         base_query.array_subqueries = spec.nested_arrays.clone();
-        base_query.refresh_relation_ir();
+        base_query.refresh_relation_ir().ok()?;
 
         // Build combined descriptor: base table + all joined tables + nested array columns
         let mut combined_columns = inner_descriptor.columns.clone();
@@ -1013,7 +1011,7 @@ impl QueryGraph {
                 conditions: spec.filters.clone(),
             }];
         }
-        step_query.refresh_relation_ir();
+        step_query.refresh_relation_ir().ok()?;
 
         // Build descriptor for step output.
         let mut step_table_descriptors = vec![step_table_descriptor.clone()];
@@ -2443,14 +2441,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_join_returns_none_without_on_clause() {
-        let schema = join_schema();
-        let query = QueryBuilder::new("users").join("posts").build();
-
-        let graph = QueryGraph::compile(&query, &schema);
+    fn compile_join_without_on_clause_fails_query_build() {
+        let query = QueryBuilder::new("users").join("posts").try_build();
         assert!(
-            graph.is_none(),
-            "Join queries without an explicit ON clause should fail compilation"
+            query.is_err(),
+            "Join queries without an explicit ON clause should fail at build time"
         );
     }
 
@@ -2707,9 +2702,9 @@ mod tests {
     fn compile_query_with_relation_ir_uses_unified_entrypoint() {
         let schema = recursive_hop_schema();
         let mut query = QueryBuilder::new("placeholder").branch("main").build();
-        query.relation_ir = Some(RelExpr::TableScan {
+        query.relation_ir = RelExpr::TableScan {
             table: TableName::new("teams"),
-        });
+        };
 
         assert!(
             QueryGraph::compile(&query, &schema).is_some(),
