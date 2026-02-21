@@ -16,7 +16,7 @@ use super::graph_nodes::array_subquery::ArraySubqueryNode;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::IndexScanNode;
-use super::graph_nodes::join::JoinNode;
+use super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
@@ -942,7 +942,7 @@ impl QueryGraph {
         let branch = branches.first().map(|s| s.as_str()).unwrap_or("main");
 
         // Track all table names and descriptors for TupleDescriptor
-        let mut table_names = vec![query.table.as_str().to_string()];
+        let mut table_names = vec![query.effective_name().to_string()];
         let mut table_descriptors = vec![base_descriptor.clone()];
         let mut seen_tables: HashSet<String> = HashSet::new();
         seen_tables.insert(query.table.as_str().to_string());
@@ -961,7 +961,11 @@ impl QueryGraph {
             .index_scan_nodes
             .push((base_scan_id, query.table, id_column));
 
-        let base_tuple_desc = TupleDescriptor::single("", base_descriptor.clone());
+        let base_tuple_desc = TupleDescriptor::single_with_materialization(
+            query.effective_name(),
+            base_descriptor.clone(),
+            true,
+        );
         let base_mat = MaterializeNode::new_all(base_tuple_desc);
         let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
         graph.add_edge(base_mat_id, base_scan_id);
@@ -969,8 +973,6 @@ impl QueryGraph {
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
         let mut left_descriptor = base_descriptor.clone();
-        let mut left_table_name = query.table.as_str().to_string();
-
         // Process each join
         for join_spec in &query.joins {
             let join_table_name = join_spec.table.as_str().to_string();
@@ -996,22 +998,35 @@ impl QueryGraph {
                 .index_scan_nodes
                 .push((right_scan_id, join_spec.table, id_column));
 
-            let right_tuple_desc = TupleDescriptor::single("", right_descriptor.clone());
+            let right_tuple_desc = TupleDescriptor::single_with_materialization(
+                join_spec.effective_name(),
+                right_descriptor.clone(),
+                true,
+            );
             let right_mat = MaterializeNode::new_all(right_tuple_desc);
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_id);
 
-            // Parse column names - may be qualified (table.col) or unqualified
-            let left_col_name = left_col.split('.').next_back().unwrap_or(left_col);
-            let right_col_name = right_col.split('.').next_back().unwrap_or(right_col);
-
-            let join_node = JoinNode::from_row_descriptors(
-                &left_table_name,
-                left_descriptor.clone(),
-                join_spec.table.as_str(),
+            // Build tuple descriptors with table/alias labels so qualified ON refs can resolve.
+            let left_tuple_desc = TupleDescriptor::from_tables(
+                &table_names
+                    .iter()
+                    .cloned()
+                    .zip(table_descriptors.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+            .with_all_materialized();
+            let right_tuple_desc = TupleDescriptor::single_with_materialization(
+                join_spec.effective_name(),
                 right_descriptor.clone(),
-                left_col_name,
-                right_col_name,
+                true,
+            );
+
+            let join_node = JoinNode::new_with_refs(
+                left_tuple_desc,
+                right_tuple_desc,
+                JoinColumnRef::parse(left_col),
+                JoinColumnRef::parse(right_col),
             )?;
             let join_id = graph.add_node(GraphNode::Join(join_node));
 
@@ -1024,14 +1039,12 @@ impl QueryGraph {
             left_id = join_id;
 
             // Track table name and descriptor for TupleDescriptor
-            table_names.push(join_table_name.clone());
+            table_names.push(join_spec.effective_name().to_string());
             table_descriptors.push(right_descriptor.clone());
             seen_tables.insert(join_table_name);
 
             // Combine descriptors for downstream nodes
             left_descriptor = RowDescriptor::combine(&[left_descriptor, right_descriptor]);
-            // Use combined table name for multi-way joins
-            left_table_name = format!("{}_{}", left_table_name, join_spec.table.as_str());
         }
 
         // Build combined descriptor and TupleDescriptor from all tables

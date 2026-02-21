@@ -2754,6 +2754,23 @@ fn join_schema() -> Schema {
     schema
 }
 
+fn join_schema_with_implicit_base_id() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Uuid),
+        ])
+        .into(),
+    );
+    schema
+}
+
 #[test]
 fn join_compiles_but_not_executed_yet() {
     // This test validates that join queries compile and don't panic,
@@ -3177,6 +3194,60 @@ fn join_filter_on_joined_table_column() {
             .windows("Learning Rust".len())
             .any(|window| window == "Learning Rust".as_bytes()),
         "Joined row should include the matching post title"
+    );
+}
+
+#[test]
+fn join_subscription_supports_implicit_base_id_keys() {
+    let sync_manager = SyncManager::new();
+    let schema = join_schema_with_implicit_base_id();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(&mut storage, "users", &[Value::Text("Alice".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("Hello".into()),
+            Value::Uuid(alice.row_id), // FK to implicit users.id
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.id", "posts.author_id")
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have join subscription update");
+
+    assert_eq!(delta.added.len(), 1, "Expected implicit-id join match");
+    let row = &delta.added[0];
+    assert_eq!(
+        row.id, alice.row_id,
+        "Join result should remain keyed by base row identity"
+    );
+    assert!(
+        row.data
+            .windows("Alice".len())
+            .any(|window| window == "Alice".as_bytes()),
+        "Joined row should include base-table value"
+    );
+    assert!(
+        row.data
+            .windows("Hello".len())
+            .any(|window| window == "Hello".as_bytes()),
+        "Joined row should include joined-table value"
     );
 }
 
