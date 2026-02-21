@@ -716,7 +716,7 @@ describe("translateQuery", () => {
     });
   });
 
-  it("translates gather metadata to runtime recursive query", () => {
+  it("keeps gather semantics in relation_ir payload", () => {
     const schema: WasmSchema = {
       tables: {
         todos: {
@@ -748,26 +748,12 @@ describe("translateQuery", () => {
     });
 
     const result = JSON.parse(translateQuery(builderJson, schema));
-    expect(result.recursive).toEqual({
-      table: "todos",
-      inner_column: "_id",
-      outer_column: "_id",
-      select_columns: null,
-      filters: [],
-      joins: [
-        {
-          table: "todos",
-          alias: "__recursive_hop_0",
-          on: ["todos.parent_id", "__recursive_hop_0.id"],
-        },
-      ],
-      result_element_index: 1,
-      max_depth: 10,
-    });
+    expect(result.recursive).toBeUndefined();
     expect(result.joins).toEqual([]);
+    expect(result.relation_ir?.type).toBe("Gather");
   });
 
-  it("translates hop metadata to runtime join plan", () => {
+  it("keeps hop semantics in relation_ir payload", () => {
     const schema: WasmSchema = {
       tables: {
         teams: {
@@ -803,18 +789,13 @@ describe("translateQuery", () => {
     });
 
     const result = JSON.parse(translateQuery(builderJson, schema));
-    expect(result.joins).toEqual([
-      {
-        table: "teams",
-        alias: "__hop_0",
-        on: ["team_edges.parent_team", "__hop_0.id"],
-      },
-    ]);
-    expect(result.result_element_index).toBe(1);
+    expect(result.joins).toEqual([]);
+    expect(result.result_element_index).toBeUndefined();
     expect(result.recursive).toBeUndefined();
+    expect(result.relation_ir?.type).toBe("Project");
   });
 
-  it("translates multi-hop metadata to chained runtime joins", () => {
+  it("keeps multi-hop semantics in relation_ir payload", () => {
     const schema: WasmSchema = {
       tables: {
         users: {
@@ -844,20 +825,10 @@ describe("translateQuery", () => {
     });
 
     const result = JSON.parse(translateQuery(builderJson, schema));
-    expect(result.joins).toEqual([
-      {
-        table: "teams",
-        alias: "__hop_0",
-        on: ["users.team_id", "__hop_0.id"],
-      },
-      {
-        table: "orgs",
-        alias: "__hop_1",
-        on: ["__hop_0.org_id", "__hop_1.id"],
-      },
-    ]);
-    expect(result.result_element_index).toBe(2);
+    expect(result.joins).toEqual([]);
+    expect(result.result_element_index).toBeUndefined();
     expect(result.recursive).toBeUndefined();
+    expect(result.relation_ir?.type).toBe("Project");
   });
 
   it("lowers hop metadata to relation IR join + project", () => {
