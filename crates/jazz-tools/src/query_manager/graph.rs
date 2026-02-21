@@ -1003,6 +1003,21 @@ impl QueryGraph {
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
         let mut left_descriptor = base_descriptor.clone();
+
+        if let Some(recursive_spec) = &query.recursive
+            && let Some((node, new_descriptor, step_table)) =
+                graph.compile_recursive_relation(recursive_spec, &left_descriptor, schema, branches)
+        {
+            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
+            graph.add_edge(node_id, left_id);
+            graph.recursive_relation_tables.push((node_id, step_table));
+            left_id = node_id;
+            left_descriptor = new_descriptor;
+            if let Some(first) = table_descriptors.first_mut() {
+                *first = left_descriptor.clone();
+            }
+        }
+
         // Process each join
         for join_spec in &query.joins {
             let join_table_name = join_spec.table.as_str().to_string();
@@ -2587,6 +2602,86 @@ mod tests {
         );
         assert_eq!(graph.recursive_relation_tables.len(), 1);
         assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
+    }
+
+    #[test]
+    fn compile_query_with_relation_ir_gather_post_join_uses_recursive_and_join() {
+        let schema = recursive_hop_schema();
+        let relation = RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::Gather {
+                    seed: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        predicate: PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("teams", "name"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::Literal(Value::Text("seed".to_string())),
+                        },
+                    }),
+                    step: Box::new(RelExpr::Project {
+                        input: Box::new(RelExpr::Join {
+                            left: Box::new(RelExpr::Filter {
+                                input: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("team_edges"),
+                                }),
+                                predicate: PredicateExpr::Cmp {
+                                    left: ColumnRef::scoped("team_edges", "child_team"),
+                                    op: PredicateCmpOp::Eq,
+                                    right: ValueRef::RowId(RowIdRef::Frontier),
+                                },
+                            }),
+                            right: Box::new(RelExpr::TableScan {
+                                table: TableName::new("teams"),
+                            }),
+                            on: vec![JoinCondition {
+                                left: ColumnRef::scoped("team_edges", "parent_team"),
+                                right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                            }],
+                            join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                        }),
+                        columns: vec![ProjectColumn {
+                            alias: "id".to_string(),
+                            expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                        }],
+                    }),
+                    frontier_key: KeyRef::RowId(RowIdRef::Current),
+                    max_depth: 8,
+                    dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("team_edges"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("teams", "id"),
+                    right: ColumnRef::scoped("__hop_0", "parent_team"),
+                }],
+                join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+            }],
+        };
+
+        let mut query = QueryBuilder::new("teams").branch("main").build();
+        query.relation_ir = Some(relation);
+        query.recursive = None;
+        query.joins.clear();
+        query.select_columns = None;
+
+        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Gather relation IR with post-join should compile to RecursiveRelationNode"
+        );
+        assert_eq!(graph.recursive_relation_tables.len(), 1);
+        assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
+        assert!(graph.nodes.iter().any(|ctx| match &ctx.node {
+            GraphNode::Join(_) => true,
+            _ => false,
+        }));
     }
 
     #[test]
