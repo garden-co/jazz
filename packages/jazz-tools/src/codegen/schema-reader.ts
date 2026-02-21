@@ -100,6 +100,11 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         table: expr.table,
         condition: clonePolicyExpr(expr.condition),
       };
+    case "ExistsRel":
+      return {
+        type: "ExistsRel",
+        rel: expr.rel,
+      };
     case "Inherits":
       return {
         type: "Inherits",
@@ -117,6 +122,10 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return { type: "True" };
     case "False":
       return { type: "False" };
+    default: {
+      const _unhandled: never = expr;
+      throw new Error(`Unsupported policy expression variant: ${String(_unhandled)}`);
+    }
   }
 }
 
