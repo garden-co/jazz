@@ -21,6 +21,7 @@ use napi_derive::napi;
 
 use groove::object::ObjectId;
 use groove::query_manager::encoding::decode_row;
+use groove::query_manager::parse_query_json_compat;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, SchemaHash, Value};
@@ -594,7 +595,7 @@ fn parse_tier(tier: &str) -> napi::Result<PersistenceTier> {
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
-    serde_json::from_str(json).map_err(|e| napi::Error::from_reason(format!("Parse error: {}", e)))
+    parse_query_json_compat(json).map_err(napi::Error::from_reason)
 }
 
 // ============================================================================
