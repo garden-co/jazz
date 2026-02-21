@@ -391,6 +391,12 @@ struct RuntimeCorePlan {
     recursive: Option<RecursiveSpec>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GatherJoinInfo {
+    plan: RuntimeCorePlan,
+    current_scope: String,
+}
+
 fn to_runtime_column(column: &str) -> String {
     if column == "id" {
         "_id".to_string()
@@ -642,6 +648,67 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
     })
 }
 
+fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
+    match expr {
+        RelExpr::Gather {
+            seed,
+            step,
+            max_depth,
+            ..
+        } => {
+            let plan = parse_gather_core(seed, step, *max_depth)?;
+            Some(GatherJoinInfo {
+                current_scope: plan.table.as_str().to_string(),
+                plan,
+            })
+        }
+        RelExpr::Filter { input, predicate } => {
+            let mut inner = parse_gather_join_info(input)?;
+            let mut conditions = relation_predicate_to_conditions(predicate)?;
+            inner.plan.conditions.append(&mut conditions);
+            Some(inner)
+        }
+        RelExpr::Join {
+            left,
+            right,
+            on,
+            join_kind,
+        } => {
+            if !matches!(join_kind, JoinKind::Inner) {
+                return None;
+            }
+            let mut left_info = parse_gather_join_info(left)?;
+            let right_table = match right.as_ref() {
+                RelExpr::TableScan { table } => *table,
+                _ => return None,
+            };
+            let first_join = on.first()?;
+            let left_scope = first_join
+                .left
+                .scope
+                .clone()
+                .unwrap_or_else(|| left_info.current_scope.clone());
+            let right_scope = first_join
+                .right
+                .scope
+                .clone()
+                .unwrap_or_else(|| right_table.as_str().to_string());
+
+            left_info.plan.joins.push(JoinSpec {
+                table: right_table,
+                alias: (right_scope != right_table.as_str()).then_some(right_scope.clone()),
+                on: Some((
+                    format!("{left_scope}.{}", first_join.left.column),
+                    format!("{right_scope}.{}", first_join.right.column),
+                )),
+            });
+            left_info.current_scope = right_scope;
+            Some(left_info)
+        }
+        _ => None,
+    }
+}
+
 fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
     match core {
         RelExpr::Gather {
@@ -651,6 +718,13 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             ..
         } => parse_gather_core(seed, step, *max_depth),
         RelExpr::Project { input, .. } => {
+            if let Some(mut gather_info) = parse_gather_join_info(input) {
+                if !gather_info.plan.joins.is_empty() {
+                    gather_info.plan.result_element_index = Some(gather_info.plan.joins.len());
+                }
+                return Some(gather_info.plan);
+            }
+
             let linear = extract_linear_join_info(input)?;
             Some(RuntimeCorePlan {
                 table: linear.base_table,
@@ -661,6 +735,10 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             })
         }
         _ => {
+            if let Some(gather_info) = parse_gather_join_info(core) {
+                return Some(gather_info.plan);
+            }
+
             let linear = extract_linear_join_info(core)?;
             Some(RuntimeCorePlan {
                 table: linear.base_table,
@@ -2100,6 +2178,120 @@ mod tests {
             recursive.joins[0].alias.as_deref(),
             Some("__recursive_hop_0")
         );
+    }
+
+    #[test]
+    fn lowered_from_relation_ir_gather_with_post_join_project_shape() {
+        let relation = RelExpr::Project {
+            input: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Gather {
+                        seed: Box::new(RelExpr::Filter {
+                            input: Box::new(RelExpr::TableScan {
+                                table: TableName::new("teams"),
+                            }),
+                            predicate: PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("teams", "name"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::Literal(Value::Text("seed".to_string())),
+                            },
+                        }),
+                        step: Box::new(RelExpr::Project {
+                            input: Box::new(RelExpr::Join {
+                                left: Box::new(RelExpr::Filter {
+                                    input: Box::new(RelExpr::TableScan {
+                                        table: TableName::new("team_edges"),
+                                    }),
+                                    predicate: PredicateExpr::Cmp {
+                                        left: ColumnRef::scoped("team_edges", "child_team"),
+                                        op: PredicateCmpOp::Eq,
+                                        right: ValueRef::RowId(RowIdRef::Frontier),
+                                    },
+                                }),
+                                right: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("teams"),
+                                }),
+                                on: vec![JoinCondition {
+                                    left: ColumnRef::scoped("team_edges", "parent_team"),
+                                    right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                                }],
+                                join_kind: JoinKind::Inner,
+                            }),
+                            columns: vec![ProjectColumn {
+                                alias: "id".to_string(),
+                                expr: ProjectExpr::Column(ColumnRef::scoped(
+                                    "__recursive_hop_0",
+                                    "id",
+                                )),
+                            }],
+                        }),
+                        frontier_key: KeyRef::RowId(RowIdRef::Current),
+                        max_depth: 7,
+                        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("resource_access_edges"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("teams", "id"),
+                        right: ColumnRef::scoped("__hop_0", "team"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::And(vec![
+                    PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("__hop_0", "resource"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text("res-1".to_string())),
+                    },
+                    PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("__hop_0", "grant_role"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text("viewer".to_string())),
+                    },
+                ]),
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+            }],
+        };
+
+        let mut query = QueryBuilder::new("placeholder").branch("main").build();
+        query.relation_ir = Some(relation);
+
+        let lowered = query
+            .lowered_from_relation_ir()
+            .expect("gather + post-join relation should lower");
+        assert_eq!(lowered.table.as_str(), "teams");
+        assert_eq!(
+            lowered.disjuncts[0].conditions,
+            vec![
+                Condition::Eq {
+                    column: "name".to_string(),
+                    value: Value::Text("seed".to_string()),
+                },
+                Condition::Eq {
+                    column: "resource".to_string(),
+                    value: Value::Text("res-1".to_string()),
+                },
+                Condition::Eq {
+                    column: "grant_role".to_string(),
+                    value: Value::Text("viewer".to_string()),
+                },
+            ]
+        );
+        assert_eq!(lowered.joins.len(), 1);
+        assert_eq!(lowered.joins[0].table.as_str(), "resource_access_edges");
+        assert_eq!(lowered.joins[0].alias.as_deref(), Some("__hop_0"));
+        assert_eq!(
+            lowered.joins[0].on.as_ref(),
+            Some(&("teams.id".to_string(), "__hop_0.team".to_string()))
+        );
+        assert_eq!(lowered.result_element_index, Some(1));
+        let recursive = lowered.recursive.expect("recursive spec");
+        assert_eq!(recursive.max_depth, 7);
+        assert_eq!(recursive.table.as_str(), "team_edges");
     }
 
     #[test]

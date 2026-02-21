@@ -286,7 +286,8 @@ impl PolicyGraph {
 mod tests {
     use super::*;
     use crate::query_manager::relation_ir::{
-        ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+        ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
+        ProjectExpr, RelExpr, RowIdRef, ValueRef,
     };
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema,
@@ -419,5 +420,124 @@ mod tests {
                 .map(|c| &c.node),
             Some(GraphNode::ExistsOutput(_))
         ));
+    }
+
+    #[test]
+    fn test_for_exists_rel_with_gather_post_join_compiles() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("teams"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("_id", ColumnType::Uuid),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ])),
+        );
+        schema.insert(
+            TableName::new("team_edges"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("_id", ColumnType::Uuid),
+                ColumnDescriptor::new("child_team", ColumnType::Uuid),
+                ColumnDescriptor::new("parent_team", ColumnType::Uuid),
+            ])),
+        );
+        schema.insert(
+            TableName::new("resource_access_edges"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("_id", ColumnType::Uuid),
+                ColumnDescriptor::new("team", ColumnType::Uuid),
+                ColumnDescriptor::new("resource", ColumnType::Text),
+                ColumnDescriptor::new("grant_role", ColumnType::Text),
+            ])),
+        );
+
+        let rel = RelExpr::Project {
+            input: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Gather {
+                        seed: Box::new(RelExpr::Filter {
+                            input: Box::new(RelExpr::TableScan {
+                                table: TableName::new("teams"),
+                            }),
+                            predicate: PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("teams", "name"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::Literal(Value::Text("seed".to_string())),
+                            },
+                        }),
+                        step: Box::new(RelExpr::Project {
+                            input: Box::new(RelExpr::Join {
+                                left: Box::new(RelExpr::Filter {
+                                    input: Box::new(RelExpr::TableScan {
+                                        table: TableName::new("team_edges"),
+                                    }),
+                                    predicate: PredicateExpr::Cmp {
+                                        left: ColumnRef::scoped("team_edges", "child_team"),
+                                        op: PredicateCmpOp::Eq,
+                                        right: ValueRef::RowId(RowIdRef::Frontier),
+                                    },
+                                }),
+                                right: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("teams"),
+                                }),
+                                on: vec![JoinCondition {
+                                    left: ColumnRef::scoped("team_edges", "parent_team"),
+                                    right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                                }],
+                                join_kind: JoinKind::Inner,
+                            }),
+                            columns: vec![ProjectColumn {
+                                alias: "id".to_string(),
+                                expr: ProjectExpr::Column(ColumnRef::scoped(
+                                    "__recursive_hop_0",
+                                    "id",
+                                )),
+                            }],
+                        }),
+                        frontier_key: KeyRef::RowId(RowIdRef::Current),
+                        max_depth: 5,
+                        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("resource_access_edges"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("teams", "id"),
+                        right: ColumnRef::scoped("__hop_0", "team"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("__hop_0", "grant_role"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("viewer".to_string())),
+                },
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+            }],
+        };
+
+        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        assert!(
+            graph.is_some(),
+            "gather + post-join exists-rel should compile"
+        );
+
+        let graph = graph.expect("graph");
+        assert!(
+            graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::RecursiveRelation(_)))
+        );
+        assert!(
+            graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Join(_)))
+        );
     }
 }
