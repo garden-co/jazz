@@ -3282,6 +3282,7 @@ fn join_subscription_can_project_joined_element_output() {
         .on("id", "author_id")
         .build();
     query.result_element_index = Some(1);
+    query.refresh_relation_ir();
 
     let sub_id = qm.subscribe(query).unwrap();
     qm.process(&mut storage);

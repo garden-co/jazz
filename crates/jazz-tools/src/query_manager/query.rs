@@ -5,6 +5,8 @@ use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
 
+use super::query_to_relation_ir::normalize_query_to_rel_expr;
+
 /// A join specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinSpec {
@@ -352,8 +354,8 @@ pub struct Query {
     pub result_element_index: Option<usize>,
     /// Optional relation IR payload for unified query/policy planning.
     ///
-    /// Current runtime still executes the legacy query fields; this IR is
-    /// carried through the boundary to enable incremental compiler cutover.
+    /// Query compilation executes through this IR. The legacy DSL fields are
+    /// retained as construction syntax and normalized into relation IR.
     #[serde(default)]
     pub relation_ir: Option<crate::query_manager::relation_ir::RelExpr>,
 }
@@ -366,8 +368,9 @@ fn default_disjuncts() -> Vec<Conjunction> {
 impl Query {
     /// Create a new query for a table (internal use - branches not set).
     fn new_internal(table: impl Into<TableName>) -> Self {
+        let table = table.into();
         Self {
-            table: table.into(),
+            table,
             alias: None,
             branches: Vec::new(),
             joins: Vec::new(),
@@ -380,7 +383,7 @@ impl Query {
             array_subqueries: Vec::new(),
             recursive: None,
             result_element_index: None,
-            relation_ir: None,
+            relation_ir: Some(crate::query_manager::relation_ir::RelExpr::TableScan { table }),
         }
     }
 
@@ -409,6 +412,11 @@ impl Query {
     /// Check if this query carries relation IR.
     pub fn has_relation_ir(&self) -> bool {
         self.relation_ir.is_some()
+    }
+
+    /// Rebuild relation IR from the query DSL fields.
+    pub fn refresh_relation_ir(&mut self) {
+        self.relation_ir = normalize_query_to_rel_expr(self);
     }
 
     /// Check if this is a join query.
@@ -745,7 +753,9 @@ impl QueryBuilder {
     /// - With SchemaManager: automatically expands to all live schema branches
     /// - Without SchemaManager: QueryManager returns an error
     pub fn build(self) -> Query {
-        self.query
+        let mut query = self.query;
+        query.refresh_relation_ir();
+        query
     }
 }
 
