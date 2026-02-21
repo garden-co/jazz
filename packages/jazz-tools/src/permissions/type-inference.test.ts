@@ -176,19 +176,15 @@ describe("permissions type inference", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
 
-      const reachableTeams = policy.recursive({
-        start: policy.teams
-          .where({ kind: "individual", identity_key: session.userId })
-          .select({ team: "id" }),
-        step: ({ self }) =>
-          self.join(policy.team_team_edges, { left: "team", right: "child_team" }).select({
-            team: "parent_team",
-          }),
+      const reachableTeams = policy.teams.gather({
+        start: { kind: "individual", identity_key: session.userId },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
       });
 
       const hasViewerGrant = (resource: unknown) =>
         policy.exists(
-          reachableTeams.join(policy.resource_access_edges, { left: "team", right: "team" }).where({
+          reachableTeams.hopTo("resource_access_edgesViaTeam").where({
             "resource_access_edges.resource": resource,
             grant_role: "viewer",
           }),

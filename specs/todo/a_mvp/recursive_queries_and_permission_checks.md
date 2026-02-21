@@ -225,6 +225,8 @@ The desired design is compositional and uniform:
 - Non-recursive `hopTo` now lowers to join-chain + projected result element (`result_element_index`) in runtime IR and Rust `QueryGraph`.
 - `gather.step(...hopTo(...))` now compiles to the same recursive step join+projection representation (instead of hop-specific recursive metadata).
 - Recursive execution now supports object-id correlated closure without requiring hop-specific execution (enabling recursive join-projection steps).
+- Permissions DSL now supports `policy.<table>.gather({ start, step, maxDepth })` + `hopTo(...)` with the same step-shape constraints and relation-name resolution model as query DSL.
+- Recursive permission compilation now derives step input/output columns from hop-lowered join metadata, matching query-side join-projection lowering semantics.
 
 ## Implicit ID + Robust Join Design (Proposal)
 

@@ -18,6 +18,16 @@ interface TodoWhere {
   projectId?: string;
 }
 
+interface Project {
+  id: string;
+  ownerId: string;
+}
+
+interface ProjectWhere {
+  id?: string;
+  ownerId?: string;
+}
+
 interface TodoShare {
   id: string;
   todoId: string;
@@ -84,6 +94,13 @@ class TodoShareQueryBuilder {
   }
 }
 
+class ProjectQueryBuilder {
+  declare readonly _rowType: Project;
+  where(_input: ProjectWhere): ProjectQueryBuilder {
+    return this;
+  }
+}
+
 class TeamQueryBuilder {
   declare readonly _rowType: Team;
   where(_input: TeamWhere): TeamQueryBuilder {
@@ -107,6 +124,7 @@ class ResourceAccessEdgeQueryBuilder {
 
 const app = {
   todos: new TodoQueryBuilder(),
+  projects: new ProjectQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
   teams: new TeamQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
@@ -125,6 +143,12 @@ const app = {
             nullable: true,
             references: "projects",
           },
+        ],
+      },
+      projects: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
         ],
       },
       todoShares: {
@@ -188,6 +212,7 @@ const app = {
 
 const appWithoutSchema = {
   todos: new TodoQueryBuilder(),
+  projects: new ProjectQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
   teams: new TeamQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
@@ -445,6 +470,89 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive reachability OR expression.");
     }
     expect(recursiveExpr.exprs).toHaveLength(4);
+  });
+
+  it("compiles gather/hopTo recursive relation with policy.exists(relation)", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.userId,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      const hasResourceRole = (resource: unknown, role: string) =>
+        policy.exists(
+          reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+            "resource_access_edges.resource": resource,
+            grant_role: role,
+          }),
+        );
+
+      return [policy.todos.allowRead.where((todo) => hasResourceRole(todo.id, "viewer"))];
+    });
+
+    const using = compiled.todos.select?.using;
+    expect(using?.type).toBe("Exists");
+    if (!using || using.type !== "Exists") {
+      throw new Error("Expected compiled recursive expression to be EXISTS.");
+    }
+    expect(using.table).toBe("resource_access_edges");
+    expect(using.condition.type).toBe("And");
+    if (using.condition.type !== "And") {
+      throw new Error("Expected anchor EXISTS condition to be AND.");
+    }
+
+    expect(using.condition.exprs).toContainEqual({
+      type: "Cmp",
+      column: "resource",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["__jazz_outer_row", "id"],
+      },
+    });
+    expect(using.condition.exprs).toContainEqual({
+      type: "Cmp",
+      column: "grant_role",
+      op: "Eq",
+      value: {
+        type: "Literal",
+        value: "viewer",
+      },
+    });
+
+    const recursiveExpr = using.condition.exprs.find((expr) => expr.type === "Or");
+    expect(recursiveExpr?.type).toBe("Or");
+    if (!recursiveExpr || recursiveExpr.type !== "Or") {
+      throw new Error("Expected recursive reachability OR expression.");
+    }
+    expect(recursiveExpr.exprs).toHaveLength(4);
+  });
+
+  it("rejects invalid gather(...) step shapes", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        const reachableTeams = policy.teams.gather({
+          start: { kind: "individual" },
+          step: ({ current }) => policy.team_team_edges.where({ child_team: current }),
+        });
+        return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+      }),
+    ).toThrow(/step must include exactly one hopto/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        const reachableTeams = policy.teams.gather({
+          start: { kind: "individual" },
+          step: () => policy.team_team_edges.where({ child_team: "literal" }).hopTo("parent_team"),
+        });
+        return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+      }),
+    ).toThrow(/where condition bound to current/i);
   });
 
   it("rejects invalid policy.recursive start/step shapes", () => {
