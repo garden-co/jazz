@@ -62,13 +62,11 @@ impl QueryManager {
         };
 
         // Compile query graph with schema context
-        let graph = Self::compile_graph_from_relation_ir(
-            &query,
-            &self.schema,
-            session.clone(),
-            &self.schema_context,
-        )
-        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        let graph =
+            Self::compile_graph(&query, &self.schema, session.clone(), &self.schema_context)
+                .ok_or_else(|| {
+                    QueryError::QueryCompilationError("failed to compile query".into())
+                })?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -134,13 +132,8 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph_from_relation_ir(
-            &query,
-            schema,
-            session.clone(),
-            schema_context,
-        )
-        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        let graph = Self::compile_graph(&query, schema, session.clone(), schema_context)
+            .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
