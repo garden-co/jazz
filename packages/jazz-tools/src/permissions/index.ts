@@ -7,6 +7,15 @@ import type {
 } from "../schema.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import type {
+  PolicyExprV2,
+  RelColumnRef,
+  RelExpr,
+  RelJoinCondition,
+  RelPredicateExpr,
+  RelProjectColumn,
+  RelValueRef,
+} from "../ir.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -679,6 +688,378 @@ function getRelationPlan(relation: PermissionRelation): RelationPlan {
     return relation.toPlan();
   }
   throw new Error("Expected a relation built from policy.<table> with where/join/hopTo/gather.");
+}
+
+function relationColumnRef(column: string, defaultScope: string): RelColumnRef {
+  const [prefix, bare] = splitQualifiedColumn(column);
+  if (prefix) {
+    return { scope: prefix, column: bare };
+  }
+  return { scope: defaultScope, column: bare };
+}
+
+function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelValueRef {
+  if (isSessionRefValue(value)) {
+    return { type: "SessionRef", path: value.path };
+  }
+  if (isRowRefValue(value)) {
+    if (!options.allowRowRefs) {
+      throw new Error("Row references are only valid inside exists() clauses.");
+    }
+    return {
+      type: "OuterColumn",
+      column: { column: value.column },
+    };
+  }
+  return { type: "Literal", value };
+}
+
+function relationFilterToPredicates(
+  filter: RelationFilterEntry,
+  defaultScope: string,
+): RelPredicateExpr[] {
+  const left = relationColumnRef(filter.column, defaultScope);
+  const raw = filter.raw;
+
+  if (raw === null) {
+    return [{ type: "IsNull", column: left }];
+  }
+  if (isSessionRefValue(raw) || isRowRefValue(raw)) {
+    return [
+      {
+        type: "Cmp",
+        left,
+        op: "Eq",
+        right: toRelValueRef(raw, { allowRowRefs: true }),
+      },
+    ];
+  }
+  if (!isPlainObject(raw)) {
+    return [
+      {
+        type: "Cmp",
+        left,
+        op: "Eq",
+        right: { type: "Literal", value: raw },
+      },
+    ];
+  }
+
+  const predicates: RelPredicateExpr[] = [];
+  for (const [op, value] of Object.entries(raw)) {
+    if (value === undefined) {
+      continue;
+    }
+    switch (op) {
+      case "eq":
+        if (value === null) {
+          predicates.push({ type: "IsNull", column: left });
+        } else {
+          predicates.push({
+            type: "Cmp",
+            left,
+            op: "Eq",
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          });
+        }
+        break;
+      case "ne":
+        if (value === null) {
+          predicates.push({ type: "IsNotNull", column: left });
+        } else {
+          predicates.push({
+            type: "Cmp",
+            left,
+            op: "Ne",
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          });
+        }
+        break;
+      case "gt":
+        predicates.push({
+          type: "Cmp",
+          left,
+          op: "Gt",
+          right: toRelValueRef(value, { allowRowRefs: true }),
+        });
+        break;
+      case "gte":
+        predicates.push({
+          type: "Cmp",
+          left,
+          op: "Ge",
+          right: toRelValueRef(value, { allowRowRefs: true }),
+        });
+        break;
+      case "lt":
+        predicates.push({
+          type: "Cmp",
+          left,
+          op: "Lt",
+          right: toRelValueRef(value, { allowRowRefs: true }),
+        });
+        break;
+      case "lte":
+        predicates.push({
+          type: "Cmp",
+          left,
+          op: "Le",
+          right: toRelValueRef(value, { allowRowRefs: true }),
+        });
+        break;
+      case "isNull":
+        if (typeof value !== "boolean") {
+          throw new Error(`"${filter.column}.isNull" expects a boolean value.`);
+        }
+        predicates.push(
+          value ? { type: "IsNull", column: left } : { type: "IsNotNull", column: left },
+        );
+        break;
+      case "in":
+        if (!Array.isArray(value)) {
+          throw new Error(`"${filter.column}.in" expects an array value.`);
+        }
+        predicates.push({
+          type: "In",
+          left,
+          values: value.map((entry) => toRelValueRef(entry, { allowRowRefs: true })),
+        });
+        break;
+      case "contains":
+        predicates.push({
+          type: "Contains",
+          left,
+          value: toRelValueRef(value, { allowRowRefs: true }),
+        });
+        break;
+      default:
+        throw new Error(`Unsupported where operator "${op}" in relation IR lowering.`);
+    }
+  }
+
+  return predicates.length > 0 ? predicates : [{ type: "True" }];
+}
+
+function andRelPredicates(predicates: RelPredicateExpr[]): RelPredicateExpr {
+  if (predicates.length === 0) {
+    return { type: "True" };
+  }
+  if (predicates.length === 1) {
+    return predicates[0];
+  }
+  return { type: "And", exprs: predicates };
+}
+
+function applyRelFilter(input: RelExpr, predicates: RelPredicateExpr[]): RelExpr {
+  const predicate = andRelPredicates(predicates);
+  if (predicate.type === "True") {
+    return input;
+  }
+  return {
+    type: "Filter",
+    input,
+    predicate,
+  };
+}
+
+function joinConditionFromSpec(
+  join: RelationJoinSpec,
+  leftScope: string,
+  rightScope: string,
+): RelJoinCondition {
+  return {
+    left: relationColumnRef(join.left, leftScope),
+    right: relationColumnRef(join.right, rightScope),
+  };
+}
+
+function projectHopResult(scope: string): RelProjectColumn[] {
+  return [
+    {
+      alias: "id",
+      expr: {
+        type: "Column",
+        column: { scope, column: "id" },
+      },
+    },
+  ];
+}
+
+function compileTableRelationToRelExpr(plan: TableRelationPlan): RelExpr {
+  let relation: RelExpr = {
+    type: "TableScan",
+    table: plan.table,
+  };
+  let defaultScope = plan.table;
+  let hasHopJoin = false;
+
+  for (let i = 0; i < plan.joins.length; i += 1) {
+    const join = plan.joins[i];
+    const rightScope = join.viaHop ? `__hop_${i}` : `__join_${i}`;
+    relation = {
+      type: "Join",
+      left: relation,
+      right: {
+        type: "TableScan",
+        table: join.table,
+      },
+      on: [joinConditionFromSpec(join, defaultScope, rightScope)],
+      joinKind: "Inner",
+    };
+    defaultScope = rightScope;
+    hasHopJoin ||= Boolean(join.viaHop);
+  }
+
+  const predicates = plan.filters.flatMap((filter) =>
+    relationFilterToPredicates(filter, defaultScope),
+  );
+  relation = applyRelFilter(relation, predicates);
+
+  if (plan.selectMap && Object.keys(plan.selectMap).length > 0) {
+    const columns: RelProjectColumn[] = Object.entries(plan.selectMap).map(([alias, column]) => ({
+      alias,
+      expr: {
+        type: "Column",
+        column: relationColumnRef(column, defaultScope),
+      },
+    }));
+    relation = {
+      type: "Project",
+      input: relation,
+      columns,
+    };
+  } else if (hasHopJoin) {
+    relation = {
+      type: "Project",
+      input: relation,
+      columns: projectHopResult(defaultScope),
+    };
+  }
+
+  return relation;
+}
+
+function compileRecursiveRelationToRelExpr(plan: RecursiveRelationPlan): RelExpr {
+  const seedPredicates = plan.startFilters.flatMap((filter) =>
+    relationFilterToPredicates(filter, plan.startTable),
+  );
+  const seed = applyRelFilter(
+    {
+      type: "TableScan",
+      table: plan.startTable,
+    },
+    seedPredicates,
+  );
+
+  const stepPredicates = [
+    ...plan.stepFilters.flatMap((filter) => relationFilterToPredicates(filter, plan.stepTable)),
+    {
+      type: "Cmp",
+      left: {
+        scope: plan.stepTable,
+        column: plan.stepInputColumn,
+      },
+      op: "Eq",
+      right: {
+        type: "RowId",
+        source: "Frontier",
+      },
+    } satisfies RelPredicateExpr,
+  ];
+  const stepFiltered = applyRelFilter(
+    {
+      type: "TableScan",
+      table: plan.stepTable,
+    },
+    stepPredicates,
+  );
+
+  const recursiveHopScope = "__recursive_hop_0";
+  const stepJoined: RelExpr = {
+    type: "Join",
+    left: stepFiltered,
+    right: {
+      type: "TableScan",
+      table: plan.startTable,
+    },
+    on: [
+      {
+        left: { scope: plan.stepTable, column: plan.stepOutputColumn },
+        right: { scope: recursiveHopScope, column: "id" },
+      },
+    ],
+    joinKind: "Inner",
+  };
+  const stepProjected: RelExpr = {
+    type: "Project",
+    input: stepJoined,
+    columns: projectHopResult(recursiveHopScope),
+  };
+
+  let relation: RelExpr = {
+    type: "Gather",
+    seed,
+    step: stepProjected,
+    frontierKey: { type: "RowId", source: "Current" },
+    maxDepth: plan.maxDepth,
+    dedupeKey: [{ type: "RowId", source: "Current" }],
+  };
+
+  let defaultScope = plan.alias;
+  let hasHopJoin = false;
+  for (let i = 0; i < plan.joins.length; i += 1) {
+    const join = plan.joins[i];
+    const rightScope = join.viaHop ? `__recursive_join_${i}` : `__recursive_join_${i}`;
+    relation = {
+      type: "Join",
+      left: relation,
+      right: {
+        type: "TableScan",
+        table: join.table,
+      },
+      on: [joinConditionFromSpec(join, defaultScope, rightScope)],
+      joinKind: "Inner",
+    };
+    defaultScope = rightScope;
+    hasHopJoin ||= Boolean(join.viaHop);
+  }
+
+  const postPredicates = plan.filters.flatMap((filter) =>
+    relationFilterToPredicates(filter, defaultScope),
+  );
+  relation = applyRelFilter(relation, postPredicates);
+
+  if (hasHopJoin) {
+    relation = {
+      type: "Project",
+      input: relation,
+      columns: projectHopResult(defaultScope),
+    };
+  }
+
+  return relation;
+}
+
+function compileRelationPlanToRelExpr(plan: RelationPlan): RelExpr {
+  switch (plan.kind) {
+    case "table":
+      return compileTableRelationToRelExpr(plan);
+    case "recursive":
+      return compileRecursiveRelationToRelExpr(plan);
+    default:
+      throw new Error("Unsupported relation shape in relation IR compiler.");
+  }
+}
+
+export function relationToIr(relation: PermissionRelation): RelExpr {
+  return compileRelationPlanToRelExpr(getRelationPlan(relation));
+}
+
+export function relationExistsToPolicyV2(relation: PermissionRelation): PolicyExprV2 {
+  return {
+    type: "ExistsRel",
+    rel: relationToIr(relation),
+  };
 }
 
 function compileRelationExists(relation: PermissionRelation): PolicyExpr {

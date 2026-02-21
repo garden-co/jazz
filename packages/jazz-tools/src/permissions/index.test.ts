@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { definePermissions } from "./index.js";
+import {
+  definePermissions,
+  relationExistsToPolicyV2,
+  relationToIr,
+  type PermissionRelation,
+} from "./index.js";
 import type { PolicyExpr } from "../schema.js";
 
 interface Todo {
@@ -466,6 +471,92 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive reachability OR expression.");
     }
     expect(recursiveExpr.exprs).toHaveLength(4);
+  });
+
+  it("lowers hop relation plans to relation IR join + project", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      relation = policy.team_team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected relation to be initialized.");
+    }
+
+    const ir = relationToIr(relation);
+    expect(ir.type).toBe("Project");
+    if (ir.type !== "Project") {
+      throw new Error("Expected relation IR project.");
+    }
+    expect(ir.input.type).toBe("Filter");
+    if (ir.input.type !== "Filter") {
+      throw new Error("Expected relation IR filter.");
+    }
+    expect(ir.input.input.type).toBe("Join");
+    if (ir.input.input.type !== "Join") {
+      throw new Error("Expected relation IR join.");
+    }
+    expect(ir.input.input.on).toEqual([
+      {
+        left: { scope: "team_team_edges", column: "parent_team" },
+        right: { scope: "__hop_0", column: "id" },
+      },
+    ]);
+    expect(ir.columns).toEqual([
+      {
+        alias: "id",
+        expr: {
+          type: "Column",
+          column: { scope: "__hop_0", column: "id" },
+        },
+      },
+    ]);
+  });
+
+  it("lowers recursive relation plans to gather IR and wraps in PolicyExprV2 exists", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.userId,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+      relation = reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+        "resource_access_edges.resource": "resource-a",
+        grant_role: "viewer",
+      });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected recursive relation to be initialized.");
+    }
+
+    const ir = relationToIr(relation);
+    expect(ir.type).toBe("Project");
+    if (ir.type !== "Project") {
+      throw new Error("Expected projected recursive relation IR.");
+    }
+    expect(ir.input.type).toBe("Filter");
+    if (ir.input.type !== "Filter") {
+      throw new Error("Expected filtered recursive relation IR.");
+    }
+    expect(ir.input.input.type).toBe("Join");
+    if (ir.input.input.type !== "Join") {
+      throw new Error("Expected recursive post-join relation IR.");
+    }
+    expect(ir.input.input.left.type).toBe("Gather");
+
+    const existsExprV2 = relationExistsToPolicyV2(relation);
+    expect(existsExprV2).toMatchObject({
+      type: "ExistsRel",
+      rel: {
+        type: "Project",
+      },
+    });
   });
 
   it("rejects invalid gather(...) step shapes", () => {

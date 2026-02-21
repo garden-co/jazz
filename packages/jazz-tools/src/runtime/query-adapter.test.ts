@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { translateQuery } from "./query-adapter.js";
+import { translateBuilderToRelationIr, translateQuery } from "./query-adapter.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 describe("translateQuery", () => {
@@ -857,6 +857,119 @@ describe("translateQuery", () => {
     ]);
     expect(result.result_element_index).toBe(2);
     expect(result.recursive).toBeUndefined();
+  });
+
+  it("lowers hop metadata to relation IR join + project", () => {
+    const schema: WasmSchema = {
+      tables: {
+        teams: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        team_edges: {
+          columns: [
+            {
+              name: "child_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "parent_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "team_edges",
+      conditions: [
+        { column: "child_team", op: "eq", value: "00000000-0000-0000-0000-000000000001" },
+      ],
+      includes: {},
+      orderBy: [],
+      hops: ["parent_team"],
+    });
+
+    const ir = translateBuilderToRelationIr(builderJson, schema);
+    expect(ir.type).toBe("Project");
+    if (ir.type !== "Project") {
+      throw new Error("Expected project relation IR.");
+    }
+    expect(ir.input.type).toBe("Join");
+    if (ir.input.type !== "Join") {
+      throw new Error("Expected join input relation IR.");
+    }
+    expect(ir.input.on).toEqual([
+      {
+        left: { scope: "team_edges", column: "parent_team" },
+        right: { scope: "__hop_0", column: "id" },
+      },
+    ]);
+    expect(ir.columns[0]).toEqual({
+      alias: "id",
+      expr: { type: "Column", column: { scope: "__hop_0", column: "id" } },
+    });
+  });
+
+  it("lowers gather metadata to relation IR gather node", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "ne", value: "archived" }],
+      includes: {},
+      orderBy: [],
+      gather: {
+        max_depth: 10,
+        step_table: "todos",
+        step_current_column: "id",
+        step_conditions: [],
+        step_hops: ["parent"],
+      },
+    });
+
+    const ir = translateBuilderToRelationIr(builderJson, schema);
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.frontierKey).toEqual({ type: "RowId", source: "Current" });
+    expect(ir.step.type).toBe("Project");
+    if (ir.step.type !== "Project") {
+      throw new Error("Expected gather step project relation.");
+    }
+    expect(ir.step.input.type).toBe("Join");
+    if (ir.step.input.type !== "Join") {
+      throw new Error("Expected gather step join relation.");
+    }
+    expect(ir.step.input.left.type).toBe("Filter");
+    if (ir.step.input.left.type !== "Filter") {
+      throw new Error("Expected gather step filter relation.");
+    }
+    expect(ir.step.input.left.predicate).toEqual({
+      type: "Cmp",
+      left: { scope: "todos", column: "id" },
+      op: "Eq",
+      right: { type: "RowId", source: "Frontier" },
+    });
   });
 
   describe("error handling", () => {

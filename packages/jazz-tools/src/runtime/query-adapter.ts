@@ -10,6 +10,13 @@
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import type {
+  RelColumnRef,
+  RelExpr,
+  RelJoinCondition,
+  RelPredicateExpr,
+  RelProjectColumn,
+} from "../ir.js";
 
 /**
  * Structure produced by QueryBuilder._build()
@@ -51,6 +58,31 @@ interface JoinOutput {
 interface HopPlan {
   joins: JoinOutput[];
   result_element_index: number | null;
+}
+
+function relColumn(column: string, scope?: string): RelColumnRef {
+  return scope ? { scope, column } : { column };
+}
+
+function relationColumnsForTable(
+  table: string,
+  scope: string,
+  schema: WasmSchema,
+): RelProjectColumn[] {
+  const tableSchema = schema.tables[table];
+  if (!tableSchema) {
+    throw new Error(`Unknown table "${table}" in relation projection.`);
+  }
+  return [
+    {
+      alias: "id",
+      expr: { type: "Column", column: relColumn("id", scope) },
+    },
+    ...tableSchema.columns.map((column) => ({
+      alias: column.name,
+      expr: { type: "Column", column: relColumn(column.name, scope) } as const,
+    })),
+  ];
 }
 
 function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
@@ -327,6 +359,300 @@ function toJoinPlanFromHops(
     joins,
     result_element_index: hops.length,
   };
+}
+
+function conditionToRelPredicate(
+  cond: { column: string; op: string; value: unknown },
+  scope?: string,
+): RelPredicateExpr {
+  const columnRef = relColumn(stripQualifier(cond.column), scope);
+  const rightLiteral =
+    isFrontierRowIdToken(cond.value) && cond.op === "eq"
+      ? { type: "RowId" as const, source: "Frontier" as const }
+      : { type: "Literal" as const, value: cond.value };
+  switch (cond.op) {
+    case "eq":
+      return { type: "Cmp", left: columnRef, op: "Eq", right: rightLiteral };
+    case "ne":
+      return {
+        type: "Cmp",
+        left: columnRef,
+        op: "Ne",
+        right: { type: "Literal", value: cond.value },
+      };
+    case "gt":
+      return {
+        type: "Cmp",
+        left: columnRef,
+        op: "Gt",
+        right: { type: "Literal", value: cond.value },
+      };
+    case "gte":
+      return {
+        type: "Cmp",
+        left: columnRef,
+        op: "Ge",
+        right: { type: "Literal", value: cond.value },
+      };
+    case "lt":
+      return {
+        type: "Cmp",
+        left: columnRef,
+        op: "Lt",
+        right: { type: "Literal", value: cond.value },
+      };
+    case "lte":
+      return {
+        type: "Cmp",
+        left: columnRef,
+        op: "Le",
+        right: { type: "Literal", value: cond.value },
+      };
+    case "isNull":
+      return { type: "IsNull", column: columnRef };
+    case "contains":
+      return { type: "Contains", left: columnRef, value: { type: "Literal", value: cond.value } };
+    case "in":
+      if (!Array.isArray(cond.value)) {
+        throw new Error('"in" operator requires an array value');
+      }
+      return {
+        type: "In",
+        left: columnRef,
+        values: cond.value.map((value) => ({ type: "Literal", value })),
+      };
+    default:
+      throw new Error(`Unknown operator: ${cond.op}`);
+  }
+}
+
+function isFrontierRowIdToken(value: unknown): value is { __jazz_ir_frontier_row_id: true } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const marker = value as { __jazz_ir_frontier_row_id?: unknown };
+  return marker.__jazz_ir_frontier_row_id === true;
+}
+
+function conditionsToRelPredicate(
+  conditions: Array<{ column: string; op: string; value: unknown }>,
+  scope?: string,
+): RelPredicateExpr {
+  if (conditions.length === 0) {
+    return { type: "True" };
+  }
+  if (conditions.length === 1) {
+    return conditionToRelPredicate(conditions[0], scope);
+  }
+  return {
+    type: "And",
+    exprs: conditions.map((condition) => conditionToRelPredicate(condition, scope)),
+  };
+}
+
+function applyFilter(input: RelExpr, predicate: RelPredicateExpr): RelExpr {
+  if (predicate.type === "True") {
+    return input;
+  }
+  return { type: "Filter", input, predicate };
+}
+
+function lowerHopsToRelExpr(
+  input: RelExpr,
+  seedTable: string,
+  hops: readonly string[],
+  relations: Map<string, Relation[]>,
+  schema: WasmSchema,
+): RelExpr {
+  if (hops.length === 0) {
+    return input;
+  }
+
+  let currentExpr = input;
+  let currentTable = seedTable;
+  let currentScope = seedTable;
+
+  for (let i = 0; i < hops.length; i += 1) {
+    const hopName = hops[i];
+    const tableRelations = relations.get(currentTable) ?? [];
+    const relation = tableRelations.find((candidate) => candidate.name === hopName);
+    if (!relation) {
+      throw new Error(`Unknown relation "${hopName}" on table "${currentTable}"`);
+    }
+
+    const hopAlias = `__hop_${i}`;
+    const joinOn: RelJoinCondition =
+      relation.type === "forward"
+        ? {
+            left: relColumn(relation.fromColumn, currentScope),
+            right: relColumn("id", hopAlias),
+          }
+        : {
+            left: relColumn("id", currentScope),
+            right: relColumn(relation.toColumn, hopAlias),
+          };
+    currentExpr = {
+      type: "Join",
+      left: currentExpr,
+      right: { type: "TableScan", table: relation.toTable },
+      on: [joinOn],
+      joinKind: "Inner",
+    };
+
+    currentTable = relation.toTable;
+    currentScope = hopAlias;
+  }
+
+  return {
+    type: "Project",
+    input: currentExpr,
+    columns: relationColumnsForTable(currentTable, currentScope, schema),
+  };
+}
+
+function gatherToRelExpr(
+  gather: NonNullable<BuilderOutput["gather"]>,
+  seedTable: string,
+  seedExpr: RelExpr,
+  relations: Map<string, Relation[]>,
+  schema: WasmSchema,
+): RelExpr {
+  if (!schema.tables[gather.step_table]) {
+    throw new Error(`Unknown gather step table "${gather.step_table}"`);
+  }
+  if (!Number.isInteger(gather.max_depth) || gather.max_depth <= 0) {
+    throw new Error("gather(...) max_depth must be a positive integer.");
+  }
+
+  const stepHops = Array.isArray(gather.step_hops)
+    ? gather.step_hops.filter((hop): hop is string => typeof hop === "string")
+    : [];
+  if (stepHops.length !== 1) {
+    throw new Error("gather(...) currently requires exactly one hopTo(...) step.");
+  }
+
+  const stepRelations = relations.get(gather.step_table) ?? [];
+  const hopName = stepHops[0];
+  const hopRelation = stepRelations.find((rel) => rel.name === hopName);
+  if (!hopRelation) {
+    throw new Error(`Unknown relation "${hopName}" on table "${gather.step_table}"`);
+  }
+  if (hopRelation.type !== "forward") {
+    throw new Error("gather(...) currently only supports forward hopTo(...) relations.");
+  }
+  if (hopRelation.toTable !== seedTable) {
+    throw new Error(
+      `gather(...) step must hop back to "${seedTable}" rows, got "${hopRelation.toTable}".`,
+    );
+  }
+
+  const stepBase: RelExpr = { type: "TableScan", table: gather.step_table };
+  const stepConditions = Array.isArray(gather.step_conditions) ? gather.step_conditions : [];
+  const stepScope = gather.step_table;
+  const stepPredicateConditions = [
+    ...stepConditions,
+    {
+      column: stripQualifier(gather.step_current_column),
+      op: "eq",
+      value: { __jazz_ir_frontier_row_id: true },
+    },
+  ];
+  const stepPredicate = conditionsToRelPredicate(stepPredicateConditions, stepScope);
+  const stepFiltered = applyFilter(stepBase, stepPredicate);
+
+  const recursiveHopAlias = "__recursive_hop_0";
+  const stepJoined: RelExpr = {
+    type: "Join",
+    left: stepFiltered,
+    right: { type: "TableScan", table: hopRelation.toTable },
+    on: [
+      {
+        left: relColumn(hopRelation.fromColumn, gather.step_table),
+        right: relColumn("id", recursiveHopAlias),
+      },
+    ],
+    joinKind: "Inner",
+  };
+
+  const stepProjected: RelExpr = {
+    type: "Project",
+    input: stepJoined,
+    columns: relationColumnsForTable(seedTable, recursiveHopAlias, schema),
+  };
+
+  return {
+    type: "Gather",
+    seed: seedExpr,
+    step: stepProjected,
+    frontierKey: { type: "RowId", source: "Current" },
+    maxDepth: gather.max_depth,
+    dedupeKey: [{ type: "RowId", source: "Current" }],
+  };
+}
+
+/**
+ * Translate QueryBuilder JSON to relation IR.
+ *
+ * This emits the canonical compositional form:
+ * - hopTo => Join + Project
+ * - gather => Gather with step Join + Project
+ */
+export function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
+  const builder: BuilderOutput = JSON.parse(builderJson);
+  const relations = analyzeRelations(schema);
+  const hops = Array.isArray(builder.hops)
+    ? builder.hops.filter((hop): hop is string => typeof hop === "string")
+    : [];
+
+  if (builder.gather && Object.keys(builder.includes ?? {}).length > 0) {
+    throw new Error("gather(...) does not yet support include(...).");
+  }
+  if (hops.length > 0 && builder.gather) {
+    throw new Error("gather(...).hopTo(...) is not yet supported.");
+  }
+  if (hops.length > 0 && Object.keys(builder.includes ?? {}).length > 0) {
+    throw new Error("hopTo(...) does not yet support include(...).");
+  }
+
+  let relation: RelExpr = { type: "TableScan", table: builder.table };
+  relation = applyFilter(
+    relation,
+    conditionsToRelPredicate(builder.conditions ?? [], builder.table),
+  );
+
+  if (builder.gather) {
+    relation = gatherToRelExpr(builder.gather, builder.table, relation, relations, schema);
+  } else {
+    relation = lowerHopsToRelExpr(relation, builder.table, hops, relations, schema);
+  }
+
+  if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
+    relation = {
+      type: "OrderBy",
+      input: relation,
+      terms: builder.orderBy.map(([column, direction]) => ({
+        column: relColumn(column),
+        direction: direction === "desc" ? "Desc" : "Asc",
+      })),
+    };
+  }
+
+  if (typeof builder.offset === "number" && builder.offset > 0) {
+    relation = {
+      type: "Offset",
+      input: relation,
+      offset: builder.offset,
+    };
+  }
+  if (typeof builder.limit === "number") {
+    relation = {
+      type: "Limit",
+      input: relation,
+      limit: builder.limit,
+    };
+  }
+
+  return relation;
 }
 
 /**
