@@ -262,6 +262,61 @@ fn recursive_query_with_hop_expands_transitive_closure() {
 }
 
 #[test]
+fn recursive_query_with_join_project_step_expands_transitive_closure() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_hop_team_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let team1 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-1".into())])
+        .unwrap();
+    let team2 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-2".into())])
+        .unwrap();
+    let team3 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-3".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Uuid(team1.row_id), Value::Uuid(team2.row_id)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Uuid(team2.row_id), Value::Uuid(team3.row_id)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("teams")
+        .filter_eq("name", Value::Text("team-1".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .join("teams")
+                .alias("__recursive_hop_0")
+                .on("team_edges.parent_team", "__recursive_hop_0.id")
+                .result_element_index(1)
+                .max_depth(10)
+        })
+        .build();
+
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    let mut names: Vec<String> = results
+        .into_iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["team-1", "team-2", "team-3"]);
+}
+
+#[test]
 fn recursive_hop_query_subscriptions_receive_expansion_updates() {
     let sync_manager = SyncManager::new();
     let schema = recursive_hop_team_schema();

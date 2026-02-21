@@ -751,12 +751,16 @@ describe("translateQuery", () => {
       table: "todos",
       inner_column: "_id",
       outer_column: "_id",
-      select_columns: ["parent_id"],
+      select_columns: null,
       filters: [],
-      hop: {
-        table: "todos",
-        via_column: "parent_id",
-      },
+      joins: [
+        {
+          table: "todos",
+          alias: "__recursive_hop_0",
+          on: ["todos.parent_id", "__recursive_hop_0.id"],
+        },
+      ],
+      result_element_index: 1,
       max_depth: 10,
     });
     expect(result.joins).toEqual([]);
@@ -806,6 +810,52 @@ describe("translateQuery", () => {
       },
     ]);
     expect(result.result_element_index).toBe(1);
+    expect(result.recursive).toBeUndefined();
+  });
+
+  it("translates multi-hop metadata to chained runtime joins", () => {
+    const schema: WasmSchema = {
+      tables: {
+        users: {
+          columns: [
+            { name: "name", column_type: { type: "Text" }, nullable: false },
+            { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+          ],
+        },
+        teams: {
+          columns: [
+            { name: "name", column_type: { type: "Text" }, nullable: false },
+            { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+          ],
+        },
+        orgs: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "users",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      hops: ["team", "org"],
+    });
+
+    const result = JSON.parse(translateQuery(builderJson, schema));
+    expect(result.joins).toEqual([
+      {
+        table: "teams",
+        alias: "__hop_0",
+        on: ["users.team_id", "__hop_0.id"],
+      },
+      {
+        table: "orgs",
+        alias: "__hop_1",
+        on: ["__hop_0.org_id", "__hop_1.id"],
+      },
+    ]);
+    expect(result.result_element_index).toBe(2);
     expect(result.recursive).toBeUndefined();
   });
 

@@ -37,10 +37,8 @@ interface RecursiveOutput {
   outer_column: string;
   select_columns: string[] | null;
   filters: object[];
-  hop: {
-    table: string;
-    via_column: string;
-  };
+  joins: JoinOutput[];
+  result_element_index?: number;
   max_depth: number;
 }
 
@@ -266,17 +264,22 @@ function toRecursiveFromGather(
 
   const innerColumn = toRuntimeColumn(stripQualifier(gather.step_current_column));
   const stepConditions = Array.isArray(gather.step_conditions) ? gather.step_conditions : [];
+  const recursiveHopAlias = "__recursive_hop_0";
 
   return {
     table: gather.step_table,
     inner_column: innerColumn,
     outer_column: "_id",
-    select_columns: [hopRelation.fromColumn],
+    select_columns: null,
     filters: stepConditions.map((condition) => toCondition(condition, schema, gather.step_table)),
-    hop: {
-      table: hopRelation.toTable,
-      via_column: hopRelation.fromColumn,
-    },
+    joins: [
+      {
+        table: hopRelation.toTable,
+        alias: recursiveHopAlias,
+        on: [`${gather.step_table}.${hopRelation.fromColumn}`, `${recursiveHopAlias}.id`],
+      },
+    ],
+    result_element_index: 1,
     max_depth: gather.max_depth,
   };
 }

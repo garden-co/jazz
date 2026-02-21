@@ -219,6 +219,13 @@ The desired design is compositional and uniform:
    - update propagation across hop edges.
 5. Only after this is stable, optionally lower `hopTo` to join+project for a single canonical implementation strategy.
 
+### Status update (current branch)
+
+- `hopTo` runtime special-casing has been removed from TS DB runtimes; `all` and `subscribeAll` both compile through the same query adapter path.
+- Non-recursive `hopTo` now lowers to join-chain + projected result element (`result_element_index`) in runtime IR and Rust `QueryGraph`.
+- `gather.step(...hopTo(...))` now compiles to the same recursive step join+projection representation (instead of hop-specific recursive metadata).
+- Recursive execution now supports object-id correlated closure without requiring hop-specific execution (enabling recursive join-projection steps).
+
 ## Implicit ID + Robust Join Design (Proposal)
 
 To make join-based `hopTo` lowering robust, implicit row IDs must be first-class in query planning.

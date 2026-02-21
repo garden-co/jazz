@@ -293,6 +293,12 @@ pub struct RecursiveSpec {
     /// Additional filters to apply to each recursive step query.
     #[serde(default)]
     pub filters: Vec<Condition>,
+    /// Optional joins to apply to each recursive step query.
+    #[serde(default)]
+    pub joins: Vec<JoinSpec>,
+    /// Optional projected tuple element index for recursive step join output.
+    #[serde(default)]
+    pub result_element_index: Option<usize>,
     /// Optional hop from each step row to target rows.
     #[serde(default)]
     pub hop: Option<RecursiveHopSpec>,
@@ -886,6 +892,8 @@ pub struct RecursiveBuilder {
     outer_column: String,
     select_columns: Option<Vec<String>>,
     filters: Vec<Condition>,
+    joins: Vec<JoinSpec>,
+    result_element_index: Option<usize>,
     hop: Option<RecursiveHopSpec>,
     max_depth: usize,
 }
@@ -899,6 +907,8 @@ impl RecursiveBuilder {
             outer_column: String::new(),
             select_columns: None,
             filters: Vec::new(),
+            joins: Vec::new(),
+            result_element_index: None,
             hop: None,
             max_depth: 10,
         }
@@ -940,6 +950,38 @@ impl RecursiveBuilder {
         self
     }
 
+    /// Join another table in each recursive step query.
+    pub fn join(mut self, table: impl Into<TableName>) -> Self {
+        self.joins.push(JoinSpec {
+            table: table.into(),
+            alias: None,
+            on: None,
+        });
+        self
+    }
+
+    /// Set alias on the most recently added recursive step join.
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        if let Some(join) = self.joins.last_mut() {
+            join.alias = Some(alias.into());
+        }
+        self
+    }
+
+    /// Set join predicate on the most recently added recursive step join.
+    pub fn on(mut self, left: impl Into<String>, right: impl Into<String>) -> Self {
+        if let Some(join) = self.joins.last_mut() {
+            join.on = Some((left.into(), right.into()));
+        }
+        self
+    }
+
+    /// Project recursive step join output to a specific tuple element.
+    pub fn result_element_index(mut self, index: usize) -> Self {
+        self.result_element_index = Some(index);
+        self
+    }
+
     /// Configure a hop from the step query rows to target rows.
     pub fn hop(mut self, table: impl Into<TableName>, via_column: impl Into<String>) -> Self {
         self.hop = Some(RecursiveHopSpec {
@@ -963,6 +1005,8 @@ impl RecursiveBuilder {
             outer_column: self.outer_column,
             select_columns: self.select_columns,
             filters: self.filters,
+            joins: self.joins,
+            result_element_index: self.result_element_index,
             hop: self.hop,
             max_depth: self.max_depth,
         }
@@ -1342,6 +1386,8 @@ mod tests {
             Some(vec!["parent_team".to_string()])
         );
         assert!(recursive.filters.is_empty());
+        assert!(recursive.joins.is_empty());
+        assert!(recursive.result_element_index.is_none());
         assert!(recursive.hop.is_none());
         assert_eq!(recursive.max_depth, 12);
     }
