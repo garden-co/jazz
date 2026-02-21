@@ -1,5 +1,5 @@
 use super::graph_nodes::sort::SortDirection;
-use super::query::{Condition, Conjunction, JoinSpec, Query, RecursiveSpec};
+use super::query::{ArraySubquerySpec, Condition, Conjunction, JoinSpec, Query, RecursiveSpec};
 use super::relation_ir::{
     JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
 };
@@ -434,15 +434,18 @@ fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
 }
 
 pub(crate) fn lower_relation_to_execution_query(
-    query: &Query,
     relation: &RelExpr,
+    branches: &[String],
+    include_deleted: bool,
+    array_subqueries: Vec<ArraySubquerySpec>,
 ) -> Option<Query> {
     let envelope = unwrap_query_envelope(relation);
     let core_plan = parse_runtime_core_plan(envelope.core)?;
 
-    let mut lowered = query.clone();
+    let mut lowered = Query::new(core_plan.table);
     lowered.table = core_plan.table;
     lowered.alias = None;
+    lowered.branches = branches.to_vec();
     lowered.disjuncts = vec![Conjunction {
         conditions: core_plan.conditions,
     }];
@@ -452,6 +455,8 @@ pub(crate) fn lower_relation_to_execution_query(
     lowered.limit = envelope.limit;
     lowered.result_element_index = core_plan.result_element_index;
     lowered.recursive = core_plan.recursive;
+    lowered.include_deleted = include_deleted;
+    lowered.array_subqueries = array_subqueries;
     lowered.select_columns = None;
     lowered.relation_ir = None;
     Some(lowered)

@@ -388,12 +388,14 @@ impl QueryManager {
 
                 // Recompile the graph
                 let new_graph = if let Some(relation) = sub.query.relation_ir.as_ref() {
-                    QueryGraph::compile_relation_ir_with_schema_context(
+                    QueryGraph::compile_relation_ir_with_schema_context_and_features(
                         relation,
                         &self.schema,
                         &sub.query.branches,
                         sub.session.clone(),
                         &self.schema_context,
+                        sub.query.include_deleted,
+                        sub.query.array_subqueries.clone(),
                     )
                 } else {
                     QueryGraph::compile_with_schema_context(
@@ -415,12 +417,14 @@ impl QueryManager {
             if sub.needs_recompile {
                 // Recompile the graph
                 let new_graph = if let Some(relation) = sub.query.relation_ir.as_ref() {
-                    QueryGraph::compile_relation_ir_with_schema_context(
+                    QueryGraph::compile_relation_ir_with_schema_context_and_features(
                         relation,
                         &self.schema,
                         &sub.query.branches,
                         sub.session.clone(),
                         &self.schema_context,
+                        sub.query.include_deleted,
+                        sub.query.array_subqueries.clone(),
                     )
                 } else {
                     QueryGraph::compile_with_schema_context(
