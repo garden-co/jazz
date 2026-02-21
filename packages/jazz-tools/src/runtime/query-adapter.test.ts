@@ -678,7 +678,7 @@ describe("translateQuery", () => {
 
       const result = JSON.parse(translateQuery(builderJson, fullSchema));
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         table: "todos",
         branches: [],
         disjuncts: [
@@ -712,6 +712,7 @@ describe("translateQuery", () => {
         ],
         joins: [],
       });
+      expect(result.relation_ir).toBeDefined();
     });
   });
 

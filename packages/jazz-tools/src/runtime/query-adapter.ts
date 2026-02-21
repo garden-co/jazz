@@ -874,6 +874,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
       ? { result_element_index: corePlan.resultElementIndex }
       : {}),
     ...(corePlan.recursive ? { recursive: corePlan.recursive } : {}),
+    relation_ir: relation,
   };
 
   return JSON.stringify(query);
