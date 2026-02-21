@@ -63,12 +63,22 @@ impl QueryManager {
         };
 
         // Compile query graph with schema context
-        let graph = QueryGraph::compile_with_schema_context(
-            &query,
-            &self.schema,
-            session.clone(),
-            &self.schema_context,
-        )
+        let graph = if let Some(relation) = query.relation_ir.as_ref() {
+            QueryGraph::compile_relation_ir_with_schema_context(
+                relation,
+                &self.schema,
+                &query.branches,
+                session.clone(),
+                &self.schema_context,
+            )
+        } else {
+            QueryGraph::compile_with_schema_context(
+                &query,
+                &self.schema,
+                session.clone(),
+                &self.schema_context,
+            )
+        }
         .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
@@ -116,10 +126,12 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        let table_name = &query.table;
-        let _table_schema = schema
-            .get(table_name)
-            .ok_or(QueryError::TableNotFound(*table_name))?;
+        if query.relation_ir.is_none() {
+            let table_name = &query.table;
+            let _table_schema = schema
+                .get(table_name)
+                .ok_or(QueryError::TableNotFound(*table_name))?;
+        }
 
         // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {
@@ -133,12 +145,17 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = QueryGraph::compile_with_schema_context(
-            &query,
-            schema,
-            session.clone(),
-            schema_context,
-        )
+        let graph = if let Some(relation) = query.relation_ir.as_ref() {
+            QueryGraph::compile_relation_ir_with_schema_context(
+                relation,
+                schema,
+                &query.branches,
+                session.clone(),
+                schema_context,
+            )
+        } else {
+            QueryGraph::compile_with_schema_context(&query, schema, session.clone(), schema_context)
+        }
         .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
