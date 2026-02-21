@@ -1,5 +1,6 @@
 use ahash::{AHashMap, AHashSet};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::ops::Bound;
 
 use bitvec::prelude::*;
@@ -31,7 +32,7 @@ use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
-use super::query::{ArraySubquerySpec, Condition, Conjunction, Query};
+use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::RelExpr;
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
@@ -39,6 +40,25 @@ use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, Row, RowDelta, RowDescriptor,
     Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryCompileError {
+    UnknownTable(TableName),
+    InvalidPlan(&'static str),
+}
+
+impl fmt::Display for QueryCompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryCompileError::UnknownTable(table) => {
+                write!(f, "unknown table referenced in relation_ir: {}", table)
+            }
+            QueryCompileError::InvalidPlan(reason) => write!(f, "invalid relation plan: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for QueryCompileError {}
 
 /// A node in the query graph (type-erased).
 #[derive(Debug)]
@@ -237,7 +257,12 @@ impl QueryGraph {
 
     /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
-        Self::compile_with_session(query, schema, None)
+        Self::try_compile_with_session(query, schema, None).ok()
+    }
+
+    /// Compile a query into a graph with typed errors (without policy filtering).
+    pub fn try_compile(query: &Query, schema: &Schema) -> Result<Self, QueryCompileError> {
+        Self::try_compile_with_session(query, schema, None)
     }
 
     /// Compile relation IR directly into a graph.
@@ -784,12 +809,24 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
     ) -> Option<Self> {
+        Self::try_compile_with_session(query, schema, session).ok()
+    }
+
+    /// Compile a query into a graph with optional session-based policy filtering.
+    ///
+    /// Returns a typed error instead of collapsing failures into `None`.
+    pub fn try_compile_with_session(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+    ) -> Result<Self, QueryCompileError> {
         let default_branches = vec!["main".to_string()];
         let branches: &[String] = if query.branches.is_empty() {
             &default_branches
         } else {
             &query.branches
         };
+        ensure_relation_tables_exist(&query.relation_ir, schema)?;
         Self::compile_relation_ir_with_features(
             &query.relation_ir,
             schema,
@@ -801,6 +838,9 @@ impl QueryGraph {
                 select_columns: query.select_columns.clone(),
             },
         )
+        .ok_or(QueryCompileError::InvalidPlan(
+            "unsupported relation_ir shape for query graph compilation",
+        ))
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -815,6 +855,18 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
+        Self::try_compile_with_schema_context(query, schema, session, schema_context).ok()
+    }
+
+    /// Compile a query with schema context for multi-schema queries.
+    ///
+    /// Returns a typed error instead of collapsing failures into `None`.
+    pub fn try_compile_with_schema_context(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Result<Self, QueryCompileError> {
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
                 .all_branch_names()
@@ -824,6 +876,7 @@ impl QueryGraph {
         } else {
             query.branches.clone()
         };
+        ensure_relation_tables_exist(&query.relation_ir, schema)?;
         Self::compile_relation_ir_with_schema_context_and_features(
             &query.relation_ir,
             schema,
@@ -836,6 +889,9 @@ impl QueryGraph {
                 select_columns: query.select_columns.clone(),
             },
         )
+        .ok_or(QueryCompileError::InvalidPlan(
+            "unsupported relation_ir shape for schema-context query compilation",
+        ))
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -859,18 +915,39 @@ impl QueryGraph {
             .unwrap_or(&spec.outer_column);
         let outer_correlation_col = outer_descriptor.column_index(outer_col_name)?;
 
-        // Build base query for subgraph, inheriting branches from outer query
-        let mut base_query = Query::new(spec.table);
-        base_query.branches = branches.to_vec();
-        base_query.joins = spec.joins.clone();
-        for condition in &spec.filters {
-            base_query.disjuncts[0].conditions.push(condition.clone());
+        // Build base query for subgraph, inheriting branches from outer query.
+        let mut base_builder = QueryBuilder::new(spec.table);
+        if !branches.is_empty() {
+            let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+            base_builder = base_builder.branches(&branch_refs);
         }
-        base_query.order_by = spec.order_by.clone();
-        base_query.limit = spec.limit;
-        base_query.select_columns = spec.select_columns.clone();
+        for join_spec in &spec.joins {
+            base_builder = base_builder.join(join_spec.table);
+            if let Some(alias) = &join_spec.alias {
+                base_builder = base_builder.alias(alias);
+            }
+            if let Some((left, right)) = &join_spec.on {
+                base_builder = base_builder.on(left, right);
+            }
+        }
+        for condition in &spec.filters {
+            base_builder = apply_condition_to_builder(base_builder, condition);
+        }
+        for (column, direction) in &spec.order_by {
+            base_builder = match direction {
+                SortDirection::Ascending => base_builder.order_by(column),
+                SortDirection::Descending => base_builder.order_by_desc(column),
+            };
+        }
+        if let Some(limit) = spec.limit {
+            base_builder = base_builder.limit(limit);
+        }
+        if let Some(cols) = &spec.select_columns {
+            let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            base_builder = base_builder.select(&col_refs);
+        }
+        let mut base_query = base_builder.try_build().ok()?;
         base_query.array_subqueries = spec.nested_arrays.clone();
-        base_query.refresh_relation_ir().ok()?;
 
         // Build combined descriptor: base table + all joined tables + nested array columns
         let mut combined_columns = inner_descriptor.columns.clone();
@@ -1001,17 +1078,31 @@ impl QueryGraph {
         }
 
         // Build step query for each recursive level.
-        let mut step_query = Query::new(spec.table);
-        step_query.branches = branches.to_vec();
-        step_query.joins = spec.joins.clone();
-        step_query.select_columns = spec.select_columns.clone();
-        step_query.result_element_index = spec.result_element_index;
-        if !spec.filters.is_empty() {
-            step_query.disjuncts = vec![crate::query_manager::query::Conjunction {
-                conditions: spec.filters.clone(),
-            }];
+        let mut step_builder = QueryBuilder::new(spec.table);
+        if !branches.is_empty() {
+            let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+            step_builder = step_builder.branches(&branch_refs);
         }
-        step_query.refresh_relation_ir().ok()?;
+        for join_spec in &spec.joins {
+            step_builder = step_builder.join(join_spec.table);
+            if let Some(alias) = &join_spec.alias {
+                step_builder = step_builder.alias(alias);
+            }
+            if let Some((left, right)) = &join_spec.on {
+                step_builder = step_builder.on(left, right);
+            }
+        }
+        for condition in &spec.filters {
+            step_builder = apply_condition_to_builder(step_builder, condition);
+        }
+        if let Some(cols) = &spec.select_columns {
+            let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            step_builder = step_builder.select(&col_refs);
+        }
+        if let Some(index) = spec.result_element_index {
+            step_builder = step_builder.result_element_index(index);
+        }
+        let step_query = step_builder.try_build().ok()?;
 
         // Build descriptor for step output.
         let mut step_table_descriptors = vec![step_table_descriptor.clone()];
@@ -2032,6 +2123,35 @@ impl QueryGraph {
     }
 }
 
+fn ensure_relation_tables_exist(
+    relation: &RelExpr,
+    schema: &Schema,
+) -> Result<(), QueryCompileError> {
+    match relation {
+        RelExpr::TableScan { table } => {
+            if schema.get(table).is_some() {
+                Ok(())
+            } else {
+                Err(QueryCompileError::UnknownTable(*table))
+            }
+        }
+        RelExpr::Filter { input, .. }
+        | RelExpr::Project { input, .. }
+        | RelExpr::Distinct { input, .. }
+        | RelExpr::OrderBy { input, .. }
+        | RelExpr::Offset { input, .. }
+        | RelExpr::Limit { input, .. } => ensure_relation_tables_exist(input, schema),
+        RelExpr::Join { left, right, .. } => {
+            ensure_relation_tables_exist(left, schema)?;
+            ensure_relation_tables_exist(right, schema)
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            ensure_relation_tables_exist(seed, schema)?;
+            ensure_relation_tables_exist(step, schema)
+        }
+    }
+}
+
 fn descriptors_compatible_by_shape(left: &RowDescriptor, right: &RowDescriptor) -> bool {
     if left.columns.len() != right.columns.len() {
         return false;
@@ -2113,6 +2233,24 @@ fn build_remaining_predicate_from_disjuncts(
         // Fall back to full predicate for partial coverage cases
         disjuncts_to_predicate(disjuncts, descriptor)
     }
+}
+
+fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) -> QueryBuilder {
+    builder = match condition {
+        Condition::Eq { column, value } => builder.filter_eq(column, value.clone()),
+        Condition::Ne { column, value } => builder.filter_ne(column, value.clone()),
+        Condition::Lt { column, value } => builder.filter_lt(column, value.clone()),
+        Condition::Le { column, value } => builder.filter_le(column, value.clone()),
+        Condition::Gt { column, value } => builder.filter_gt(column, value.clone()),
+        Condition::Ge { column, value } => builder.filter_ge(column, value.clone()),
+        Condition::Between { column, min, max } => {
+            builder.filter_between(column, min.clone(), max.clone())
+        }
+        Condition::Contains { column, value } => builder.filter_contains(column, value.clone()),
+        Condition::IsNull { column } => builder.filter_is_null(column),
+        Condition::IsNotNull { column } => builder.filter_is_not_null(column),
+    };
+    builder
 }
 
 /// Convert a condition to a scan condition.

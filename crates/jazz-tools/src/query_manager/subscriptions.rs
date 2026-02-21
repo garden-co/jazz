@@ -64,9 +64,7 @@ impl QueryManager {
         // Compile query graph with schema context
         let graph =
             Self::compile_graph(&query, &self.schema, session.clone(), &self.schema_context)
-                .ok_or_else(|| {
-                    QueryError::QueryCompilationError("failed to compile query".into())
-                })?;
+                .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -126,7 +124,7 @@ impl QueryManager {
 
         // Compile query graph with explicit schema context
         let graph = Self::compile_graph(&query, schema, session.clone(), schema_context)
-            .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+            .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
