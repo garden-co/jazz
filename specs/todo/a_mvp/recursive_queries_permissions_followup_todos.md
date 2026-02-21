@@ -17,7 +17,7 @@ Status note: this list is the refreshed "what remains" plan after the latest gat
 - [x] Red: add test proving uncompilable query subscriptions return a client-visible error.
   - `query_manager::manager_tests::server_sends_error_for_uncompilable_query_subscription`
 - [x] Green: emit explicit sync error payload instead of silently dropping failed subscriptions.
-- [ ] Hardening: add one assertion-focused test that validates error message context quality (query id + reason shape).
+- [x] Hardening: add one assertion-focused test that validates error message context quality (query id + reason shape).
 
 ## 3) Permissions docs cleanup
 
@@ -36,25 +36,27 @@ Status note: this list is the refreshed "what remains" plan after the latest gat
 
 ## 5) IR-first Query shape cleanup in Rust
 
-- [ ] Red: add tests that fail when runtime depends on legacy query-field normalization fallback.
-  - Candidate file: `crates/jazz-tools/src/query_manager/query_to_relation_ir.rs`
-  - Candidate assertions:
-    - relation-IR payloads compile without legacy-field fallback
-    - unsupported relation-IR fails loudly (no silent legacy path)
-- [ ] Green: remove residual normalization scaffolding / shape-compat fallback in `query_to_relation_ir`.
-- [ ] Cleanup: keep builder ergonomics intact while enforcing relation-IR-first execution boundaries.
+- [x] Red: add tests that fail when runtime depends on legacy query-field normalization fallback.
+  - `query_to_relation_ir::normalize_query_rejects_legacy_recursive_join_projection_spec`
+  - `graph::compile_query_with_recursive_join_projection_relation_is_rejected`
+  - `manager_tests::recursive_query_with_legacy_join_project_step_is_rejected`
+- [x] Green: remove residual normalization scaffolding / shape-compat fallback in `query_to_relation_ir`.
+  - Removed legacy recursive join+`result_element_index` normalization path; only direct step and hop-based recursive shapes are accepted.
+- [x] Cleanup: keep builder ergonomics intact while enforcing relation-IR-first execution boundaries.
 
 ## 6) Planner gap closure
 
-- [ ] Red: add join+policy interaction tests in query planning/execution.
-  - Candidate area: `crates/jazz-tools/src/query_manager/manager_tests.rs`
-- [ ] Red: add multi-branch join tests that fail under first-branch-only behavior.
-- [ ] Green: implement planner behavior for both suites, then remove first-branch shortcuts.
+- [x] Red: add join+policy interaction tests in query planning/execution.
+  - `manager_tests::join_query_applies_policy_filter_on_joined_table`
+- [x] Red: add multi-branch join tests that fail under first-branch-only behavior.
+  - `manager_tests::join_query_with_multiple_branches_reads_all_branches`
+- [x] Green: implement planner behavior for both suites, then remove first-branch shortcuts.
+  - `compile_join_plan` now scans/merges all query branches and applies per-table select policies before joins.
 
 ## Suggested execution order
 
 - [x] Slice A: finish item 1 (`delete_with_session` complex-clause parity).
 - [x] Slice B: item 4 (TS permissions single-path cutover).
-- [ ] Slice C: item 5 (Rust IR-first cleanup).
-- [ ] Slice D: item 6 (planner gaps).
-- [ ] Slice E: remaining docs hardening in item 3.
+- [x] Slice C: item 5 (Rust IR-first cleanup).
+- [x] Slice D: item 6 (planner gaps).
+- [x] Slice E: remaining docs hardening in item 3.

@@ -190,33 +190,6 @@ fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelEx
                 expr: ProjectExpr::Column(ColumnRef::scoped(hop_scope, "id")),
             }],
         }
-    } else if spec.joins.len() == 1 && spec.result_element_index == Some(1) {
-        if spec.select_columns.is_some() {
-            return None;
-        }
-        let join_spec = spec.joins.first()?;
-        let (left_raw, right_raw) = join_spec.on.as_ref()?;
-        let hop_scope = join_spec.effective_name().to_string();
-        if join_spec.table == spec.table {
-            return None;
-        }
-        RelExpr::Project {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(step_left),
-                right: Box::new(RelExpr::TableScan {
-                    table: join_spec.table,
-                }),
-                on: vec![JoinCondition {
-                    left: parse_join_column(left_raw, &step_scope)?,
-                    right: parse_join_column(right_raw, &hop_scope)?,
-                }],
-                join_kind: JoinKind::Inner,
-            }),
-            columns: vec![ProjectColumn {
-                alias: "id".to_string(),
-                expr: ProjectExpr::Column(ColumnRef::scoped(hop_scope, "id")),
-            }],
-        }
     } else {
         if !spec.joins.is_empty() || spec.result_element_index.is_some() {
             return None;
@@ -668,8 +641,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_with_recursive_join_projection_spec_produces_gather() {
-        let query = QueryBuilder::new("teams")
+    fn normalize_query_rejects_legacy_recursive_join_projection_spec() {
+        let build = QueryBuilder::new("teams")
             .with_recursive(|r| {
                 r.from("team_edges")
                     .correlate("child_team", "_id")
@@ -679,36 +652,11 @@ mod tests {
                     .result_element_index(1)
                     .max_depth(6)
             })
-            .build();
+            .try_build();
 
-        let relation = normalize_query_to_rel_expr(&query)
-            .expect("recursive join-projection spec should normalize to gather");
-        let RelExpr::Gather {
-            max_depth,
-            step,
-            frontier_key,
-            dedupe_key,
-            ..
-        } = relation
-        else {
-            panic!("expected gather relation");
-        };
-        assert_eq!(max_depth, 6);
-        assert_eq!(frontier_key, KeyRef::RowId(RowIdRef::Current));
-        assert_eq!(dedupe_key, vec![KeyRef::RowId(RowIdRef::Current)]);
-
-        let RelExpr::Project { input, .. } = *step else {
-            panic!("expected project step");
-        };
-        let RelExpr::Join { on, .. } = *input else {
-            panic!("expected join step");
-        };
-        assert_eq!(
-            on,
-            vec![JoinCondition {
-                left: ColumnRef::scoped("team_edges", "parent_team"),
-                right: ColumnRef::scoped("__recursive_hop_0", "id"),
-            }]
+        assert!(
+            build.is_err(),
+            "legacy recursive join-projection specs should be rejected in IR-first mode"
         );
     }
 

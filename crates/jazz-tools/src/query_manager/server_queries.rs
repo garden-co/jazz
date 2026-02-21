@@ -60,10 +60,14 @@ impl QueryManager {
             );
 
             let Ok(mut graph) = graph else {
-                // Query compilation failed (e.g., missing table) - notify client.
+                // Query compilation failed (e.g., missing table) - notify client with compiler context.
+                let compile_error = graph
+                    .err()
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "unknown compile error".to_string());
                 let reason = format!(
-                    "query compilation failed for query_id {}: invalid or unsupported query shape",
-                    sub.query_id.0
+                    "query compilation failed for query_id {}: {}",
+                    sub.query_id.0, compile_error
                 );
                 self.sync_manager.emit_query_subscription_rejected(
                     sub.client_id,

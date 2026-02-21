@@ -348,8 +348,7 @@ impl QueryGraph {
         };
 
         if !plan.joins.is_empty() {
-            // TODO: Add policy support for joins
-            return Self::compile_join_plan(plan, schema, branches);
+            return Self::compile_join_plan(plan, schema, branches, session.clone());
         }
 
         let table_schema = schema.get(&plan.table)?;
@@ -576,7 +575,7 @@ impl QueryGraph {
         };
 
         if !plan.joins.is_empty() {
-            return Self::compile_join_plan(plan, schema, &branches);
+            return Self::compile_join_plan(plan, schema, &branches, session.clone());
         }
 
         let table_schema = schema.get(&plan.table)?;
@@ -1175,14 +1174,17 @@ impl QueryGraph {
         plan: &ExecutionQueryPlan,
         schema: &Schema,
         branches: &[String],
+        session: Option<Session>,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.descriptor.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
 
-        // For joins, we use the first branch only for now
-        // TODO: Support multi-branch joins with LWW merge
-        let branch = branches.first().map(|s| s.as_str()).unwrap_or("main");
+        let join_branches: Vec<&str> = if branches.is_empty() {
+            vec!["main"]
+        } else {
+            branches.iter().map(String::as_str).collect()
+        };
 
         // Track all table names and descriptors for TupleDescriptor
         let mut table_names = vec![plan.table.as_str().to_string()];
@@ -1190,19 +1192,33 @@ impl QueryGraph {
         let mut seen_tables: HashSet<String> = HashSet::new();
         seen_tables.insert(plan.table.as_str().to_string());
 
-        // Build pipeline for base table: IndexScan -> Materialize
-        let id_column = ColumnName::new("_id");
-        let base_scan = IndexScanNode::new_with_branch(
-            plan.table,
-            id_column,
-            branch,
-            ScanCondition::All,
-            base_descriptor.clone(),
-        );
-        let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
-        graph
-            .index_scan_nodes
-            .push((base_scan_id, plan.table, id_column));
+        // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
+        let mut base_scan_ids = Vec::new();
+        for branch in &join_branches {
+            let id_column = ColumnName::new("_id");
+            let base_scan = IndexScanNode::new_with_branch(
+                plan.table,
+                id_column,
+                *branch,
+                ScanCondition::All,
+                base_descriptor.clone(),
+            );
+            let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
+            graph
+                .index_scan_nodes
+                .push((base_scan_id, plan.table, id_column));
+            base_scan_ids.push(base_scan_id);
+        }
+        let base_scan_output = if base_scan_ids.len() > 1 {
+            let union_node = UnionNode::new();
+            let union_id = graph.add_node(GraphNode::Union(union_node));
+            for scan_id in base_scan_ids {
+                graph.add_edge(union_id, scan_id);
+            }
+            union_id
+        } else {
+            *base_scan_ids.first()?
+        };
 
         let base_tuple_desc = TupleDescriptor::single_with_materialization(
             plan.table.as_str(),
@@ -1211,10 +1227,32 @@ impl QueryGraph {
         );
         let base_mat = MaterializeNode::new_all(base_tuple_desc);
         let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
-        graph.add_edge(base_mat_id, base_scan_id);
+        graph.add_edge(base_mat_id, base_scan_output);
 
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
+        if let (Some(session), Some(policy)) =
+            (&session, base_table_schema.policies.select.using.clone())
+        {
+            let policy_node = PolicyFilterNode::new(
+                base_descriptor.clone(),
+                policy,
+                session.clone(),
+                schema.clone(),
+                plan.table.as_str(),
+            );
+            let inherits_tables: Vec<TableName> = policy_node
+                .inherits_tables()
+                .iter()
+                .map(TableName::new)
+                .collect();
+            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+            graph.add_edge(policy_id, left_id);
+            for inherits_table in inherits_tables {
+                graph.policy_filter_tables.push((policy_id, inherits_table));
+            }
+            left_id = policy_id;
+        }
         let mut left_descriptor = base_descriptor.clone();
 
         if let Some(recursive_spec) = &plan.recursive
@@ -1243,18 +1281,33 @@ impl QueryGraph {
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.descriptor.clone();
 
-            // Build pipeline for right table: IndexScan -> Materialize (same branch)
-            let right_scan = IndexScanNode::new_with_branch(
-                join_spec.table,
-                id_column,
-                branch,
-                ScanCondition::All,
-                right_descriptor.clone(),
-            );
-            let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
-            graph
-                .index_scan_nodes
-                .push((right_scan_id, join_spec.table, id_column));
+            // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
+            let mut right_scan_ids = Vec::new();
+            for branch in &join_branches {
+                let id_column = ColumnName::new("_id");
+                let right_scan = IndexScanNode::new_with_branch(
+                    join_spec.table,
+                    id_column,
+                    *branch,
+                    ScanCondition::All,
+                    right_descriptor.clone(),
+                );
+                let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
+                graph
+                    .index_scan_nodes
+                    .push((right_scan_id, join_spec.table, id_column));
+                right_scan_ids.push(right_scan_id);
+            }
+            let right_scan_output = if right_scan_ids.len() > 1 {
+                let union_node = UnionNode::new();
+                let union_id = graph.add_node(GraphNode::Union(union_node));
+                for scan_id in right_scan_ids {
+                    graph.add_edge(union_id, scan_id);
+                }
+                union_id
+            } else {
+                *right_scan_ids.first()?
+            };
 
             let right_tuple_desc = TupleDescriptor::single_with_materialization(
                 join_spec.effective_name(),
@@ -1263,7 +1316,30 @@ impl QueryGraph {
             );
             let right_mat = MaterializeNode::new_all(right_tuple_desc);
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
-            graph.add_edge(right_mat_id, right_scan_id);
+            graph.add_edge(right_mat_id, right_scan_output);
+            let mut right_input_id = right_mat_id;
+            if let (Some(session), Some(policy)) =
+                (&session, right_table_schema.policies.select.using.clone())
+            {
+                let policy_node = PolicyFilterNode::new(
+                    right_descriptor.clone(),
+                    policy,
+                    session.clone(),
+                    schema.clone(),
+                    join_spec.table.as_str(),
+                );
+                let inherits_tables: Vec<TableName> = policy_node
+                    .inherits_tables()
+                    .iter()
+                    .map(TableName::new)
+                    .collect();
+                let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+                graph.add_edge(policy_id, right_input_id);
+                for inherits_table in inherits_tables {
+                    graph.policy_filter_tables.push((policy_id, inherits_table));
+                }
+                right_input_id = policy_id;
+            }
 
             // Build tuple descriptors with table/alias labels so qualified ON refs can resolve.
             let left_tuple_desc = TupleDescriptor::from_tables(
@@ -1291,7 +1367,7 @@ impl QueryGraph {
             // JoinNode takes left and right as inputs
             // Using convention: first edge is left, second is right
             graph.add_edge(join_id, left_id);
-            graph.add_edge(join_id, right_mat_id);
+            graph.add_edge(join_id, right_input_id);
 
             // Update for next join in chain
             left_id = join_id;
@@ -2814,9 +2890,8 @@ mod tests {
     }
 
     #[test]
-    fn compile_query_with_recursive_join_projection_relation() {
-        let schema = recursive_hop_schema();
-        let query = QueryBuilder::new("teams")
+    fn compile_query_with_recursive_join_projection_relation_is_rejected() {
+        let query_result = QueryBuilder::new("teams")
             .filter_eq("name", Value::Text("seed".into()))
             .with_recursive(|r| {
                 r.from("team_edges")
@@ -2827,12 +2902,10 @@ mod tests {
                     .result_element_index(1)
                     .max_depth(10)
             })
-            .build();
-
-        let graph = QueryGraph::compile(&query, &schema).expect("Graph should compile");
+            .try_build();
         assert!(
-            has_recursive_relation_node(&graph),
-            "Recursive join-projection queries should compile to RecursiveRelationNode"
+            query_result.is_err(),
+            "legacy recursive join-projection query shape should be rejected"
         );
     }
 
