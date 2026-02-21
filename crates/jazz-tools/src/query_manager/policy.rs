@@ -716,6 +716,16 @@ pub fn bind_relation_refs(
                     outer_row_id,
                 )?,
             }),
+            PredicateExpr::Contains { left, right } => Some(PredicateExpr::Contains {
+                left: left.clone(),
+                right: bind_value_ref(
+                    right,
+                    outer_content,
+                    outer_descriptor,
+                    session,
+                    outer_row_id,
+                )?,
+            }),
             PredicateExpr::IsNull { column } => Some(PredicateExpr::IsNull {
                 column: column.clone(),
             }),

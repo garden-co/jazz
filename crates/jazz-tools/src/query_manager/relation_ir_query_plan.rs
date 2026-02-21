@@ -93,6 +93,13 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
                 },
             })
         }
+        PredicateExpr::Contains {
+            left,
+            right: ValueRef::Literal(value),
+        } => Some(Condition::Contains {
+            column: to_runtime_column(&left.column),
+            value: value.clone(),
+        }),
         PredicateExpr::IsNull { column } => Some(Condition::IsNull {
             column: to_runtime_column(&column.column),
         }),
@@ -124,6 +131,7 @@ fn relation_predicate_to_disjuncts(predicate: &PredicateExpr) -> Option<Vec<Conj
     match predicate {
         PredicateExpr::True => Some(dnf_true()),
         PredicateExpr::Cmp { .. }
+        | PredicateExpr::Contains { .. }
         | PredicateExpr::IsNull { .. }
         | PredicateExpr::IsNotNull { .. } => {
             let condition = predicate_term_to_condition(predicate)?;

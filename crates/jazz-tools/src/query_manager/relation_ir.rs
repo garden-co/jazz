@@ -67,6 +67,10 @@ pub enum PredicateExpr {
         op: PredicateCmpOp,
         right: ValueRef,
     },
+    Contains {
+        left: ColumnRef,
+        right: ValueRef,
+    },
     IsNull {
         column: ColumnRef,
     },
