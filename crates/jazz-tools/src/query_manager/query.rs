@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
+use crate::query_manager::relation_ir::{
+    JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
 
 /// A join specification.
@@ -363,6 +366,358 @@ fn default_disjuncts() -> Vec<Conjunction> {
     vec![Conjunction::new()]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueryEnvelope<'a> {
+    core: &'a RelExpr,
+    order_by: Vec<(String, SortDirection)>,
+    offset: usize,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinearJoinInfo {
+    base_table: TableName,
+    base_scope: String,
+    conditions: Vec<Condition>,
+    joins: Vec<JoinSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeCorePlan {
+    table: TableName,
+    conditions: Vec<Condition>,
+    joins: Vec<JoinSpec>,
+    result_element_index: Option<usize>,
+    recursive: Option<RecursiveSpec>,
+}
+
+fn to_runtime_column(column: &str) -> String {
+    if column == "id" {
+        "_id".to_string()
+    } else {
+        column.to_string()
+    }
+}
+
+fn flatten_predicate_terms<'a>(predicate: &'a PredicateExpr, out: &mut Vec<&'a PredicateExpr>) {
+    match predicate {
+        PredicateExpr::And(exprs) => {
+            for expr in exprs {
+                flatten_predicate_terms(expr, out);
+            }
+        }
+        _ => out.push(predicate),
+    }
+}
+
+fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
+    match predicate {
+        PredicateExpr::Cmp {
+            left,
+            op,
+            right: ValueRef::Literal(value),
+        } => {
+            let column = to_runtime_column(&left.column);
+            Some(match op {
+                PredicateCmpOp::Eq => Condition::Eq {
+                    column,
+                    value: value.clone(),
+                },
+                PredicateCmpOp::Ne => Condition::Ne {
+                    column,
+                    value: value.clone(),
+                },
+                PredicateCmpOp::Lt => Condition::Lt {
+                    column,
+                    value: value.clone(),
+                },
+                PredicateCmpOp::Le => Condition::Le {
+                    column,
+                    value: value.clone(),
+                },
+                PredicateCmpOp::Gt => Condition::Gt {
+                    column,
+                    value: value.clone(),
+                },
+                PredicateCmpOp::Ge => Condition::Ge {
+                    column,
+                    value: value.clone(),
+                },
+            })
+        }
+        PredicateExpr::IsNull { column } => Some(Condition::IsNull {
+            column: to_runtime_column(&column.column),
+        }),
+        PredicateExpr::IsNotNull { column } => Some(Condition::IsNotNull {
+            column: to_runtime_column(&column.column),
+        }),
+        PredicateExpr::True => None,
+        _ => None,
+    }
+}
+
+fn relation_predicate_to_conditions(predicate: &PredicateExpr) -> Option<Vec<Condition>> {
+    if matches!(predicate, PredicateExpr::True) {
+        return Some(Vec::new());
+    }
+
+    let mut terms = Vec::new();
+    flatten_predicate_terms(predicate, &mut terms);
+
+    let mut conditions = Vec::with_capacity(terms.len());
+    for term in terms {
+        let condition = predicate_term_to_condition(term)?;
+        conditions.push(condition);
+    }
+
+    Some(conditions)
+}
+
+fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
+    match expr {
+        RelExpr::TableScan { table } => Some(LinearJoinInfo {
+            base_table: *table,
+            base_scope: table.as_str().to_string(),
+            conditions: Vec::new(),
+            joins: Vec::new(),
+        }),
+        RelExpr::Filter { input, predicate } => {
+            let mut inner = extract_linear_join_info(input)?;
+            let conditions = relation_predicate_to_conditions(predicate)?;
+            inner.conditions.extend(conditions);
+            Some(inner)
+        }
+        RelExpr::Join {
+            left,
+            right,
+            on,
+            join_kind,
+        } => {
+            if !matches!(join_kind, JoinKind::Inner) {
+                return None;
+            }
+
+            let right_table = match right.as_ref() {
+                RelExpr::TableScan { table } => *table,
+                _ => return None,
+            };
+
+            let mut left_info = extract_linear_join_info(left)?;
+            let first_join = on.first()?;
+
+            let left_scope = first_join
+                .left
+                .scope
+                .clone()
+                .unwrap_or_else(|| left_info.base_scope.clone());
+            let right_scope = first_join
+                .right
+                .scope
+                .clone()
+                .unwrap_or_else(|| right_table.as_str().to_string());
+            let join_spec = JoinSpec {
+                table: right_table,
+                alias: (right_scope != right_table.as_str()).then_some(right_scope.clone()),
+                on: Some((
+                    format!("{left_scope}.{}", first_join.left.column),
+                    format!("{right_scope}.{}", first_join.right.column),
+                )),
+            };
+            left_info.base_scope = right_scope;
+            left_info.joins.push(join_spec);
+            Some(left_info)
+        }
+        _ => None,
+    }
+}
+
+fn extract_step_scan(expr: &RelExpr, predicates: &mut Vec<PredicateExpr>) -> Option<TableName> {
+    match expr {
+        RelExpr::TableScan { table } => Some(*table),
+        RelExpr::Filter { input, predicate } => {
+            predicates.push(predicate.clone());
+            extract_step_scan(input, predicates)
+        }
+        _ => None,
+    }
+}
+
+fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option<RuntimeCorePlan> {
+    let seed_info = extract_linear_join_info(seed)?;
+    if !seed_info.joins.is_empty() {
+        return None;
+    }
+
+    let (step_join, _step_columns) = match step {
+        RelExpr::Project { input, columns } => (input, columns),
+        _ => return None,
+    };
+    let (step_left, step_right, step_on, step_join_kind) = match step_join.as_ref() {
+        RelExpr::Join {
+            left,
+            right,
+            on,
+            join_kind,
+        } => (left, right, on, join_kind),
+        _ => return None,
+    };
+    if !matches!(step_join_kind, JoinKind::Inner) {
+        return None;
+    }
+
+    let step_hop_table = match step_right.as_ref() {
+        RelExpr::TableScan { table } => *table,
+        _ => return None,
+    };
+
+    let mut step_predicates = Vec::new();
+    let step_scan_table = extract_step_scan(step_left, &mut step_predicates)?;
+
+    let mut frontier_column: Option<String> = None;
+    let mut step_filters = Vec::new();
+    for predicate in &step_predicates {
+        let mut terms = Vec::new();
+        flatten_predicate_terms(predicate, &mut terms);
+        for term in terms {
+            match term {
+                PredicateExpr::Cmp {
+                    left,
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::RowId(RowIdRef::Frontier),
+                } => {
+                    let candidate = to_runtime_column(&left.column);
+                    if let Some(existing) = &frontier_column
+                        && existing != &candidate
+                    {
+                        return None;
+                    }
+                    frontier_column = Some(candidate);
+                }
+                _ => {
+                    let condition = predicate_term_to_condition(term)?;
+                    step_filters.push(condition);
+                }
+            }
+        }
+    }
+
+    let inner_column = frontier_column?;
+    let first_join = step_on.first()?;
+    let left_scope = first_join
+        .left
+        .scope
+        .clone()
+        .unwrap_or_else(|| step_scan_table.as_str().to_string());
+    let right_scope = first_join
+        .right
+        .scope
+        .clone()
+        .unwrap_or_else(|| step_hop_table.as_str().to_string());
+
+    let recursive = RecursiveSpec {
+        table: step_scan_table,
+        inner_column,
+        outer_column: "_id".to_string(),
+        select_columns: None,
+        filters: step_filters,
+        joins: vec![JoinSpec {
+            table: step_hop_table,
+            alias: (right_scope != step_hop_table.as_str()).then_some(right_scope.clone()),
+            on: Some((
+                format!("{left_scope}.{}", first_join.left.column),
+                format!("{right_scope}.{}", first_join.right.column),
+            )),
+        }],
+        result_element_index: Some(1),
+        hop: None,
+        max_depth,
+    };
+
+    Some(RuntimeCorePlan {
+        table: seed_info.base_table,
+        conditions: seed_info.conditions,
+        joins: Vec::new(),
+        result_element_index: None,
+        recursive: Some(recursive),
+    })
+}
+
+fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
+    match core {
+        RelExpr::Gather {
+            seed,
+            step,
+            max_depth,
+            ..
+        } => parse_gather_core(seed, step, *max_depth),
+        RelExpr::Project { input, .. } => {
+            let linear = extract_linear_join_info(input)?;
+            Some(RuntimeCorePlan {
+                table: linear.base_table,
+                conditions: linear.conditions,
+                joins: linear.joins.clone(),
+                result_element_index: Some(linear.joins.len()),
+                recursive: None,
+            })
+        }
+        _ => {
+            let linear = extract_linear_join_info(core)?;
+            Some(RuntimeCorePlan {
+                table: linear.base_table,
+                conditions: linear.conditions,
+                joins: linear.joins,
+                result_element_index: None,
+                recursive: None,
+            })
+        }
+    }
+}
+
+fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
+    let mut current = expr;
+    let mut order_by = Vec::new();
+    let mut offset = 0;
+    let mut limit = None;
+
+    loop {
+        match current {
+            RelExpr::OrderBy { input, terms } => {
+                if order_by.is_empty() {
+                    order_by = terms
+                        .iter()
+                        .map(|term| {
+                            (
+                                term.column.column.clone(),
+                                match term.direction {
+                                    OrderDirection::Asc => SortDirection::Ascending,
+                                    OrderDirection::Desc => SortDirection::Descending,
+                                },
+                            )
+                        })
+                        .collect();
+                }
+                current = input;
+            }
+            RelExpr::Offset { input, offset: n } => {
+                offset = *n;
+                current = input;
+            }
+            RelExpr::Limit { input, limit: n } => {
+                limit = Some(*n);
+                current = input;
+            }
+            _ => {
+                return QueryEnvelope {
+                    core: current,
+                    order_by,
+                    offset,
+                    limit,
+                };
+            }
+        }
+    }
+}
+
 impl Query {
     /// Create a new query for a table (internal use - branches not set).
     fn new_internal(table: impl Into<TableName>) -> Self {
@@ -409,6 +764,29 @@ impl Query {
     /// Check if this query carries relation IR.
     pub fn has_relation_ir(&self) -> bool {
         self.relation_ir.is_some()
+    }
+
+    /// Build an execution query from relation IR when it matches the
+    /// currently supported lowered shape. Returns `None` on unsupported IR.
+    pub fn lowered_from_relation_ir(&self) -> Option<Self> {
+        let relation = self.relation_ir.as_ref()?;
+        let envelope = unwrap_query_envelope(relation);
+        let core_plan = parse_runtime_core_plan(envelope.core)?;
+
+        let mut lowered = self.clone();
+        lowered.table = core_plan.table;
+        lowered.alias = None;
+        lowered.disjuncts = vec![Conjunction {
+            conditions: core_plan.conditions,
+        }];
+        lowered.joins = core_plan.joins;
+        lowered.order_by = envelope.order_by;
+        lowered.offset = envelope.offset;
+        lowered.limit = envelope.limit;
+        lowered.result_element_index = core_plan.result_element_index;
+        lowered.recursive = core_plan.recursive;
+        lowered.select_columns = None;
+        Some(lowered)
     }
 
     /// Check if this is a join query.
@@ -1034,6 +1412,9 @@ impl Default for RecursiveBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, KeyRef, OrderByExpr, ProjectColumn, ProjectExpr,
+    };
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
@@ -1558,6 +1939,196 @@ mod tests {
 
         assert!(decoded.has_relation_ir());
         assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn lowered_from_relation_ir_project_join_shape() {
+        let relation = RelExpr::Limit {
+            input: Box::new(RelExpr::OrderBy {
+                input: Box::new(RelExpr::Project {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::Filter {
+                            input: Box::new(RelExpr::TableScan {
+                                table: TableName::new("team_edges"),
+                            }),
+                            predicate: PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("team_edges", "child_team"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::Literal(Value::Integer(7)),
+                            },
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("team_edges", "parent_team"),
+                            right: ColumnRef::scoped("__hop_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    columns: vec![ProjectColumn {
+                        alias: "id".to_string(),
+                        expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+                    }],
+                }),
+                terms: vec![OrderByExpr {
+                    column: ColumnRef::unscoped("name"),
+                    direction: OrderDirection::Desc,
+                }],
+            }),
+            limit: 5,
+        };
+
+        let mut query = QueryBuilder::new("placeholder").branch("main").build();
+        query.relation_ir = Some(relation);
+
+        let lowered = query
+            .lowered_from_relation_ir()
+            .expect("relation IR should lower to runtime query");
+        assert_eq!(lowered.table.as_str(), "team_edges");
+        assert_eq!(
+            lowered.order_by,
+            vec![("name".to_string(), SortDirection::Descending)]
+        );
+        assert_eq!(lowered.limit, Some(5));
+        assert_eq!(lowered.result_element_index, Some(1));
+        assert_eq!(lowered.joins.len(), 1);
+        assert_eq!(lowered.joins[0].table.as_str(), "teams");
+        assert_eq!(lowered.joins[0].alias.as_deref(), Some("__hop_0"));
+        assert_eq!(
+            lowered.joins[0].on.as_ref(),
+            Some(&(
+                "team_edges.parent_team".to_string(),
+                "__hop_0.id".to_string()
+            ))
+        );
+        assert_eq!(lowered.disjuncts.len(), 1);
+        assert_eq!(
+            lowered.disjuncts[0].conditions,
+            vec![Condition::Eq {
+                column: "child_team".to_string(),
+                value: Value::Integer(7),
+            }]
+        );
+    }
+
+    #[test]
+    fn lowered_from_relation_ir_gather_shape() {
+        let relation = RelExpr::Gather {
+            seed: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("teams"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("teams", "name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("seed".to_string())),
+                },
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("team_edges"),
+                        }),
+                        predicate: PredicateExpr::And(vec![
+                            PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("team_edges", "child_team"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::RowId(RowIdRef::Frontier),
+                            },
+                            PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("team_edges", "archived"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::Literal(Value::Boolean(false)),
+                            },
+                        ]),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                }],
+            }),
+            frontier_key: KeyRef::RowId(RowIdRef::Current),
+            max_depth: 12,
+            dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+        };
+
+        let mut query = QueryBuilder::new("placeholder").branch("main").build();
+        query.relation_ir = Some(relation);
+
+        let lowered = query
+            .lowered_from_relation_ir()
+            .expect("gather relation should lower to recursive runtime query");
+        assert_eq!(lowered.table.as_str(), "teams");
+        assert!(lowered.joins.is_empty());
+        assert_eq!(lowered.result_element_index, None);
+        assert_eq!(
+            lowered.disjuncts[0].conditions,
+            vec![Condition::Eq {
+                column: "name".to_string(),
+                value: Value::Text("seed".to_string()),
+            }]
+        );
+
+        let recursive = lowered.recursive.expect("recursive spec");
+        assert_eq!(recursive.table.as_str(), "team_edges");
+        assert_eq!(recursive.inner_column, "child_team");
+        assert_eq!(recursive.outer_column, "_id");
+        assert_eq!(recursive.max_depth, 12);
+        assert_eq!(recursive.result_element_index, Some(1));
+        assert_eq!(recursive.filters.len(), 1);
+        assert_eq!(
+            recursive.filters,
+            vec![Condition::Eq {
+                column: "archived".to_string(),
+                value: Value::Boolean(false),
+            }]
+        );
+        assert_eq!(recursive.joins.len(), 1);
+        assert_eq!(recursive.joins[0].table.as_str(), "teams");
+        assert_eq!(
+            recursive.joins[0].alias.as_deref(),
+            Some("__recursive_hop_0")
+        );
+    }
+
+    #[test]
+    fn lowered_from_relation_ir_rejects_unsupported_predicate() {
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            predicate: PredicateExpr::Or(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Alice".to_string())),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Bob".to_string())),
+                },
+            ]),
+        };
+
+        let mut query = QueryBuilder::new("users").branch("main").build();
+        query.relation_ir = Some(relation);
+
+        assert!(
+            query.lowered_from_relation_ir().is_none(),
+            "unsupported relation shapes should fail lowering cleanly"
+        );
     }
 
     #[test]
