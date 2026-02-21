@@ -25,6 +25,7 @@ use super::graph_nodes::project::ProjectNode;
 use super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
 };
+use super::graph_nodes::select_element::SelectElementNode;
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
@@ -46,6 +47,7 @@ pub enum GraphNode {
     Join(JoinNode),
     Materialize(MaterializeNode),
     Project(ProjectNode),
+    SelectElement(SelectElementNode),
     RecursiveRelation(RecursiveRelationNode),
     Filter(FilterNode),
     PolicyFilter(PolicyFilterNode),
@@ -1059,7 +1061,8 @@ impl QueryGraph {
         )
         .with_all_materialized();
         graph.table_descriptors = table_descriptors;
-        graph.combined_descriptor = combined_descriptor.clone();
+        let mut output_descriptor = combined_descriptor.clone();
+        let mut output_tuple_descriptor = tuple_descriptor.clone();
 
         let mut phase2_input = left_id;
 
@@ -1067,9 +1070,12 @@ impl QueryGraph {
         if let Some(columns) = &query.select_columns {
             let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
             let project_node = ProjectNode::new(combined_descriptor.clone(), &col_refs);
+            output_descriptor = project_node.output_descriptor().clone();
             let project_id = graph.add_node(GraphNode::Project(project_node));
             graph.add_edge(project_id, phase2_input);
             phase2_input = project_id;
+            output_tuple_descriptor =
+                TupleDescriptor::single_with_materialization("", output_descriptor.clone(), true);
         }
 
         // Filter node (if conditions exist)
@@ -1107,8 +1113,29 @@ impl QueryGraph {
             phase2_input = limit_offset_id;
         }
 
+        // Optional output projection to a specific joined element.
+        if let Some(element_index) = query.result_element_index {
+            let select_input_descriptor = TupleDescriptor::from_tables(
+                &table_names
+                    .iter()
+                    .cloned()
+                    .zip(graph.table_descriptors.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+            .with_all_materialized();
+            let select_node = SelectElementNode::new(select_input_descriptor, element_index)?;
+            output_descriptor = select_node.output_descriptor().clone();
+            output_tuple_descriptor =
+                TupleDescriptor::single_with_materialization("", output_descriptor.clone(), true);
+            let select_id = graph.add_node(GraphNode::SelectElement(select_node));
+            graph.add_edge(select_id, phase2_input);
+            phase2_input = select_id;
+        }
+
         // Output node
-        let output_node = OutputNode::with_tuple_descriptor(tuple_descriptor, OutputMode::Delta);
+        graph.combined_descriptor = output_descriptor;
+        let output_node =
+            OutputNode::with_tuple_descriptor(output_tuple_descriptor, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
@@ -1369,6 +1396,7 @@ impl QueryGraph {
                 Some(GraphNode::Alias(_)) => "Alias",
                 Some(GraphNode::Join(_)) => "Join",
                 Some(GraphNode::Project(_)) => "Project",
+                Some(GraphNode::SelectElement(_)) => "SelectElement",
                 Some(GraphNode::RecursiveRelation(_)) => "RecursiveRelation",
                 Some(GraphNode::Materialize(_)) => "Materialize",
                 Some(GraphNode::Filter(_)) => "Filter",
@@ -1472,6 +1500,26 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Project(project_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(project_node, input_delta);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::SelectElement(_)) => {
+                    let input_delta = self
+                        .get_inputs(node_id)
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::SelectElement(select_node)) = self.get_node_mut(node_id)
+                    {
+                        let delta = RowNode::process(select_node, input_delta);
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,

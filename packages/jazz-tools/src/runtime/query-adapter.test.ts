@@ -762,6 +762,53 @@ describe("translateQuery", () => {
     expect(result.joins).toEqual([]);
   });
 
+  it("translates hop metadata to runtime join plan", () => {
+    const schema: WasmSchema = {
+      tables: {
+        teams: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        team_edges: {
+          columns: [
+            {
+              name: "child_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "parent_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "team_edges",
+      conditions: [
+        { column: "child_team", op: "eq", value: "00000000-0000-0000-0000-000000000001" },
+      ],
+      includes: {},
+      orderBy: [],
+      hops: ["parent_team"],
+    });
+
+    const result = JSON.parse(translateQuery(builderJson, schema));
+    expect(result.joins).toEqual([
+      {
+        table: "teams",
+        alias: "__hop_0",
+        on: ["team_edges.parent_team", "__hop_0.id"],
+      },
+    ]);
+    expect(result.result_element_index).toBe(1);
+    expect(result.recursive).toBeUndefined();
+  });
+
   describe("error handling", () => {
     it("throws for unknown column", () => {
       const builderJson = JSON.stringify({
@@ -854,6 +901,89 @@ describe("translateQuery", () => {
 
       expect(() => translateQuery(builderJson, schema)).toThrow(
         "gather(...) does not yet support include(...).",
+      );
+    });
+
+    it("throws when gather query also includes hopTo(...)", () => {
+      const schema: WasmSchema = {
+        tables: {
+          teams: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+          team_edges: {
+            columns: [
+              {
+                name: "child_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+              {
+                name: "parent_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "teams",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        hops: ["team_edgesViaChild_team"],
+        gather: {
+          max_depth: 10,
+          step_table: "team_edges",
+          step_current_column: "child_team",
+          step_conditions: [],
+          step_hops: ["parent_team"],
+        },
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "gather(...).hopTo(...) is not yet supported.",
+      );
+    });
+
+    it("throws when hop query also includes include(...)", () => {
+      const schema: WasmSchema = {
+        tables: {
+          teams: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+          team_edges: {
+            columns: [
+              {
+                name: "child_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+              {
+                name: "parent_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "team_edges",
+        conditions: [],
+        includes: { parent_team: true },
+        orderBy: [],
+        hops: ["parent_team"],
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "hopTo(...) does not yet support include(...).",
       );
     });
   });

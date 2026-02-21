@@ -6,6 +6,7 @@ import { transformRows } from "../runtime/row-transformer.js";
 import { SubscriptionManager, type SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { toUpdateRecord, toValueArray } from "../runtime/value-converter.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
+import { analyzeRelations } from "../codegen/relation-analyzer.js";
 
 export interface DbConfig {
   appId: string;
@@ -119,83 +120,25 @@ function normalizeBuiltQuery(raw: BuiltQuery, fallbackTable: string): Normalized
   };
 }
 
-function toBuilderJson(query: NormalizedBuiltQuery): string {
-  return JSON.stringify({
-    table: query.table,
-    conditions: query.conditions,
-    includes: query.includes,
-    orderBy: query.orderBy,
-    limit: query.limit,
-    offset: query.offset,
-  });
-}
-
-function includeTreeFromHops(hops: readonly string[]): IncludeSpec {
-  const root: IncludeSpec = {};
-  let cursor: IncludeSpec = root;
-
-  for (let i = 0; i < hops.length; i += 1) {
-    const hop = hops[i];
-    if (i === hops.length - 1) {
-      cursor[hop] = true;
-      break;
-    }
-    const next: IncludeSpec = {};
-    cursor[hop] = next;
-    cursor = next;
-  }
-
-  return root;
-}
-
-function mergeIncludes(base: IncludeSpec, extra: IncludeSpec): IncludeSpec {
-  const merged: IncludeSpec = { ...base };
-  for (const [key, value] of Object.entries(extra)) {
-    const existing = merged[key];
-    if (isPlainObject(existing) && isPlainObject(value)) {
-      merged[key] = mergeIncludes(existing as IncludeSpec, value as IncludeSpec);
-      continue;
-    }
-    merged[key] = value as boolean | IncludeSpec;
-  }
-  return merged;
-}
-
-function flattenHopPath(
-  rows: Record<string, unknown>[],
+function resolveHopOutputTable(
+  schema: WasmSchema,
+  startTable: string,
   hops: readonly string[],
-): Record<string, unknown>[] {
-  let frontier: unknown[] = rows;
-  for (const hop of hops) {
-    const next: unknown[] = [];
-    for (const item of frontier) {
-      if (!isPlainObject(item)) {
-        continue;
-      }
-      const value = item[hop];
-      if (Array.isArray(value)) {
-        next.push(...value);
-      } else if (value !== undefined && value !== null) {
-        next.push(value);
-      }
-    }
-    frontier = next;
+): string {
+  if (hops.length === 0) {
+    return startTable;
   }
-  return frontier.filter(isPlainObject) as Record<string, unknown>[];
-}
-
-function dedupeRowsById(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  const seen = new Set<string>();
-  const deduped: Record<string, unknown>[] = [];
-  for (const row of rows) {
-    const id = row.id;
-    if (typeof id !== "string" || seen.has(id)) {
-      continue;
+  const relations = analyzeRelations(schema);
+  let currentTable = startTable;
+  for (const hopName of hops) {
+    const candidates = relations.get(currentTable) ?? [];
+    const relation = candidates.find((candidate) => candidate.name === hopName);
+    if (!relation) {
+      throw new Error(`Unknown relation "${hopName}" on table "${currentTable}"`);
     }
-    seen.add(id);
-    deduped.push(row);
+    currentTable = relation.toTable;
   }
-  return deduped;
+  return currentTable;
 }
 
 export class Db {
@@ -284,31 +227,13 @@ export class Db {
     const client = this.getClient(query._schema);
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-
-    if (builtQuery.hops.length > 0) {
-      const hopIncludes = includeTreeFromHops(builtQuery.hops);
-      const mergedIncludes = mergeIncludes(builtQuery.includes, hopIncludes);
-      const sourceQuery: NormalizedBuiltQuery = {
-        ...builtQuery,
-        includes: mergedIncludes,
-        hops: [],
-        gather: undefined,
-      };
-      const sourceRows = await client.query(
-        translateQuery(toBuilderJson(sourceQuery), query._schema),
-        settledTier,
-      );
-      const sourceObjects = transformRows<Record<string, unknown>>(
-        sourceRows,
-        query._schema,
-        builtQuery.table,
-        mergedIncludes,
-      );
-      return dedupeRowsById(flattenHopPath(sourceObjects, builtQuery.hops)) as T[];
-    }
-
     const rows = await client.query(translateQuery(builderJson, query._schema), settledTier);
-    return transformRows<T>(rows, query._schema, query._table, builtQuery.includes);
+    const outputTable =
+      builtQuery.hops.length > 0
+        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        : query._table;
+    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    return transformRows<T>(rows, query._schema, outputTable, outputIncludes);
   }
 
   async one<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T | null> {
@@ -325,13 +250,15 @@ export class Db {
     const client = this.getClient(query._schema);
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    if (builtQuery.hops.length > 0) {
-      throw new Error("subscribeAll(...) does not yet support hopTo(...).");
-    }
+    const outputTable =
+      builtQuery.hops.length > 0
+        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        : query._table;
+    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, query._schema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], query._schema, query._table, builtQuery.includes ?? {})[0];
+      return transformRows<T>([row], query._schema, outputTable, outputIncludes)[0];
     };
 
     const subId = client.subscribe(
