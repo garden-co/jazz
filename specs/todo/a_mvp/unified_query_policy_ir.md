@@ -35,7 +35,7 @@ Current state is functionally close but architecturally split:
 
 2. Policy path
 
-- `packages/jazz-tools/src/permissions/index.ts` has a separate relation planner (`RelationPlan`) for `policy.exists(...)`.
+- `packages/jazz-tools/src/permissions/index.ts` now builds `policy.exists(...)` relations via direct relation-expression state (no legacy `RelationPlan` split between table/recursive compilers).
 - `policy.exists(relation)` now compiles to `PolicyExpr::ExistsRel { rel }` with relation IR emitted from TS (`relationToIr(...)`), including recursive `gather` relations.
 - Rust policy runtime (`crates/jazz-tools/src/query_manager/policy.rs`, `.../graph_nodes/policy_filter.rs`) evaluates `PolicyExpr` and recursive `INHERITS`.
 
@@ -43,7 +43,7 @@ Current state is functionally close but architecturally split:
 
 - Same user-facing combinators are implemented through different semantic pipelines.
 - Recursion semantics are duplicated across TS and Rust.
-- Policy relation planning still has a TS-side relation planner (`RelationPlan`) separate from query-builder lowering.
+- Policy relation construction is still TS-side (separate from app query builder internals), though now as direct relation-expression state instead of plan variants.
 - Harder to guarantee parity across `all`, `subscribeAll`, and permission checks.
 - Rust relation IR lowering now covers `Gather` with post-gather join/filter/project composition used by `gather(...).hopTo(...).where(...)`; unsupported relation IR is still rejected rather than silently falling back.
 
