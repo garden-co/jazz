@@ -269,6 +269,18 @@ impl ArraySubquerySpec {
 /// The current query acts as the seed relation. Each recursive step evaluates
 /// `table` with `inner_column = seed_value`, then projects `select_columns`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursiveHopSpec {
+    /// Target table reached from each recursive step row.
+    pub table: TableName,
+    /// Column on the step table that stores the target row id.
+    pub via_column: String,
+}
+
+/// Specification for a recursive relation expansion.
+///
+/// The current query acts as the seed relation. Each recursive step evaluates
+/// `table` with `inner_column = seed_value`, then projects `select_columns`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecursiveSpec {
     /// Inner table to query at each step.
     pub table: TableName,
@@ -278,6 +290,12 @@ pub struct RecursiveSpec {
     pub outer_column: String,
     /// Columns selected from each step (None = all columns).
     pub select_columns: Option<Vec<String>>,
+    /// Additional filters to apply to each recursive step query.
+    #[serde(default)]
+    pub filters: Vec<Condition>,
+    /// Optional hop from each step row to target rows.
+    #[serde(default)]
+    pub hop: Option<RecursiveHopSpec>,
     /// Maximum recursion depth (levels beyond the seed level).
     pub max_depth: usize,
 }
@@ -860,6 +878,8 @@ pub struct RecursiveBuilder {
     inner_column: String,
     outer_column: String,
     select_columns: Option<Vec<String>>,
+    filters: Vec<Condition>,
+    hop: Option<RecursiveHopSpec>,
     max_depth: usize,
 }
 
@@ -871,6 +891,8 @@ impl RecursiveBuilder {
             inner_column: String::new(),
             outer_column: String::new(),
             select_columns: None,
+            filters: Vec::new(),
+            hop: None,
             max_depth: 10,
         }
     }
@@ -902,6 +924,24 @@ impl RecursiveBuilder {
         self
     }
 
+    /// Add an equality filter to each recursive step query.
+    pub fn filter_eq(mut self, column: impl Into<String>, value: Value) -> Self {
+        self.filters.push(Condition::Eq {
+            column: column.into(),
+            value,
+        });
+        self
+    }
+
+    /// Configure a hop from the step query rows to target rows.
+    pub fn hop(mut self, table: impl Into<TableName>, via_column: impl Into<String>) -> Self {
+        self.hop = Some(RecursiveHopSpec {
+            table: table.into(),
+            via_column: via_column.into(),
+        });
+        self
+    }
+
     /// Set maximum recursion depth.
     pub fn max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
@@ -915,6 +955,8 @@ impl RecursiveBuilder {
             inner_column: self.inner_column,
             outer_column: self.outer_column,
             select_columns: self.select_columns,
+            filters: self.filters,
+            hop: self.hop,
             max_depth: self.max_depth,
         }
     }
@@ -1292,6 +1334,8 @@ mod tests {
             recursive.select_columns,
             Some(vec!["parent_team".to_string()])
         );
+        assert!(recursive.filters.is_empty());
+        assert!(recursive.hop.is_none());
         assert_eq!(recursive.max_depth, 12);
     }
 
