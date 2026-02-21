@@ -98,9 +98,6 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
 }
 
 fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelExpr> {
-    if spec.select_columns.is_some() {
-        return None;
-    }
     if spec.outer_column != "id" && spec.outer_column != "_id" {
         return None;
     }
@@ -124,22 +121,32 @@ fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelEx
         predicate: step_predicate,
     };
 
-    let (hop_table, hop_scope, join_on) = if let Some(hop) = spec.hop.as_ref() {
+    let step = if let Some(hop) = spec.hop.as_ref() {
         if !spec.joins.is_empty() || spec.result_element_index.is_some() || hop.table == spec.table
         {
             return None;
         }
+        if spec.select_columns.is_some() {
+            return None;
+        }
         let hop_scope = "__recursive_hop_0".to_string();
-        (
-            hop.table,
-            hop_scope.clone(),
-            vec![JoinCondition {
-                left: ColumnRef::scoped(step_scope, hop.via_column.clone()),
-                right: ColumnRef::scoped(hop_scope, "id"),
+        RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(step_left),
+                right: Box::new(RelExpr::TableScan { table: hop.table }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped(step_scope, hop.via_column.clone()),
+                    right: ColumnRef::scoped(hop_scope.clone(), "id"),
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped(hop_scope, "id")),
             }],
-        )
-    } else {
-        if spec.joins.len() != 1 || spec.result_element_index != Some(1) {
+        }
+    } else if spec.joins.len() == 1 && spec.result_element_index == Some(1) {
+        if spec.select_columns.is_some() {
             return None;
         }
         let join_spec = spec.joins.first()?;
@@ -148,27 +155,45 @@ fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelEx
         if join_spec.table == spec.table {
             return None;
         }
-        (
-            join_spec.table,
-            hop_scope.clone(),
-            vec![JoinCondition {
-                left: parse_join_column(left_raw, &step_scope)?,
-                right: parse_join_column(right_raw, &hop_scope)?,
+        RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(step_left),
+                right: Box::new(RelExpr::TableScan {
+                    table: join_spec.table,
+                }),
+                on: vec![JoinCondition {
+                    left: parse_join_column(left_raw, &step_scope)?,
+                    right: parse_join_column(right_raw, &hop_scope)?,
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped(hop_scope, "id")),
             }],
-        )
-    };
+        }
+    } else {
+        if !spec.joins.is_empty() || spec.result_element_index.is_some() {
+            return None;
+        }
 
-    let step = RelExpr::Project {
-        input: Box::new(RelExpr::Join {
-            left: Box::new(step_left),
-            right: Box::new(RelExpr::TableScan { table: hop_table }),
-            on: join_on,
-            join_kind: JoinKind::Inner,
-        }),
-        columns: vec![ProjectColumn {
-            alias: "id".to_string(),
-            expr: ProjectExpr::Column(ColumnRef::scoped(hop_scope, "id")),
-        }],
+        if let Some(select_columns) = spec.select_columns.as_ref() {
+            RelExpr::Project {
+                input: Box::new(step_left),
+                columns: select_columns
+                    .iter()
+                    .map(|column| ProjectColumn {
+                        alias: column.clone(),
+                        expr: ProjectExpr::Column(ColumnRef::scoped(
+                            spec.table.as_str(),
+                            column.clone(),
+                        )),
+                    })
+                    .collect(),
+            }
+        } else {
+            step_left
+        }
     };
 
     Some(RelExpr::Gather {
@@ -472,12 +497,49 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_with_recursive_spec_without_hop_is_unsupported() {
+    fn normalize_query_with_recursive_spec_without_hop_produces_gather() {
         let query = QueryBuilder::new("teams")
-            .with_recursive(|r| r.from("teams").correlate("parent_team", "_id"))
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "_id")
+                    .select(&["parent_team"])
+                    .max_depth(4)
+            })
             .build();
+        let relation = normalize_query_to_rel_expr(&query)
+            .expect("recursive no-hop spec should normalize to gather");
 
-        assert!(normalize_query_to_rel_expr(&query).is_none());
+        let RelExpr::Gather {
+            max_depth, step, ..
+        } = relation
+        else {
+            panic!("expected gather relation");
+        };
+        assert_eq!(max_depth, 4);
+
+        let RelExpr::Project { input, columns } = *step else {
+            panic!("expected project step");
+        };
+        assert_eq!(
+            columns,
+            vec![ProjectColumn {
+                alias: "parent_team".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("team_edges", "parent_team")),
+            }]
+        );
+        assert_eq!(
+            *input,
+            RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("team_edges"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("team_edges", "child_team"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::RowId(RowIdRef::Frontier),
+                },
+            }
+        );
     }
 
     #[test]
