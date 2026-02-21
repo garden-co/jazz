@@ -1,5 +1,7 @@
 use super::graph_nodes::sort::SortDirection;
-use super::query::{ArraySubquerySpec, Condition, Conjunction, JoinSpec, Query, RecursiveSpec};
+use super::query::{
+    ArraySubquerySpec, Condition, Conjunction, JoinSpec, Query, RecursiveHopSpec, RecursiveSpec,
+};
 use super::relation_ir::{
     JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr, RelExpr,
     RowIdRef, ValueRef,
@@ -232,12 +234,23 @@ fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
     }
 }
 
-fn extract_step_scan(expr: &RelExpr, predicates: &mut Vec<PredicateExpr>) -> Option<TableName> {
+fn extract_step_scan(
+    expr: &RelExpr,
+    predicates: &mut Vec<PredicateExpr>,
+    select_columns: &mut Option<Vec<String>>,
+) -> Option<TableName> {
     match expr {
         RelExpr::TableScan { table } => Some(*table),
         RelExpr::Filter { input, predicate } => {
             predicates.push(predicate.clone());
-            extract_step_scan(input, predicates)
+            extract_step_scan(input, predicates, select_columns)
+        }
+        RelExpr::Project { input, columns } => {
+            if select_columns.is_some() {
+                return None;
+            }
+            *select_columns = Some(project_columns_to_select(columns)?);
+            extract_step_scan(input, predicates, select_columns)
         }
         _ => None,
     }
@@ -307,13 +320,14 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         } => (left, right, on, join_kind),
         _ => {
             let mut step_predicates = Vec::new();
-            let step_scan_table = extract_step_scan(step_core, &mut step_predicates)?;
-            let (inner_column, step_filters) = parse_frontier_and_filters(&step_predicates)?;
-            let select_columns = if let Some(columns) = step_projection {
+            let mut select_columns = if let Some(columns) = step_projection {
                 Some(project_columns_to_select(columns)?)
             } else {
                 None
             };
+            let step_scan_table =
+                extract_step_scan(step_core, &mut step_predicates, &mut select_columns)?;
+            let (inner_column, step_filters) = parse_frontier_and_filters(&step_predicates)?;
 
             let recursive = RecursiveSpec {
                 table: step_scan_table,
@@ -346,7 +360,9 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
     };
 
     let mut step_predicates = Vec::new();
-    let step_scan_table = extract_step_scan(step_left, &mut step_predicates)?;
+    let mut step_select_columns = None;
+    let step_scan_table =
+        extract_step_scan(step_left, &mut step_predicates, &mut step_select_columns)?;
     let (inner_column, step_filters) = parse_frontier_and_filters(&step_predicates)?;
     let first_join = step_on.first()?;
     let left_scope = first_join
@@ -360,23 +376,44 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         .clone()
         .unwrap_or_else(|| step_hop_table.as_str().to_string());
 
-    let recursive = RecursiveSpec {
-        table: step_scan_table,
-        inner_column,
-        outer_column: "_id".to_string(),
-        select_columns: None,
-        filters: step_filters,
-        joins: vec![JoinSpec {
-            table: step_hop_table,
-            alias: (right_scope != step_hop_table.as_str()).then_some(right_scope.clone()),
-            on: Some((
-                format!("{left_scope}.{}", first_join.left.column),
-                format!("{right_scope}.{}", first_join.right.column),
-            )),
-        }],
-        result_element_index: Some(1),
-        hop: None,
-        max_depth,
+    let right_join_column = to_runtime_column(&first_join.right.column);
+    let recursive = if right_join_column == "_id" {
+        RecursiveSpec {
+            table: step_scan_table,
+            inner_column,
+            outer_column: "_id".to_string(),
+            select_columns: step_select_columns,
+            filters: step_filters,
+            joins: Vec::new(),
+            result_element_index: None,
+            hop: Some(RecursiveHopSpec {
+                table: step_hop_table,
+                via_column: to_runtime_column(&first_join.left.column),
+            }),
+            max_depth,
+        }
+    } else {
+        if step_select_columns.is_some() {
+            return None;
+        }
+        RecursiveSpec {
+            table: step_scan_table,
+            inner_column,
+            outer_column: "_id".to_string(),
+            select_columns: None,
+            filters: step_filters,
+            joins: vec![JoinSpec {
+                table: step_hop_table,
+                alias: (right_scope != step_hop_table.as_str()).then_some(right_scope.clone()),
+                on: Some((
+                    format!("{left_scope}.{}", first_join.left.column),
+                    format!("{right_scope}.{}", first_join.right.column),
+                )),
+            }],
+            result_element_index: Some(1),
+            hop: None,
+            max_depth,
+        }
     };
 
     Some(RuntimeCorePlan {
