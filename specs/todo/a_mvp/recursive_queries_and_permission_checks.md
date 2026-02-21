@@ -186,6 +186,82 @@ Implementation detail for MVP: keep an unrolled level stack internally in `Recur
 - Extend policy expression model for relation-backed exists checks.
 - Update schema hashing/encoding for new policy/query variants.
 
+## `hopTo` Design Clarification + Next Steps
+
+The desired design is compositional and uniform:
+
+- `hopTo(...)` is a normal query combinator (not a special-case helper path).
+- It must work the same way in:
+  - one-shot reads (`db.all`, `db.one`),
+  - subscriptions (`db.subscribeAll`),
+  - query expressions used inside `gather.step(...)`,
+  - permission relation expressions (`policy.*`).
+- `gather(...)` must compile to the recursive query graph node in both TS and Rust.  
+  No client-side unrolling and no subscription-only behavior differences.
+
+### Desired execution properties
+
+- No runtime special-casing in `db.ts` / `react-native/db.ts` for hop flattening.
+- One compilation path: builder JSON -> query adapter -> runtime query IR -> QueryGraph.
+- Stable delta semantics for subscriptions (added/removed/updated) for `hopTo` and `gather`.
+- Deterministic dedupe by row identity.
+
+### Implementation next steps
+
+1. Remove `hopTo` special-case execution in TS DB runtime and route all paths through query compilation.
+2. Introduce a first-class compiled representation for non-recursive `hopTo` in runtime query IR.
+3. Lower that representation in Rust query graph compilation (initially via the existing recursive/hop machinery if needed), so it is subscription-safe.
+4. Add coverage for:
+   - standalone one-hop `hopTo`,
+   - multi-hop chains,
+   - `hopTo` inside `gather.step`,
+   - `subscribeAll` parity with `all`,
+   - update propagation across hop edges.
+5. Only after this is stable, optionally lower `hopTo` to join+project for a single canonical implementation strategy.
+
+## Implicit ID + Robust Join Design (Proposal)
+
+To make join-based `hopTo` lowering robust, implicit row IDs must be first-class in query planning.
+
+### Current gap
+
+- We treat `id` as implicit in many APIs, but join planning is descriptor-column based.
+- This causes fragility for `... ON edge.parent_id = table.id` style joins.
+- Query adapter currently strips qualifiers in several paths, reducing disambiguation power.
+
+### Proposed model
+
+1. **First-class ID column model**
+   - Introduce a canonical internal ID column in descriptors (e.g. `_id`) for every table.
+   - Keep public TS DSL surface as `id`.
+   - Add explicit mapping: public `id` <-> internal `_id`.
+
+2. **Typed column refs in IR**
+   - Replace stringly-typed join/filter column fields with a structured `ColumnRef`:
+     - optional table/alias qualifier,
+     - canonical column name,
+     - explicit flag/kind for implicit ID references.
+   - Preserve qualifiers through TS -> runtime IR -> Rust compile.
+
+3. **Join key extraction that supports implicit IDs**
+   - In join execution, allow key extraction from tuple identity when the ref is implicit ID.
+   - Avoid requiring synthetic ID bytes in row payloads just to join on ID.
+
+4. **Ambiguity handling**
+   - If a column name is ambiguous across joined tables, require qualified refs.
+   - Return explicit compile errors instead of silently picking a column.
+
+5. **Alias/self-join support**
+   - Finish alias-aware join compilation so self-joins are safe and deterministic.
+
+### Rollout for robust join-based `hopTo`
+
+1. Land canonical implicit-ID exposure in descriptors and column resolution.
+2. Land `ColumnRef` query IR and parser/adapter support.
+3. Enable joins on implicit IDs end-to-end with tests.
+4. Lower `hopTo` to join+project in both query and policy compilers.
+5. Delete any remaining hop-specific execution branches.
+
 ## SQL/schema manager integration
 
 - Preserve current behavior for non-recursive policies.
