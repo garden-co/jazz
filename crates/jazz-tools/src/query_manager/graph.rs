@@ -2905,7 +2905,7 @@ mod tests {
             .try_build();
         assert!(
             query_result.is_err(),
-            "legacy recursive join-projection query shape should be rejected"
+            "recursive join-projection query shape should be rejected"
         );
     }
 

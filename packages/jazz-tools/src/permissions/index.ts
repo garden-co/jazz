@@ -535,8 +535,8 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   try {
     return analyzeRelations(typedSchema);
   } catch {
-    // Preserve legacy behavior for partially-specified schemas used in tests/tooling.
-    // hopTo/gather callers will still receive explicit unknown-relation errors.
+    // Keep permissive behavior for partially-specified schemas used in tests/tooling.
+    // hopTo/gather callers still receive explicit unknown-relation errors.
     return new Map();
   }
 }

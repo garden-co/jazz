@@ -7,7 +7,7 @@ Rebuild query and policy compilation around one shared Rust relation IR.
 - TS query DSL and TS policy DSL both lower to declarative IR payloads.
 - Rust owns semantic lowering and execution planning.
 - `gather` and `hopTo` are first-class relation combinators everywhere (queries, subscriptions, policy exists checks).
-- No compatibility layer for legacy or intermediate paths.
+- No compatibility layer for previous or intermediate paths.
 
 This replaces the current split architecture where:
 
@@ -28,14 +28,14 @@ Current state is functionally close but architecturally split:
 1. Query path
 
 - `packages/jazz-tools/src/codegen/query-builder-generator.ts` generates `gather`/`hopTo` on app builders.
-- `packages/jazz-tools/src/runtime/query-adapter.ts` now emits relation-IR-first payloads (legacy `joins`/`recursive` fields are no longer semantically lowered in TS).
+- `packages/jazz-tools/src/runtime/query-adapter.ts` now emits relation-IR-first payloads (previous `joins`/`recursive` fields are no longer semantically lowered in TS).
 - Rust query IR (`crates/jazz-tools/src/query_manager/query.rs`) has `Query`, `RecursiveSpec`, join specs, and `result_element_index`.
 - Rust execution (`crates/jazz-tools/src/query_manager/graph.rs`, `crates/jazz-tools/src/query_manager/graph_nodes/recursive_relation.rs`) lowers supported `relation_ir` shapes and compiles/executes recursive node.
-- If `relation_ir` is present but unsupported by Rust lowering, compilation now fails (no silent fallback to legacy query fields).
+- If `relation_ir` is present but unsupported by Rust lowering, compilation now fails (no silent fallback to older query fields).
 
 2. Policy path
 
-- `packages/jazz-tools/src/permissions/index.ts` now builds `policy.exists(...)` relations via direct relation-expression state (no legacy `RelationPlan` split between table/recursive compilers).
+- `packages/jazz-tools/src/permissions/index.ts` now builds `policy.exists(...)` relations via direct relation-expression state (no older `RelationPlan` split between table/recursive compilers).
 - `policy.exists(relation)` now compiles to `PolicyExpr::ExistsRel { rel }` with relation IR emitted from TS (`relationToIr(...)`), including recursive `gather` relations.
 - Rust policy runtime (`crates/jazz-tools/src/query_manager/policy.rs`, `.../graph_nodes/policy_filter.rs`) evaluates `PolicyExpr` and recursive `INHERITS`.
 
@@ -206,7 +206,7 @@ Exit criteria:
 
 - Recursive policy checks match expected behavior without TS depth-unroll logic.
 
-## Phase 6: Delete legacy/intermediate code
+## Phase 6: Delete previous/intermediate code
 
 - Remove old query adapter fields that represent pre-lowered recursion internals.
 - Remove policy relation planner code that duplicates relation semantics in TS.
@@ -215,7 +215,7 @@ Exit criteria:
 
 Exit criteria:
 
-- No references remain to legacy recursive lowering path.
+- No references remain to earlier recursive lowering path.
 
 ## Test Strategy (Required)
 
@@ -257,5 +257,5 @@ Exit criteria:
 - No TS semantic recursion lowering remains.
 - Recursive execution path is graph-node based for both reads and subscriptions.
 - Recursive permission checks run through shared relation planning, not custom TS expansion.
-- Legacy/intermediate recursion APIs and code paths are removed.
+- Earlier/intermediate recursion APIs and code paths are removed.
 - Comprehensive tests pass across IR, query, policy, and subscription layers.

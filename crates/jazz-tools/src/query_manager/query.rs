@@ -375,7 +375,7 @@ pub struct Query {
     pub result_element_index: Option<usize>,
     /// Relation IR payload used for query/policy planning.
     ///
-    /// Query compilation executes through this IR. The legacy DSL fields are
+    /// Query compilation executes through this IR. The builder DSL fields are
     /// retained as construction syntax and normalized into relation IR.
     pub relation_ir: crate::query_manager::relation_ir::RelExpr,
 }
