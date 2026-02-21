@@ -34,7 +34,7 @@ Current permissions support `INHERITS` and table-scoped `exists.where(...)`, but
 - No recursive SQL syntax for external SQL clients in this phase.
 - No provenance/explain API beyond minimal debug counters/logs.
 - No attempt to optimize for very high fanout graphs.
-- No backwards-compatibility layer for earlier experimental recursive API names (`withRecursive`, `whereRecursive`, `policy.recursive`).
+- No backwards-compatibility layer for earlier experimental recursive API names.
 
 ## TS Query DSL (Proposed)
 

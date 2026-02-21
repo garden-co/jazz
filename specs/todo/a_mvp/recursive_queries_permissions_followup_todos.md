@@ -22,26 +22,25 @@ Status note: this list is the refreshed "what remains" plan after the latest gat
 ## 3) Permissions docs cleanup
 
 - Docs note: no red-test requirement for docs-only updates.
-- [x] Replace stale `policy.recursive(...)` docs with `policy.<table>.gather(...)` + `hopTo(...)`.
+- [x] Replace stale recursive shorthand docs with `policy.<table>.gather(...)` + `hopTo(...)`.
 - [x] Update MVP constraints in advanced recursive section.
 - [x] Add one end-to-end docs example showing: recursive gather -> post-gather hop -> where filter.
 
 ## 4) TS permissions compiler single-path cleanup
 
 - [x] Red: add tests that enforce one canonical API/compile path (`definePermissions`) and fail on split behavior.
-  - `permissions/index.test.ts::does not expose transitional definePermissionsV2 API`
   - `permissions/index.test.ts::compiles policy.exists(relation) to ExistsRel in definePermissions`
-- [x] Green: remove `definePermissionsV2` and legacy conversion helpers (`legacyPolicyExprToV2`, predicate adapters), then route all callers through one path.
+- [x] Green: remove deprecated conversion helpers and route all callers through one path.
 - [x] Cleanup: align type-inference tests (`packages/jazz-tools/src/permissions/type-inference.test.ts`) to the final single API.
 
 ## 5) IR-first Query shape cleanup in Rust
 
-- [x] Red: add tests that fail when runtime depends on legacy query-field normalization fallback.
-  - `query_to_relation_ir::normalize_query_rejects_legacy_recursive_join_projection_spec`
+- [x] Red: add tests that fail when runtime depends on removed query-field normalization fallback.
+  - `query_to_relation_ir::normalize_query_rejects_recursive_join_projection_spec`
   - `graph::compile_query_with_recursive_join_projection_relation_is_rejected`
-  - `manager_tests::recursive_query_with_legacy_join_project_step_is_rejected`
+  - `manager_tests::recursive_query_with_join_project_step_is_rejected`
 - [x] Green: remove residual normalization scaffolding / shape-compat fallback in `query_to_relation_ir`.
-  - Removed legacy recursive join+`result_element_index` normalization path; only direct step and hop-based recursive shapes are accepted.
+  - Removed recursive join+`result_element_index` normalization path; only direct step and hop-based recursive shapes are accepted.
 - [x] Cleanup: keep builder ergonomics intact while enforcing relation-IR-first execution boundaries.
 
 ## 6) Planner gap closure

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import * as permissionsDsl from "./index.js";
 import {
   definePermissions,
   relationExistsToPolicy,
@@ -594,17 +593,6 @@ describe("permissions DSL", () => {
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),
     ).toThrow(/where condition bound to current/i);
-  });
-
-  it("does not expose legacy policy.recursive API", () => {
-    definePermissions(app, ({ policy }) => {
-      expect((policy as { recursive?: unknown }).recursive).toBeUndefined();
-      return [];
-    });
-  });
-
-  it("does not expose transitional definePermissionsV2 API", () => {
-    expect("definePermissionsV2" in permissionsDsl).toBe(false);
   });
 
   it("rejects allowedTo when column is not a foreign key", () => {

@@ -263,7 +263,7 @@ fn recursive_query_with_hop_expands_transitive_closure() {
 }
 
 #[test]
-fn recursive_query_with_legacy_join_project_step_is_rejected() {
+fn recursive_query_with_join_project_step_is_rejected() {
     let sync_manager = SyncManager::new();
     let schema = recursive_hop_team_schema();
     let (qm, _storage) = create_query_manager(sync_manager, schema);
@@ -284,7 +284,7 @@ fn recursive_query_with_legacy_join_project_step_is_rejected() {
 
     assert!(
         query_result.is_err(),
-        "legacy recursive join-projection shape should be rejected"
+        "recursive join-projection shape should be rejected"
     );
 }
 

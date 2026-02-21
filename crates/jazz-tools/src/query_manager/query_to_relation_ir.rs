@@ -5,7 +5,7 @@ use super::relation_ir::{
     PredicateExpr, ProjectColumn, ProjectExpr, RelExpr, RowIdRef, ValueRef,
 };
 
-/// Convert legacy query fields into relation IR when shape-compatible.
+/// Convert query DSL fields into relation IR when shape-compatible.
 ///
 /// Returns `None` for query constructs that don't yet have a faithful relation-IR lowering.
 pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
@@ -354,7 +354,7 @@ mod tests {
             .build();
 
         let relation =
-            normalize_query_to_rel_expr(&query).expect("legacy query should normalize to relation");
+            normalize_query_to_rel_expr(&query).expect("query should normalize to relation");
         assert_eq!(
             relation,
             RelExpr::Limit {
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_rejects_legacy_recursive_join_projection_spec() {
+    fn normalize_query_rejects_recursive_join_projection_spec() {
         let build = QueryBuilder::new("teams")
             .with_recursive(|r| {
                 r.from("team_edges")
@@ -656,7 +656,7 @@ mod tests {
 
         assert!(
             build.is_err(),
-            "legacy recursive join-projection specs should be rejected in IR-first mode"
+            "recursive join-projection specs should be rejected in IR-first mode"
         );
     }
 
