@@ -45,7 +45,7 @@ Current state is functionally close but architecturally split:
 - Recursion semantics are duplicated across TS and Rust.
 - Policy relation planning still has a TS-side relation planner (`RelationPlan`) separate from query-builder lowering.
 - Harder to guarantee parity across `all`, `subscribeAll`, and permission checks.
-- Rust relation IR lowering remains shape-limited beyond currently covered forms; unsupported relation IR is now rejected rather than silently falling back.
+- Rust relation IR lowering now covers `Gather` with post-gather join/filter/project composition used by `gather(...).hopTo(...).where(...)`; unsupported relation IR is still rejected rather than silently falling back.
 
 ## Desired End State
 
