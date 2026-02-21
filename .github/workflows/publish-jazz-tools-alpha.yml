@@ -131,10 +131,48 @@ jobs:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
 
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Build jazz-wasm npm package
+        run: pnpm --filter jazz-wasm build
+
+      - name: Verify jazz-wasm publish artifacts
+        run: |
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+
+      - name: Verify packed jazz-wasm payload
+        run: |
+          TMP_DIR=$(mktemp -d)
+          pnpm --filter jazz-wasm pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-wasm-*.tgz | head -n 1)
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.js"
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.js"
+          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.d.ts"
+
+      - name: Build jazz-tools TypeScript package
+        run: pnpm --filter jazz-tools build
+
+      - name: Verify jazz-tools publish artifacts
+        run: |
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/index.d.ts
+          test -f packages/jazz-tools/dist/backend/index.js
+          test -f packages/jazz-tools/dist/react/index.js
+          test -f packages/jazz-tools/dist/permissions/index.js
 
       - name: Stage binaries into npm package
         run: |
@@ -150,9 +188,21 @@ jobs:
         run: |
           node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(p.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${p.version}`);}console.log(`Publishing ${p.name}@${p.version}`);'
 
-      - name: Verify publish-safe dependencies
+      - name: Verify packed jazz-tools manifest
         run: |
-          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version})`);}}}console.log("Publish manifest is workspace-protocol safe.");'
+          TMP_DIR=$(mktemp -d)
+          pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+
+      - name: Publish jazz-wasm (alpha tag)
+        run: |
+          WASM_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-wasm/package.json","utf8")).version')
+          if npm view "jazz-wasm@${WASM_VERSION}" version >/dev/null 2>&1; then
+            echo "jazz-wasm@${WASM_VERSION} already exists on npm; skipping publish."
+          else
+            pnpm --filter jazz-wasm publish --tag alpha --access public --no-git-checks
+          fi
 
       - name: Publish jazz-tools (alpha tag)
-        run: npm publish ./packages/jazz-tools --tag alpha --access public
+        run: pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks

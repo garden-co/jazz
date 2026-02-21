@@ -54,6 +54,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "jazz-wasm": "workspace:*",
     "tsx": "^4.0.0"
   },
   "devDependencies": {
@@ -63,7 +64,6 @@
     "@vitest/browser-playwright": "catalog:default",
     "fake-indexeddb": "^5.0.2",
     "jazz-rn": "workspace:*",
-    "jazz-wasm": "workspace:*",
     "typescript": "^5.3.0",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
