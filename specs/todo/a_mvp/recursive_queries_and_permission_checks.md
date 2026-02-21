@@ -21,7 +21,7 @@ Current permissions support `INHERITS` and table-scoped `exists.where(...)`, but
 ## Goals
 
 - Add generic recursive query support to TS query DSL.
-- Add matching recursive relation support to TS permissions DSL (`policy.recursive(...)` + `policy.exists(...)`).
+- Add matching recursive relation support to TS permissions DSL with the same combinators as query DSL.
 - Reuse one recursion execution model for reads and permission checks.
 - Keep safety guarantees:
   - bounded recursion,
@@ -34,44 +34,51 @@ Current permissions support `INHERITS` and table-scoped `exists.where(...)`, but
 - No recursive SQL syntax for external SQL clients in this phase.
 - No provenance/explain API beyond minimal debug counters/logs.
 - No attempt to optimize for very high fanout graphs.
+- No backwards-compatibility layer for earlier experimental recursive API names (`withRecursive`, `whereRecursive`, `policy.recursive`).
 
 ## TS Query DSL (Proposed)
 
-Add a generic relation builder namespace:
+Use two public combinators:
+
+- `hopTo(relationName)`:
+  - a normal query combinator that traverses one relation hop and changes row shape to the related table.
+- `gather({ start, step, maxDepth })`:
+  - bounded recursive traversal where `step` returns rows in the same shape as the root query.
 
 ```ts
-import { query } from "jazz-tools";
 import { app } from "./schema/app.js";
 
-const reachableTeams = query.recursive({
-  start: app.teams
-    .where({ kind: "individual", identity_key: session.subject })
-    .select({ team: "id" }),
-  step: ({ self }) =>
-    self
-      .join(app.team_team_edges, { left: "team", right: "child_team" })
-      .select({ team: "parent_team" }),
-  maxDepth: 10, // optional override; default comes from runtime config
-  distinctBy: ["team"], // optional; default = all projected columns
-});
+const parentTeams = await db.all(
+  app.team_team_edges.where({ child_team: myTeamId }).hopTo("parent_team"),
+);
 
-const readableResourceIds = reachableTeams
-  .join(app.resource_access_edges, { left: "team", right: "team" })
-  .where({ grant_role: "viewer" })
-  .select({ resource: "resource" })
-  .distinctBy(["resource"]);
+const reachableTeams = await db.all(
+  app.teams.gather({
+    start: { team_id: { eq: myTeamId } },
+    step: ({ current }) => app.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+    maxDepth: 10, // optional override; default comes from runtime config
+  }),
+);
+
+const readableResourceIds = await db.all(
+  reachableTeams
+    .hopTo("resource_access_edges")
+    .where({ grant_role: "viewer" })
+    .select({ resource: "resource" }),
+);
 ```
 
 Notes:
 
-- `start` and `step` are relation expressions with the same projected shape.
-- `step` receives `self` (accumulated rows up to previous level).
-- `maxDepth` is optional per-recursion override.
-- Recursion semantics are breadth-first by level.
+- `gather` is a method on table query builders (`app.<table>.gather(...)`), not a separate namespace.
+- `step` receives `current` (current frontier identity/value) and returns a query expression.
+- `step` **must** return rows with the same shape as the root query/table.
+- `hopTo` is relation-typed by codegen (invalid relation names are type errors).
+- Recursion semantics are breadth-first by level with dedupe by root identity.
 
 ## TS Permission DSL (Proposed)
 
-Keep existing `definePermissions(...)` shape and add recursive helpers:
+Permissions use the same recursive combinators (`gather`, `hopTo`) plus `policy.exists(...)`:
 
 ```ts
 import { definePermissions } from "jazz-tools/permissions";
@@ -80,25 +87,19 @@ import { app } from "./app.js";
 type ResourceRoleValue = "viewer" | "editor" | "manager";
 
 export default definePermissions(app, ({ policy, session }) => {
-  const reachableTeams = policy.recursive({
-    start: policy.teams
-      .where({ kind: "individual", identity_key: session.subject })
-      .select({ team: "id" }),
-    step: ({ self }) =>
-      self
-        .join(policy.team_team_edges, { left: "team", right: "child_team" })
-        .select({ team: "parent_team" }),
-    // maxDepth optional (falls back to global default)
+  const reachableTeams = policy.teams.gather({
+    start: { kind: "individual", identity_key: session.subject },
+    step: ({ current }) =>
+      policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+    maxDepth: 10, // optional; falls back to global default
   });
 
   const hasResourceRole = (resource: unknown, role: ResourceRoleValue) =>
     policy.exists(
-      reachableTeams
-        .join(policy.resource_access_edges, { left: "team", right: "team" })
-        .where({
-          "resource_access_edges.resource": resource,
-          "resource_access_edges.grant_role": role,
-        }),
+      reachableTeams.hopTo("resource_access_edges").where({
+        resource,
+        grant_role: role,
+      }),
     );
 
   return [
@@ -111,9 +112,8 @@ export default definePermissions(app, ({ policy, session }) => {
 
 Notes:
 
-- This is generic relation recursion, not team-specific.
-- `policy.exists(...)` accepts a relation expression (not only table-local `exists.where({...})`).
-- Existing `policy.<table>.exists.where(...)` remains supported as sugar.
+- `policy` should expose the same relation/query combinators as `app` for API uniformity.
+- `policy.exists(...)` accepts relation/query expressions (not only table-local `exists.where({...})`).
 
 ## Execution Model (Naive Unrolled)
 
@@ -136,11 +136,11 @@ Notes:
 
 For one recursive relation:
 
-1. `RecursiveRelationNode` runs `start` as level `0` inner graph(s), collects rows.
+1. `RecursiveRelationNode` runs root table with `start` as level `0`, collects rows.
 2. Node sets `seen = distinct(startRows)` and `frontier = seen`.
 3. For each level `d = 1..maxDepth`, node:
-   - binds `self = seen`,
-   - compiles and settles `step(self)` as level `d` inner graph(s),
+   - binds `current = frontier` (MVP may batch values),
+   - compiles and settles `step({ current })` as level `d` inner graph(s),
    - compute `next = distinct(stepRows - seen)`,
    - add `next` to `seen`,
    - set `frontier = next`,
@@ -169,11 +169,11 @@ Implementation detail for MVP: keep an unrolled level stack internally in `Recur
 ### TypeScript layer
 
 - Extend query builder/typegen with relation expression IR supporting:
-  - `where`, `join`, `select`, `distinctBy`, `recursive`.
+  - `where`, `include`, `hopTo`, `gather`.
 - Extend runtime query adapter to emit recursive query payloads.
 - Extend permissions DSL compiler:
   - parse relation expressions,
-  - compile `policy.exists(relationExpr)` into policy IR for runtime.
+  - compile `policy.exists(relationExpr)` into policy IR for runtime using `gather`/`hopTo` forms.
 
 ### Rust layer
 
@@ -209,11 +209,12 @@ All tests below are required for MVP.
 ### Query DSL tests (TS)
 
 - `packages/jazz-tools/src/codegen/codegen.test.ts`
-  - generates recursive relation typing and method signatures.
+  - generates `hopTo` and `gather` method signatures/typing.
 - `packages/jazz-tools/src/runtime/query-adapter.test.ts`
-  - recursive builder JSON translates to expected runtime query payload.
+  - `hopTo`/`gather` builder JSON translates to expected runtime query payload.
 - `packages/jazz-tools/tests/ts-dsl/query-api.test.ts`
-  - recursive traversal returns expected rows for:
+  - `hopTo` one-level traversal returns expected related rows.
+  - `gather` recursive traversal returns expected rows for:
     - simple chain,
     - branching graph,
     - cycle graph.
@@ -223,9 +224,9 @@ All tests below are required for MVP.
 ### Permission DSL compiler tests (TS)
 
 - `packages/jazz-tools/src/permissions/index.test.ts`
-  - compiles `policy.recursive + policy.exists(relationExpr)` into policy IR.
+  - compiles `policy.<table>.gather + policy.exists(relationExpr)` into policy IR.
   - preserves existing non-recursive rules and OR-merging behavior.
-  - validates bad recursive shapes (projection mismatch between `start` and `step`, unknown columns).
+  - validates bad recursive shapes (`step` output shape mismatch with root, unknown relations/columns).
 - `packages/jazz-tools/src/permissions/type-inference.test.ts`
   - row/session typing works inside recursive permission expressions.
   - invalid table/column references fail at type level where possible.
