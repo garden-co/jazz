@@ -6,7 +6,6 @@
  * type safety across the Rust/TypeScript boundary.
  */
 
-import type { RelExpr } from "../ir.js";
 import type {
   WasmColumnDescriptor as GrooveWasmColumnDescriptor,
   WasmColumnType as GrooveWasmColumnType,
@@ -59,10 +58,6 @@ export type PolicyExpr =
       type: "Exists";
       table: string;
       condition: PolicyExpr;
-    }
-  | {
-      type: "ExistsRel";
-      rel: RelExpr;
     }
   | {
       type: "Inherits";
