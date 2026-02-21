@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   definePermissions,
+  definePermissionsV2,
   relationExistsToPolicyV2,
   relationToIr,
   type PermissionRelation,
@@ -552,6 +553,38 @@ describe("permissions DSL", () => {
 
     const existsExprV2 = relationExistsToPolicyV2(relation);
     expect(existsExprV2).toMatchObject({
+      type: "ExistsRel",
+      rel: {
+        type: "Project",
+      },
+    });
+  });
+
+  it("compiles policy.exists(relation) to ExistsRel in definePermissionsV2", () => {
+    const compiled = definePermissionsV2(app, ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.userId,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [
+        policy.todos.allowRead.where(
+          policy.exists(
+            reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+              "resource_access_edges.resource": "resource-a",
+              grant_role: "viewer",
+            }),
+          ),
+        ),
+      ];
+    });
+
+    expect(compiled.todos.select?.using).toMatchObject({
       type: "ExistsRel",
       rel: {
         type: "Project",
