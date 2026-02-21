@@ -1,11 +1,11 @@
 /**
  * Translate QueryBuilder JSON to WASM Query format.
  *
- * QueryBuilder produces a simple JSON structure:
- * { table, conditions, includes, orderBy, limit, offset, gather? }
+ * QueryBuilder produces a compact JSON structure:
+ * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
  *
- * WASM runtime expects a more complex structure:
- * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins, recursive? }
+ * Runtime semantics are driven by `relation_ir`. Legacy top-level query fields
+ * are still populated in minimal form to satisfy the wire/query schema.
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
