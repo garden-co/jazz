@@ -229,6 +229,9 @@ describe("permissions type inference", () => {
         // @ts-expect-error invalid exists where key for projects
         policy.projects.exists.where({ missingColumn: true });
 
+        // @ts-expect-error legacy recursive API removed
+        policy.recursive({});
+
         // @ts-expect-error row callback should expose only known todo columns
         policy.todos.allowRead.where((todo) => ({ ownerId: todo.missingColumn }));
       }
