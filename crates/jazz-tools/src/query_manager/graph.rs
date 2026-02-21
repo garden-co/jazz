@@ -2858,6 +2858,52 @@ mod tests {
     }
 
     #[test]
+    fn compile_query_with_relation_ir_project_join_base_element_shape() {
+        let schema = join_schema();
+        let relation = RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("users"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("posts"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("users", "id"),
+                    right: ColumnRef::scoped("posts", "author_id"),
+                }],
+                join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("users", "id")),
+            }],
+        };
+
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::SelectElement(_))),
+            "project-to-base relation IR should compile to SelectElementNode",
+        );
+        assert!(
+            graph.combined_descriptor.column_index("name").is_some(),
+            "base element projection should keep base descriptor columns",
+        );
+        assert!(
+            graph
+                .combined_descriptor
+                .column_index("author_id")
+                .is_none(),
+            "base element projection should not expose joined table columns",
+        );
+    }
+
+    #[test]
     fn compile_query_with_relation_ir_gather_uses_recursive_node() {
         let schema = recursive_hop_schema();
         let relation = RelExpr::Gather {

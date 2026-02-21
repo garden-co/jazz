@@ -19,7 +19,8 @@ struct QueryEnvelope<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LinearJoinInfo {
     base_table: TableName,
-    base_scope: String,
+    current_scope: String,
+    scope_order: Vec<String>,
     disjuncts: Vec<Conjunction>,
     joins: Vec<JoinSpec>,
 }
@@ -187,7 +188,8 @@ fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
     match expr {
         RelExpr::TableScan { table } => Some(LinearJoinInfo {
             base_table: *table,
-            base_scope: table.as_str().to_string(),
+            current_scope: table.as_str().to_string(),
+            scope_order: vec![table.as_str().to_string()],
             disjuncts: dnf_true(),
             joins: Vec::new(),
         }),
@@ -220,12 +222,16 @@ fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
                 .left
                 .scope
                 .clone()
-                .unwrap_or_else(|| left_info.base_scope.clone());
+                .unwrap_or_else(|| left_info.current_scope.clone());
             let right_scope = first_join
                 .right
                 .scope
                 .clone()
                 .unwrap_or_else(|| right_table.as_str().to_string());
+
+            if let Some(last_scope) = left_info.scope_order.last_mut() {
+                *last_scope = left_scope.clone();
+            }
 
             left_info.joins.push(JoinSpec {
                 table: right_table,
@@ -235,7 +241,8 @@ fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
                     format!("{right_scope}.{}", first_join.right.column),
                 )),
             });
-            left_info.base_scope = right_scope;
+            left_info.current_scope = right_scope.clone();
+            left_info.scope_order.push(right_scope);
             Some(left_info)
         }
         _ => None,
@@ -498,6 +505,29 @@ fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
 }
 
 fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
+    fn projected_result_element_index(
+        scope_order: &[String],
+        columns: &[ProjectColumn],
+    ) -> Option<usize> {
+        let projected_column = match columns {
+            [
+                ProjectColumn {
+                    expr: ProjectExpr::Column(column),
+                    ..
+                },
+            ] => column,
+            _ => return None,
+        };
+        if to_runtime_column(&projected_column.column) != "_id" {
+            return None;
+        }
+        match projected_column.scope.as_deref() {
+            Some(scope) => scope_order.iter().position(|candidate| candidate == scope),
+            None if scope_order.len() == 1 => Some(0),
+            None => None,
+        }
+    }
+
     match core {
         RelExpr::Gather {
             seed,
@@ -505,20 +535,38 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             max_depth,
             ..
         } => parse_gather_core(seed, step, *max_depth),
-        RelExpr::Project { input, .. } => {
+        RelExpr::Project { input, columns } => {
             if let Some(mut gather_info) = parse_gather_join_info(input) {
-                if !gather_info.plan.joins.is_empty() {
+                let mut scope_order = vec![gather_info.plan.table.as_str().to_string()];
+                scope_order.extend(
+                    gather_info
+                        .plan
+                        .joins
+                        .iter()
+                        .map(|join| join.effective_name().to_string()),
+                );
+                if let Some(index) = projected_result_element_index(&scope_order, columns) {
+                    gather_info.plan.result_element_index = Some(index);
+                } else if !gather_info.plan.joins.is_empty() {
                     gather_info.plan.result_element_index = Some(gather_info.plan.joins.len());
                 }
                 return Some(gather_info.plan);
             }
 
             let linear = extract_linear_join_info(input)?;
+            let result_element_index =
+                if let Some(index) = projected_result_element_index(&linear.scope_order, columns) {
+                    Some(index)
+                } else if !linear.joins.is_empty() {
+                    Some(linear.joins.len())
+                } else {
+                    None
+                };
             Some(RuntimeCorePlan {
                 table: linear.base_table,
                 disjuncts: linear.disjuncts,
                 joins: linear.joins.clone(),
-                result_element_index: Some(linear.joins.len()),
+                result_element_index,
                 recursive: None,
             })
         }
