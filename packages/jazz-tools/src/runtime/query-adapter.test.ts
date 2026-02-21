@@ -715,135 +715,21 @@ describe("translateQuery", () => {
     });
   });
 
-  describe("recursive translation", () => {
-    const recursiveSchema: WasmSchema = {
-      tables: {
-        teams: {
-          columns: [
-            { name: "team_id", column_type: { type: "Integer" }, nullable: false },
-            { name: "name", column_type: { type: "Text" }, nullable: false },
-          ],
-        },
-        team_edges: {
-          columns: [
-            { name: "child_team", column_type: { type: "Integer" }, nullable: false },
-            { name: "parent_team", column_type: { type: "Integer" }, nullable: false },
-          ],
-        },
-      },
-    };
-
-    it("translates recursive spec", () => {
-      const builderJson = JSON.stringify({
-        table: "teams",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        recursive: {
-          table: "team_edges",
-          inner_column: "child_team",
-          outer_column: "team_id",
-          select_columns: ["parent_team"],
-          max_depth: 10,
-        },
-      });
-
-      const result = JSON.parse(translateQuery(builderJson, recursiveSchema));
-
-      expect(result.recursive).toEqual({
-        table: "team_edges",
-        inner_column: "child_team",
-        outer_column: "team_id",
-        select_columns: ["parent_team"],
+  it("ignores non-runtime builder metadata fields", () => {
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      hops: ["project"],
+      gather: {
         max_depth: 10,
-      });
+      },
     });
 
-    it("normalizes qualified recursive columns", () => {
-      const builderJson = JSON.stringify({
-        table: "teams",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        recursive: {
-          table: "team_edges",
-          inner_column: "team_edges.child_team",
-          outer_column: "teams.team_id",
-          select_columns: ["team_edges.parent_team"],
-          max_depth: 5,
-        },
-      });
-
-      const result = JSON.parse(translateQuery(builderJson, recursiveSchema));
-
-      expect(result.recursive).toEqual({
-        table: "team_edges",
-        inner_column: "child_team",
-        outer_column: "team_id",
-        select_columns: ["parent_team"],
-        max_depth: 5,
-      });
-    });
-
-    it("throws for unknown recursive table", () => {
-      const builderJson = JSON.stringify({
-        table: "teams",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        recursive: {
-          table: "missing_edges",
-          inner_column: "child_team",
-          outer_column: "team_id",
-          select_columns: ["parent_team"],
-          max_depth: 5,
-        },
-      });
-
-      expect(() => translateQuery(builderJson, recursiveSchema)).toThrow(
-        'Unknown recursive step table "missing_edges"',
-      );
-    });
-
-    it("throws for invalid recursive columns", () => {
-      const builderJson = JSON.stringify({
-        table: "teams",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        recursive: {
-          table: "team_edges",
-          inner_column: "missing_col",
-          outer_column: "team_id",
-          select_columns: ["parent_team"],
-          max_depth: 5,
-        },
-      });
-
-      expect(() => translateQuery(builderJson, recursiveSchema)).toThrow(
-        'Unknown recursive inner_column "missing_col" on table "team_edges"',
-      );
-    });
-
-    it("throws for invalid recursive max depth", () => {
-      const builderJson = JSON.stringify({
-        table: "teams",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        recursive: {
-          table: "team_edges",
-          inner_column: "child_team",
-          outer_column: "team_id",
-          select_columns: ["parent_team"],
-          max_depth: 0,
-        },
-      });
-
-      expect(() => translateQuery(builderJson, recursiveSchema)).toThrow(
-        "Recursive max_depth must be a positive integer",
-      );
-    });
+    const result = JSON.parse(translateQuery(builderJson, basicSchema));
+    expect(result.recursive).toBeUndefined();
+    expect(result.joins).toEqual([]);
   });
 
   describe("error handling", () => {

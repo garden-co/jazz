@@ -122,12 +122,13 @@ function generateQueryBuilderClass(
   lines.push(`  private _orderBys: Array<[string, "asc" | "desc"]> = [];`);
   lines.push(`  private _limitVal?: number;`);
   lines.push(`  private _offsetVal?: number;`);
-  lines.push(`  private _recursiveVal?: {`);
-  lines.push(`    table: string;`);
-  lines.push(`    inner_column: string;`);
-  lines.push(`    outer_column: string;`);
-  lines.push(`    select_columns: string[] | null;`);
+  lines.push(`  private _hops: string[] = [];`);
+  lines.push(`  private _gatherVal?: {`);
   lines.push(`    max_depth: number;`);
+  lines.push(`    step_table: string;`);
+  lines.push(`    step_current_column: string;`);
+  lines.push(`    step_conditions: Array<{ column: string; op: string; value: unknown }>;`);
+  lines.push(`    step_hops: string[];`);
   lines.push(`  };`);
   lines.push(``);
 
@@ -191,91 +192,92 @@ function generateQueryBuilderClass(
   lines.push(`  }`);
   lines.push(``);
 
-  // withRecursive() method
-  lines.push(`  withRecursive(options: {`);
-  lines.push(`    from: string;`);
-  lines.push(`    correlate: { inner: string; outer: string };`);
-  lines.push(`    select?: ReadonlyArray<string>;`);
+  if (hasRelations) {
+    const relationUnion = tableRels.map((rel) => `"${rel.name}"`).join(" | ");
+    lines.push(`  hopTo(relation: ${relationUnion}): ${interfaceName}QueryBuilder<I> {`);
+    lines.push(`    const clone = this._clone();`);
+    lines.push(`    clone._hops.push(relation);`);
+    lines.push(`    return clone;`);
+    lines.push(`  }`);
+    lines.push(``);
+  }
+
+  // gather() method
+  lines.push(`  gather(options: {`);
+  lines.push(`    start: ${whereInputInterface};`);
+  lines.push(`    step: (ctx: { current: any }) => unknown;`);
   lines.push(`    maxDepth?: number;`);
   lines.push(`  }): ${interfaceName}QueryBuilder<I> {`);
-  lines.push(`    const clone = this._clone();`);
-  lines.push(``);
-  lines.push(`    if (typeof options.from !== "string" || !options.from.trim()) {`);
-  lines.push(
-    `      throw new Error("withRecursive(...) requires from to be a non-empty table name.");`,
-  );
+  lines.push(`    if (options.start === undefined) {`);
+  lines.push(`      throw new Error("gather(...) requires start where conditions.");`);
   lines.push(`    }`);
-  lines.push(
-    `    if (typeof options.correlate?.inner !== "string" || !options.correlate.inner.trim()) {`,
-  );
-  lines.push(
-    `      throw new Error("withRecursive(...) requires correlate.inner to be a non-empty column name.");`,
-  );
-  lines.push(`    }`);
-  lines.push(
-    `    if (typeof options.correlate?.outer !== "string" || !options.correlate.outer.trim()) {`,
-  );
-  lines.push(
-    `      throw new Error("withRecursive(...) requires correlate.outer to be a non-empty column name.");`,
-  );
+  lines.push(`    if (typeof options.step !== "function") {`);
+  lines.push(`      throw new Error("gather(...) requires step callback.");`);
   lines.push(`    }`);
   lines.push(``);
   lines.push(`    const maxDepth = options.maxDepth ?? 10;`);
   lines.push(`    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {`);
-  lines.push(`      throw new Error("withRecursive(...) maxDepth must be a positive integer.");`);
+  lines.push(`      throw new Error("gather(...) maxDepth must be a positive integer.");`);
   lines.push(`    }`);
   lines.push(``);
-  lines.push(`    if (options.select !== undefined) {`);
-  lines.push(`      if (!Array.isArray(options.select) || options.select.length === 0) {`);
+  lines.push(`    const currentToken = "__jazz_gather_current__";`);
+  lines.push(`    const stepOutput = options.step({ current: currentToken });`);
   lines.push(
-    `        throw new Error("withRecursive(...) select must be a non-empty array when provided.");`,
-  );
-  lines.push(`      }`);
-  lines.push(
-    `      if (options.select.some((column) => typeof column !== "string" || !column.trim())) {`,
+    `    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {`,
   );
   lines.push(
-    `        throw new Error("withRecursive(...) select entries must be non-empty column names.");`,
+    `      throw new Error("gather(...) step must return a query expression built from app.<table>.");`,
   );
-  lines.push(`      }`);
   lines.push(`    }`);
   lines.push(``);
-  lines.push(`    clone._recursiveVal = {`);
-  lines.push(`      table: options.from,`);
-  lines.push(`      inner_column: options.correlate.inner,`);
-  lines.push(`      outer_column: options.correlate.outer,`);
-  lines.push(`      select_columns: options.select ? [...options.select] : null,`);
+  lines.push(`    const stepBuilt = JSON.parse(`);
+  lines.push(`      (stepOutput as { _build: () => string })._build(),`);
+  lines.push(`    ) as {`);
+  lines.push(`      table?: unknown;`);
+  lines.push(`      conditions?: Array<{ column: string; op: string; value: unknown }>;`);
+  lines.push(`      hops?: unknown;`);
+  lines.push(`    };`);
+  lines.push(``);
+  lines.push(`    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {`);
+  lines.push(`      throw new Error("gather(...) step query is missing table metadata.");`);
+  lines.push(`    }`);
+  lines.push(`    if (!Array.isArray(stepBuilt.conditions)) {`);
+  lines.push(`      throw new Error("gather(...) step query is missing condition metadata.");`);
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    const stepHops = Array.isArray(stepBuilt.hops)`);
+  lines.push(`      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")`);
+  lines.push(`      : [];`);
+  lines.push(`    if (stepHops.length === 0) {`);
+  lines.push(`      throw new Error("gather(...) step must end with hopTo(...).");`);
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    const currentIndex = stepBuilt.conditions.findIndex(`);
+  lines.push(`      (condition) => condition.op === "eq" && condition.value === currentToken,`);
+  lines.push(`    );`);
+  lines.push(`    if (currentIndex < 0) {`);
+  lines.push(
+    `      throw new Error("gather(...) step must include exactly one where condition bound to current.");`,
+  );
+  lines.push(`    }`);
+  lines.push(``);
+  lines.push(`    const currentCondition = stepBuilt.conditions[currentIndex];`);
+  lines.push(
+    `    const stepConditions = stepBuilt.conditions.filter((_, index) => index !== currentIndex);`,
+  );
+  lines.push(``);
+  lines.push(`    const withStart = this.where(options.start);`);
+  lines.push(`    const clone = withStart._clone();`);
+  lines.push(`    clone._hops = [];`);
+  lines.push(`    clone._gatherVal = {`);
   lines.push(`      max_depth: maxDepth,`);
+  lines.push(`      step_table: stepBuilt.table,`);
+  lines.push(`      step_current_column: currentCondition.column,`);
+  lines.push(`      step_conditions: stepConditions,`);
+  lines.push(`      step_hops: stepHops,`);
   lines.push(`    };`);
   lines.push(``);
   lines.push(`    return clone;`);
-  lines.push(`  }`);
-  lines.push(``);
-
-  // whereRecursive() method
-  lines.push(`  whereRecursive(options: {`);
-  lines.push(`    start: ${whereInputInterface};`);
-  lines.push(`    step: {`);
-  lines.push(`      from: string;`);
-  lines.push(`      correlate: { inner: string; outer: string };`);
-  lines.push(`      select?: ReadonlyArray<string>;`);
-  lines.push(`    };`);
-  lines.push(`    maxDepth?: number;`);
-  lines.push(`  }): ${interfaceName}QueryBuilder<I> {`);
-  lines.push(`    if (options.start === undefined) {`);
-  lines.push(`      throw new Error("whereRecursive(...) requires start where conditions.");`);
-  lines.push(`    }`);
-  lines.push(`    if (!options.step) {`);
-  lines.push(`      throw new Error("whereRecursive(...) requires step configuration.");`);
-  lines.push(`    }`);
-  lines.push(``);
-  lines.push(`    const withStart = this.where(options.start);`);
-  lines.push(`    return withStart.withRecursive({`);
-  lines.push(`      from: options.step.from,`);
-  lines.push(`      correlate: options.step.correlate,`);
-  lines.push(`      select: options.step.select,`);
-  lines.push(`      maxDepth: options.maxDepth,`);
-  lines.push(`    });`);
   lines.push(`  }`);
   lines.push(``);
 
@@ -288,7 +290,8 @@ function generateQueryBuilderClass(
   lines.push(`      orderBy: this._orderBys,`);
   lines.push(`      limit: this._limitVal,`);
   lines.push(`      offset: this._offsetVal,`);
-  lines.push(`      recursive: this._recursiveVal,`);
+  lines.push(`      hops: this._hops,`);
+  lines.push(`      gather: this._gatherVal,`);
   lines.push(`    });`);
   lines.push(`  }`);
   lines.push(``);
@@ -301,9 +304,16 @@ function generateQueryBuilderClass(
   lines.push(`    clone._orderBys = [...this._orderBys];`);
   lines.push(`    clone._limitVal = this._limitVal;`);
   lines.push(`    clone._offsetVal = this._offsetVal;`);
+  lines.push(`    clone._hops = [...this._hops];`);
+  lines.push(`    clone._gatherVal = this._gatherVal`);
+  lines.push(`      ? {`);
+  lines.push(`          ...this._gatherVal,`);
   lines.push(
-    `    clone._recursiveVal = this._recursiveVal ? { ...this._recursiveVal, select_columns: this._recursiveVal.select_columns ? [...this._recursiveVal.select_columns] : null } : undefined;`,
+    `          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),`,
   );
+  lines.push(`          step_hops: [...this._gatherVal.step_hops],`);
+  lines.push(`        }`);
+  lines.push(`      : undefined;`);
   lines.push(`    return clone;`);
   lines.push(`  }`);
 

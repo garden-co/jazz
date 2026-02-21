@@ -691,8 +691,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("orderBy(column: keyof Todo");
     expect(output).toContain("limit(n: number)");
     expect(output).toContain("offset(n: number)");
-    expect(output).toContain("withRecursive(options: {");
-    expect(output).toContain("whereRecursive(options: {");
+    expect(output).toContain("gather(options: {");
     expect(output).toContain("_build(): string");
   });
 
@@ -714,6 +713,16 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
+  });
+
+  it("generates hopTo method for tables with relations", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain('hopTo(relation: "owner")');
   });
 
   it("does not generate include method for tables without relations", () => {
@@ -755,7 +764,8 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("orderBy: this._orderBys,");
     expect(output).toContain("limit: this._limitVal,");
     expect(output).toContain("offset: this._offsetVal,");
-    expect(output).toContain("recursive: this._recursiveVal,");
+    expect(output).toContain("hops: this._hops,");
+    expect(output).toContain("gather: this._gatherVal,");
   });
 
   it("generates private _clone method for immutability", () => {
@@ -767,18 +777,21 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("private _clone(): TodoQueryBuilder<I> {");
     expect(output).toContain("const clone = new TodoQueryBuilder<I>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
-    expect(output).toContain("clone._recursiveVal = this._recursiveVal");
+    expect(output).toContain("clone._hops = [...this._hops];");
+    expect(output).toContain("clone._gatherVal = this._gatherVal");
   });
 
-  it("generates whereRecursive helper that composes start + step", () => {
+  it("generates gather helper that compiles start + step", () => {
     table("todos", { title: col.string(), parent_id: col.ref("todos").optional() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("whereRecursive(options: {");
+    expect(output).toContain("gather(options: {");
+    expect(output).toContain("const stepOutput = options.step({ current: currentToken });");
+    expect(output).toContain("if (stepHops.length === 0) {");
     expect(output).toContain("const withStart = this.where(options.start);");
-    expect(output).toContain("return withStart.withRecursive({");
+    expect(output).toContain("clone._gatherVal = {");
   });
 });
 
