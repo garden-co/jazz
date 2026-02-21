@@ -350,6 +350,12 @@ pub struct Query {
     /// instead of returning flattened combined rows.
     #[serde(default)]
     pub result_element_index: Option<usize>,
+    /// Optional relation IR payload for unified query/policy planning.
+    ///
+    /// Current runtime still executes the legacy query fields; this IR is
+    /// carried through the boundary to enable incremental compiler cutover.
+    #[serde(default)]
+    pub relation_ir: Option<crate::query_manager::relation_ir::RelExpr>,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -374,6 +380,7 @@ impl Query {
             array_subqueries: Vec::new(),
             recursive: None,
             result_element_index: None,
+            relation_ir: None,
         }
     }
 
@@ -397,6 +404,11 @@ impl Query {
     /// Check if this query has a recursive expansion.
     pub fn has_recursive(&self) -> bool {
         self.recursive.is_some()
+    }
+
+    /// Check if this query carries relation IR.
+    pub fn has_relation_ir(&self) -> bool {
+        self.relation_ir.is_some()
     }
 
     /// Check if this is a join query.
@@ -1531,6 +1543,20 @@ mod tests {
         let json = serde_json::to_string(&query).expect("serialize");
         let decoded: Query = serde_json::from_str(&json).expect("deserialize");
 
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_relation_ir_serialization() {
+        let mut query = QueryBuilder::new("users").branch("main").build();
+        query.relation_ir = Some(crate::query_manager::relation_ir::RelExpr::TableScan {
+            table: TableName::new("users"),
+        });
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert!(decoded.has_relation_ir());
         assert_eq!(query, decoded);
     }
 
