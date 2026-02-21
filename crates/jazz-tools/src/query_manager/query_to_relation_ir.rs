@@ -126,13 +126,29 @@ fn normalize_recursive_spec(spec: &RecursiveSpec, seed: RelExpr) -> Option<RelEx
         {
             return None;
         }
-        if spec.select_columns.is_some() {
-            return None;
-        }
+
+        let step_source = if let Some(select_columns) = spec.select_columns.as_ref() {
+            RelExpr::Project {
+                input: Box::new(step_left),
+                columns: select_columns
+                    .iter()
+                    .map(|column| ProjectColumn {
+                        alias: column.clone(),
+                        expr: ProjectExpr::Column(ColumnRef::scoped(
+                            spec.table.as_str(),
+                            column.clone(),
+                        )),
+                    })
+                    .collect(),
+            }
+        } else {
+            step_left
+        };
+
         let hop_scope = "__recursive_hop_0".to_string();
         RelExpr::Project {
             input: Box::new(RelExpr::Join {
-                left: Box::new(step_left),
+                left: Box::new(step_source),
                 right: Box::new(RelExpr::TableScan { table: hop.table }),
                 on: vec![JoinCondition {
                     left: ColumnRef::scoped(step_scope, hop.via_column.clone()),
@@ -422,6 +438,7 @@ mod tests {
             .with_recursive(|r| {
                 r.from("team_edges")
                     .correlate("child_team", "_id")
+                    .select(&["parent_team"])
                     .hop("teams", "parent_team")
                     .max_depth(8)
             })
@@ -481,8 +498,22 @@ mod tests {
                 right: ColumnRef::scoped("__recursive_hop_0", "id"),
             }]
         );
+        let RelExpr::Project {
+            input: step_filter,
+            columns: step_columns,
+        } = *left
+        else {
+            panic!("expected projected step source");
+        };
         assert_eq!(
-            *left,
+            step_columns,
+            vec![ProjectColumn {
+                alias: "parent_team".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("team_edges", "parent_team")),
+            }]
+        );
+        assert_eq!(
+            *step_filter,
             RelExpr::Filter {
                 input: Box::new(RelExpr::TableScan {
                     table: TableName::new("team_edges"),

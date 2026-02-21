@@ -2881,6 +2881,71 @@ mod tests {
     }
 
     #[test]
+    fn compile_query_with_relation_ir_gather_hop_step_projection_uses_recursive_node() {
+        let schema = recursive_hop_schema();
+        let relation = RelExpr::Gather {
+            seed: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("teams"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("teams", "name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("seed".to_string())),
+                },
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Project {
+                        input: Box::new(RelExpr::Filter {
+                            input: Box::new(RelExpr::TableScan {
+                                table: TableName::new("team_edges"),
+                            }),
+                            predicate: PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("team_edges", "child_team"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::RowId(RowIdRef::Frontier),
+                            },
+                        }),
+                        columns: vec![ProjectColumn {
+                            alias: "parent_team".to_string(),
+                            expr: ProjectExpr::Column(ColumnRef::scoped(
+                                "team_edges",
+                                "parent_team",
+                            )),
+                        }],
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                    }],
+                    join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                }],
+            }),
+            frontier_key: KeyRef::RowId(RowIdRef::Current),
+            max_depth: 8,
+            dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+        };
+
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Gather with projected hop step should compile to RecursiveRelationNode",
+        );
+        assert_eq!(graph.recursive_relation_tables.len(), 1);
+        assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
+    }
+
+    #[test]
     fn compile_query_with_relation_ir_gather_direct_step_uses_recursive_node() {
         let schema = recursive_schema();
         let relation = RelExpr::Gather {
