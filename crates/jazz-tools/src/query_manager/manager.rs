@@ -365,7 +365,6 @@ impl QueryManager {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<QueryGraph> {
-        query.relation_ir.as_ref()?;
         QueryGraph::compile_with_schema_context(query, schema, session, schema_context)
     }
 

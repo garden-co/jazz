@@ -46,12 +46,6 @@ impl QueryManager {
     ) -> Result<QuerySubscriptionId, QueryError> {
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?settled_tier).entered();
-        if query.relation_ir.is_none() {
-            return Err(QueryError::QueryCompilationError(
-                "relation_ir is required".into(),
-            ));
-        }
-
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -119,12 +113,6 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        if query.relation_ir.is_none() {
-            return Err(QueryError::QueryCompilationError(
-                "relation_ir is required".into(),
-            ));
-        }
-
         // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()

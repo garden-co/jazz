@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
@@ -6,6 +7,26 @@ use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryBuildError {
+    UnsupportedShape,
+}
+
+impl fmt::Display for QueryBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryBuildError::UnsupportedShape => {
+                write!(
+                    f,
+                    "query shape is not supported by relation IR normalization"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for QueryBuildError {}
 
 /// A join specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,12 +373,11 @@ pub struct Query {
     /// instead of returning flattened combined rows.
     #[serde(default)]
     pub result_element_index: Option<usize>,
-    /// Optional relation IR payload for unified query/policy planning.
+    /// Relation IR payload used for query/policy planning.
     ///
     /// Query compilation executes through this IR. The legacy DSL fields are
     /// retained as construction syntax and normalized into relation IR.
-    #[serde(default)]
-    pub relation_ir: Option<crate::query_manager::relation_ir::RelExpr>,
+    pub relation_ir: crate::query_manager::relation_ir::RelExpr,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -383,7 +403,7 @@ impl Query {
             array_subqueries: Vec::new(),
             recursive: None,
             result_element_index: None,
-            relation_ir: Some(crate::query_manager::relation_ir::RelExpr::TableScan { table }),
+            relation_ir: crate::query_manager::relation_ir::RelExpr::TableScan { table },
         }
     }
 
@@ -411,12 +431,14 @@ impl Query {
 
     /// Check if this query carries relation IR.
     pub fn has_relation_ir(&self) -> bool {
-        self.relation_ir.is_some()
+        true
     }
 
     /// Rebuild relation IR from the query DSL fields.
-    pub fn refresh_relation_ir(&mut self) {
-        self.relation_ir = normalize_query_to_rel_expr(self);
+    pub fn refresh_relation_ir(&mut self) -> Result<(), QueryBuildError> {
+        self.relation_ir =
+            normalize_query_to_rel_expr(self).ok_or(QueryBuildError::UnsupportedShape)?;
+        Ok(())
     }
 
     /// Check if this is a join query.
@@ -752,10 +774,15 @@ impl QueryBuilder {
     /// If no branches specified:
     /// - With SchemaManager: automatically expands to all live schema branches
     /// - Without SchemaManager: QueryManager returns an error
-    pub fn build(self) -> Query {
+    pub fn try_build(self) -> Result<Query, QueryBuildError> {
         let mut query = self.query;
-        query.refresh_relation_ir();
-        query
+        query.refresh_relation_ir()?;
+        Ok(query)
+    }
+
+    pub fn build(self) -> Query {
+        self.try_build()
+            .expect("QueryBuilder::build produced an unsupported relation IR shape")
     }
 }
 
@@ -1559,9 +1586,9 @@ mod tests {
     #[test]
     fn query_with_relation_ir_serialization() {
         let mut query = QueryBuilder::new("users").branch("main").build();
-        query.relation_ir = Some(crate::query_manager::relation_ir::RelExpr::TableScan {
+        query.relation_ir = crate::query_manager::relation_ir::RelExpr::TableScan {
             table: TableName::new("users"),
-        });
+        };
 
         let json = serde_json::to_string(&query).expect("serialize");
         let decoded: Query = serde_json::from_str(&json).expect("deserialize");
