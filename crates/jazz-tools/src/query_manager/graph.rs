@@ -96,6 +96,13 @@ pub struct QueryGraph {
     pub combined_descriptor: RowDescriptor,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RelationCompileFeatures {
+    pub include_deleted: bool,
+    pub array_subqueries: Vec<ArraySubquerySpec>,
+    pub select_columns: Option<Vec<String>>,
+}
+
 impl QueryGraph {
     pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
@@ -245,8 +252,7 @@ impl QueryGraph {
             schema,
             branches,
             session,
-            false,
-            Vec::new(),
+            RelationCompileFeatures::default(),
         )
     }
 
@@ -255,14 +261,14 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         session: Option<Session>,
-        include_deleted: bool,
-        array_subqueries: Vec<ArraySubquerySpec>,
+        features: RelationCompileFeatures,
     ) -> Option<Self> {
         let query = lower_relation_to_execution_query(
             relation,
             branches,
-            include_deleted,
-            array_subqueries,
+            features.include_deleted,
+            features.array_subqueries,
+            features.select_columns,
         )?;
         Self::compile_with_session(&query, schema, session)
     }
@@ -281,8 +287,7 @@ impl QueryGraph {
             branches,
             session,
             schema_context,
-            false,
-            Vec::new(),
+            RelationCompileFeatures::default(),
         )
     }
 
@@ -292,14 +297,14 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         schema_context: &SchemaContext,
-        include_deleted: bool,
-        array_subqueries: Vec<ArraySubquerySpec>,
+        features: RelationCompileFeatures,
     ) -> Option<Self> {
         let query = lower_relation_to_execution_query(
             relation,
             branches,
-            include_deleted,
-            array_subqueries,
+            features.include_deleted,
+            features.array_subqueries,
+            features.select_columns,
         )?;
         Self::compile_with_schema_context(&query, schema, session, schema_context)
     }
@@ -2637,8 +2642,11 @@ mod tests {
             &schema,
             &branches,
             None,
-            true,
-            Vec::new(),
+            RelationCompileFeatures {
+                include_deleted: true,
+                array_subqueries: Vec::new(),
+                select_columns: None,
+            },
         )
         .expect("Graph should compile");
 
@@ -2672,8 +2680,11 @@ mod tests {
             &schema,
             &branches,
             None,
-            false,
-            query_with_arrays.array_subqueries,
+            RelationCompileFeatures {
+                include_deleted: false,
+                array_subqueries: query_with_arrays.array_subqueries,
+                select_columns: None,
+            },
         )
         .expect("Graph should compile");
 
@@ -2683,6 +2694,35 @@ mod tests {
         );
         assert_eq!(graph.array_subquery_tables.len(), 1);
         assert_eq!(graph.array_subquery_tables[0].1.as_str(), "posts");
+    }
+
+    #[test]
+    fn compile_relation_ir_with_select_columns_adds_project_node() {
+        let schema = test_schema();
+        let relation = RelExpr::TableScan {
+            table: TableName::new("users"),
+        };
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir_with_features(
+            &relation,
+            &schema,
+            &branches,
+            None,
+            RelationCompileFeatures {
+                include_deleted: false,
+                array_subqueries: Vec::new(),
+                select_columns: Some(vec!["name".to_string()]),
+            },
+        )
+        .expect("Graph should compile");
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Project(_))),
+            "select_columns should insert ProjectNode in relation-ir compile path",
+        );
     }
 
     #[test]

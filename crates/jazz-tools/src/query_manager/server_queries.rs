@@ -7,7 +7,6 @@ use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, PendingPermissionCheck, QueryId};
 
-use super::graph::QueryGraph;
 use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
@@ -53,24 +52,12 @@ impl QueryManager {
             };
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
-            let graph = if let Some(relation) = sub.query.relation_ir.as_ref() {
-                QueryGraph::compile_relation_ir_with_schema_context_and_features(
-                    relation,
-                    &schema_for_compile,
-                    &sub.query.branches,
-                    sub.session.clone(),
-                    &self.schema_context,
-                    sub.query.include_deleted,
-                    sub.query.array_subqueries.clone(),
-                )
-            } else {
-                QueryGraph::compile_with_schema_context(
-                    &sub.query,
-                    &schema_for_compile,
-                    sub.session.clone(),
-                    &self.schema_context,
-                )
-            };
+            let graph = Self::compile_graph_with_relation_fallback(
+                &sub.query,
+                &schema_for_compile,
+                sub.session.clone(),
+                &self.schema_context,
+            );
 
             let Some(mut graph) = graph else {
                 // Query compilation failed (e.g., missing table)

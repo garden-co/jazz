@@ -6,7 +6,6 @@ use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 
 #[cfg(test)]
 use super::encoding::decode_row;
-use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::manager::{CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QueryUpdate};
 use super::query::{Query, QueryBuilder};
@@ -63,24 +62,12 @@ impl QueryManager {
         };
 
         // Compile query graph with schema context
-        let graph = if let Some(relation) = query.relation_ir.as_ref() {
-            QueryGraph::compile_relation_ir_with_schema_context_and_features(
-                relation,
-                &self.schema,
-                &query.branches,
-                session.clone(),
-                &self.schema_context,
-                query.include_deleted,
-                query.array_subqueries.clone(),
-            )
-        } else {
-            QueryGraph::compile_with_schema_context(
-                &query,
-                &self.schema,
-                session.clone(),
-                &self.schema_context,
-            )
-        }
+        let graph = Self::compile_graph_with_relation_fallback(
+            &query,
+            &self.schema,
+            session.clone(),
+            &self.schema_context,
+        )
         .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
@@ -147,19 +134,12 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = if let Some(relation) = query.relation_ir.as_ref() {
-            QueryGraph::compile_relation_ir_with_schema_context_and_features(
-                relation,
-                schema,
-                &query.branches,
-                session.clone(),
-                schema_context,
-                query.include_deleted,
-                query.array_subqueries.clone(),
-            )
-        } else {
-            QueryGraph::compile_with_schema_context(&query, schema, session.clone(), schema_context)
-        }
+        let graph = Self::compile_graph_with_relation_fallback(
+            &query,
+            schema,
+            session.clone(),
+            schema_context,
+        )
         .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
