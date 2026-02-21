@@ -2,10 +2,10 @@
  * Translate QueryBuilder JSON to WASM Query format.
  *
  * QueryBuilder produces a simple JSON structure:
- * { table, conditions, includes, orderBy, limit, offset, recursive? }
+ * { table, conditions, includes, orderBy, limit, offset }
  *
  * WASM runtime expects a more complex structure:
- * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins, recursive? }
+ * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins }
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
@@ -21,13 +21,6 @@ interface BuilderOutput {
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
-  recursive?: {
-    table: string;
-    inner_column: string;
-    outer_column: string;
-    select_columns: string[] | null;
-    max_depth: number;
-  };
 }
 
 function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
@@ -37,15 +30,6 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;
-}
-
-function stripQualifier(column: string): string {
-  const parts = column.split(".");
-  return parts[parts.length - 1] ?? column;
-}
-
-function hasSchemaColumn(schema: WasmSchema, table: string, column: string): boolean {
-  return !!schema.tables[table]?.columns.some((c) => c.name === column);
 }
 
 /**
@@ -204,61 +188,6 @@ function toArraySubqueries(
   return subqueries;
 }
 
-function toRecursiveSpec(
-  recursive: BuilderOutput["recursive"],
-  schema: WasmSchema,
-  seedTable: string,
-): BuilderOutput["recursive"] | undefined {
-  if (!recursive) {
-    return undefined;
-  }
-
-  if (!schema.tables[recursive.table]) {
-    throw new Error(`Unknown recursive step table "${recursive.table}"`);
-  }
-
-  if (!Number.isInteger(recursive.max_depth) || recursive.max_depth <= 0) {
-    throw new Error("Recursive max_depth must be a positive integer");
-  }
-
-  const innerColumn = stripQualifier(recursive.inner_column);
-  const outerColumn = stripQualifier(recursive.outer_column);
-
-  if (!hasSchemaColumn(schema, recursive.table, innerColumn)) {
-    throw new Error(
-      `Unknown recursive inner_column "${recursive.inner_column}" on table "${recursive.table}"`,
-    );
-  }
-
-  if (!hasSchemaColumn(schema, seedTable, outerColumn)) {
-    throw new Error(
-      `Unknown recursive outer_column "${recursive.outer_column}" on table "${seedTable}"`,
-    );
-  }
-
-  if (recursive.select_columns !== null) {
-    if (!Array.isArray(recursive.select_columns) || recursive.select_columns.length === 0) {
-      throw new Error("Recursive select_columns must be null or a non-empty array");
-    }
-    for (const rawColumn of recursive.select_columns) {
-      const column = stripQualifier(rawColumn);
-      if (!hasSchemaColumn(schema, recursive.table, column)) {
-        throw new Error(
-          `Unknown recursive select column "${rawColumn}" on table "${recursive.table}"`,
-        );
-      }
-    }
-  }
-
-  return {
-    table: recursive.table,
-    inner_column: innerColumn,
-    outer_column: outerColumn,
-    select_columns: recursive.select_columns?.map(stripQualifier) ?? null,
-    max_depth: recursive.max_depth,
-  };
-}
-
 /**
  * Translate QueryBuilder JSON to WASM Query JSON.
  *
@@ -287,7 +216,6 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     include_deleted: false,
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations),
     joins: [],
-    recursive: toRecursiveSpec(builder.recursive, schema, builder.table),
   };
 
   return JSON.stringify(query);

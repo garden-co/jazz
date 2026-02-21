@@ -184,18 +184,16 @@ Recursive queries compute bounded transitive closures from a seed row set (for e
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     ```ts
-    const query = app.teams.whereRecursive({
+    const query = app.teams.gather({
       start: { team_id: { eq: 1 } },
-      step: {
-        from: "team_edges",
-        correlate: { inner: "child_team", outer: "team_id" },
-        select: ["parent_team"],
-      },
+      step: ({ current }) =>
+        app.team_edges.where({ child_team: current }).hopTo("parent_team"),
       maxDepth: 10,
     });
     ```
 
-    `whereRecursive(...)` combines seed filtering (`start`) with recursive step traversal (`step`).
+    `gather(...)` combines seed filtering (`start`) with recursive step traversal (`step`).
+    `hopTo(...)` is a one-hop relation traversal combinator.
     `maxDepth` defaults to `10` when omitted.
 
   </Tab>
