@@ -38,23 +38,6 @@ interface BuilderOutput {
   };
 }
 
-interface RecursiveOutput {
-  table: string;
-  inner_column: string;
-  outer_column: string;
-  select_columns: string[] | null;
-  filters: object[];
-  joins: JoinOutput[];
-  result_element_index?: number;
-  max_depth: number;
-}
-
-interface JoinOutput {
-  table: string;
-  alias: string | null;
-  on: [string, string];
-}
-
 function relColumn(column: string, scope?: string): RelColumnRef {
   return scope ? { scope, column } : { column };
 }
@@ -545,303 +528,6 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   return relation;
 }
 
-interface BuilderCondition {
-  column: string;
-  op: string;
-  value: unknown;
-}
-
-interface LinearJoinInfo {
-  baseTable: string;
-  baseScope: string;
-  conditions: BuilderCondition[];
-  joins: JoinOutput[];
-}
-
-interface RuntimeCorePlan {
-  table: string;
-  conditions: BuilderCondition[];
-  joins: JoinOutput[];
-  resultElementIndex: number | null;
-  recursive?: RecursiveOutput;
-}
-
-interface QueryEnvelope {
-  core: RelExpr;
-  orderBy: Array<[string, "Ascending" | "Descending"]>;
-  offset: number;
-  limit: number | null;
-}
-
-function builderCmpOp(op: string): string {
-  switch (op) {
-    case "Eq":
-      return "eq";
-    case "Ne":
-      return "ne";
-    case "Gt":
-      return "gt";
-    case "Ge":
-      return "gte";
-    case "Lt":
-      return "lt";
-    case "Le":
-      return "lte";
-    default:
-      throw new Error(`Unsupported relation comparison op "${op}" for runtime query lowering.`);
-  }
-}
-
-function builderColumn(column: RelColumnRef): string {
-  return column.scope ? `${column.scope}.${column.column}` : column.column;
-}
-
-function flattenPredicateTerms(predicate: RelPredicateExpr): RelPredicateExpr[] {
-  if (predicate.type === "And") {
-    return predicate.exprs.flatMap((expr) => flattenPredicateTerms(expr));
-  }
-  return [predicate];
-}
-
-function predicateTermToBuilderCondition(predicate: RelPredicateExpr): BuilderCondition | null {
-  switch (predicate.type) {
-    case "Cmp":
-      if (predicate.right.type !== "Literal") {
-        throw new Error("Only literal Cmp values are supported in runtime query lowering.");
-      }
-      return {
-        column: builderColumn(predicate.left),
-        op: builderCmpOp(predicate.op),
-        value: predicate.right.value,
-      };
-    case "IsNull":
-      return {
-        column: builderColumn(predicate.column),
-        op: "isNull",
-        value: true,
-      };
-    case "IsNotNull":
-      return {
-        column: builderColumn(predicate.column),
-        op: "isNull",
-        value: false,
-      };
-    case "In":
-      if (predicate.values.some((value) => value.type !== "Literal")) {
-        throw new Error("Only literal IN values are supported in runtime query lowering.");
-      }
-      return {
-        column: builderColumn(predicate.left),
-        op: "in",
-        value: predicate.values.map((value) =>
-          value.type === "Literal" ? value.value : undefined,
-        ),
-      };
-    case "Contains":
-      if (predicate.value.type !== "Literal") {
-        throw new Error("Only literal CONTAINS values are supported in runtime query lowering.");
-      }
-      return {
-        column: builderColumn(predicate.left),
-        op: "contains",
-        value: predicate.value.value,
-      };
-    case "True":
-      return null;
-    default:
-      throw new Error(
-        `Predicate "${predicate.type}" is not supported in runtime query condition lowering.`,
-      );
-  }
-}
-
-function relationPredicateToBuilderConditions(predicate: RelPredicateExpr): BuilderCondition[] {
-  const terms = flattenPredicateTerms(predicate);
-  return terms
-    .map((term) => predicateTermToBuilderCondition(term))
-    .filter((condition): condition is BuilderCondition => Boolean(condition));
-}
-
-function extractLinearJoinInfo(expr: RelExpr): LinearJoinInfo {
-  switch (expr.type) {
-    case "TableScan":
-      return {
-        baseTable: expr.table,
-        baseScope: expr.table,
-        conditions: [],
-        joins: [],
-      };
-    case "Filter": {
-      const inner = extractLinearJoinInfo(expr.input);
-      return {
-        ...inner,
-        conditions: [...inner.conditions, ...relationPredicateToBuilderConditions(expr.predicate)],
-      };
-    }
-    case "Join": {
-      if (expr.right.type !== "TableScan") {
-        throw new Error("Runtime query lowering currently requires table-scan join RHS.");
-      }
-      const left = extractLinearJoinInfo(expr.left);
-      const firstJoin = expr.on[0];
-      if (!firstJoin) {
-        throw new Error("Runtime query lowering requires explicit join conditions.");
-      }
-      const leftScope = firstJoin.left.scope ?? left.baseScope;
-      const rightScope = firstJoin.right.scope ?? expr.right.table;
-      return {
-        ...left,
-        baseScope: rightScope,
-        joins: [
-          ...left.joins,
-          {
-            table: expr.right.table,
-            alias: rightScope === expr.right.table ? null : rightScope,
-            on: [
-              `${leftScope}.${firstJoin.left.column}`,
-              `${rightScope}.${firstJoin.right.column}`,
-            ],
-          },
-        ],
-      };
-    }
-    default:
-      throw new Error(`Runtime query lowering cannot linearize relation node type "${expr.type}".`);
-  }
-}
-
-function extractStepScan(
-  expr: RelExpr,
-  predicates: RelPredicateExpr[] = [],
-): { table: string; predicates: RelPredicateExpr[] } {
-  if (expr.type === "TableScan") {
-    return { table: expr.table, predicates };
-  }
-  if (expr.type === "Filter") {
-    return extractStepScan(expr.input, [...predicates, expr.predicate]);
-  }
-  throw new Error("Gather step must start from a filtered table scan.");
-}
-
-function parseGatherCore(
-  core: Extract<RelExpr, { type: "Gather" }>,
-  schema: WasmSchema,
-): RuntimeCorePlan {
-  const seed = extractLinearJoinInfo(core.seed);
-  if (seed.joins.length > 0) {
-    throw new Error("Gather seed cannot include joins in runtime query lowering.");
-  }
-
-  if (core.step.type !== "Project" || core.step.input.type !== "Join") {
-    throw new Error("Gather step must lower to Project(Join(...)) shape.");
-  }
-  const stepJoin = core.step.input;
-  if (stepJoin.right.type !== "TableScan") {
-    throw new Error("Gather step join RHS must be a table scan.");
-  }
-
-  const stepScan = extractStepScan(stepJoin.left);
-  let frontierColumn: string | undefined;
-  const stepConditions: BuilderCondition[] = [];
-  for (const predicate of stepScan.predicates.flatMap((expr) => flattenPredicateTerms(expr))) {
-    if (
-      predicate.type === "Cmp" &&
-      predicate.op === "Eq" &&
-      predicate.right.type === "RowId" &&
-      predicate.right.source === "Frontier"
-    ) {
-      frontierColumn = predicate.left.column;
-      continue;
-    }
-    stepConditions.push(...relationPredicateToBuilderConditions(predicate));
-  }
-
-  if (!frontierColumn) {
-    throw new Error("Gather step predicate must include a frontier row-id comparison.");
-  }
-
-  const firstJoin = stepJoin.on[0];
-  if (!firstJoin) {
-    throw new Error("Gather step join requires an explicit ON predicate.");
-  }
-  const leftScope = firstJoin.left.scope ?? stepScan.table;
-  const rightScope = firstJoin.right.scope ?? stepJoin.right.table;
-
-  return {
-    table: seed.baseTable,
-    conditions: seed.conditions,
-    joins: [],
-    resultElementIndex: null,
-    recursive: {
-      table: stepScan.table,
-      inner_column: toRuntimeColumn(stripQualifier(frontierColumn)),
-      outer_column: "_id",
-      select_columns: null,
-      filters: stepConditions.map((condition) => toCondition(condition, schema, stepScan.table)),
-      joins: [
-        {
-          table: stepJoin.right.table,
-          alias: rightScope === stepJoin.right.table ? null : rightScope,
-          on: [`${leftScope}.${firstJoin.left.column}`, `${rightScope}.${firstJoin.right.column}`],
-        },
-      ],
-      result_element_index: 1,
-      max_depth: core.maxDepth,
-    },
-  };
-}
-
-function parseRuntimeCorePlan(core: RelExpr, schema: WasmSchema): RuntimeCorePlan {
-  if (core.type === "Gather") {
-    return parseGatherCore(core, schema);
-  }
-
-  const linear =
-    core.type === "Project" ? extractLinearJoinInfo(core.input) : extractLinearJoinInfo(core);
-  return {
-    table: linear.baseTable,
-    conditions: linear.conditions,
-    joins: linear.joins,
-    resultElementIndex: core.type === "Project" ? linear.joins.length : null,
-  };
-}
-
-function unwrapQueryEnvelope(expr: RelExpr): QueryEnvelope {
-  let current = expr;
-  let orderBy: Array<[string, "Ascending" | "Descending"]> = [];
-  let offset = 0;
-  let limit: number | null = null;
-
-  while (true) {
-    switch (current.type) {
-      case "OrderBy":
-        if (orderBy.length === 0) {
-          orderBy = current.terms.map((term) => [
-            term.column.column,
-            term.direction === "Desc" ? "Descending" : "Ascending",
-          ]);
-        }
-        current = current.input;
-        break;
-      case "Offset":
-        offset = current.offset;
-        current = current.input;
-        break;
-      case "Limit":
-        limit = current.limit;
-        current = current.input;
-        break;
-      default:
-        return {
-          core: current,
-          orderBy,
-          offset,
-          limit,
-        };
-    }
-  }
-}
-
 /**
  * Translate QueryBuilder JSON to WASM Query JSON.
  *
@@ -853,27 +539,25 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const builder: BuilderOutput = JSON.parse(builderJson);
   const relations = analyzeRelations(schema);
   const relation = translateBuilderToRelationIr(builderJson, schema);
-  const envelope = unwrapQueryEnvelope(relation);
-  const corePlan = parseRuntimeCorePlan(envelope.core, schema);
-
   const query = {
-    table: corePlan.table,
+    table: builder.table,
     branches: [],
     disjuncts: [
       {
-        conditions: corePlan.conditions.map((cond) => toCondition(cond, schema, corePlan.table)),
+        conditions: (builder.conditions ?? []).map((cond) =>
+          toCondition(cond, schema, builder.table),
+        ),
       },
     ],
-    order_by: envelope.orderBy,
-    offset: envelope.offset,
-    limit: envelope.limit,
+    order_by: (builder.orderBy ?? []).map(([column, direction]) => [
+      column,
+      direction === "desc" ? "Descending" : "Ascending",
+    ]),
+    offset: typeof builder.offset === "number" ? builder.offset : 0,
+    limit: typeof builder.limit === "number" ? builder.limit : null,
     include_deleted: false,
-    array_subqueries: toArraySubqueries(builder.includes ?? {}, corePlan.table, relations),
-    joins: corePlan.joins,
-    ...(corePlan.resultElementIndex !== null
-      ? { result_element_index: corePlan.resultElementIndex }
-      : {}),
-    ...(corePlan.recursive ? { recursive: corePlan.recursive } : {}),
+    array_subqueries: toArraySubqueries(builder.includes ?? {}, builder.table, relations),
+    joins: [],
     relation_ir: relation,
   };
 
