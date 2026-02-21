@@ -203,6 +203,10 @@ pub enum WasmPolicyExpr {
         table: String,
         condition: Box<WasmPolicyExpr>,
     },
+    ExistsRel {
+        #[tsify(type = "any")]
+        rel: serde_json::Value,
+    },
     Inherits {
         operation: WasmPolicyOperation,
         via_column: String,
@@ -398,6 +402,11 @@ impl From<groove::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
                     condition: Box::new((*condition).into()),
                 }
             }
+            groove::query_manager::policy::PolicyExpr::ExistsRel { rel } => {
+                WasmPolicyExpr::ExistsRel {
+                    rel: serde_json::to_value(rel).unwrap_or(serde_json::Value::Null),
+                }
+            }
             groove::query_manager::policy::PolicyExpr::Inherits {
                 operation,
                 via_column,
@@ -451,6 +460,12 @@ impl TryFrom<WasmPolicyExpr> for groove::query_manager::policy::PolicyExpr {
                 groove::query_manager::policy::PolicyExpr::Exists {
                     table,
                     condition: Box::new((*condition).try_into()?),
+                }
+            }
+            WasmPolicyExpr::ExistsRel { rel } => {
+                groove::query_manager::policy::PolicyExpr::ExistsRel {
+                    rel: serde_json::from_value(rel)
+                        .map_err(|err| format!("Invalid relation IR in ExistsRel: {err}"))?,
                 }
             }
             WasmPolicyExpr::Inherits {

@@ -1102,6 +1102,7 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
                 policy_expr_to_sql(condition)
             )
         }
+        PolicyExpr::ExistsRel { .. } => "EXISTS_REL(<relation_ir>)".to_string(),
         PolicyExpr::Inherits {
             operation,
             via_column,

@@ -292,7 +292,9 @@ impl QueryManager {
                 !self.evaluate_policy_for_values(expr, values, descriptor, session, table)
             }
 
-            PolicyExpr::Exists { .. } | PolicyExpr::Inherits { .. } => {
+            PolicyExpr::Exists { .. }
+            | PolicyExpr::ExistsRel { .. }
+            | PolicyExpr::Inherits { .. } => {
                 // EXISTS and INHERITS require actual row data - for writes, return true
                 // (TODO: implement for write policies that need these)
                 true

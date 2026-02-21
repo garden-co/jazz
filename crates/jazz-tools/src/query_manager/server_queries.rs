@@ -620,6 +620,11 @@ impl QueryManager {
                         graphs.push(graph);
                     }
                 }
+                ComplexClause::ExistsRel { rel } => {
+                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
+                        graphs.push(graph);
+                    }
+                }
             }
         }
 

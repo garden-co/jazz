@@ -10,7 +10,7 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{column_is_null, decode_column};
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, bind_outer_row_refs, evaluate_expr_recursive,
+    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs, evaluate_expr_recursive,
     normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
@@ -272,6 +272,9 @@ impl PolicyFilterNode {
             PolicyExpr::Exists { table, condition } => {
                 self.evaluate_exists_with_context(table, condition, row, io, row_loader, depth)
             }
+            PolicyExpr::ExistsRel { rel } => {
+                self.evaluate_exists_rel_with_context(rel, row, io, row_loader, depth)
+            }
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
                     e, row, descriptor, table_name, io, row_loader, depth, visited,
@@ -422,6 +425,45 @@ impl PolicyFilterNode {
         graph.result()
     }
 
+    /// Evaluate declarative EXISTS relation by compiling relation IR to a query graph.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_exists_rel_with_context(
+        &self,
+        rel: &crate::query_manager::relation_ir::RelExpr,
+        row: &Row,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        depth: usize,
+    ) -> bool {
+        if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+            return false;
+        }
+
+        let bound_rel = match bind_relation_refs(
+            rel,
+            &row.data,
+            &self.descriptor,
+            &self.session,
+            Some(row.id),
+        ) {
+            Some(expr) => expr,
+            None => return false,
+        };
+
+        let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, &self.schema, &self.branch) {
+            Some(g) => g,
+            None => return false,
+        };
+
+        for _ in 0..100 {
+            if graph.settle(io, row_loader) {
+                break;
+            }
+        }
+
+        graph.result()
+    }
+
     /// Evaluate the policy expression against a row.
     pub fn evaluate(&self, row: &Row) -> bool {
         self.evaluate_expr(&self.policy, row, self.initial_depth)
@@ -445,6 +487,7 @@ impl PolicyFilterNode {
                 max_depth,
             } => self.evaluate_inherits(*operation, via_column, *max_depth, row, depth),
             PolicyExpr::Exists { .. } => false, // Without context, fail closed.
+            PolicyExpr::ExistsRel { .. } => false, // Without context, fail closed.
 
             // And/Or/Not need to recurse through this method for INHERITS support
             PolicyExpr::And(exprs) => exprs.iter().all(|e| self.evaluate_expr(e, row, depth)),
@@ -533,10 +576,40 @@ fn collect_inherits_tables_recursive(
             tables.insert(table.clone());
             collect_inherits_tables_recursive(condition, descriptor, tables);
         }
+        PolicyExpr::ExistsRel { rel } => {
+            collect_relation_tables(rel, tables);
+        }
         PolicyExpr::Not(inner) => {
             collect_inherits_tables_recursive(inner, descriptor, tables);
         }
         _ => {}
+    }
+}
+
+fn collect_relation_tables(
+    rel: &crate::query_manager::relation_ir::RelExpr,
+    tables: &mut HashSet<String>,
+) {
+    use crate::query_manager::relation_ir::RelExpr;
+
+    match rel {
+        RelExpr::TableScan { table } => {
+            tables.insert(table.as_str().to_string());
+        }
+        RelExpr::Filter { input, .. }
+        | RelExpr::Project { input, .. }
+        | RelExpr::Distinct { input, .. }
+        | RelExpr::OrderBy { input, .. }
+        | RelExpr::Offset { input, .. }
+        | RelExpr::Limit { input, .. } => collect_relation_tables(input, tables),
+        RelExpr::Join { left, right, .. } => {
+            collect_relation_tables(left, tables);
+            collect_relation_tables(right, tables);
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            collect_relation_tables(seed, tables);
+            collect_relation_tables(step, tables);
+        }
     }
 }
 
@@ -644,7 +717,8 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
+    use crate::query_manager::relation_ir::RelExpr;
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, Value};
     use serde_json::json;
 
     fn test_descriptor() -> RowDescriptor {
@@ -841,6 +915,46 @@ mod tests {
         let policy = PolicyExpr::Exists {
             table: "memberships".into(),
             condition: Box::new(PolicyExpr::True),
+        };
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            policy,
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        assert!(node.has_inherits());
+        assert!(node.inherits_tables().contains("memberships"));
+    }
+
+    #[test]
+    fn test_policy_exists_rel_fails_closed_without_context() {
+        let session = Session::new("user1");
+        let policy = PolicyExpr::ExistsRel {
+            rel: RelExpr::TableScan {
+                table: TableName::new("memberships"),
+            },
+        };
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            policy,
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        let row = make_row("user1", "eng", "Doc 1");
+        assert!(!node.evaluate(&row));
+    }
+
+    #[test]
+    fn test_policy_exists_rel_registers_dependency_table() {
+        let session = Session::new("user1");
+        let policy = PolicyExpr::ExistsRel {
+            rel: RelExpr::TableScan {
+                table: TableName::new("memberships"),
+            },
         };
         let node = PolicyFilterNode::new(
             test_descriptor(),

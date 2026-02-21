@@ -437,41 +437,23 @@ describe("permissions DSL", () => {
     });
 
     const using = compiled.todos.select?.using;
-    expect(using?.type).toBe("Exists");
-    if (!using || using.type !== "Exists") {
-      throw new Error("Expected compiled recursive expression to be EXISTS.");
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected compiled recursive expression to be ExistsRel.");
     }
-    expect(using.table).toBe("resource_access_edges");
-    expect(using.condition.type).toBe("And");
-    if (using.condition.type !== "And") {
-      throw new Error("Expected anchor EXISTS condition to be AND.");
+    expect(using.rel.type).toBe("Project");
+    if (using.rel.type !== "Project") {
+      throw new Error("Expected projected relation IR.");
     }
-
-    expect(using.condition.exprs).toContainEqual({
-      type: "Cmp",
-      column: "resource",
-      op: "Eq",
-      value: {
-        type: "SessionRef",
-        path: ["__jazz_outer_row", "id"],
-      },
-    });
-    expect(using.condition.exprs).toContainEqual({
-      type: "Cmp",
-      column: "grant_role",
-      op: "Eq",
-      value: {
-        type: "Literal",
-        value: "viewer",
-      },
-    });
-
-    const recursiveExpr = using.condition.exprs.find((expr) => expr.type === "Or");
-    expect(recursiveExpr?.type).toBe("Or");
-    if (!recursiveExpr || recursiveExpr.type !== "Or") {
-      throw new Error("Expected recursive reachability OR expression.");
+    expect(using.rel.input.type).toBe("Filter");
+    if (using.rel.input.type !== "Filter") {
+      throw new Error("Expected filtered relation IR.");
     }
-    expect(recursiveExpr.exprs).toHaveLength(4);
+    expect(using.rel.input.input.type).toBe("Join");
+    if (using.rel.input.input.type !== "Join") {
+      throw new Error("Expected relation IR join.");
+    }
+    expect(using.rel.input.input.left.type).toBe("Gather");
   });
 
   it("lowers hop relation plans to relation IR join + project", () => {

@@ -55,6 +55,8 @@ function policyExprToSql(expr: PolicyExpr): string {
       return `${expr.column} IN @session.${expr.session_path.join(".")}`;
     case "Exists":
       return `EXISTS (SELECT FROM ${expr.table} WHERE ${policyExprToSql(expr.condition)})`;
+    case "ExistsRel":
+      return "EXISTS_REL(<relation_ir>)";
     case "Inherits":
       return expr.max_depth === undefined
         ? `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`

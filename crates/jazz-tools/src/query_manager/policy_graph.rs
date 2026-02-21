@@ -16,6 +16,7 @@ use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::index::ScanCondition;
 use super::policy::PolicyExpr;
+use super::query::Query;
 use super::session::Session;
 use super::types::ColumnName;
 use super::types::{Schema, TableName, TupleDescriptor, Value};
@@ -198,6 +199,41 @@ impl PolicyGraph {
         })
     }
 
+    /// Create a graph for declarative EXISTS relation checks.
+    ///
+    /// Compiles relation IR through the shared query planner, then appends an
+    /// ExistsOutput node over the compiled query output.
+    pub fn for_exists_rel(
+        rel: &crate::query_manager::relation_ir::RelExpr,
+        schema: &Schema,
+        branch: &str,
+    ) -> Option<Self> {
+        let mut query = Query::new("__policy_exists_rel");
+        query.branches = vec![branch.to_string()];
+        query.relation_ir = Some(rel.clone());
+
+        let mut graph = QueryGraph::compile(&query, schema)?;
+        let output_descriptor = match graph
+            .nodes
+            .get(graph.output_node.0 as usize)
+            .map(|c| &c.node)
+        {
+            Some(GraphNode::Output(node)) => node.output_tuple_descriptor().combined_descriptor(),
+            _ => return None,
+        };
+
+        let exists_node = ExistsOutputNode::new(output_descriptor);
+        let exists_id = graph.add_node_with_id(GraphNode::ExistsOutput(exists_node));
+        graph.add_edge(exists_id, graph.output_node);
+        graph.output_node = exists_id;
+
+        Some(Self {
+            table: graph.table,
+            graph,
+            exists_node: exists_id,
+        })
+    }
+
     /// Settle the graph. With synchronous Storage, always completes in one pass.
     ///
     /// The row_loader trait object is used to fetch row content by ObjectId.
@@ -249,6 +285,9 @@ impl PolicyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::relation_ir::{
+        ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+    };
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema,
     };
@@ -351,5 +390,34 @@ mod tests {
 
         // No rows found (object doesn't exist in empty OM), so result is false
         assert!(!pg.result());
+    }
+
+    #[test]
+    fn test_for_exists_rel_creates_graph() {
+        let schema = test_schema();
+        let rel = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("documents"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("owner_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Text("user1".to_string())),
+            },
+        };
+
+        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        assert!(graph.is_some(), "exists-rel graph should compile");
+
+        let graph = graph.expect("graph");
+        assert_eq!(graph.table().as_str(), "documents");
+        assert!(matches!(
+            graph
+                .graph
+                .nodes
+                .get(graph.exists_node.0 as usize)
+                .map(|c| &c.node),
+            Some(GraphNode::ExistsOutput(_))
+        ));
     }
 }

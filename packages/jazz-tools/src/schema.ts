@@ -1,4 +1,5 @@
 // Schema type definitions
+import type { RelExpr } from "./ir.js";
 
 export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
 export interface ArraySqlType {
@@ -76,6 +77,10 @@ export type PolicyExpr =
       type: "Exists";
       table: string;
       condition: PolicyExpr;
+    }
+  | {
+      type: "ExistsRel";
+      rel: RelExpr;
     }
   | {
       type: "Inherits";
