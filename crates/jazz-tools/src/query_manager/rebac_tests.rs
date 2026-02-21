@@ -17,7 +17,10 @@ use crate::sync_manager::{
 
 use super::QueryManager;
 use super::encoding::encode_row;
+use super::manager::QueryError;
+use super::policy::Operation;
 use super::policy::PolicyExpr;
+use super::relation_ir::{ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TablePolicies, TableSchema,
@@ -1554,6 +1557,252 @@ fn rebac_update_denied_by_using_exists_policy() {
         tips.contains(&alice_commit.id()),
         "Alice's update should be applied - she is an admin"
     );
+}
+
+#[test]
+fn local_insert_with_exists_rel_policy_denies_non_admin() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        },
+    });
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+
+    let bob_err = qm
+        .insert_with_session(
+            &mut storage,
+            "projects",
+            &[Value::Text("bob project".into())],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("non-admin insert should be denied");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("projects")
+    ));
+
+    qm.insert_with_session(
+        &mut storage,
+        "projects",
+        &[Value::Text("alice project".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("admin insert should be allowed");
+}
+
+#[test]
+fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+    let mut schema = Schema::new();
+    let folders_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let folders_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent_id".into(),
+            max_depth: Some(10),
+        },
+    );
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let root = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .expect("create root");
+    let child = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root.row_id),
+            ],
+        )
+        .expect("create child");
+
+    let update_err = qm
+        .update_with_session(
+            &mut storage,
+            child.row_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child renamed".into()),
+                Value::Uuid(root.row_id),
+            ],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("update should fail inherited WITH CHECK");
+    assert!(matches!(
+        update_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("folders")
+    ));
+}
+
+#[test]
+fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::Exists {
+            table: "admins".into(),
+            condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+
+    let bob_err = qm
+        .update_with_session(
+            &mut storage,
+            protected.row_id,
+            &[Value::Text("bob update".into())],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("non-admin update should be denied");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("protected")
+    ));
+
+    qm.update_with_session(
+        &mut storage,
+        protected.row_id,
+        &[Value::Text("alice update".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("admin update should be allowed");
+}
+
+#[test]
+fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        },
+    });
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+
+    let bob_err = qm
+        .delete_with_session(&mut storage, protected.row_id, Some(&Session::new("bob")))
+        .expect_err("non-admin delete should be denied");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Delete
+        } if table == TableName::new("protected")
+    ));
+
+    qm.delete_with_session(&mut storage, protected.row_id, Some(&Session::new("alice")))
+        .expect("admin delete should be allowed");
+    assert!(qm.row_is_deleted(&storage, "protected", protected.row_id));
 }
 
 // ============================================================================

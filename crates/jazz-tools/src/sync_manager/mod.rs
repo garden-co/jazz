@@ -398,4 +398,20 @@ impl SyncManager {
             });
         }
     }
+
+    /// Emit a query subscription rejection error to a client.
+    pub fn emit_query_subscription_rejected(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        reason: impl Into<String>,
+    ) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                query_id,
+                reason: reason.into(),
+            }),
+        });
+    }
 }

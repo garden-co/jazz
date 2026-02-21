@@ -10,8 +10,9 @@ use crate::storage::MemoryStorage;
 use crate::sync_manager::SyncManager;
 
 use super::{
-    ColumnDescriptor, ColumnType, PolicyExpr, QueryError, QueryManager, RowDescriptor, Schema,
-    Session as PolicySession, TableName, TablePolicies, TableSchema, Value, decode_row,
+    ColumnDescriptor, ColumnType, PolicyExpr, QueryBuilder, QueryError, QueryManager,
+    RowDescriptor, Schema, Session as PolicySession, TableName, TablePolicies, TableSchema, Value,
+    decode_row,
 };
 
 fn test_schema() -> Schema {
@@ -5332,6 +5333,49 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn server_sends_error_for_uncompilable_query_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    // Query references a table that does not exist in schema.
+    let invalid_query = QueryBuilder::new("no_such_table").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(42),
+            query: Box::new(invalid_query),
+            session: None,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let error_to_client = outbox.iter().find(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, .. }),
+            ) if *id == client_id && *query_id == QueryId(42)
+        )
+    });
+    assert!(
+        error_to_client.is_some(),
+        "Server should send an error payload when query subscription compilation fails"
+    );
 }
 
 #[test]

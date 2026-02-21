@@ -60,8 +60,16 @@ impl QueryManager {
             );
 
             let Ok(mut graph) = graph else {
-                // Query compilation failed (e.g., missing table)
-                // TODO: Send error back to client
+                // Query compilation failed (e.g., missing table) - notify client.
+                let reason = format!(
+                    "query compilation failed for query_id {}: invalid or unsupported query shape",
+                    sub.query_id.0
+                );
+                self.sync_manager.emit_query_subscription_rejected(
+                    sub.client_id,
+                    sub.query_id,
+                    reason,
+                );
                 continue;
             };
 

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
+import * as permissionsDsl from "./index.js";
 import {
   definePermissions,
-  definePermissionsV2,
-  relationExistsToPolicyV2,
+  relationExistsToPolicy,
   relationToIr,
   type PermissionRelation,
 } from "./index.js";
@@ -496,7 +496,7 @@ describe("permissions DSL", () => {
     ]);
   });
 
-  it("lowers recursive relation plans to gather IR and wraps in PolicyExprV2 exists", () => {
+  it("lowers recursive relation plans to gather IR and wraps in ExistsRel policy expr", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy, session }) => {
       const reachableTeams = policy.teams.gather({
@@ -533,8 +533,8 @@ describe("permissions DSL", () => {
     }
     expect(ir.input.input.left.type).toBe("Gather");
 
-    const existsExprV2 = relationExistsToPolicyV2(relation);
-    expect(existsExprV2).toMatchObject({
+    const existsExpr = relationExistsToPolicy(relation);
+    expect(existsExpr).toMatchObject({
       type: "ExistsRel",
       rel: {
         type: "Project",
@@ -542,8 +542,8 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("compiles policy.exists(relation) to ExistsRel in definePermissionsV2", () => {
-    const compiled = definePermissionsV2(app, ({ policy, session }) => {
+  it("compiles policy.exists(relation) to ExistsRel in definePermissions", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => {
       const reachableTeams = policy.teams.gather({
         start: {
           kind: "individual",
@@ -601,6 +601,10 @@ describe("permissions DSL", () => {
       expect((policy as { recursive?: unknown }).recursive).toBeUndefined();
       return [];
     });
+  });
+
+  it("does not expose transitional definePermissionsV2 API", () => {
+    expect("definePermissionsV2" in permissionsDsl).toBe(false);
   });
 
   it("rejects allowedTo when column is not a foreign key", () => {
