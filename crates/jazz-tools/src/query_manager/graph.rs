@@ -2760,6 +2760,39 @@ mod tests {
     }
 
     #[test]
+    fn compile_relation_ir_with_contains_filter_builds_filter_plan() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ])
+            .into(),
+        );
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            predicate: PredicateExpr::Contains {
+                left: ColumnRef::unscoped("tags"),
+                right: ValueRef::Literal(Value::Text("admin".to_string())),
+            },
+        };
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("contains filter relation should compile");
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Filter(_))),
+            "contains relation filters should lower to FilterNode",
+        );
+    }
+
+    #[test]
     fn compile_query_with_relation_ir_project_join_order_limit_shape() {
         let schema = recursive_hop_schema();
         let relation = RelExpr::Limit {

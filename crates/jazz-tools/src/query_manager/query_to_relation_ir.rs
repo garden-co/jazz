@@ -341,7 +341,10 @@ fn normalize_condition(condition: &Condition) -> Option<PredicateExpr> {
         Condition::IsNotNull { column } => Some(PredicateExpr::IsNotNull {
             column: ColumnRef::unscoped(column.clone()),
         }),
-        Condition::Contains { .. } => None,
+        Condition::Contains { column, value } => Some(PredicateExpr::Contains {
+            left: ColumnRef::unscoped(column.clone()),
+            right: ValueRef::Literal(value.clone()),
+        }),
     }
 }
 
@@ -450,14 +453,23 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_with_contains_filter_is_unsupported() {
+    fn normalize_query_with_contains_filter_is_supported() {
         let query = QueryBuilder::new("users")
             .filter_contains("tags", Value::Text("admin".to_string()))
             .build();
-
-        assert!(
-            normalize_query_to_rel_expr(&query).is_none(),
-            "contains predicates should fall back to legacy compilation"
+        let relation = normalize_query_to_rel_expr(&query)
+            .expect("contains filter should normalize to relation predicate");
+        assert_eq!(
+            relation,
+            RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("users"),
+                }),
+                predicate: PredicateExpr::Contains {
+                    left: ColumnRef::unscoped("tags"),
+                    right: ValueRef::Literal(Value::Text("admin".to_string())),
+                },
+            }
         );
     }
 
