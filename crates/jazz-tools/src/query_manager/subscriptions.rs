@@ -62,7 +62,7 @@ impl QueryManager {
         };
 
         // Compile query graph with schema context
-        let graph = Self::compile_graph_with_relation_fallback(
+        let graph = Self::compile_graph_from_relation_ir(
             &query,
             &self.schema,
             session.clone(),
@@ -134,7 +134,7 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph_with_relation_fallback(
+        let graph = Self::compile_graph_from_relation_ir(
             &query,
             schema,
             session.clone(),

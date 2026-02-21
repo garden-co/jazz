@@ -273,35 +273,51 @@ fn extract_step_scan(
 
 fn parse_frontier_and_filters(
     step_predicates: &[PredicateExpr],
-) -> Option<(String, Vec<Condition>)> {
-    let mut frontier_column: Option<String> = None;
+) -> Option<(String, String, Vec<Condition>)> {
+    let mut frontier_inner_column: Option<String> = None;
+    let mut frontier_outer_column: Option<String> = None;
     let mut step_filters = Vec::new();
     for predicate in step_predicates {
         let mut terms = Vec::new();
         flatten_predicate_terms(predicate, &mut terms);
         for term in terms {
-            match term {
+            let frontier_outer = match &term {
                 PredicateExpr::Cmp {
-                    left,
                     op: PredicateCmpOp::Eq,
                     right: ValueRef::RowId(RowIdRef::Frontier),
-                } => {
-                    let candidate = to_runtime_column(&left.column);
-                    if let Some(existing) = &frontier_column
-                        && existing != &candidate
-                    {
-                        return None;
-                    }
-                    frontier_column = Some(candidate);
+                    ..
+                } => Some("_id".to_string()),
+                PredicateExpr::Cmp {
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::FrontierColumn(column),
+                    ..
+                } => Some(to_runtime_column(&column.column)),
+                _ => None,
+            };
+            if let Some(candidate_outer) = frontier_outer {
+                let PredicateExpr::Cmp { left, .. } = term else {
+                    continue;
+                };
+                let candidate_inner = to_runtime_column(&left.column);
+                if let Some(existing) = &frontier_inner_column
+                    && existing != &candidate_inner
+                {
+                    return None;
                 }
-                _ => {
-                    let condition = predicate_term_to_condition(term)?;
-                    step_filters.push(condition);
+                if let Some(existing) = &frontier_outer_column
+                    && existing != &candidate_outer
+                {
+                    return None;
                 }
+                frontier_inner_column = Some(candidate_inner);
+                frontier_outer_column = Some(candidate_outer);
+                continue;
             }
+            let condition = predicate_term_to_condition(term)?;
+            step_filters.push(condition);
         }
     }
-    Some((frontier_column?, step_filters))
+    Some((frontier_inner_column?, frontier_outer_column?, step_filters))
 }
 
 fn project_columns_to_select(columns: &[ProjectColumn]) -> Option<Vec<String>> {
@@ -342,12 +358,13 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
             };
             let step_scan_table =
                 extract_step_scan(step_core, &mut step_predicates, &mut select_columns)?;
-            let (inner_column, step_filters) = parse_frontier_and_filters(&step_predicates)?;
+            let (inner_column, outer_column, step_filters) =
+                parse_frontier_and_filters(&step_predicates)?;
 
             let recursive = RecursiveSpec {
                 table: step_scan_table,
                 inner_column,
-                outer_column: "_id".to_string(),
+                outer_column,
                 select_columns,
                 filters: step_filters,
                 joins: Vec::new(),
@@ -378,7 +395,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
     let mut step_select_columns = None;
     let step_scan_table =
         extract_step_scan(step_left, &mut step_predicates, &mut step_select_columns)?;
-    let (inner_column, step_filters) = parse_frontier_and_filters(&step_predicates)?;
+    let (inner_column, outer_column, step_filters) = parse_frontier_and_filters(&step_predicates)?;
     let first_join = step_on.first()?;
     let left_scope = first_join
         .left
@@ -396,7 +413,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         RecursiveSpec {
             table: step_scan_table,
             inner_column,
-            outer_column: "_id".to_string(),
+            outer_column: outer_column.clone(),
             select_columns: step_select_columns,
             filters: step_filters,
             joins: Vec::new(),
@@ -414,7 +431,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         RecursiveSpec {
             table: step_scan_table,
             inner_column,
-            outer_column: "_id".to_string(),
+            outer_column,
             select_columns: None,
             filters: step_filters,
             joins: vec![JoinSpec {
