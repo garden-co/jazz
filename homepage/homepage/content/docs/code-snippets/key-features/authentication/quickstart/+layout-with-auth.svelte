@@ -1,7 +1,7 @@
 <script lang="ts">
   // [!code ++:2]
   import { JazzSvelteProvider } from "jazz-tools/svelte";
-  import Auth from '$lib/Auth.svelte';
+  import Auth from '$lib/components/Auth.svelte';
   import { JazzFestAccount } from "$lib/schema";
   // @ts-expect-error Will be there in a real app
   import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
