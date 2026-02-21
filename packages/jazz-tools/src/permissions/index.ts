@@ -97,7 +97,6 @@ interface RecursiveRelationPlan {
   kind: "recursive";
   alias: string;
   startTable: string;
-  startColumn: string;
   startFilters: RelationFilterEntry[];
   stepTable: string;
   stepInputColumn: string;
@@ -236,7 +235,7 @@ class PermissionRelationBuilder implements PermissionRelation {
           ...this.plan.joins,
           {
             table: rel.toTable,
-            left: this.plan.alias,
+            left: "id",
             right: rel.toColumn,
             viaHop: true,
           },
@@ -300,9 +299,8 @@ class PermissionRelationBuilder implements PermissionRelation {
     return new PermissionRelationBuilder(
       {
         kind: "recursive",
-        alias: "__recursive_current",
+        alias: this.plan.table,
         startTable: this.plan.table,
-        startColumn: "id",
         startFilters,
         stepTable: stepPlan.table,
         stepInputColumn: stripQualifier(currentFilter.column),
