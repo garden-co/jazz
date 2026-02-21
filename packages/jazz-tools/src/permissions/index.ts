@@ -79,14 +79,6 @@ interface TableRelationPlan {
   selectMap?: Record<string, string>;
 }
 
-interface SelfRelationPlan {
-  kind: "self";
-  alias: string;
-  filters: RelationFilterEntry[];
-  joins: RelationJoinSpec[];
-  selectMap?: Record<string, string>;
-}
-
 interface RecursiveRelationPlan {
   kind: "recursive";
   alias: string;
@@ -102,7 +94,7 @@ interface RecursiveRelationPlan {
   joins: RelationJoinSpec[];
 }
 
-type RelationPlan = TableRelationPlan | SelfRelationPlan | RecursiveRelationPlan;
+type RelationPlan = TableRelationPlan | RecursiveRelationPlan;
 
 interface TableJoinTarget {
   readonly __jazzPermissionKind: "table-builder";
@@ -121,12 +113,6 @@ export interface PermissionRelation {
     step: (ctx: { current: unknown }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation;
-}
-
-interface RecursiveRelationInput {
-  start: PermissionRelation;
-  step: (ctx: { self: PermissionRelation }) => PermissionRelation;
-  maxDepth?: number;
 }
 
 interface RecursiveCurrentValue {
@@ -184,10 +170,6 @@ class PermissionRelationBuilder implements PermissionRelation {
     const relationName = relation.trim();
     if (!relationName) {
       throw new Error("hopTo(...) requires a non-empty relation name.");
-    }
-
-    if (this.plan.kind === "self") {
-      throw new Error("hopTo(...) is not supported on self relations.");
     }
 
     if (this.plan.kind === "table") {
@@ -387,7 +369,6 @@ export type PolicyContext<TApp extends AppLike> = {
       RowFor<QueryBuilderFor<TApp, K>>
     >;
   } & {
-    recursive(input: RecursiveRelationInput): PermissionRelation;
     exists(relation: PermissionRelation): PolicyExpr;
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
@@ -522,8 +503,6 @@ function buildPolicyContext(
   for (const table of tableNames) {
     context[table] = buildTablePolicyBuilder(table, relationsByTable);
   }
-  context.recursive = (input: RecursiveRelationInput): PermissionRelation =>
-    buildRecursiveRelation(input, relationsByTable);
   context.exists = (relation: PermissionRelation): PolicyExpr => compileRelationExists(relation);
   return context;
 }
@@ -595,22 +574,6 @@ function createTableRelation(
       table,
       filters: [],
       joins: [],
-    },
-    relationsByTable,
-  );
-}
-
-function createSelfRelation(
-  alias: string,
-  relationsByTable: Map<string, Relation[]>,
-): PermissionRelation {
-  return new PermissionRelationBuilder(
-    {
-      kind: "self",
-      alias,
-      filters: [],
-      joins: [],
-      selectMap: { [alias]: alias },
     },
     relationsByTable,
   );
@@ -701,89 +664,21 @@ function normalizeRecursiveRelationDepth(maxDepth?: number): number {
     return RECURSIVE_POLICY_MAX_DEPTH_DEFAULT;
   }
   if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-    throw new Error("policy.recursive(...) maxDepth must be a positive integer.");
+    throw new Error("gather(...) maxDepth must be a positive integer.");
   }
   if (maxDepth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP) {
     throw new Error(
-      `policy.recursive(...) maxDepth ${maxDepth} exceeds hard cap ${RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP}.`,
+      `gather(...) maxDepth ${maxDepth} exceeds hard cap ${RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP}.`,
     );
   }
   return maxDepth;
-}
-
-function buildRecursiveRelation(
-  input: RecursiveRelationInput,
-  relationsByTable: Map<string, Relation[]>,
-): PermissionRelation {
-  const startPlan = getRelationPlan(input.start);
-  if (startPlan.kind !== "table") {
-    throw new Error("policy.recursive(...) start must begin from policy.<table>.");
-  }
-  if (startPlan.joins.length > 0) {
-    throw new Error("policy.recursive(...) start does not support joins in MVP.");
-  }
-  if (!startPlan.selectMap || Object.keys(startPlan.selectMap).length !== 1) {
-    throw new Error(
-      "policy.recursive(...) start must project exactly one column via select({ alias: column }).",
-    );
-  }
-
-  const [alias, startColumn] = Object.entries(startPlan.selectMap)[0];
-
-  const stepPlan = getRelationPlan(
-    input.step({ self: createSelfRelation(alias, relationsByTable) }),
-  );
-  if (stepPlan.kind !== "self") {
-    throw new Error(
-      "policy.recursive(...) step must be based on the provided self relation (step({ self }) => ...).",
-    );
-  }
-  if (stepPlan.joins.length !== 1) {
-    throw new Error("policy.recursive(...) step must include exactly one join in MVP.");
-  }
-  if (!stepPlan.selectMap || Object.keys(stepPlan.selectMap).length !== 1) {
-    throw new Error(
-      "policy.recursive(...) step must project exactly one column via select({ alias: column }).",
-    );
-  }
-  if (!Object.prototype.hasOwnProperty.call(stepPlan.selectMap, alias)) {
-    throw new Error(`policy.recursive(...) step select alias must match start alias "${alias}".`);
-  }
-
-  const stepJoin = stepPlan.joins[0];
-  const stepLeft = stripQualifier(stepJoin.left);
-  if (stepLeft !== alias) {
-    throw new Error(
-      `policy.recursive(...) step join left column must reference self alias "${alias}".`,
-    );
-  }
-
-  const maxDepth = normalizeRecursiveRelationDepth(input.maxDepth);
-
-  return new PermissionRelationBuilder(
-    {
-      kind: "recursive",
-      alias,
-      startTable: startPlan.table,
-      startColumn: stripQualifier(startColumn),
-      startFilters: [...startPlan.filters],
-      stepTable: stepJoin.table,
-      stepInputColumn: stripQualifier(stepJoin.right),
-      stepOutputColumn: stripQualifier(stepPlan.selectMap[alias]),
-      stepFilters: [...stepPlan.filters],
-      maxDepth,
-      filters: [],
-      joins: [],
-    },
-    relationsByTable,
-  );
 }
 
 function getRelationPlan(relation: PermissionRelation): RelationPlan {
   if (relation instanceof PermissionRelationBuilder) {
     return relation.toPlan();
   }
-  throw new Error("Expected a relation built from policy.<table> or policy.recursive(...).");
+  throw new Error("Expected a relation built from policy.<table> with where/join/hopTo/gather.");
 }
 
 function compileRelationExists(relation: PermissionRelation): PolicyExpr {
@@ -793,8 +688,6 @@ function compileRelationExists(relation: PermissionRelation): PolicyExpr {
       return compileTableRelationExists(plan);
     case "recursive":
       return compileRecursiveRelationExists(plan);
-    case "self":
-      throw new Error("Cannot use self relation directly in policy.exists(...).");
     default:
       throw new Error("Unsupported relation shape in policy.exists(...).");
   }
@@ -855,7 +748,7 @@ function compileTableRelationExists(plan: TableRelationPlan): PolicyExpr {
 function compileRecursiveRelationExists(plan: RecursiveRelationPlan): PolicyExpr {
   if (plan.joins.length > 1) {
     throw new Error(
-      "policy.exists(...) currently supports at most one join after policy.recursive(...) in MVP.",
+      "policy.exists(...) currently supports at most one join after gather(...) in MVP.",
     );
   }
 
@@ -888,9 +781,7 @@ function compileRecursiveRelationExists(plan: RecursiveRelationPlan): PolicyExpr
   const join = plan.joins[0];
   const joinLeft = stripQualifier(join.left);
   if (joinLeft !== plan.alias) {
-    throw new Error(
-      `First join after policy.recursive(...) must join from recursive alias "${plan.alias}".`,
-    );
+    throw new Error(`First join after gather(...) must join from recursive alias "${plan.alias}".`);
   }
 
   const anchorTable = join.table;
