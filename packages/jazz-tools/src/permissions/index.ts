@@ -85,29 +85,15 @@ interface RelationFilterEntry {
   raw: unknown;
 }
 
-interface TableRelationPlan {
-  kind: "table";
-  table: string;
+interface RelationExprState {
+  kind: "table" | "recursive";
+  outputTable: string;
+  base: RelExpr;
+  initialScope: string;
   filters: RelationFilterEntry[];
   joins: RelationJoinSpec[];
   selectMap?: Record<string, string>;
 }
-
-interface RecursiveRelationPlan {
-  kind: "recursive";
-  alias: string;
-  startTable: string;
-  startFilters: RelationFilterEntry[];
-  stepTable: string;
-  stepInputColumn: string;
-  stepOutputColumn: string;
-  stepFilters: RelationFilterEntry[];
-  maxDepth: number;
-  filters: RelationFilterEntry[];
-  joins: RelationJoinSpec[];
-}
-
-type RelationPlan = TableRelationPlan | RecursiveRelationPlan;
 
 interface TableJoinTarget {
   readonly __jazzPermissionKind: "table-builder";
@@ -134,16 +120,16 @@ interface RecursiveCurrentValue {
 
 class PermissionRelationBuilder implements PermissionRelation {
   constructor(
-    private readonly plan: RelationPlan,
+    private readonly state: RelationExprState,
     private readonly relations: Map<string, Relation[]>,
   ) {}
 
   where(input: unknown): PermissionRelation {
     const where = resolveRelationWhereInput(input);
-    const filters = [...this.plan.filters, ...extractRelationFilters(where)];
+    const filters = [...this.state.filters, ...extractRelationFilters(where)];
     return new PermissionRelationBuilder(
       {
-        ...this.plan,
+        ...this.state,
         filters,
       },
       this.relations,
@@ -153,7 +139,7 @@ class PermissionRelationBuilder implements PermissionRelation {
   join(target: RelationJoinTarget, on: { left: string; right: string }): PermissionRelation {
     const table = relationJoinTargetToTable(target);
     const joins = [
-      ...this.plan.joins,
+      ...this.state.joins,
       {
         table,
         left: on.left,
@@ -162,7 +148,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     ];
     return new PermissionRelationBuilder(
       {
-        ...this.plan,
+        ...this.state,
         joins,
       },
       this.relations,
@@ -172,7 +158,7 @@ class PermissionRelationBuilder implements PermissionRelation {
   select(columns: Record<string, string>): PermissionRelation {
     return new PermissionRelationBuilder(
       {
-        ...this.plan,
+        ...this.state,
         selectMap: normalizeRelationSelectMap(columns),
       },
       this.relations,
@@ -185,14 +171,14 @@ class PermissionRelationBuilder implements PermissionRelation {
       throw new Error("hopTo(...) requires a non-empty relation name.");
     }
 
-    if (this.plan.kind === "table") {
-      if (this.plan.joins.length > 0) {
+    if (this.state.kind === "table") {
+      if (this.state.joins.length > 0) {
         throw new Error("hopTo(...) currently supports a single hop per relation in MVP.");
       }
-      if (this.plan.selectMap && Object.keys(this.plan.selectMap).length > 0) {
+      if (this.state.selectMap && Object.keys(this.state.selectMap).length > 0) {
         throw new Error("hopTo(...) cannot be composed after select(...).");
       }
-      const rel = resolveNamedRelation(this.relations, this.plan.table, relationName);
+      const rel = resolveNamedRelation(this.relations, this.state.outputTable, relationName);
       const join: RelationJoinSpec =
         rel.type === "forward"
           ? {
@@ -209,30 +195,30 @@ class PermissionRelationBuilder implements PermissionRelation {
             };
       return new PermissionRelationBuilder(
         {
-          ...this.plan,
-          joins: [...this.plan.joins, join],
+          ...this.state,
+          joins: [...this.state.joins, join],
         },
         this.relations,
       );
     }
 
     // Recursive relation hop: anchored against the recursive row identity.
-    if (this.plan.joins.length > 0) {
+    if (this.state.joins.length > 0) {
       throw new Error("hopTo(...) currently supports a single hop per relation in MVP.");
     }
 
-    const rel = resolveNamedRelation(this.relations, this.plan.startTable, relationName);
+    const rel = resolveNamedRelation(this.relations, this.state.outputTable, relationName);
     if (rel.type !== "reverse") {
       throw new Error(
-        `Recursive hopTo("${relationName}") currently requires a reverse relation from "${this.plan.startTable}".`,
+        `Recursive hopTo("${relationName}") currently requires a reverse relation from "${this.state.outputTable}".`,
       );
     }
 
     return new PermissionRelationBuilder(
       {
-        ...this.plan,
+        ...this.state,
         joins: [
-          ...this.plan.joins,
+          ...this.state.joins,
           {
             table: rel.toTable,
             left: "id",
@@ -250,10 +236,10 @@ class PermissionRelationBuilder implements PermissionRelation {
     step: (ctx: { current: unknown }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation {
-    if (this.plan.kind !== "table") {
+    if (this.state.kind !== "table") {
       throw new Error("gather(...) must start from policy.<table>.");
     }
-    if (this.plan.joins.length > 0) {
+    if (this.state.joins.length > 0) {
       throw new Error("gather(...) does not support pre-joined start relations in MVP.");
     }
     if (typeof options.step !== "function") {
@@ -261,23 +247,23 @@ class PermissionRelationBuilder implements PermissionRelation {
     }
 
     const startWhere = resolveRelationWhereInput(options.start);
-    const startFilters = [...this.plan.filters, ...extractRelationFilters(startWhere)];
+    const startFilters = [...this.state.filters, ...extractRelationFilters(startWhere)];
 
     const currentToken: RecursiveCurrentValue = {
       __jazzPermissionKind: "recursive-current",
     };
-    const stepPlan = getRelationPlan(options.step({ current: currentToken }));
-    if (stepPlan.kind !== "table") {
+    const stepState = getRelationState(options.step({ current: currentToken }));
+    if (stepState.kind !== "table") {
       throw new Error("gather(...) step must return a relation built from policy.<table>.");
     }
-    if (stepPlan.joins.length !== 1 || !stepPlan.joins[0]?.viaHop) {
+    if (stepState.joins.length !== 1 || !stepState.joins[0]?.viaHop) {
       throw new Error("gather(...) step must include exactly one hopTo(...).");
     }
-    if (stepPlan.selectMap && Object.keys(stepPlan.selectMap).length > 0) {
+    if (stepState.selectMap && Object.keys(stepState.selectMap).length > 0) {
       throw new Error("gather(...) step does not support select(...).");
     }
 
-    const currentFilters = stepPlan.filters.filter((filter) =>
+    const currentFilters = stepState.filters.filter((filter) =>
       isRecursiveCurrentFilter(filter.raw, currentToken),
     );
     if (currentFilters.length !== 1) {
@@ -286,36 +272,85 @@ class PermissionRelationBuilder implements PermissionRelation {
       );
     }
     const currentFilter = currentFilters[0];
-    const stepFilters = stepPlan.filters.filter((filter) => filter !== currentFilter);
-    const stepJoin = stepPlan.joins[0];
+    const stepFilters = stepState.filters.filter((filter) => filter !== currentFilter);
+    const stepJoin = stepState.joins[0];
 
-    if (stepJoin.table !== this.plan.table || stripQualifier(stepJoin.right) !== "id") {
+    if (stepJoin.table !== this.state.outputTable || stripQualifier(stepJoin.right) !== "id") {
       throw new Error(
-        `gather(...) step must hop back to "${this.plan.table}" rows via hopTo(...).`,
+        `gather(...) step must hop back to "${this.state.outputTable}" rows via hopTo(...).`,
       );
     }
+
+    const seedPredicates = startFilters.flatMap((filter) =>
+      relationFilterToPredicates(filter, this.state.initialScope),
+    );
+    const seed = applyRelFilter(this.state.base, seedPredicates);
+
+    const stepPredicates = [
+      ...stepFilters.flatMap((filter) => relationFilterToPredicates(filter, stepState.outputTable)),
+      {
+        type: "Cmp",
+        left: {
+          scope: stepState.outputTable,
+          column: stripQualifier(currentFilter.column),
+        },
+        op: "Eq",
+        right: {
+          type: "RowId",
+          source: "Frontier",
+        },
+      } satisfies RelPredicateExpr,
+    ];
+    const stepFiltered = applyRelFilter(stepState.base, stepPredicates);
+
+    const recursiveHopScope = "__recursive_hop_0";
+    const stepProjected: RelExpr = {
+      type: "Project",
+      input: {
+        type: "Join",
+        left: stepFiltered,
+        right: {
+          type: "TableScan",
+          table: this.state.outputTable,
+        },
+        on: [
+          {
+            left: {
+              scope: stepState.outputTable,
+              column: stripQualifier(stepJoin.left),
+            },
+            right: { scope: recursiveHopScope, column: "id" },
+          },
+        ],
+        joinKind: "Inner",
+      },
+      columns: projectHopResult(recursiveHopScope),
+    };
 
     const maxDepth = normalizeRecursiveRelationDepth(options.maxDepth);
     return new PermissionRelationBuilder(
       {
         kind: "recursive",
-        alias: this.plan.table,
-        startTable: this.plan.table,
-        startFilters,
-        stepTable: stepPlan.table,
-        stepInputColumn: stripQualifier(currentFilter.column),
-        stepOutputColumn: stripQualifier(stepJoin.left),
-        stepFilters,
-        maxDepth,
+        outputTable: this.state.outputTable,
+        base: {
+          type: "Gather",
+          seed,
+          step: stepProjected,
+          frontierKey: { type: "RowId", source: "Current" },
+          maxDepth,
+          dedupeKey: [{ type: "RowId", source: "Current" }],
+        },
+        initialScope: this.state.outputTable,
         filters: [],
         joins: [],
+        selectMap: undefined,
       },
       this.relations,
     );
   }
 
-  toPlan(): RelationPlan {
-    return this.plan;
+  toState(): RelationExprState {
+    return this.state;
   }
 }
 
@@ -619,9 +654,15 @@ function createTableRelation(
   return new PermissionRelationBuilder(
     {
       kind: "table",
-      table,
+      outputTable: table,
+      base: {
+        type: "TableScan",
+        table,
+      },
+      initialScope: table,
       filters: [],
       joins: [],
+      selectMap: undefined,
     },
     relationsByTable,
   );
@@ -722,9 +763,9 @@ function normalizeRecursiveRelationDepth(maxDepth?: number): number {
   return maxDepth;
 }
 
-function getRelationPlan(relation: PermissionRelation): RelationPlan {
+function getRelationState(relation: PermissionRelation): RelationExprState {
   if (relation instanceof PermissionRelationBuilder) {
-    return relation.toPlan();
+    return relation.toState();
   }
   throw new Error("Expected a relation built from policy.<table> with where/join/hopTo/gather.");
 }
@@ -984,107 +1025,24 @@ function applyRelationTail(options: {
   return relation;
 }
 
-function compileTableRelationToRelExpr(plan: TableRelationPlan): RelExpr {
+function relationStateToRelExpr(state: RelationExprState): RelExpr {
   return applyRelationTail({
-    base: {
-      type: "TableScan",
-      table: plan.table,
-    },
-    initialScope: plan.table,
-    joins: plan.joins,
-    filters: plan.filters,
-    selectMap: plan.selectMap,
-    joinAlias: (join, index) => (join.viaHop ? `__hop_${index}` : `__join_${index}`),
+    base: state.base,
+    initialScope: state.initialScope,
+    joins: state.joins,
+    filters: state.filters,
+    selectMap: state.selectMap,
+    joinAlias: (join, index) =>
+      state.kind === "recursive"
+        ? `__recursive_join_${index}`
+        : join.viaHop
+          ? `__hop_${index}`
+          : `__join_${index}`,
   });
-}
-
-function compileRecursiveRelationToRelExpr(plan: RecursiveRelationPlan): RelExpr {
-  const seedPredicates = plan.startFilters.flatMap((filter) =>
-    relationFilterToPredicates(filter, plan.startTable),
-  );
-  const seed = applyRelFilter(
-    {
-      type: "TableScan",
-      table: plan.startTable,
-    },
-    seedPredicates,
-  );
-
-  const stepPredicates = [
-    ...plan.stepFilters.flatMap((filter) => relationFilterToPredicates(filter, plan.stepTable)),
-    {
-      type: "Cmp",
-      left: {
-        scope: plan.stepTable,
-        column: plan.stepInputColumn,
-      },
-      op: "Eq",
-      right: {
-        type: "RowId",
-        source: "Frontier",
-      },
-    } satisfies RelPredicateExpr,
-  ];
-  const stepFiltered = applyRelFilter(
-    {
-      type: "TableScan",
-      table: plan.stepTable,
-    },
-    stepPredicates,
-  );
-
-  const recursiveHopScope = "__recursive_hop_0";
-  const stepJoined: RelExpr = {
-    type: "Join",
-    left: stepFiltered,
-    right: {
-      type: "TableScan",
-      table: plan.startTable,
-    },
-    on: [
-      {
-        left: { scope: plan.stepTable, column: plan.stepOutputColumn },
-        right: { scope: recursiveHopScope, column: "id" },
-      },
-    ],
-    joinKind: "Inner",
-  };
-  const stepProjected: RelExpr = {
-    type: "Project",
-    input: stepJoined,
-    columns: projectHopResult(recursiveHopScope),
-  };
-
-  const relation: RelExpr = {
-    type: "Gather",
-    seed,
-    step: stepProjected,
-    frontierKey: { type: "RowId", source: "Current" },
-    maxDepth: plan.maxDepth,
-    dedupeKey: [{ type: "RowId", source: "Current" }],
-  };
-  return applyRelationTail({
-    base: relation,
-    initialScope: plan.alias,
-    joins: plan.joins,
-    filters: plan.filters,
-    joinAlias: (_join, index) => `__recursive_join_${index}`,
-  });
-}
-
-function compileRelationPlanToRelExpr(plan: RelationPlan): RelExpr {
-  switch (plan.kind) {
-    case "table":
-      return compileTableRelationToRelExpr(plan);
-    case "recursive":
-      return compileRecursiveRelationToRelExpr(plan);
-    default:
-      throw new Error("Unsupported relation shape in relation IR compiler.");
-  }
 }
 
 export function relationToIr(relation: PermissionRelation): RelExpr {
-  return compileRelationPlanToRelExpr(getRelationPlan(relation));
+  return relationStateToRelExpr(getRelationState(relation));
 }
 
 export function relationExistsToPolicyV2(relation: PermissionRelation): PolicyExprV2 {
