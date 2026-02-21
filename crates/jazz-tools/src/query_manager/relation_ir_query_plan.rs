@@ -498,6 +498,7 @@ pub(crate) fn lower_relation_to_execution_query(
     branches: &[String],
     include_deleted: bool,
     array_subqueries: Vec<ArraySubquerySpec>,
+    select_columns: Option<Vec<String>>,
 ) -> Option<Query> {
     let envelope = unwrap_query_envelope(relation);
     let core_plan = parse_runtime_core_plan(envelope.core)?;
@@ -518,7 +519,7 @@ pub(crate) fn lower_relation_to_execution_query(
     lowered.recursive = core_plan.recursive;
     lowered.include_deleted = include_deleted;
     lowered.array_subqueries = array_subqueries;
-    lowered.select_columns = None;
+    lowered.select_columns = select_columns;
     lowered.relation_ir = None;
     Some(lowered)
 }

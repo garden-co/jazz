@@ -8,6 +8,7 @@ pub mod policy;
 pub mod policy_graph;
 pub mod policy_ir;
 pub mod query;
+mod query_to_relation_ir;
 pub mod relation_ir;
 mod relation_ir_query_plan;
 pub mod server_queries;
