@@ -60,13 +60,18 @@ interface ExistsCondition {
   readonly where: Record<string, unknown>;
 }
 
+interface ExistsRelationCondition {
+  readonly __jazzPermissionKind: "exists-relation";
+  readonly relation: PermissionRelation;
+}
+
 interface CompoundCondition {
   readonly __jazzPermissionKind: "compound";
   readonly op: "And" | "Or";
   readonly conditions: Condition[];
 }
 
-type Condition = PolicyExpr | CompoundCondition | ExistsCondition;
+type Condition = PolicyExpr | CompoundCondition | ExistsCondition | ExistsRelationCondition;
 
 interface RelationJoinSpec {
   table: string;
@@ -378,7 +383,7 @@ export type PolicyContext<TApp extends AppLike> = {
       RowFor<QueryBuilderFor<TApp, K>>
     >;
   } & {
-    exists(relation: PermissionRelation): PolicyExpr;
+    exists(relation: PermissionRelation): ExistsRelationCondition;
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
   allOf: (conditions: readonly unknown[]) => Condition;
@@ -387,6 +392,20 @@ export type PolicyContext<TApp extends AppLike> = {
 };
 
 export type CompiledPermissions = Record<string, TablePolicies>;
+
+export interface OperationPolicyV2 {
+  using?: PolicyExprV2;
+  with_check?: PolicyExprV2;
+}
+
+export interface TablePoliciesV2 {
+  select?: OperationPolicyV2;
+  insert?: OperationPolicyV2;
+  update?: OperationPolicyV2;
+  delete?: OperationPolicyV2;
+}
+
+export type CompiledPermissionsV2 = Record<string, TablePoliciesV2>;
 
 type PermissionWhereInput<T> =
   T extends Array<infer U>
@@ -459,6 +478,25 @@ export function definePermissions<TApp extends AppLike>(
   return compileRules(rules, fkColumnsByTable);
 }
 
+export function definePermissionsV2<TApp extends AppLike>(
+  app: TApp,
+  factory: (ctx: PolicyContext<TApp>) => RuleLike[] | RuleLike,
+): CompiledPermissionsV2 {
+  const fkColumnsByTable = collectFkColumnsByTable(app);
+  const relationsByTable = collectRelationsByTable(app);
+  const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
+  const ctx = {
+    policy: buildPolicyContext(tableNames, relationsByTable),
+    anyOf,
+    allOf,
+    allowedTo: createAllowedToContext(),
+    session: createSessionContext(),
+  } as unknown as PolicyContext<TApp>;
+  const output = factory(ctx);
+  const rules = Array.isArray(output) ? output : [output];
+  return compileRulesV2(rules, fkColumnsByTable);
+}
+
 function collectFkColumnsByTable(app: AppLike): Map<string, Set<string>> {
   const result = new Map<string, Set<string>>();
   const schema = (app as { wasmSchema?: unknown }).wasmSchema;
@@ -512,7 +550,10 @@ function buildPolicyContext(
   for (const table of tableNames) {
     context[table] = buildTablePolicyBuilder(table, relationsByTable);
   }
-  context.exists = (relation: PermissionRelation): PolicyExpr => compileRelationExists(relation);
+  context.exists = (relation: PermissionRelation): ExistsRelationCondition => ({
+    __jazzPermissionKind: "exists-relation",
+    relation,
+  });
   return context;
 }
 
@@ -1486,6 +1527,9 @@ function resolveWhereInput(input: unknown): Condition {
   if (isExistsCondition(input)) {
     return input;
   }
+  if (isExistsRelationCondition(input)) {
+    return input;
+  }
   if (isCompoundCondition(input)) {
     return input;
   }
@@ -1643,6 +1687,294 @@ function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): Compou
   };
 }
 
+function compileRulesV2(
+  rules: RuleLike[],
+  fkColumnsByTable: Map<string, Set<string>>,
+): CompiledPermissionsV2 {
+  const compiled: CompiledPermissionsV2 = {};
+  for (const ruleLike of rules) {
+    const rule = isUpdateRuleBuilder(ruleLike) ? ruleLike.toRule() : ruleLike;
+    if (!compiled[rule.table]) {
+      compiled[rule.table] = {};
+    }
+    const tablePolicies = compiled[rule.table];
+    switch (rule.action) {
+      case "read":
+        tablePolicies.select = mergeOperationPolicyV2(tablePolicies.select, {
+          using: compileConditionV2(rule.using, rule.table, fkColumnsByTable),
+        });
+        break;
+      case "insert":
+        tablePolicies.insert = mergeOperationPolicyV2(tablePolicies.insert, {
+          with_check: compileConditionV2(rule.withCheck, rule.table, fkColumnsByTable),
+        });
+        break;
+      case "update":
+        tablePolicies.update = mergeOperationPolicyV2(tablePolicies.update, {
+          using: compileConditionV2(rule.using, rule.table, fkColumnsByTable),
+          with_check: compileConditionV2(rule.withCheck, rule.table, fkColumnsByTable),
+        });
+        break;
+      case "delete":
+        tablePolicies.delete = mergeOperationPolicyV2(tablePolicies.delete, {
+          using: compileConditionV2(rule.using, rule.table, fkColumnsByTable),
+        });
+        break;
+      default:
+        throw new Error(`Unsupported action ${(rule as { action: string }).action}`);
+    }
+  }
+  return compiled;
+}
+
+function mergeOperationPolicyV2(
+  existing: OperationPolicyV2 | undefined,
+  incoming: OperationPolicyV2,
+): OperationPolicyV2 {
+  return {
+    using: mergeExprWithOrV2(existing?.using, incoming.using),
+    with_check: mergeExprWithOrV2(existing?.with_check, incoming.with_check),
+  };
+}
+
+function mergeExprWithOrV2(left?: PolicyExprV2, right?: PolicyExprV2): PolicyExprV2 | undefined {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  const exprs: PolicyExprV2[] = [];
+  if (left.type === "Or") {
+    exprs.push(...left.exprs);
+  } else {
+    exprs.push(left);
+  }
+  if (right.type === "Or") {
+    exprs.push(...right.exprs);
+  } else {
+    exprs.push(right);
+  }
+  return { type: "Or", exprs };
+}
+
+function compileConditionV2(
+  condition: Condition | undefined,
+  table: string,
+  fkColumnsByTable: Map<string, Set<string>>,
+): PolicyExprV2 | undefined {
+  if (!condition) {
+    return undefined;
+  }
+  if (isExistsRelationCondition(condition)) {
+    return relationExistsToPolicyV2(condition.relation);
+  }
+  if (isPolicyExpr(condition)) {
+    assertInheritsColumns(condition, table, fkColumnsByTable);
+    return legacyPolicyExprToV2(condition);
+  }
+  if (isExistsCondition(condition)) {
+    const filters = extractRelationFilters(condition.where);
+    const predicates = filters.flatMap((filter) =>
+      relationFilterToPredicates(filter, condition.table),
+    );
+    return {
+      type: "ExistsRel",
+      rel: applyRelFilter(
+        {
+          type: "TableScan",
+          table: condition.table,
+        },
+        predicates,
+      ),
+    };
+  }
+  if (isCompoundCondition(condition)) {
+    const compiledChildren = condition.conditions.map((child) =>
+      compileConditionV2(child, table, fkColumnsByTable),
+    );
+    const exprs = compiledChildren.filter((expr): expr is PolicyExprV2 => Boolean(expr));
+    if (exprs.length === 0) {
+      return condition.op === "And" ? { type: "True" } : { type: "False" };
+    }
+    if (exprs.length === 1) {
+      return exprs[0];
+    }
+    return condition.op === "And" ? { type: "And", exprs } : { type: "Or", exprs };
+  }
+  throw new Error("Unsupported condition in permissions v2 compiler.");
+}
+
+function legacyPolicyExprToV2(expr: PolicyExpr): PolicyExprV2 {
+  switch (expr.type) {
+    case "Cmp":
+      return {
+        type: "Predicate",
+        predicate: {
+          type: "Cmp",
+          left: { column: expr.column },
+          op: expr.op,
+          right: policyValueToRelValueRef(expr.value),
+        },
+      };
+    case "IsNull":
+      return {
+        type: "Predicate",
+        predicate: {
+          type: "IsNull",
+          column: { column: expr.column },
+        },
+      };
+    case "IsNotNull":
+      return {
+        type: "Predicate",
+        predicate: {
+          type: "IsNotNull",
+          column: { column: expr.column },
+        },
+      };
+    case "In":
+      return {
+        type: "Predicate",
+        predicate: {
+          type: "In",
+          left: { column: expr.column },
+          values: [{ type: "SessionRef", path: expr.session_path }],
+        },
+      };
+    case "Exists": {
+      const predicate = legacyPolicyExprToPredicate(expr.condition);
+      if (!predicate) {
+        throw new Error(
+          `Cannot convert legacy Exists condition on table "${expr.table}" to PolicyExprV2 predicate.`,
+        );
+      }
+      return {
+        type: "ExistsRel",
+        rel: {
+          type: "Filter",
+          input: {
+            type: "TableScan",
+            table: expr.table,
+          },
+          predicate,
+        },
+      };
+    }
+    case "Inherits":
+      return {
+        type: "Inherits",
+        operation: expr.operation,
+        viaColumn: expr.via_column,
+        ...(expr.max_depth !== undefined ? { maxDepth: expr.max_depth } : {}),
+      };
+    case "And":
+      return {
+        type: "And",
+        exprs: expr.exprs.map(legacyPolicyExprToV2),
+      };
+    case "Or":
+      return {
+        type: "Or",
+        exprs: expr.exprs.map(legacyPolicyExprToV2),
+      };
+    case "Not":
+      return {
+        type: "Not",
+        expr: legacyPolicyExprToV2(expr.expr),
+      };
+    case "True":
+      return { type: "True" };
+    case "False":
+      return { type: "False" };
+    default:
+      throw new Error("Unsupported legacy policy expression for v2 conversion.");
+  }
+}
+
+function policyValueToRelValueRef(value: PolicyValue): RelValueRef {
+  if (value.type === "Literal") {
+    return { type: "Literal", value: value.value };
+  }
+  if (value.path[0] === OUTER_ROW_SESSION_PREFIX && value.path[1]) {
+    return {
+      type: "OuterColumn",
+      column: { column: value.path[1] },
+    };
+  }
+  return {
+    type: "SessionRef",
+    path: value.path,
+  };
+}
+
+function legacyPolicyExprToPredicate(expr: PolicyExpr): RelPredicateExpr | undefined {
+  switch (expr.type) {
+    case "Cmp":
+      return {
+        type: "Cmp",
+        left: { column: expr.column },
+        op: expr.op,
+        right: policyValueToRelValueRef(expr.value),
+      };
+    case "IsNull":
+      return {
+        type: "IsNull",
+        column: { column: expr.column },
+      };
+    case "IsNotNull":
+      return {
+        type: "IsNotNull",
+        column: { column: expr.column },
+      };
+    case "In":
+      return {
+        type: "In",
+        left: { column: expr.column },
+        values: [{ type: "SessionRef", path: expr.session_path }],
+      };
+    case "And": {
+      const exprs = expr.exprs.map(legacyPolicyExprToPredicate);
+      if (exprs.some((inner) => !inner)) {
+        return undefined;
+      }
+      return {
+        type: "And",
+        exprs: exprs as RelPredicateExpr[],
+      };
+    }
+    case "Or": {
+      const exprs = expr.exprs.map(legacyPolicyExprToPredicate);
+      if (exprs.some((inner) => !inner)) {
+        return undefined;
+      }
+      return {
+        type: "Or",
+        exprs: exprs as RelPredicateExpr[],
+      };
+    }
+    case "Not": {
+      const inner = legacyPolicyExprToPredicate(expr.expr);
+      if (!inner) {
+        return undefined;
+      }
+      return {
+        type: "Not",
+        expr: inner,
+      };
+    }
+    case "True":
+      return { type: "True" };
+    case "False":
+      return { type: "False" };
+    case "Exists":
+    case "Inherits":
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
 function compileRules(
   rules: RuleLike[],
   fkColumnsByTable: Map<string, Set<string>>,
@@ -1725,6 +2057,11 @@ function compileCondition(
   if (isPolicyExpr(condition)) {
     assertInheritsColumns(condition, table, fkColumnsByTable);
     return condition;
+  }
+  if (isExistsRelationCondition(condition)) {
+    const compiled = compileRelationExists(condition.relation);
+    assertInheritsColumns(compiled, table, fkColumnsByTable);
+    return compiled;
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
@@ -1831,6 +2168,14 @@ function isExistsCondition(input: unknown): input is ExistsCondition {
     input.__jazzPermissionKind === "exists" &&
     typeof input.table === "string" &&
     isPlainObject(input.where)
+  );
+}
+
+function isExistsRelationCondition(input: unknown): input is ExistsRelationCondition {
+  return (
+    isPlainObject(input) &&
+    input.__jazzPermissionKind === "exists-relation" &&
+    isPlainObject(input.relation)
   );
 }
 
