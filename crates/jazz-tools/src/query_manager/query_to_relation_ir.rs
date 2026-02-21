@@ -12,37 +12,66 @@ pub(crate) fn normalize_query_to_rel_expr(query: &Query) -> Option<RelExpr> {
     if query.has_relation_ir() {
         return None;
     }
-    if query.has_recursive() && (!query.joins.is_empty() || query.result_element_index.is_some()) {
+    if query.has_recursive() && query.result_element_index.is_some() {
         return None;
     }
 
     let mut relation = RelExpr::TableScan { table: query.table };
     let mut current_scope = query.effective_name().to_string();
-
-    for join in &query.joins {
-        let (left_raw, right_raw) = join.on.as_ref()?;
-        let right_scope = join.effective_name().to_string();
-        relation = RelExpr::Join {
-            left: Box::new(relation),
-            right: Box::new(RelExpr::TableScan { table: join.table }),
-            on: vec![JoinCondition {
-                left: parse_join_column(left_raw, &current_scope)?,
-                right: parse_join_column(right_raw, &right_scope)?,
-            }],
-            join_kind: JoinKind::Inner,
-        };
-        current_scope = right_scope;
-    }
-
     let predicate = normalize_disjuncts(&query.disjuncts)?;
-    if !matches!(predicate, PredicateExpr::True) {
-        relation = RelExpr::Filter {
-            input: Box::new(relation),
-            predicate,
-        };
-    }
     if let Some(recursive) = query.recursive.as_ref() {
-        relation = normalize_recursive_spec(recursive, relation)?;
+        if query.joins.is_empty() {
+            if !matches!(predicate, PredicateExpr::True) {
+                relation = RelExpr::Filter {
+                    input: Box::new(relation),
+                    predicate,
+                };
+            }
+            relation = normalize_recursive_spec(recursive, relation)?;
+        } else {
+            relation = normalize_recursive_spec(recursive, relation)?;
+            for join in &query.joins {
+                let (left_raw, right_raw) = join.on.as_ref()?;
+                let right_scope = join.effective_name().to_string();
+                relation = RelExpr::Join {
+                    left: Box::new(relation),
+                    right: Box::new(RelExpr::TableScan { table: join.table }),
+                    on: vec![JoinCondition {
+                        left: parse_join_column(left_raw, &current_scope)?,
+                        right: parse_join_column(right_raw, &right_scope)?,
+                    }],
+                    join_kind: JoinKind::Inner,
+                };
+                current_scope = right_scope;
+            }
+            if !matches!(predicate, PredicateExpr::True) {
+                relation = RelExpr::Filter {
+                    input: Box::new(relation),
+                    predicate,
+                };
+            }
+        }
+    } else {
+        for join in &query.joins {
+            let (left_raw, right_raw) = join.on.as_ref()?;
+            let right_scope = join.effective_name().to_string();
+            relation = RelExpr::Join {
+                left: Box::new(relation),
+                right: Box::new(RelExpr::TableScan { table: join.table }),
+                on: vec![JoinCondition {
+                    left: parse_join_column(left_raw, &current_scope)?,
+                    right: parse_join_column(right_raw, &right_scope)?,
+                }],
+                join_kind: JoinKind::Inner,
+            };
+            current_scope = right_scope;
+        }
+        if !matches!(predicate, PredicateExpr::True) {
+            relation = RelExpr::Filter {
+                input: Box::new(relation),
+                predicate,
+            };
+        }
     }
 
     if let Some(index) = query.result_element_index {
@@ -614,6 +643,46 @@ mod tests {
             vec![JoinCondition {
                 left: ColumnRef::scoped("team_edges", "parent_team"),
                 right: ColumnRef::scoped("__recursive_hop_0", "id"),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalize_query_with_recursive_and_top_level_join_keeps_gather_on_left() {
+        let query = QueryBuilder::new("teams")
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "_id")
+                    .hop("teams", "parent_team")
+            })
+            .join("team_edges")
+            .on("teams.id", "team_edges.parent_team")
+            .filter_eq("name", Value::Text("seed".to_string()))
+            .build();
+
+        let relation = normalize_query_to_rel_expr(&query)
+            .expect("recursive query with top-level join should normalize");
+        let RelExpr::Filter { input, .. } = relation else {
+            panic!("expected filter wrapper after recursive join chain");
+        };
+        let RelExpr::Join {
+            left, right, on, ..
+        } = *input
+        else {
+            panic!("expected top-level join");
+        };
+        assert!(matches!(*left, RelExpr::Gather { .. }));
+        assert_eq!(
+            *right,
+            RelExpr::TableScan {
+                table: TableName::new("team_edges"),
+            }
+        );
+        assert_eq!(
+            on,
+            vec![JoinCondition {
+                left: ColumnRef::scoped("teams", "id"),
+                right: ColumnRef::scoped("team_edges", "parent_team"),
             }]
         );
     }
