@@ -57,9 +57,6 @@
     "jazz-wasm": "workspace:*",
     "tsx": "^4.0.0"
   },
-  "optionalDependencies": {
-    "jazz-napi": "workspace:*"
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
@@ -74,6 +71,9 @@
   },
   "peerDependencies": {
     "react": "^18 || ^19"
+  },
+  "optionalDependencies": {
+    "jazz-napi": "workspace:*"
   },
   "engines": {
     "node": ">=20"

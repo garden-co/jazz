@@ -7,12 +7,12 @@
     "type": "git",
     "url": "https://github.com/garden-co/jazz2"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
   "files": [
     "index.js",
     "index.d.ts"
   ],
+  "main": "index.js",
+  "types": "index.d.ts",
   "publishConfig": {
     "access": "public",
     "tag": "alpha"
