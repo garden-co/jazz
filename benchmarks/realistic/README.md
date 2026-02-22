@@ -30,6 +30,19 @@ RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
   --server-url http://127.0.0.1:1625
 ```
 
+## Rust Criterion (Phase 1 local baseline)
+
+Run the first local realistic benchmark (`R1` sustained CRUD throughput):
+
+```bash
+cargo bench -p jazz-tools --bench realistic_phase1
+```
+
+It currently loads:
+
+- profile: `benchmarks/realistic/profiles/s.json`
+- scenario: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
+
 ## Browser Runner (OPFS Worker)
 
 Run the browser benchmark test:

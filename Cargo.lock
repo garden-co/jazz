@@ -1643,6 +1643,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "criterion",
  "futures",
  "hex",
  "internment",
