@@ -47,6 +47,7 @@ It currently loads:
 - scenario `R3`: `benchmarks/realistic/scenarios/r3_cold_load_surrealkv.json` (cold open + first query, SurrealKV)
 - scenario `R4`: `benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
 - scenario `R5`: `benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
+- scenario `R6`: `benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
 - scenario `R7A`: `benchmarks/realistic/scenarios/r7_hotspot_history.json` (deep updates on a small hot set)
 
 Current topology coverage:
@@ -57,6 +58,7 @@ Current topology coverage:
 - persisted cold-load (`M1_surrealkv`): `realistic_phase1/cold_load_surrealkv` (requires `--features surrealkv`)
 - fanout delivery: `realistic_phase1/fanout_updates`
 - recursive permission read/write: `realistic_phase1/permission_recursive`
+- recursive permission write-heavy: `realistic_phase1/permission_write_heavy`
 - hotspot deep-history updates: `realistic_phase1/hotspot_history`
 
 Run only the cold-load benchmark:
