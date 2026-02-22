@@ -59,6 +59,10 @@ impl SubgraphTemplate {
     ) -> Option<SubgraphInstance> {
         // Build query with correlation filter
         let mut query_builder = QueryBuilder::new(self.base_query.table);
+        query_builder = query_builder.branches_owned(self.base_query.branches.clone());
+        if self.base_query.include_deleted {
+            query_builder = query_builder.include_deleted();
+        }
 
         // Add joins from base query
         for join_spec in &self.base_query.joins {
@@ -138,15 +142,14 @@ impl SubgraphTemplate {
             query_builder = query_builder.select(&cols);
         }
 
-        let mut query = query_builder.build();
+        query_builder =
+            query_builder.with_array_subqueries(self.base_query.array_subqueries.clone());
+        if let Some(index) = self.base_query.result_element_index {
+            query_builder = query_builder.result_element_index(index);
+        }
 
-        // Copy branches from base query (important for schema-aware branch names)
-        query.branches = self.base_query.branches.clone();
-
-        // Copy nested array subqueries from base query
-        query.array_subqueries = self.base_query.array_subqueries.clone();
-
-        let graph = QueryGraph::compile(&query, schema)?;
+        let query = query_builder.try_build().ok()?;
+        let graph = QueryGraph::try_compile(&query, schema).ok()?;
 
         Some(SubgraphInstance {
             graph,
