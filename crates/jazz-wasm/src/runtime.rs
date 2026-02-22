@@ -90,6 +90,16 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
     }
 }
 
+fn parse_session_json(session_json: Option<String>) -> Result<Option<Session>, JsError> {
+    if let Some(json) = session_json {
+        let session = serde_json::from_str::<Session>(&json)
+            .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?;
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn build_wasm_delta_json<F>(
     delta: &SubscriptionDelta,
@@ -460,15 +470,7 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
-
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json)
-                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
-            )
-        } else {
-            None
-        };
+        let session = parse_session_json(session_json)?;
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
@@ -526,6 +528,44 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "updated");
+        Ok(())
+    }
+
+    /// Update a row by ObjectId as an explicit session principal.
+    ///
+    /// # Arguments
+    /// * `object_id` - UUID string of target object
+    /// * `values` - Partial update map (`{ columnName: WasmValue }`)
+    /// * `session_json` - Optional JSON-encoded Session used for policy checks
+    #[wasm_bindgen(js_name = updateWithSession)]
+    pub fn update_with_session(
+        &self,
+        object_id: &str,
+        values: JsValue,
+        session_json: Option<String>,
+    ) -> Result<(), JsError> {
+        let _span =
+            debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values
+            .into_iter()
+            .map(|(k, v)| {
+                let groove_value: Value = v.try_into()?;
+                Ok((k, groove_value))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|e: String| JsError::new(&e))?;
+
+        let mut core = self.core.borrow_mut();
+        core.update(oid, updates, session.as_ref())
+            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
+
+        tracing::debug!(object_id, "updated_with_session");
         Ok(())
     }
 
@@ -667,15 +707,7 @@ impl WasmRuntime {
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
-
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json)
-                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
-            )
-        } else {
-            None
-        };
+        let session = parse_session_json(session_json)?;
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
