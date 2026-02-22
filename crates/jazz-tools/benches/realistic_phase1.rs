@@ -65,6 +65,14 @@ struct R4ScenarioConfig {
     target_project_index: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct R7ScenarioConfig {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    hot_task_count: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CrudOperation {
     InsertTask,
@@ -106,6 +114,14 @@ struct R4Scenario {
     operation_count: usize,
     fanout_clients: Vec<usize>,
     target_project_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct R7Scenario {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    hot_task_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +429,24 @@ impl R1State {
             total_rows += self.execute_read(op);
         }
         total_rows
+    }
+
+    fn run_hotspot_update_batch(
+        &mut self,
+        hot_task_ids: &[ObjectId],
+        operation_count: usize,
+    ) -> usize {
+        if hot_task_ids.is_empty() {
+            return 0;
+        }
+
+        let mut updates = 0usize;
+        for op_idx in 0..operation_count {
+            let task_id = hot_task_ids[op_idx % hot_task_ids.len()];
+            self.update_task_with_id(task_id);
+            updates += 1;
+        }
+        updates
     }
 
     fn run_one_crud_operation(&mut self, scenario: &R1Scenario) {
@@ -1005,6 +1039,39 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
     group.finish();
 }
 
+fn realistic_r7_hotspot_history(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r7_scenario("benchmarks/realistic/scenarios/r7_hotspot_history.json");
+    let benchmark_name = format!(
+        "{}_{}_hot{}",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.hot_task_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/hotspot_history");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let mut state = R1State::seeded(&profile, profile.seed ^ scenario.seed);
+            let hot_count = scenario.hot_task_count.max(1).min(state.active_tasks.len());
+            let hot_task_ids = state.active_tasks[..hot_count].to_vec();
+            b.iter(|| {
+                let updates =
+                    state.run_hotspot_update_batch(&hot_task_ids, scenario.operation_count);
+                black_box(updates);
+            });
+        },
+    );
+
+    group.finish();
+}
+
 fn load_r1_scenario(path: &str) -> R1Scenario {
     let raw: R1ScenarioConfig = load_json(path);
     let mut operations = Vec::with_capacity(raw.mix.len());
@@ -1063,6 +1130,16 @@ fn load_r4_scenario(path: &str) -> R4Scenario {
         operation_count: raw.operation_count,
         fanout_clients: raw.fanout_clients,
         target_project_index: raw.target_project_index,
+    }
+}
+
+fn load_r7_scenario(path: &str) -> R7Scenario {
+    let raw: R7ScenarioConfig = load_json(path);
+    R7Scenario {
+        id: raw.id,
+        seed: raw.seed,
+        operation_count: raw.operation_count,
+        hot_task_count: raw.hot_task_count,
     }
 }
 
@@ -1165,6 +1242,7 @@ criterion_group!(
     realistic_r2_reads,
     realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn,
-    realistic_r4_fanout_updates
+    realistic_r4_fanout_updates,
+    realistic_r7_hotspot_history
 );
 criterion_main!(benches);
