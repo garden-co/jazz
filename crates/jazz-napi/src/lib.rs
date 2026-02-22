@@ -21,6 +21,7 @@ use napi_derive::napi;
 
 use groove::object::ObjectId;
 use groove::query_manager::encoding::decode_row;
+use groove::query_manager::parse_query_json_compat;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, SchemaHash, Value};
@@ -178,9 +179,14 @@ enum JsPolicyExpr {
         table: String,
         condition: Box<JsPolicyExpr>,
     },
+    ExistsRel {
+        rel: serde_json::Value,
+    },
     Inherits {
         operation: JsPolicyOperation,
         via_column: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
     },
     And {
         exprs: Vec<JsPolicyExpr>,
@@ -305,9 +311,14 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                 table,
                 condition: Box::new(js_policy_expr_to_groove(*condition)),
             },
+            JsPolicyExpr::ExistsRel { rel } => match serde_json::from_value(rel) {
+                Ok(rel) => PolicyExpr::ExistsRel { rel },
+                Err(_) => PolicyExpr::False,
+            },
             JsPolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth,
             } => PolicyExpr::Inherits {
                 operation: match operation {
                     JsPolicyOperation::Select => Operation::Select,
@@ -316,6 +327,7 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                     JsPolicyOperation::Delete => Operation::Delete,
                 },
                 via_column,
+                max_depth,
             },
             JsPolicyExpr::And { exprs } => {
                 PolicyExpr::And(exprs.into_iter().map(js_policy_expr_to_groove).collect())
@@ -490,9 +502,13 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                 table: table.clone(),
                 condition: Box::new(policy_expr_to_js(condition)),
             },
+            PolicyExpr::ExistsRel { rel } => JsPolicyExpr::ExistsRel {
+                rel: serde_json::to_value(rel).unwrap_or(serde_json::Value::Null),
+            },
             PolicyExpr::Inherits {
                 operation,
                 via_column,
+                max_depth,
             } => JsPolicyExpr::Inherits {
                 operation: match operation {
                     Operation::Select => JsPolicyOperation::Select,
@@ -501,6 +517,7 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     Operation::Delete => JsPolicyOperation::Delete,
                 },
                 via_column: via_column.clone(),
+                max_depth: *max_depth,
             },
             PolicyExpr::And(exprs) => JsPolicyExpr::And {
                 exprs: exprs.iter().map(policy_expr_to_js).collect(),
@@ -578,7 +595,7 @@ fn parse_tier(tier: &str) -> napi::Result<PersistenceTier> {
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
-    serde_json::from_str(json).map_err(|e| napi::Error::from_reason(format!("Parse error: {}", e)))
+    parse_query_json_compat(json).map_err(napi::Error::from_reason)
 }
 
 // ============================================================================

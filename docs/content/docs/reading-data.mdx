@@ -177,6 +177,49 @@ const memberships = await db.all(
   </Tab>
 </Tabs>
 
+## Advanced: Recursive Queries
+
+Recursive queries compute bounded transitive closures from a seed row set (for example, walking team ancestry or folder hierarchies).
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    ```ts
+    const query = app.teams.gather({
+      start: { team_id: { eq: 1 } },
+      step: ({ current }) =>
+        app.team_edges.where({ child_team: current }).hopTo("parent_team"),
+      maxDepth: 10,
+    });
+    ```
+
+    `gather(...)` combines seed filtering (`start`) with recursive step traversal (`step`).
+    `hopTo(...)` is a one-hop relation traversal combinator.
+    `maxDepth` defaults to `10` when omitted.
+
+  </Tab>
+  <Tab value="Rust">
+    ```rs
+    use groove::{QueryBuilder, Value};
+
+    let query = QueryBuilder::new("teams")
+        .select(&["team_id"])
+        .filter_eq("team_id", Value::Integer(1))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "team_id")
+                .select(&["parent_team"])
+                .max_depth(10)
+        })
+        .build();
+    ```
+
+    `with_recursive(...)` uses the current query output as the seed relation.
+    The runtime executes recursion through a dedicated `RecursiveRelationNode` that orchestrates a bounded, internally unrolled stack of step subgraphs.
+    `max_depth` defaults to `10` when omitted.
+
+  </Tab>
+</Tabs>
+
 ## Read Settled Tiers
 
 ### API Reference

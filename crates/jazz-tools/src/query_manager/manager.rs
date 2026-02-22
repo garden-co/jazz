@@ -11,7 +11,7 @@ use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
 
-use super::graph::QueryGraph;
+use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::Operation;
 use super::policy_graph::PolicyGraph;
@@ -359,6 +359,15 @@ impl QueryManager {
         }
     }
 
+    pub(super) fn compile_graph(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Result<QueryGraph, QueryCompileError> {
+        QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
+    }
+
     /// Mark all subscriptions for recompilation.
     ///
     /// Called when live schemas change to ensure subscriptions pick up new branches.
@@ -387,12 +396,13 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                if let Some(new_graph) = QueryGraph::compile_with_schema_context(
+                let new_graph = Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                ) {
+                );
+                if let Ok(new_graph) = new_graph {
                     sub.graph = new_graph;
                 }
                 sub.needs_recompile = false;
@@ -403,12 +413,13 @@ impl QueryManager {
         for sub in self.server_subscriptions.values_mut() {
             if sub.needs_recompile {
                 // Recompile the graph
-                if let Some(new_graph) = QueryGraph::compile_with_schema_context(
+                let new_graph = Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                ) {
+                );
+                if let Ok(new_graph) = new_graph {
                     sub.graph = new_graph;
                 }
                 sub.needs_recompile = false;

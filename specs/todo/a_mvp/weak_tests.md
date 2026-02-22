@@ -38,7 +38,7 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## 4. Broader Sweep (medium priority)
 
-- Continue reducing `len()`-only checks in older tests (especially early `sync_manager/tests.rs` and legacy `manager_tests.rs` cases) where object identity/content can be asserted cheaply.
+- Continue reducing `len()`-only checks in older tests (especially early `sync_manager/tests.rs` and older `manager_tests.rs` cases) where object identity/content can be asserted cheaply.
 - Avoid broad `matches!` patterns that do not validate key payload fields.
 
 ## Missing Schema/Catalogue Negative Paths

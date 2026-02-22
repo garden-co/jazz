@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { translateQuery } from "./query-adapter.js";
+import { translateBuilderToRelationIr, translateQuery } from "./query-adapter.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 describe("translateQuery", () => {
@@ -678,7 +678,7 @@ describe("translateQuery", () => {
 
       const result = JSON.parse(translateQuery(builderJson, fullSchema));
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         table: "todos",
         branches: [],
         disjuncts: [
@@ -712,6 +712,235 @@ describe("translateQuery", () => {
         ],
         joins: [],
       });
+      expect(result.relation_ir).toBeDefined();
+    });
+  });
+
+  it("keeps gather semantics in relation_ir payload", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      gather: {
+        max_depth: 10,
+        step_table: "todos",
+        step_current_column: "id",
+        step_conditions: [],
+        step_hops: ["parent"],
+      },
+    });
+
+    const result = JSON.parse(translateQuery(builderJson, schema));
+    expect(result.recursive).toBeUndefined();
+    expect(result.joins).toEqual([]);
+    expect(result.relation_ir?.type).toBe("Gather");
+  });
+
+  it("keeps hop semantics in relation_ir payload", () => {
+    const schema: WasmSchema = {
+      tables: {
+        teams: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        team_edges: {
+          columns: [
+            {
+              name: "child_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "parent_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "team_edges",
+      conditions: [
+        { column: "child_team", op: "eq", value: "00000000-0000-0000-0000-000000000001" },
+      ],
+      includes: {},
+      orderBy: [],
+      hops: ["parent_team"],
+    });
+
+    const result = JSON.parse(translateQuery(builderJson, schema));
+    expect(result.joins).toEqual([]);
+    expect(result.result_element_index).toBeUndefined();
+    expect(result.recursive).toBeUndefined();
+    expect(result.relation_ir?.type).toBe("Project");
+  });
+
+  it("keeps multi-hop semantics in relation_ir payload", () => {
+    const schema: WasmSchema = {
+      tables: {
+        users: {
+          columns: [
+            { name: "name", column_type: { type: "Text" }, nullable: false },
+            { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+          ],
+        },
+        teams: {
+          columns: [
+            { name: "name", column_type: { type: "Text" }, nullable: false },
+            { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+          ],
+        },
+        orgs: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "users",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      hops: ["team", "org"],
+    });
+
+    const result = JSON.parse(translateQuery(builderJson, schema));
+    expect(result.joins).toEqual([]);
+    expect(result.result_element_index).toBeUndefined();
+    expect(result.recursive).toBeUndefined();
+    expect(result.relation_ir?.type).toBe("Project");
+  });
+
+  it("lowers hop metadata to relation IR join + project", () => {
+    const schema: WasmSchema = {
+      tables: {
+        teams: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        team_edges: {
+          columns: [
+            {
+              name: "child_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "parent_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "team_edges",
+      conditions: [
+        { column: "child_team", op: "eq", value: "00000000-0000-0000-0000-000000000001" },
+      ],
+      includes: {},
+      orderBy: [],
+      hops: ["parent_team"],
+    });
+
+    const ir = translateBuilderToRelationIr(builderJson, schema);
+    expect(ir.type).toBe("Project");
+    if (ir.type !== "Project") {
+      throw new Error("Expected project relation IR.");
+    }
+    expect(ir.input.type).toBe("Join");
+    if (ir.input.type !== "Join") {
+      throw new Error("Expected join input relation IR.");
+    }
+    expect(ir.input.on).toEqual([
+      {
+        left: { scope: "team_edges", column: "parent_team" },
+        right: { scope: "__hop_0", column: "id" },
+      },
+    ]);
+    expect(ir.columns[0]).toEqual({
+      alias: "id",
+      expr: { type: "Column", column: { scope: "__hop_0", column: "id" } },
+    });
+  });
+
+  it("lowers gather metadata to relation IR gather node", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
+        },
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "ne", value: "archived" }],
+      includes: {},
+      orderBy: [],
+      gather: {
+        max_depth: 10,
+        step_table: "todos",
+        step_current_column: "id",
+        step_conditions: [],
+        step_hops: ["parent"],
+      },
+    });
+
+    const ir = translateBuilderToRelationIr(builderJson, schema);
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.frontierKey).toEqual({ type: "RowId", source: "Current" });
+    expect(ir.step.type).toBe("Project");
+    if (ir.step.type !== "Project") {
+      throw new Error("Expected gather step project relation.");
+    }
+    expect(ir.step.input.type).toBe("Join");
+    if (ir.step.input.type !== "Join") {
+      throw new Error("Expected gather step join relation.");
+    }
+    expect(ir.step.input.left.type).toBe("Filter");
+    if (ir.step.input.left.type !== "Filter") {
+      throw new Error("Expected gather step filter relation.");
+    }
+    expect(ir.step.input.left.predicate).toEqual({
+      type: "Cmp",
+      left: { scope: "todos", column: "id" },
+      op: "Eq",
+      right: { type: "RowId", source: "Frontier" },
     });
   });
 
@@ -735,6 +964,168 @@ describe("translateQuery", () => {
 
       expect(() => translateQuery(builderJson, basicSchema)).toThrow(
         "Unexpected array value for scalar column",
+      );
+    });
+
+    it("throws when gather step does not use a forward hop", () => {
+      const schema: WasmSchema = {
+        tables: {
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              {
+                name: "parent_id",
+                column_type: { type: "Uuid" },
+                nullable: true,
+                references: "todos",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        gather: {
+          max_depth: 10,
+          step_table: "todos",
+          step_current_column: "id",
+          step_conditions: [],
+          step_hops: ["todosViaParent"],
+        },
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "gather(...) currently only supports forward hopTo(...) relations.",
+      );
+    });
+
+    it("throws when gather query also includes include(...)", () => {
+      const schema: WasmSchema = {
+        tables: {
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              {
+                name: "parent_id",
+                column_type: { type: "Uuid" },
+                nullable: true,
+                references: "todos",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: { parent: true },
+        orderBy: [],
+        gather: {
+          max_depth: 10,
+          step_table: "todos",
+          step_current_column: "id",
+          step_conditions: [],
+          step_hops: ["parent"],
+        },
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "gather(...) does not yet support include(...).",
+      );
+    });
+
+    it("lowers gather query followed by hopTo(...)", () => {
+      const schema: WasmSchema = {
+        tables: {
+          teams: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+          team_edges: {
+            columns: [
+              {
+                name: "child_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+              {
+                name: "parent_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "teams",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        hops: ["team_edgesViaChild_team"],
+        gather: {
+          max_depth: 10,
+          step_table: "team_edges",
+          step_current_column: "child_team",
+          step_conditions: [],
+          step_hops: ["parent_team"],
+        },
+      });
+
+      const result = JSON.parse(translateQuery(builderJson, schema));
+      expect(result.relation_ir?.type).toBe("Project");
+      if (result.relation_ir?.type !== "Project") {
+        throw new Error("Expected projected relation IR.");
+      }
+      expect(result.relation_ir.input.type).toBe("Join");
+      if (result.relation_ir.input.type !== "Join") {
+        throw new Error("Expected gather hop join relation IR.");
+      }
+      expect(result.relation_ir.input.left.type).toBe("Gather");
+    });
+
+    it("throws when hop query also includes include(...)", () => {
+      const schema: WasmSchema = {
+        tables: {
+          teams: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+          team_edges: {
+            columns: [
+              {
+                name: "child_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+              {
+                name: "parent_team",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "teams",
+              },
+            ],
+          },
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "team_edges",
+        conditions: [],
+        includes: { parent_team: true },
+        orderBy: [],
+        hops: ["parent_team"],
+      });
+
+      expect(() => translateQuery(builderJson, schema)).toThrow(
+        "hopTo(...) does not yet support include(...).",
       );
     });
   });

@@ -10,7 +10,8 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{column_is_null, decode_column};
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, bind_outer_row_refs, evaluate_expr_recursive,
+    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs, evaluate_expr_recursive,
+    normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::session::Session;
@@ -37,6 +38,8 @@ pub struct PolicyFilterNode {
     table_name: String,
     /// Branch name for index lookups.
     branch: String,
+    /// Initial recursion depth used for policy evaluation.
+    initial_depth: usize,
     /// Current tuples that pass the policy.
     current_tuples: AHashSet<Tuple>,
     dirty: bool,
@@ -57,7 +60,7 @@ impl PolicyFilterNode {
         schema: Schema,
         table_name: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch(descriptor, policy, session, schema, table_name, "main")
+        Self::new_with_branch_and_depth(descriptor, policy, session, schema, table_name, "main", 0)
     }
 
     /// Create a new policy filter node with explicit branch.
@@ -69,6 +72,19 @@ impl PolicyFilterNode {
         table_name: impl Into<String>,
         branch: impl Into<String>,
     ) -> Self {
+        Self::new_with_branch_and_depth(descriptor, policy, session, schema, table_name, branch, 0)
+    }
+
+    /// Create a new policy filter node with explicit branch and initial recursion depth.
+    pub fn new_with_branch_and_depth(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+        initial_depth: usize,
+    ) -> Self {
         let table_name = table_name.into();
         let inherits_tables = collect_inherits_tables(&policy, &descriptor);
         let has_inherits = !inherits_tables.is_empty();
@@ -79,6 +95,7 @@ impl PolicyFilterNode {
             schema,
             table_name,
             branch: branch.into(),
+            initial_depth,
             current_tuples: AHashSet::new(),
             dirty: true,
             has_inherits,
@@ -113,10 +130,13 @@ impl PolicyFilterNode {
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
-        // If inherits tables changed, we need to reevaluate all current tuples
+        let mut result = TupleDelta::default();
+
+        // If dependency tables changed, re-check current visible tuples.
+        // Keep processing incoming delta in the same call to avoid dropping it.
         if self.inherits_dirty {
             self.inherits_dirty = false;
-            return self.reevaluate_all_with_context(io, &mut row_loader);
+            result = self.reevaluate_all_with_context(io, &mut row_loader);
         }
 
         if !self.dirty
@@ -124,10 +144,8 @@ impl PolicyFilterNode {
             && input.removed.is_empty()
             && input.updated.is_empty()
         {
-            return TupleDelta::default();
+            return result;
         }
-
-        let mut result = TupleDelta::default();
 
         // Process added tuples
         for tuple in input.added {
@@ -204,27 +222,41 @@ impl PolicyFilterNode {
         result
     }
 
-    /// Evaluate with context - uses PolicyGraph for INHERITS evaluation.
+    /// Evaluate with context - supports recursive INHERITS and EXISTS evaluation.
     fn evaluate_with_context(
         &self,
         row: &Row,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
-        self.evaluate_expr_with_context(&self.policy, row, io, row_loader, 0)
+        let mut visited = HashSet::new();
+        self.evaluate_expr_with_context(
+            &self.policy,
+            row,
+            &self.descriptor,
+            &self.table_name,
+            io,
+            row_loader,
+            self.initial_depth,
+            &mut visited,
+        )
     }
 
     /// Evaluate a policy expression with context for INHERITS.
     /// Uses trait object for row_loader to avoid generic recursion limit.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_expr_with_context(
         &self,
         expr: &PolicyExpr,
         row: &Row,
+        descriptor: &RowDescriptor,
+        table_name: &str,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
+        visited: &mut HashSet<ObjectId>,
     ) -> bool {
-        if depth > 32 {
+        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
 
@@ -232,70 +264,90 @@ impl PolicyFilterNode {
             PolicyExpr::Inherits {
                 operation,
                 via_column,
-            } => self
-                .evaluate_inherits_with_context(*operation, via_column, row, io, row_loader, depth),
+                max_depth,
+            } => self.evaluate_inherits_with_context(
+                *operation, via_column, *max_depth, row, descriptor, table_name, io, row_loader,
+                depth, visited,
+            ),
             PolicyExpr::Exists { table, condition } => {
                 self.evaluate_exists_with_context(table, condition, row, io, row_loader, depth)
             }
-            PolicyExpr::And(exprs) => exprs
-                .iter()
-                .all(|e| self.evaluate_expr_with_context(e, row, io, row_loader, depth)),
-            PolicyExpr::Or(exprs) => exprs
-                .iter()
-                .any(|e| self.evaluate_expr_with_context(e, row, io, row_loader, depth)),
-            PolicyExpr::Not(inner) => {
-                !self.evaluate_expr_with_context(inner, row, io, row_loader, depth)
+            PolicyExpr::ExistsRel { rel } => {
+                self.evaluate_exists_rel_with_context(rel, row, io, row_loader, depth)
             }
+            PolicyExpr::And(exprs) => exprs.iter().all(|e| {
+                self.evaluate_expr_with_context(
+                    e, row, descriptor, table_name, io, row_loader, depth, visited,
+                )
+            }),
+            PolicyExpr::Or(exprs) => exprs.iter().any(|e| {
+                self.evaluate_expr_with_context(
+                    e, row, descriptor, table_name, io, row_loader, depth, visited,
+                )
+            }),
+            PolicyExpr::Not(inner) => !self.evaluate_expr_with_context(
+                inner, row, descriptor, table_name, io, row_loader, depth, visited,
+            ),
             // All other expressions delegate to shared evaluation
-            _ => evaluate_expr_recursive(expr, &row.data, &self.descriptor, &self.session, depth),
+            _ => evaluate_expr_recursive(expr, &row.data, descriptor, &self.session, depth),
         }
     }
 
-    /// Evaluate INHERITS by creating and settling a PolicyGraph for the parent row.
-    /// Uses trait object for row_loader to avoid generic recursion limit.
+    /// Evaluate INHERITS recursively by loading parent rows and evaluating parent policies.
     #[allow(clippy::too_many_arguments)]
     fn evaluate_inherits_with_context(
         &self,
         operation: Operation,
         via_column: &str,
+        max_depth: Option<usize>,
         row: &Row,
+        descriptor: &RowDescriptor,
+        _table_name: &str,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
+        visited: &mut HashSet<ObjectId>,
     ) -> bool {
-        // Depth limit to prevent infinite recursion
-        if depth >= 32 {
+        let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
+            return false;
+        };
+        if depth >= effective_max_depth {
             return false;
         }
 
         // Get the FK column index
-        let col_index = match self.descriptor.column_index(via_column) {
+        let col_index = match descriptor.column_index(via_column) {
             Some(idx) => idx,
             None => return false,
         };
 
         // Check if FK is NULL - if so, INHERITS passes (no parent to check)
-        if column_is_null(&self.descriptor, &row.data, col_index).unwrap_or(false) {
+        if column_is_null(descriptor, &row.data, col_index).unwrap_or(false) {
             return true;
         }
 
         // Get the FK column descriptor to find the referenced table
-        let col_desc = &self.descriptor.columns[col_index];
+        let col_desc = &descriptor.columns[col_index];
         let parent_table = match &col_desc.references {
             Some(table) => table,
             None => return false, // No FK reference - schema error
         };
 
-        // Self-INHERITS check: disallow for now
-        if parent_table.as_str() == self.table_name {
-            // Self-referential INHERITS not yet supported
-            return false;
-        }
-
         // Decode the FK value to get the parent ObjectId
-        let parent_id = match decode_column(&self.descriptor, &row.data, col_index) {
+        let parent_id = match decode_column(descriptor, &row.data, col_index) {
             Ok(Value::Uuid(id)) => id,
             _ => return false,
+        };
+
+        // Cycle detection for recursive chains.
+        if visited.contains(&parent_id) {
+            return false;
+        }
+        visited.insert(parent_id);
+
+        let (parent_content, parent_commit_id) = match row_loader(parent_id) {
+            Some(content) => content,
+            None => return false,
         };
 
         // Get the parent table's schema
@@ -319,28 +371,17 @@ impl PolicyFilterNode {
             None => return true,
         };
 
-        // Create a PolicyGraph to evaluate the parent's policy
-        let mut graph = match PolicyGraph::for_inherits(
-            &parent_table_name,
-            parent_id,
+        let parent_row = Row::new(parent_id, parent_content, parent_commit_id);
+        self.evaluate_expr_with_context(
             parent_policy,
-            &self.session,
-            &self.schema,
-            &self.branch,
-        ) {
-            Some(g) => g,
-            None => return false,
-        };
-
-        // Settle the graph until complete
-        for _ in 0..100 {
-            // Max iterations to prevent infinite loop
-            if graph.settle(io, row_loader) {
-                break;
-            }
-        }
-
-        graph.result()
+            &parent_row,
+            &parent_schema.descriptor,
+            parent_table_name.as_str(),
+            io,
+            row_loader,
+            depth + 1,
+            visited,
+        )
     }
 
     /// Evaluate EXISTS by creating and settling a PolicyGraph for the target table.
@@ -354,7 +395,7 @@ impl PolicyFilterNode {
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
     ) -> bool {
-        if depth >= 32 {
+        if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
 
@@ -384,9 +425,48 @@ impl PolicyFilterNode {
         graph.result()
     }
 
+    /// Evaluate declarative EXISTS relation by compiling relation IR to a query graph.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_exists_rel_with_context(
+        &self,
+        rel: &crate::query_manager::relation_ir::RelExpr,
+        row: &Row,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        depth: usize,
+    ) -> bool {
+        if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+            return false;
+        }
+
+        let bound_rel = match bind_relation_refs(
+            rel,
+            &row.data,
+            &self.descriptor,
+            &self.session,
+            Some(row.id),
+        ) {
+            Some(expr) => expr,
+            None => return false,
+        };
+
+        let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, &self.schema, &self.branch) {
+            Some(g) => g,
+            None => return false,
+        };
+
+        for _ in 0..100 {
+            if graph.settle(io, row_loader) {
+                break;
+            }
+        }
+
+        graph.result()
+    }
+
     /// Evaluate the policy expression against a row.
     pub fn evaluate(&self, row: &Row) -> bool {
-        self.evaluate_expr(&self.policy, row, 0)
+        self.evaluate_expr(&self.policy, row, self.initial_depth)
     }
 
     /// Evaluate a policy expression with recursion depth tracking.
@@ -395,7 +475,7 @@ impl PolicyFilterNode {
     /// handles INHERITS locally since it requires schema access.
     fn evaluate_expr(&self, expr: &PolicyExpr, row: &Row, depth: usize) -> bool {
         // Prevent infinite recursion in INHERITS
-        if depth > 32 {
+        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
 
@@ -404,8 +484,10 @@ impl PolicyFilterNode {
             PolicyExpr::Inherits {
                 operation,
                 via_column,
-            } => self.evaluate_inherits(*operation, via_column, row, depth),
+                max_depth,
+            } => self.evaluate_inherits(*operation, via_column, *max_depth, row, depth),
             PolicyExpr::Exists { .. } => false, // Without context, fail closed.
+            PolicyExpr::ExistsRel { .. } => false, // Without context, fail closed.
 
             // And/Or/Not need to recurse through this method for INHERITS support
             PolicyExpr::And(exprs) => exprs.iter().all(|e| self.evaluate_expr(e, row, depth)),
@@ -430,11 +512,14 @@ impl PolicyFilterNode {
         &self,
         operation: Operation,
         via_column: &str,
+        max_depth: Option<usize>,
         row: &Row,
         depth: usize,
     ) -> bool {
-        // Depth limit to prevent infinite recursion
-        if depth >= 32 {
+        let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
+            return false;
+        };
+        if depth >= effective_max_depth {
             return false;
         }
 
@@ -491,10 +576,40 @@ fn collect_inherits_tables_recursive(
             tables.insert(table.clone());
             collect_inherits_tables_recursive(condition, descriptor, tables);
         }
+        PolicyExpr::ExistsRel { rel } => {
+            collect_relation_tables(rel, tables);
+        }
         PolicyExpr::Not(inner) => {
             collect_inherits_tables_recursive(inner, descriptor, tables);
         }
         _ => {}
+    }
+}
+
+fn collect_relation_tables(
+    rel: &crate::query_manager::relation_ir::RelExpr,
+    tables: &mut HashSet<String>,
+) {
+    use crate::query_manager::relation_ir::RelExpr;
+
+    match rel {
+        RelExpr::TableScan { table } => {
+            tables.insert(table.as_str().to_string());
+        }
+        RelExpr::Filter { input, .. }
+        | RelExpr::Project { input, .. }
+        | RelExpr::Distinct { input, .. }
+        | RelExpr::OrderBy { input, .. }
+        | RelExpr::Offset { input, .. }
+        | RelExpr::Limit { input, .. } => collect_relation_tables(input, tables),
+        RelExpr::Join { left, right, .. } => {
+            collect_relation_tables(left, tables);
+            collect_relation_tables(right, tables);
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            collect_relation_tables(seed, tables);
+            collect_relation_tables(step, tables);
+        }
     }
 }
 
@@ -602,7 +717,8 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
+    use crate::query_manager::relation_ir::RelExpr;
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, Value};
     use serde_json::json;
 
     fn test_descriptor() -> RowDescriptor {
@@ -799,6 +915,46 @@ mod tests {
         let policy = PolicyExpr::Exists {
             table: "memberships".into(),
             condition: Box::new(PolicyExpr::True),
+        };
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            policy,
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        assert!(node.has_inherits());
+        assert!(node.inherits_tables().contains("memberships"));
+    }
+
+    #[test]
+    fn test_policy_exists_rel_fails_closed_without_context() {
+        let session = Session::new("user1");
+        let policy = PolicyExpr::ExistsRel {
+            rel: RelExpr::TableScan {
+                table: TableName::new("memberships"),
+            },
+        };
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            policy,
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        let row = make_row("user1", "eng", "Doc 1");
+        assert!(!node.evaluate(&row));
+    }
+
+    #[test]
+    fn test_policy_exists_rel_registers_dependency_table() {
+        let session = Session::new("user1");
+        let policy = PolicyExpr::ExistsRel {
+            rel: RelExpr::TableScan {
+                table: TableName::new("memberships"),
+            },
         };
         let node = PolicyFilterNode::new(
             test_descriptor(),

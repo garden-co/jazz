@@ -7,9 +7,9 @@ use crate::storage::Storage;
 
 use super::encoding::{decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
-use super::policy::{Operation, resolve_session_value};
+use super::policy::{Operation, evaluate_simple_parts};
 use super::session::Session;
-use super::types::{Row, RowDescriptor, TableName, Value};
+use super::types::{RowDescriptor, TableName, Value};
 
 impl QueryManager {
     /// Insert a new row into a table.
@@ -53,19 +53,26 @@ impl QueryManager {
             });
         }
 
+        // Encode to binary
+        let data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
         // Check INSERT WITH CHECK policy
         if let (Some(session), Some(policy)) = (session, insert_policy)
-            && !self.evaluate_policy_for_values(&policy, values, &descriptor, session, table)
+            && !self.evaluate_policy_for_content_with_context(
+                storage,
+                &policy,
+                &data,
+                &descriptor,
+                session,
+                table,
+            )
         {
             return Err(QueryError::PolicyDenied {
                 table: table_name,
                 operation: Operation::Insert,
             });
         }
-
-        // Encode to binary
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Create object with table metadata
         let mut metadata = HashMap::new();
@@ -150,19 +157,26 @@ impl QueryManager {
             });
         }
 
+        // Encode to binary
+        let data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
         // Check INSERT WITH CHECK policy
         if let (Some(session), Some(policy)) = (session, insert_policy)
-            && !self.evaluate_policy_for_values(&policy, values, &descriptor, session, table)
+            && !self.evaluate_policy_for_content_with_context(
+                storage,
+                &policy,
+                &data,
+                &descriptor,
+                session,
+                table,
+            )
         {
             return Err(QueryError::PolicyDenied {
                 table: table_name,
                 operation: Operation::Insert,
             });
         }
-
-        // Encode to binary
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Create object with table metadata
         let mut metadata = HashMap::new();
@@ -212,134 +226,67 @@ impl QueryManager {
         })
     }
 
-    /// Evaluate a policy expression against row values (pre-encoding).
+    /// Evaluate a policy expression against encoded row content using full policy context.
     ///
-    /// This is used for write policy checking (INSERT/UPDATE WITH CHECK).
-    #[allow(clippy::only_used_in_recursion)]
-    pub(super) fn evaluate_policy_for_values(
-        &self,
+    /// This uses the same simple/complex split as server-side permission checks:
+    /// - Evaluate simple predicates directly from row bytes.
+    /// - Materialize and settle policy graphs for complex clauses.
+    fn evaluate_policy_for_content_with_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
         policy: &crate::query_manager::policy::PolicyExpr,
-        values: &[Value],
+        content: &[u8],
         descriptor: &RowDescriptor,
         session: &Session,
         table: &str,
     ) -> bool {
-        use crate::query_manager::policy::PolicyExpr;
-
-        match policy {
-            PolicyExpr::True => true,
-            PolicyExpr::False => false,
-
-            PolicyExpr::Cmp { column, op, value } => {
-                let col_index = match descriptor.column_index(column) {
-                    Some(idx) => idx,
-                    None => return false,
-                };
-                let col_value = &values[col_index];
-                let cmp_value = match value {
-                    crate::query_manager::policy::PolicyValue::Literal(v) => v.clone(),
-                    crate::query_manager::policy::PolicyValue::SessionRef(path) => {
-                        match resolve_session_value(path, session) {
-                            Some(v) => v,
-                            None => return false,
-                        }
-                    }
-                };
-                self.compare_values(col_value, &cmp_value, op)
-            }
-
-            PolicyExpr::IsNull { column } => {
-                let col_index = match descriptor.column_index(column) {
-                    Some(idx) => idx,
-                    None => return false,
-                };
-                matches!(values[col_index], Value::Null)
-            }
-
-            PolicyExpr::IsNotNull { column } => {
-                let col_index = match descriptor.column_index(column) {
-                    Some(idx) => idx,
-                    None => return false,
-                };
-                !matches!(values[col_index], Value::Null)
-            }
-
-            PolicyExpr::In {
-                column,
-                session_path,
-            } => {
-                let col_index = match descriptor.column_index(column) {
-                    Some(idx) => idx,
-                    None => return false,
-                };
-                let col_value = &values[col_index];
-                let session_array = match session.get_array(session_path) {
-                    Some(arr) => arr,
-                    None => return false,
-                };
-                self.value_in_json_array(col_value, session_array)
-            }
-
-            PolicyExpr::And(exprs) => exprs
-                .iter()
-                .all(|e| self.evaluate_policy_for_values(e, values, descriptor, session, table)),
-
-            PolicyExpr::Or(exprs) => exprs
-                .iter()
-                .any(|e| self.evaluate_policy_for_values(e, values, descriptor, session, table)),
-
-            PolicyExpr::Not(expr) => {
-                !self.evaluate_policy_for_values(expr, values, descriptor, session, table)
-            }
-
-            PolicyExpr::Exists { .. } | PolicyExpr::Inherits { .. } => {
-                // EXISTS and INHERITS require actual row data - for writes, return true
-                // (TODO: implement for write policies that need these)
-                true
-            }
+        let simple_result = evaluate_simple_parts(policy, content, descriptor, session);
+        if !simple_result.passed {
+            return false;
         }
-    }
+        if simple_result.complex_clauses.is_empty() {
+            return true;
+        }
 
-    /// Compare two Values with the given operator.
-    pub(super) fn compare_values(
-        &self,
-        a: &Value,
-        b: &Value,
-        op: &crate::query_manager::policy::CmpOp,
-    ) -> bool {
-        use crate::query_manager::policy::CmpOp;
-        use std::cmp::Ordering;
+        let table_name = TableName::new(table);
+        let mut graphs = self.create_policy_graphs_for_complex_clauses(
+            &simple_result.complex_clauses,
+            content,
+            descriptor,
+            &table_name,
+            session,
+        );
+        if graphs.is_empty() {
+            return true;
+        }
 
-        let ord = match (a, b) {
-            (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
-            (Value::BigInt(x), Value::BigInt(y)) => x.cmp(y),
-            (Value::Integer(x), Value::BigInt(y)) => (*x as i64).cmp(y),
-            (Value::BigInt(x), Value::Integer(y)) => x.cmp(&(*y as i64)),
-            (Value::Text(x), Value::Text(y)) => x.cmp(y),
-            (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
-            (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
-            (Value::Uuid(x), Value::Uuid(y)) => x.0.cmp(&y.0),
-            _ => return false, // Type mismatch
+        let current_branch = self.current_branch();
+        let branches = vec![current_branch.clone()];
+        let storage_ref: &dyn Storage = storage;
+        let om = &mut self.sync_manager.object_manager;
+        let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            let obj = om.get_or_load(id, storage_ref, &branches)?;
+            let branch = obj.branches.get(&BranchName::new(&current_branch))?;
+            let tip_id = branch.tips.iter().next()?;
+            let commit = branch.commits.get(tip_id)?;
+            if commit.content.is_empty() {
+                return None;
+            }
+            Some((commit.content.clone(), *tip_id))
         };
 
-        match op {
-            CmpOp::Eq => ord == Ordering::Equal,
-            CmpOp::Ne => ord != Ordering::Equal,
-            CmpOp::Lt => ord == Ordering::Less,
-            CmpOp::Le => ord != Ordering::Greater,
-            CmpOp::Gt => ord == Ordering::Greater,
-            CmpOp::Ge => ord != Ordering::Less,
+        for graph in &mut graphs {
+            for _ in 0..100 {
+                if graph.settle(storage_ref, &mut row_loader) {
+                    break;
+                }
+            }
+            if !graph.result() {
+                return false;
+            }
         }
-    }
 
-    /// Check if a Value is in a JSON array.
-    pub(super) fn value_in_json_array(&self, value: &Value, array: &[serde_json::Value]) -> bool {
-        match value {
-            Value::Text(s) => array.iter().any(|v| v.as_str() == Some(s.as_str())),
-            Value::Integer(i) => array.iter().any(|v| v.as_i64() == Some(*i as i64)),
-            Value::BigInt(i) => array.iter().any(|v| v.as_i64() == Some(*i)),
-            _ => false,
-        }
+        true
     }
 
     /// Update a row.
@@ -376,7 +323,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Get old data from ObjectManager
-        let (old_data, commit_id) = self
+        let (old_data, _commit_id) = self
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
@@ -395,20 +342,20 @@ impl QueryManager {
             });
         }
 
-        // Check UPDATE USING policy against old row
-        if let (Some(session), Some(policy)) = (session, &using_policy) {
-            let old_row = crate::query_manager::types::Row::new(id, old_data.clone(), commit_id);
-            if !self.evaluate_policy_for_row(policy, &old_row, &descriptor, session, &table) {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Update,
-                });
-            }
-        }
+        // Encode new data (used by WITH CHECK and commit write).
+        let new_data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
-        // Check UPDATE WITH CHECK policy against new values
-        if let (Some(session), Some(policy)) = (session, check_policy)
-            && !self.evaluate_policy_for_values(&policy, values, &descriptor, session, &table)
+        // Check UPDATE USING policy against old row
+        if let (Some(session), Some(policy)) = (session, &using_policy)
+            && !self.evaluate_policy_for_content_with_context(
+                storage,
+                policy,
+                &old_data,
+                &descriptor,
+                session,
+                &table,
+            )
         {
             return Err(QueryError::PolicyDenied {
                 table: table_name,
@@ -416,9 +363,22 @@ impl QueryManager {
             });
         }
 
-        // Encode new data
-        let new_data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        // Check UPDATE WITH CHECK policy against new values
+        if let (Some(session), Some(policy)) = (session, check_policy)
+            && !self.evaluate_policy_for_content_with_context(
+                storage,
+                &policy,
+                &new_data,
+                &descriptor,
+                session,
+                &table,
+            )
+        {
+            return Err(QueryError::PolicyDenied {
+                table: table_name,
+                operation: Operation::Update,
+            });
+        }
 
         // Get parent commit
         let tips = self
@@ -471,28 +431,6 @@ impl QueryManager {
         Ok(commit_id)
     }
 
-    /// Evaluate a policy expression against an encoded row.
-    pub(super) fn evaluate_policy_for_row(
-        &self,
-        policy: &crate::query_manager::policy::PolicyExpr,
-        row: &crate::query_manager::types::Row,
-        descriptor: &RowDescriptor,
-        session: &Session,
-        table: &str,
-    ) -> bool {
-        use crate::query_manager::graph_nodes::policy_filter::PolicyFilterNode;
-
-        // Create a temporary PolicyFilterNode to evaluate the policy
-        let filter = PolicyFilterNode::new(
-            descriptor.clone(),
-            policy.clone(),
-            session.clone(),
-            (*self.schema).clone(),
-            table,
-        );
-        filter.evaluate(row)
-    }
-
     /// Soft delete a row.
     ///
     /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
@@ -538,7 +476,7 @@ impl QueryManager {
         }
 
         // Get old data from ObjectManager (for index removal and content preservation)
-        let (old_data, commit_id) = self
+        let (old_data, _commit_id) = self
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
@@ -550,14 +488,20 @@ impl QueryManager {
 
         // Check DELETE USING policy (falls back to UPDATE's USING)
         let using_policy = table_schema.policies.effective_delete_using().cloned();
-        if let (Some(session), Some(policy)) = (session, using_policy) {
-            let old_row = Row::new(id, old_data.clone(), commit_id);
-            if !self.evaluate_policy_for_row(&policy, &old_row, &descriptor, session, &table) {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Delete,
-                });
-            }
+        if let (Some(session), Some(policy)) = (session, using_policy)
+            && !self.evaluate_policy_for_content_with_context(
+                storage,
+                &policy,
+                &old_data,
+                &descriptor,
+                session,
+                &table,
+            )
+        {
+            return Err(QueryError::PolicyDenied {
+                table: table_name,
+                operation: Operation::Delete,
+            });
         }
 
         // Get parent commit

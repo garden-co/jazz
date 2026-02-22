@@ -7,7 +7,6 @@ use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, PendingPermissionCheck, QueryId};
 
-use super::graph::QueryGraph;
 use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
@@ -53,16 +52,28 @@ impl QueryManager {
             };
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
-            let graph = QueryGraph::compile_with_schema_context(
+            let graph = Self::compile_graph(
                 &sub.query,
                 &schema_for_compile,
                 sub.session.clone(),
                 &self.schema_context,
             );
 
-            let Some(mut graph) = graph else {
-                // Query compilation failed (e.g., missing table)
-                // TODO: Send error back to client
+            let Ok(mut graph) = graph else {
+                // Query compilation failed (e.g., missing table) - notify client with compiler context.
+                let compile_error = graph
+                    .err()
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "unknown compile error".to_string());
+                let reason = format!(
+                    "query compilation failed for query_id {}: {}",
+                    sub.query_id.0, compile_error
+                );
+                self.sync_manager.emit_query_subscription_rejected(
+                    sub.client_id,
+                    sub.query_id,
+                    reason,
+                );
                 continue;
             };
 
@@ -548,6 +559,7 @@ impl QueryManager {
                 ComplexClause::Inherits {
                     operation,
                     via_column,
+                    max_depth: _,
                 } => {
                     // Get the FK column to find the parent
                     let col_idx = match descriptor.column_index(via_column) {
@@ -602,6 +614,7 @@ impl QueryManager {
                         session,
                         &self.schema,
                         &branch,
+                        1,
                     ) {
                         graphs.push(graph);
                     }
@@ -615,6 +628,11 @@ impl QueryManager {
                         &self.schema,
                         &branch,
                     ) {
+                        graphs.push(graph);
+                    }
+                }
+                ComplexClause::ExistsRel { rel } => {
+                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
                         graphs.push(graph);
                     }
                 }

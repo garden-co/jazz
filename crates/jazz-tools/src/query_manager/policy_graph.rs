@@ -48,6 +48,19 @@ impl PolicyGraph {
         schema: &Schema,
         branch: &str,
     ) -> Option<Self> {
+        Self::for_using_check_with_depth(table, object_id, policy, session, schema, branch, 0)
+    }
+
+    /// Create a graph for USING check with an explicit initial recursion depth.
+    pub fn for_using_check_with_depth(
+        table: &TableName,
+        object_id: ObjectId,
+        policy: &PolicyExpr,
+        session: &Session,
+        schema: &Schema,
+        branch: &str,
+        initial_depth: usize,
+    ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.descriptor.clone();
 
@@ -72,13 +85,14 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate policy against row
-        let policy_node = PolicyFilterNode::new_with_branch(
+        let policy_node = PolicyFilterNode::new_with_branch_and_depth(
             descriptor.clone(),
             policy.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
             branch,
+            initial_depth,
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -109,15 +123,17 @@ impl PolicyGraph {
         session: &Session,
         schema: &Schema,
         branch: &str,
+        initial_depth: usize,
     ) -> Option<Self> {
         // INHERITS is essentially the same as a USING check on the parent table
-        Self::for_using_check(
+        Self::for_using_check_with_depth(
             parent_table,
             parent_id,
             parent_policy,
             session,
             schema,
             branch,
+            initial_depth,
         )
     }
 
@@ -182,6 +198,38 @@ impl PolicyGraph {
         })
     }
 
+    /// Create a graph for declarative EXISTS relation checks.
+    ///
+    /// Compiles relation IR through the shared query planner, then appends an
+    /// ExistsOutput node over the compiled query output.
+    pub fn for_exists_rel(
+        rel: &crate::query_manager::relation_ir::RelExpr,
+        schema: &Schema,
+        branch: &str,
+    ) -> Option<Self> {
+        let branches = vec![branch.to_string()];
+        let mut graph = QueryGraph::compile_relation_ir(rel, schema, &branches, None)?;
+        let output_descriptor = match graph
+            .nodes
+            .get(graph.output_node.0 as usize)
+            .map(|c| &c.node)
+        {
+            Some(GraphNode::Output(node)) => node.output_tuple_descriptor().combined_descriptor(),
+            _ => return None,
+        };
+
+        let exists_node = ExistsOutputNode::new(output_descriptor);
+        let exists_id = graph.add_node_with_id(GraphNode::ExistsOutput(exists_node));
+        graph.add_edge(exists_id, graph.output_node);
+        graph.output_node = exists_id;
+
+        Some(Self {
+            table: graph.table,
+            graph,
+            exists_node: exists_id,
+        })
+    }
+
     /// Settle the graph. With synchronous Storage, always completes in one pass.
     ///
     /// The row_loader trait object is used to fetch row content by ObjectId.
@@ -233,6 +281,10 @@ impl PolicyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
+        ProjectExpr, RelExpr, RowIdRef, ValueRef,
+    };
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema,
     };
@@ -335,5 +387,153 @@ mod tests {
 
         // No rows found (object doesn't exist in empty OM), so result is false
         assert!(!pg.result());
+    }
+
+    #[test]
+    fn test_for_exists_rel_creates_graph() {
+        let schema = test_schema();
+        let rel = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("documents"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("owner_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Text("user1".to_string())),
+            },
+        };
+
+        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        assert!(graph.is_some(), "exists-rel graph should compile");
+
+        let graph = graph.expect("graph");
+        assert_eq!(graph.table().as_str(), "documents");
+        assert!(matches!(
+            graph
+                .graph
+                .nodes
+                .get(graph.exists_node.0 as usize)
+                .map(|c| &c.node),
+            Some(GraphNode::ExistsOutput(_))
+        ));
+    }
+
+    #[test]
+    fn test_for_exists_rel_with_gather_post_join_compiles() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("teams"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("_id", ColumnType::Uuid),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ])),
+        );
+        schema.insert(
+            TableName::new("team_edges"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("_id", ColumnType::Uuid),
+                ColumnDescriptor::new("child_team", ColumnType::Uuid),
+                ColumnDescriptor::new("parent_team", ColumnType::Uuid),
+            ])),
+        );
+        schema.insert(
+            TableName::new("resource_access_edges"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("_id", ColumnType::Uuid),
+                ColumnDescriptor::new("team", ColumnType::Uuid),
+                ColumnDescriptor::new("resource", ColumnType::Text),
+                ColumnDescriptor::new("grant_role", ColumnType::Text),
+            ])),
+        );
+
+        let rel = RelExpr::Project {
+            input: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Gather {
+                        seed: Box::new(RelExpr::Filter {
+                            input: Box::new(RelExpr::TableScan {
+                                table: TableName::new("teams"),
+                            }),
+                            predicate: PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("teams", "name"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::Literal(Value::Text("seed".to_string())),
+                            },
+                        }),
+                        step: Box::new(RelExpr::Project {
+                            input: Box::new(RelExpr::Join {
+                                left: Box::new(RelExpr::Filter {
+                                    input: Box::new(RelExpr::TableScan {
+                                        table: TableName::new("team_edges"),
+                                    }),
+                                    predicate: PredicateExpr::Cmp {
+                                        left: ColumnRef::scoped("team_edges", "child_team"),
+                                        op: PredicateCmpOp::Eq,
+                                        right: ValueRef::RowId(RowIdRef::Frontier),
+                                    },
+                                }),
+                                right: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("teams"),
+                                }),
+                                on: vec![JoinCondition {
+                                    left: ColumnRef::scoped("team_edges", "parent_team"),
+                                    right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                                }],
+                                join_kind: JoinKind::Inner,
+                            }),
+                            columns: vec![ProjectColumn {
+                                alias: "id".to_string(),
+                                expr: ProjectExpr::Column(ColumnRef::scoped(
+                                    "__recursive_hop_0",
+                                    "id",
+                                )),
+                            }],
+                        }),
+                        frontier_key: KeyRef::RowId(RowIdRef::Current),
+                        max_depth: 5,
+                        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("resource_access_edges"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("teams", "id"),
+                        right: ColumnRef::scoped("__hop_0", "team"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("__hop_0", "grant_role"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("viewer".to_string())),
+                },
+            }),
+            columns: vec![ProjectColumn {
+                alias: "id".to_string(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+            }],
+        };
+
+        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        assert!(
+            graph.is_some(),
+            "gather + post-join exists-rel should compile"
+        );
+
+        let graph = graph.expect("graph");
+        assert!(
+            graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::RecursiveRelation(_)))
+        );
+        assert!(
+            graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Join(_)))
+        );
     }
 }

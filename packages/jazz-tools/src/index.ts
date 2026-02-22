@@ -29,6 +29,23 @@ export type {
   DropOp,
   RenameOp,
 } from "./schema.js";
+export type {
+  RelColumnRef,
+  RelRowIdRef,
+  RelValueRef,
+  RelPredicateCmpOp,
+  RelPredicateExpr,
+  RelJoinKind,
+  RelJoinCondition,
+  RelKeyRef,
+  RelProjectExpr,
+  RelProjectColumn,
+  RelOrderDirection,
+  RelOrderByExpr,
+  RelExpr,
+  PolicyOperationV2,
+  PolicyExprV2,
+} from "./ir.js";
 
 // Codegen
 export { generateClient, schemaToWasm, generateTypes } from "./codegen/index.js";

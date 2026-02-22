@@ -100,11 +100,16 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         table: expr.table,
         condition: clonePolicyExpr(expr.condition),
       };
+    case "ExistsRel":
+      throw new Error(
+        "Policy ExistsRel is not supported in schemaToWasm(). Use definePermissions() relation IR path instead.",
+      );
     case "Inherits":
       return {
         type: "Inherits",
         operation: expr.operation,
         via_column: expr.via_column,
+        max_depth: expr.max_depth,
       };
     case "And":
       return { type: "And", exprs: expr.exprs.map(clonePolicyExpr) };
