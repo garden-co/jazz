@@ -12,7 +12,10 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use futures::executor::block_on;
 use groove::object::ObjectId;
 use groove::query_manager::query::QueryBuilder;
-use groove::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema, Value};
+use groove::query_manager::types::{
+    ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
+};
+use groove::query_manager::{Operation as PolicyOperation, PolicyExpr, Session};
 use groove::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::MemoryStorage;
@@ -86,6 +89,18 @@ struct R4ScenarioConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct R5ScenarioConfig {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    mix: Vec<WeightedOperation>,
+    recursive_depths: Vec<usize>,
+    shared_chain_depth: usize,
+    docs_per_folder: usize,
+    denied_docs: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct R7ScenarioConfig {
     id: String,
     seed: u64,
@@ -144,6 +159,26 @@ struct R4Scenario {
     operation_count: usize,
     fanout_clients: Vec<usize>,
     target_project_index: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PermissionOperation {
+    QueryVisibleDocs,
+    UpdateAllowedDoc,
+    UpdateDeniedDoc,
+}
+
+#[derive(Debug, Clone)]
+struct R5Scenario {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    operations: Vec<PermissionOperation>,
+    weights: Vec<u32>,
+    recursive_depths: Vec<usize>,
+    shared_chain_depth: usize,
+    docs_per_folder: usize,
+    denied_docs: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +268,21 @@ struct FanoutR4State {
     hot_task_cursor: usize,
     total_routed_messages: usize,
     delivered_notifications: Arc<AtomicUsize>,
+}
+
+struct PermissionBatchResult {
+    total_rows: usize,
+    allowed_updates: usize,
+    denied_updates: usize,
+}
+
+struct PermissionR5State {
+    runtime: BenchRuntime,
+    rng: Lcg,
+    session_alice: Session,
+    allowed_doc_ids: Vec<ObjectId>,
+    denied_doc_ids: Vec<ObjectId>,
+    timestamp: u64,
 }
 
 #[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
@@ -1094,6 +1144,195 @@ impl FanoutR4State {
     }
 }
 
+impl PermissionR5State {
+    fn new(scenario: &R5Scenario, recursive_depth: usize) -> Self {
+        let runtime = create_runtime(permission_recursive_schema(recursive_depth));
+        let session_alice = Session::new("alice");
+        let mut state = Self {
+            runtime,
+            rng: Lcg::new(scenario.seed ^ recursive_depth as u64),
+            session_alice,
+            allowed_doc_ids: Vec::new(),
+            denied_doc_ids: Vec::new(),
+            timestamp: 1_770_000_000_000_000,
+        };
+
+        let alice_root = state
+            .runtime
+            .insert(
+                "folders",
+                vec![
+                    Value::Text("alice".to_string()),
+                    Value::Text("alice-root".to_string()),
+                    Value::Null,
+                ],
+                None,
+            )
+            .expect("seed alice root folder");
+        let mut shared_folders = vec![alice_root];
+        let mut parent = alice_root;
+        for idx in 0..scenario.shared_chain_depth {
+            let folder_id = state
+                .runtime
+                .insert(
+                    "folders",
+                    vec![
+                        Value::Text("bob".to_string()),
+                        Value::Text(format!("shared-folder-{idx}")),
+                        Value::Uuid(parent),
+                    ],
+                    None,
+                )
+                .expect("seed shared folder");
+            shared_folders.push(folder_id);
+            parent = folder_id;
+        }
+
+        for (depth_idx, folder_id) in shared_folders.iter().copied().enumerate() {
+            for doc_idx in 0..scenario.docs_per_folder {
+                let updated_at = state.next_timestamp();
+                let owner_id = if doc_idx % 8 == 0 { "alice" } else { "bob" };
+                let doc_id = state
+                    .runtime
+                    .insert(
+                        "documents",
+                        vec![
+                            Value::Text(owner_id.to_string()),
+                            Value::Uuid(folder_id),
+                            Value::Text(format!("shared-doc-{depth_idx}-{doc_idx}")),
+                            Value::Text("open".to_string()),
+                            Value::Timestamp(updated_at),
+                            Value::Text("{\"kind\":\"shared\"}".to_string()),
+                        ],
+                        None,
+                    )
+                    .expect("seed shared docs");
+                if owner_id == "alice" {
+                    state.allowed_doc_ids.push(doc_id);
+                }
+            }
+        }
+
+        let private_root = state
+            .runtime
+            .insert(
+                "folders",
+                vec![
+                    Value::Text("bob".to_string()),
+                    Value::Text("private-root".to_string()),
+                    Value::Null,
+                ],
+                None,
+            )
+            .expect("seed private root folder");
+        for doc_idx in 0..scenario.denied_docs {
+            let updated_at = state.next_timestamp();
+            let doc_id = state
+                .runtime
+                .insert(
+                    "documents",
+                    vec![
+                        Value::Text("bob".to_string()),
+                        Value::Uuid(private_root),
+                        Value::Text(format!("private-doc-{doc_idx}")),
+                        Value::Text("open".to_string()),
+                        Value::Timestamp(updated_at),
+                        Value::Text("{\"kind\":\"private\"}".to_string()),
+                    ],
+                    None,
+                )
+                .expect("seed private docs");
+            state.denied_doc_ids.push(doc_id);
+        }
+
+        assert!(
+            !state.allowed_doc_ids.is_empty(),
+            "permission benchmark needs allowed documents"
+        );
+        assert!(
+            !state.denied_doc_ids.is_empty(),
+            "permission benchmark needs denied documents"
+        );
+        state
+    }
+
+    fn run_batch(&mut self, scenario: &R5Scenario) -> PermissionBatchResult {
+        let mut result = PermissionBatchResult {
+            total_rows: 0,
+            allowed_updates: 0,
+            denied_updates: 0,
+        };
+
+        for _ in 0..scenario.operation_count {
+            let op_idx = self.rng.pick_weighted_index(&scenario.weights);
+            let op = scenario.operations[op_idx];
+            match op {
+                PermissionOperation::QueryVisibleDocs => {
+                    result.total_rows += self.query_visible_docs();
+                }
+                PermissionOperation::UpdateAllowedDoc => {
+                    self.update_allowed_doc();
+                    result.allowed_updates += 1;
+                }
+                PermissionOperation::UpdateDeniedDoc => {
+                    self.update_denied_doc();
+                    result.denied_updates += 1;
+                }
+            }
+        }
+
+        result
+    }
+
+    fn query_visible_docs(&mut self) -> usize {
+        let query = QueryBuilder::new("documents")
+            .filter_ne("status", Value::Text("archived".to_string()))
+            .order_by_desc("updated_at")
+            .limit(200)
+            .build();
+        let rows = block_on(
+            self.runtime
+                .query(query, Some(self.session_alice.clone()), None),
+        )
+        .expect("permission query");
+        rows.len()
+    }
+
+    fn update_allowed_doc(&mut self) {
+        let doc_id = self.allowed_doc_ids[self.rng.next_usize(self.allowed_doc_ids.len())];
+        let updated_at = self.next_timestamp();
+        self.runtime
+            .update(
+                doc_id,
+                vec![
+                    ("status".to_string(), Value::Text("in_review".to_string())),
+                    ("updated_at".to_string(), Value::Timestamp(updated_at)),
+                ],
+                Some(&self.session_alice),
+            )
+            .expect("allowed permission update");
+    }
+
+    fn update_denied_doc(&mut self) {
+        let doc_id = self.denied_doc_ids[self.rng.next_usize(self.denied_doc_ids.len())];
+        let updated_at = self.next_timestamp();
+        let result = self.runtime.update(
+            doc_id,
+            vec![
+                ("status".to_string(), Value::Text("archived".to_string())),
+                ("updated_at".to_string(), Value::Timestamp(updated_at)),
+            ],
+            Some(&self.session_alice),
+        );
+        assert!(result.is_err(), "expected denied permission update");
+    }
+
+    fn next_timestamp(&mut self) -> u64 {
+        self.timestamp += 1;
+        self.timestamp
+    }
+}
+
 fn realistic_r1_crud(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
     let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
@@ -1344,6 +1583,33 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
     group.finish();
 }
 
+fn realistic_r5_permission_recursive(c: &mut Criterion) {
+    let scenario = load_r5_scenario("benchmarks/realistic/scenarios/r5_permission_recursive.json");
+    let mut group = c.benchmark_group("realistic_phase1/permission_recursive");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    for recursive_depth in scenario.recursive_depths.iter().copied() {
+        let bench_id = format!("{}_depth{recursive_depth}", scenario.id.to_lowercase());
+        group.bench_with_input(
+            BenchmarkId::from_parameter(bench_id),
+            &recursive_depth,
+            |b, recursive_depth| {
+                let mut state = PermissionR5State::new(&scenario, *recursive_depth);
+                b.iter(|| {
+                    let result = state.run_batch(&scenario);
+                    black_box(result.total_rows);
+                    black_box(result.allowed_updates);
+                    black_box(result.denied_updates);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn realistic_r7_hotspot_history(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
     let scenario = load_r7_scenario("benchmarks/realistic/scenarios/r7_hotspot_history.json");
@@ -1450,6 +1716,34 @@ fn load_r4_scenario(path: &str) -> R4Scenario {
     }
 }
 
+fn load_r5_scenario(path: &str) -> R5Scenario {
+    let raw: R5ScenarioConfig = load_json(path);
+    let mut operations = Vec::with_capacity(raw.mix.len());
+    let mut weights = Vec::with_capacity(raw.mix.len());
+    for op in raw.mix {
+        let parsed = match op.operation.as_str() {
+            "query_visible_docs" => PermissionOperation::QueryVisibleDocs,
+            "update_allowed_doc" => PermissionOperation::UpdateAllowedDoc,
+            "update_denied_doc" => PermissionOperation::UpdateDeniedDoc,
+            unknown => panic!("unsupported R5 operation: {unknown}"),
+        };
+        operations.push(parsed);
+        weights.push(op.weight);
+    }
+
+    R5Scenario {
+        id: raw.id,
+        seed: raw.seed,
+        operation_count: raw.operation_count,
+        operations,
+        weights,
+        recursive_depths: raw.recursive_depths,
+        shared_chain_depth: raw.shared_chain_depth,
+        docs_per_folder: raw.docs_per_folder,
+        denied_docs: raw.denied_docs,
+    }
+}
+
 fn load_r7_scenario(path: &str) -> R7Scenario {
     let raw: R7ScenarioConfig = load_json(path);
     R7Scenario {
@@ -1515,6 +1809,54 @@ fn create_surrealkv_runtime(
         NoopScheduler,
         VecSyncSender::new(),
     )
+}
+
+fn permission_recursive_schema(recursive_depth: usize) -> Schema {
+    let folder_select = PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::inherits_with_depth(PolicyOperation::Select, "parent_id", recursive_depth),
+    ]);
+    let folder_update = PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::inherits_with_depth(PolicyOperation::Update, "parent_id", recursive_depth),
+    ]);
+    let folder_policies = TablePolicies::new()
+        .with_select(folder_select)
+        .with_update(Some(folder_update), PolicyExpr::True);
+
+    let doc_select = PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::inherits_with_depth(PolicyOperation::Select, "folder_id", recursive_depth),
+    ]);
+    let doc_update = PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::inherits_with_depth(PolicyOperation::Update, "folder_id", recursive_depth),
+    ]);
+    let doc_update_check = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let doc_policies = TablePolicies::new()
+        .with_select(doc_select)
+        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+        .with_update(Some(doc_update), doc_update_check);
+
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("parent_id", "folders")
+                .policies(folder_policies),
+        )
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .fk_column("folder_id", "folders")
+                .column("title", ColumnType::Text)
+                .column("status", ColumnType::Text)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("payload", ColumnType::Text)
+                .policies(doc_policies),
+        )
+        .build()
 }
 
 fn project_board_schema() -> Schema {
@@ -1585,6 +1927,7 @@ criterion_group!(
     realistic_r2_reads_with_write_churn,
     realistic_r3_cold_load_surrealkv,
     realistic_r4_fanout_updates,
+    realistic_r5_permission_recursive,
     realistic_r7_hotspot_history
 );
 criterion_main!(benches);
