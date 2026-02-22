@@ -8,6 +8,12 @@ import profileJson from "../../../../benchmarks/realistic/profiles/s.json";
 import w1Json from "../../../../benchmarks/realistic/scenarios/w1_interactive.json";
 import w3Json from "../../../../benchmarks/realistic/scenarios/w3_offline_reconnect.json";
 import w4Json from "../../../../benchmarks/realistic/scenarios/w4_cold_start.json";
+import b1Json from "../../../../benchmarks/realistic/scenarios/b1_server_crud_sustained.json";
+import b2Json from "../../../../benchmarks/realistic/scenarios/b2_server_reads_sustained.json";
+import b3Json from "../../../../benchmarks/realistic/scenarios/b3_server_cold_load_large.json";
+import b4Json from "../../../../benchmarks/realistic/scenarios/b4_server_fanout_updates.json";
+import b5Json from "../../../../benchmarks/realistic/scenarios/b5_server_permission_recursive.json";
+import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
 
 type PersistenceTier = "worker" | "edge" | "core";
 
@@ -45,6 +51,60 @@ interface W4Scenario {
   name: string;
   seed: number;
   reopen_cycles: number;
+}
+
+interface B1Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  insert_count: number;
+  update_count: number;
+  delete_count: number;
+}
+
+interface B2Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  request_count: number;
+  mix: Array<{ operation: string; weight: number }>;
+}
+
+interface B3Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  reopen_cycles: number;
+  large_multiplier: number;
+}
+
+interface B4Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  subscriber_counts: number[];
+  rounds: number;
+  timeout_seconds: number;
+}
+
+interface B5Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  folders: number;
+  documents: number;
+  read_request_count: number;
+  update_attempt_count: number;
+  allow_fraction: number;
+  recursive_depth: number;
+}
+
+interface B6Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  hot_task_count: number;
+  update_count: number;
 }
 
 interface UserRow {
@@ -109,6 +169,22 @@ interface ActivityRow {
   payload: string;
 }
 
+interface PermissionFolderRow {
+  id: string;
+  parent_id: string | null;
+  owner_id: string;
+  title: string;
+  updated_at: number;
+}
+
+interface PermissionDocumentRow {
+  id: string;
+  folder_id: string;
+  body: string;
+  revision: number;
+  updated_at: number;
+}
+
 interface SeedState {
   users: string[];
   projects: string[];
@@ -143,6 +219,12 @@ const profile = profileJson as unknown as ProfileConfig;
 const w1 = w1Json as unknown as W1Scenario;
 const w3 = w3Json as unknown as W3Scenario;
 const w4 = w4Json as unknown as W4Scenario;
+const b1 = b1Json as unknown as B1Scenario;
+const b2 = b2Json as unknown as B2Scenario;
+const b3 = b3Json as unknown as B3Scenario;
+const b4 = b4Json as unknown as B4Scenario;
+const b5 = b5Json as unknown as B5Scenario;
+const b6 = b6Json as unknown as B6Scenario;
 
 const usersTable = tableProxy<UserRow, Omit<UserRow, "id">>("users");
 const organizationsTable = tableProxy<OrganizationRow, Omit<OrganizationRow, "id">>(
@@ -184,10 +266,10 @@ class Lcg {
   }
 }
 
-function tableProxy<T, Init>(table: string): TableProxy<T, Init> {
+function tableProxy<T, Init>(table: string, tableSchema: WasmSchema = schema): TableProxy<T, Init> {
   return {
     _table: table,
-    _schema: schema,
+    _schema: tableSchema,
     _rowType: {} as T,
     _initType: {} as Init,
   };
@@ -198,10 +280,11 @@ function query<T>(
   conditions: Array<{ column: string; op: string; value: unknown }> = [],
   orderBy: Array<[string, "asc" | "desc"]> = [],
   limit?: number,
+  querySchema: WasmSchema = schema,
 ): QueryBuilder<T> {
   return {
     _table: table,
-    _schema: schema,
+    _schema: querySchema,
     _rowType: {} as T,
     _build() {
       return JSON.stringify({
@@ -268,6 +351,57 @@ function scaledProfile(input: ProfileConfig): ProfileConfig {
     comments,
     activity_events,
   };
+}
+
+function scaledLargeProfile(input: ProfileConfig, multiplier: number): ProfileConfig {
+  const base = scaledProfile(input);
+  const factor = Math.max(1, Math.floor(multiplier));
+  const tasks = Math.min(4000, base.tasks * factor);
+  const comments = Math.min(16000, Math.max(tasks, base.comments * factor));
+  const activity_events = Math.min(12000, Math.max(tasks, base.activity_events * factor));
+  return {
+    ...base,
+    id: `${base.id}_L`,
+    tasks,
+    comments,
+    activity_events,
+  };
+}
+
+async function createServerDb(
+  dbName: string,
+  sub: string,
+  claims: Record<string, unknown> = {},
+): Promise<Db> {
+  const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+  const token = await signJwt(sub, JWT_SECRET, claims);
+  return createDb({
+    appId: APP_ID,
+    dbName,
+    serverUrl,
+    jwtToken: token,
+    adminSecret: ADMIN_SECRET,
+    logLevel: "warn",
+  });
+}
+
+async function waitForCondition(
+  description: string,
+  timeoutMs: number,
+  condition: () => boolean,
+): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+}
+
+async function storageUsageBytes(): Promise<number | null> {
+  if (typeof navigator === "undefined" || !navigator.storage?.estimate) return null;
+  const estimate = await navigator.storage.estimate();
+  return typeof estimate.usage === "number" ? estimate.usage : null;
 }
 
 async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
@@ -681,8 +815,796 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
   }
 }
 
+async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
+  progressLog("B1 start");
+  const dbName = uniqueDbName("b1");
+  const rng = new Lcg(b1.seed ^ config.seed);
+  const insertCount = Math.min(b1.insert_count, 96);
+  const updateCount = Math.min(b1.update_count, 96);
+  const deleteCount = Math.min(b1.delete_count, insertCount);
+  const insertedCommentIds: string[] = [];
+  const latencies: Record<string, number[]> = {};
+
+  let db: Db | null = null;
+  try {
+    db = await createServerDb(dbName, "realistic-b1");
+    const state = await seedDataset(db, config);
+    const wallStart = performance.now();
+
+    for (let i = 0; i < insertCount; i += 1) {
+      reportLoopProgress("B1 inserts", i, insertCount);
+      const taskIdx = rng.nextInt(state.taskIds.length);
+      const t0 = performance.now();
+      const id = db.insert(commentsTable, {
+        task_id: state.taskIds[taskIdx],
+        author_id: state.users[rng.nextInt(state.users.length)],
+        body: `b1_insert_comment_${i}`,
+        created_at: nowMicros(),
+      });
+      insertedCommentIds.push(id);
+      (latencies.insert_sync ||= []).push(performance.now() - t0);
+    }
+
+    for (let i = 0; i < updateCount; i += 1) {
+      reportLoopProgress("B1 updates", i, updateCount);
+      const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+      const t0 = performance.now();
+      db.update(tasksTable, taskId, {
+        priority: 1 + rng.nextInt(4),
+        status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
+        updated_at: nowMicros(),
+      });
+      (latencies.update_sync ||= []).push(performance.now() - t0);
+    }
+
+    for (let i = 0; i < deleteCount; i += 1) {
+      reportLoopProgress("B1 deletes", i, deleteCount);
+      const id = insertedCommentIds[i];
+      const t0 = performance.now();
+      db.deleteFrom(commentsTable, id);
+      (latencies.delete_sync ||= []).push(performance.now() - t0);
+    }
+
+    const wallMs = performance.now() - wallStart;
+    const totalOperations = insertCount + updateCount + deleteCount;
+    const operationSummaries: Record<string, OpSummary> = {};
+    for (const [op, samples] of Object.entries(latencies)) {
+      operationSummaries[op] = summarizeLatencies(samples);
+    }
+
+    return {
+      scenario_id: b1.id,
+      scenario_name: b1.name,
+      profile_id: config.id,
+      topology: "single_hop_browser",
+      total_operations: totalOperations,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: totalOperations / Math.max(0.001, wallMs / 1000),
+      operation_summaries: operationSummaries,
+      extra: {
+        inserts: insertCount,
+        updates: updateCount,
+        deletes: deleteCount,
+      },
+    };
+  } finally {
+    if (db) await db.shutdown();
+  }
+}
+
+async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
+  progressLog("B2 start");
+  const dbName = uniqueDbName("b2");
+  const rng = new Lcg(b2.seed ^ config.seed);
+  const requestCount = Math.min(b2.request_count, 160);
+  const weights = b2.mix.map((x) => x.weight);
+  const latencies: Record<string, number[]> = {};
+
+  let db: Db | null = null;
+  try {
+    db = await createServerDb(dbName, "realistic-b2");
+    const state = await seedDataset(db, config);
+
+    const wallStart = performance.now();
+    for (let i = 0; i < requestCount; i += 1) {
+      reportLoopProgress("B2 reads", i, requestCount);
+      const op = b2.mix[rng.pickWeightedIndex(weights)].operation;
+      const t0 = performance.now();
+      switch (op) {
+        case "query_board": {
+          const project = state.projects[rng.nextInt(state.hotProjectCount)];
+          await db.all(
+            query<TaskRow>(
+              "tasks",
+              [{ column: "project_id", op: "eq", value: project }],
+              [["updated_at", "desc"]],
+              200,
+            ),
+          );
+          break;
+        }
+        case "query_my_work": {
+          const assignee = state.users[rng.nextInt(state.users.length)];
+          await db.all(
+            query<TaskRow>(
+              "tasks",
+              [
+                { column: "assignee_id", op: "eq", value: assignee },
+                { column: "status", op: "eq", value: "in_progress" },
+              ],
+              [["updated_at", "desc"]],
+              200,
+            ),
+          );
+          break;
+        }
+        case "query_task_detail": {
+          const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+          await db.all(
+            query<CommentRow>(
+              "task_comments",
+              [{ column: "task_id", op: "eq", value: taskId }],
+              [["created_at", "desc"]],
+              200,
+            ),
+          );
+          await db.all(
+            query<ActivityRow>(
+              "activity_events",
+              [{ column: "task_id", op: "eq", value: taskId }],
+              [["created_at", "desc"]],
+              200,
+            ),
+          );
+          break;
+        }
+        default:
+          throw new Error(`Unknown operation in B2 mix: ${op}`);
+      }
+      (latencies[op] ||= []).push(performance.now() - t0);
+    }
+    const wallMs = performance.now() - wallStart;
+
+    const operationSummaries: Record<string, OpSummary> = {};
+    for (const [op, samples] of Object.entries(latencies)) {
+      operationSummaries[op] = summarizeLatencies(samples);
+    }
+
+    return {
+      scenario_id: b2.id,
+      scenario_name: b2.name,
+      profile_id: config.id,
+      topology: "single_hop_browser",
+      total_operations: requestCount,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: requestCount / Math.max(0.001, wallMs / 1000),
+      operation_summaries: operationSummaries,
+      extra: {
+        read_mix: b2.mix,
+      },
+    };
+  } finally {
+    if (db) await db.shutdown();
+  }
+}
+
+async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
+  const dbName = uniqueDbName("b3");
+  const cycles = Math.min(b3.reopen_cycles, 4);
+  const largeConfig = scaledLargeProfile(config, b3.large_multiplier);
+  progressLog(
+    `B3 start cycles=${cycles} tasks=${largeConfig.tasks} comments=${largeConfig.comments}`,
+  );
+  const latencies: number[] = [];
+  let seedDb: Db | null = null;
+  let cycleDb: Db | null = null;
+
+  try {
+    seedDb = await createServerDb(dbName, "realistic-b3-seed");
+    const state = await seedDataset(seedDb, largeConfig);
+    const hotProjectId = state.projects[0];
+    await seedDb.all(
+      query<TaskRow>(
+        "tasks",
+        [{ column: "project_id", op: "eq", value: hotProjectId }],
+        [["updated_at", "desc"]],
+        200,
+      ),
+    );
+    await seedDb.shutdown();
+    seedDb = null;
+
+    const wallStart = performance.now();
+    for (let i = 0; i < cycles; i += 1) {
+      progressLog(`B3 cycle ${i + 1}/${cycles}`);
+      const t0 = performance.now();
+      cycleDb = await createServerDb(dbName, "realistic-b3-cycle");
+      await cycleDb.all(
+        query<TaskRow>(
+          "tasks",
+          [{ column: "project_id", op: "eq", value: hotProjectId }],
+          [["updated_at", "desc"]],
+          200,
+        ),
+      );
+      await cycleDb.shutdown();
+      cycleDb = null;
+      latencies.push(performance.now() - t0);
+    }
+    const wallMs = performance.now() - wallStart;
+
+    return {
+      scenario_id: b3.id,
+      scenario_name: b3.name,
+      profile_id: largeConfig.id,
+      topology: "single_hop_browser",
+      total_operations: cycles,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: cycles / Math.max(0.001, wallMs / 1000),
+      operation_summaries: {
+        cold_reopen_query: summarizeLatencies(latencies),
+      },
+      extra: {
+        cycles,
+        dataset: {
+          users: largeConfig.users,
+          projects: largeConfig.projects,
+          tasks: largeConfig.tasks,
+          comments: largeConfig.comments,
+          activity_events: largeConfig.activity_events,
+        },
+      },
+    };
+  } finally {
+    if (seedDb) await seedDb.shutdown();
+    if (cycleDb) await cycleDb.shutdown();
+  }
+}
+
+async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
+  progressLog("B4 start");
+  const dbName = uniqueDbName("b4");
+  const subscriberCounts = b4.subscriber_counts.map((x) => Math.max(1, Math.min(40, x)));
+  const rounds = Math.min(b4.rounds, 8);
+  const timeoutMs = Math.min(b4.timeout_seconds, 30) * 1000;
+  const fanoutDeliveryLatencies: number[] = [];
+  const operationSummaries: Record<string, OpSummary> = {};
+  const fanoutElemsPerSec: Record<string, number> = {};
+  let writer: Db | null = null;
+
+  try {
+    writer = await createServerDb(dbName, "realistic-b4-writer");
+    const state = await seedDataset(writer, config);
+    const targetTaskId = state.taskIds[0];
+    writer.update(tasksTable, targetTaskId, {
+      priority: 0,
+      updated_at: nowMicros(),
+    });
+
+    const wallStart = performance.now();
+    let totalRounds = 0;
+    for (const subscriberCount of subscriberCounts) {
+      progressLog(`B4 fanout subscribers=${subscriberCount}`);
+      const unsubscribeFns: Array<() => void> = [];
+      const seenAt = new Array<number>(subscriberCount).fill(0);
+      let targetPriority = -1;
+
+      try {
+        for (let i = 0; i < subscriberCount; i += 1) {
+          const unsubscribe = writer.subscribeAll(
+            query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
+            (delta) => {
+              const row = delta.all[0];
+              if (!row) return;
+              if (row.priority === targetPriority && seenAt[i] === 0) {
+                seenAt[i] = performance.now();
+              }
+            },
+          );
+          unsubscribeFns.push(unsubscribe);
+        }
+
+        // Warmup update confirms all subscribers are active before measured rounds.
+        targetPriority = 9_000 + subscriberCount;
+        seenAt.fill(0);
+        writer.update(tasksTable, targetTaskId, {
+          priority: targetPriority,
+          updated_at: nowMicros(),
+        });
+        await waitForCondition(`fanout warmup n=${subscriberCount}`, timeoutMs, () =>
+          seenAt.every((x) => x > 0),
+        );
+
+        const perCountLatencies: number[] = [];
+        for (let round = 0; round < rounds; round += 1) {
+          targetPriority = 10_000 + subscriberCount * 100 + round;
+          seenAt.fill(0);
+
+          const t0 = performance.now();
+          writer.update(tasksTable, targetTaskId, {
+            priority: targetPriority,
+            updated_at: nowMicros(),
+          });
+          await waitForCondition(`fanout n=${subscriberCount} round=${round + 1}`, timeoutMs, () =>
+            seenAt.every((x) => x > 0),
+          );
+
+          const deliveredAt = Math.max(...seenAt);
+          const deliveryMs = Math.max(0, deliveredAt - t0);
+          perCountLatencies.push(deliveryMs);
+          fanoutDeliveryLatencies.push(deliveryMs);
+          totalRounds += 1;
+        }
+
+        operationSummaries[`fanout_delivery_n${subscriberCount}`] =
+          summarizeLatencies(perCountLatencies);
+        const groupWallMs = perCountLatencies.reduce((sum, x) => sum + x, 0);
+        fanoutElemsPerSec[`n${subscriberCount}`] =
+          (subscriberCount * perCountLatencies.length) / Math.max(0.001, groupWallMs / 1000);
+      } finally {
+        while (unsubscribeFns.length > 0) {
+          const unsubscribe = unsubscribeFns.pop();
+          if (unsubscribe) unsubscribe();
+        }
+      }
+    }
+
+    const wallMs = performance.now() - wallStart;
+    operationSummaries.fanout_delivery = summarizeLatencies(fanoutDeliveryLatencies);
+
+    return {
+      scenario_id: b4.id,
+      scenario_name: b4.name,
+      profile_id: config.id,
+      topology: "single_hop_browser",
+      total_operations: totalRounds,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: totalRounds / Math.max(0.001, wallMs / 1000),
+      operation_summaries: operationSummaries,
+      extra: {
+        subscriber_counts: subscriberCounts,
+        rounds_per_count: rounds,
+        fanout_elems_per_sec: fanoutElemsPerSec,
+      },
+    };
+  } finally {
+    if (writer) await writer.shutdown();
+  }
+}
+
+function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
+  const folderSelectPolicy = {
+    using: {
+      type: "Or",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+        {
+          type: "Inherits",
+          operation: "Select",
+          via_column: "parent_id",
+          max_depth: recursiveDepth,
+        },
+      ],
+    },
+  };
+
+  const folderUpdatePolicy = {
+    using: {
+      type: "Or",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+        {
+          type: "Inherits",
+          operation: "Update",
+          via_column: "parent_id",
+          max_depth: recursiveDepth,
+        },
+      ],
+    },
+    with_check: {
+      type: "Or",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+        {
+          type: "Inherits",
+          operation: "Update",
+          via_column: "parent_id",
+          max_depth: recursiveDepth,
+        },
+      ],
+    },
+  };
+
+  const documentSelectPolicy = {
+    using: {
+      type: "Inherits",
+      operation: "Select",
+      via_column: "folder_id",
+      max_depth: recursiveDepth,
+    },
+  };
+
+  const documentUpdatePolicy = {
+    using: {
+      type: "Inherits",
+      operation: "Update",
+      via_column: "folder_id",
+      max_depth: recursiveDepth,
+    },
+    with_check: {
+      type: "Inherits",
+      operation: "Update",
+      via_column: "folder_id",
+      max_depth: recursiveDepth,
+    },
+  };
+
+  return {
+    tables: {
+      folders: {
+        columns: [
+          {
+            name: "parent_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "folders",
+          },
+          {
+            name: "owner_id",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+          {
+            name: "title",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+          {
+            name: "updated_at",
+            column_type: { type: "Timestamp" },
+            nullable: false,
+          },
+        ],
+        policies: {
+          select: folderSelectPolicy,
+          update: folderUpdatePolicy,
+        },
+      },
+      documents: {
+        columns: [
+          {
+            name: "folder_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "folders",
+          },
+          {
+            name: "body",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+          {
+            name: "revision",
+            column_type: { type: "Integer" },
+            nullable: false,
+          },
+          {
+            name: "updated_at",
+            column_type: { type: "Timestamp" },
+            nullable: false,
+          },
+        ],
+        policies: {
+          select: documentSelectPolicy,
+          update: documentUpdatePolicy,
+        },
+      },
+    },
+  };
+}
+
+interface PermissionSeedState {
+  allowedDocumentIds: string[];
+  deniedDocumentIds: string[];
+}
+
+async function seedPermissionDataset(
+  db: Db,
+  scenario: B5Scenario,
+  permissionSchema: WasmSchema,
+): Promise<PermissionSeedState> {
+  const folderTable = tableProxy<PermissionFolderRow, Omit<PermissionFolderRow, "id">>(
+    "folders",
+    permissionSchema,
+  );
+  const documentTable = tableProxy<PermissionDocumentRow, Omit<PermissionDocumentRow, "id">>(
+    "documents",
+    permissionSchema,
+  );
+  const rng = new Lcg(scenario.seed);
+  const allowedUser = "realistic-b5-allowed";
+  const deniedUser = "realistic-b5-denied";
+  const totalFolders = Math.max(4, scenario.folders);
+  const totalDocuments = Math.max(20, scenario.documents);
+
+  const allowedFolders: string[] = [];
+  const deniedFolders: string[] = [];
+  const ts = nowMicros();
+  const allowedRootId = db.insert(folderTable, {
+    parent_id: null,
+    owner_id: allowedUser,
+    title: "allowed-root",
+    updated_at: ts,
+  });
+  const deniedRootId = db.insert(folderTable, {
+    parent_id: null,
+    owner_id: deniedUser,
+    title: "denied-root",
+    updated_at: ts + 1,
+  });
+  allowedFolders.push(allowedRootId);
+  deniedFolders.push(deniedRootId);
+
+  for (let i = 2; i < totalFolders; i += 1) {
+    const allowedChain = i % 2 === 0;
+    const parent = allowedChain
+      ? allowedFolders[allowedFolders.length - 1]
+      : deniedFolders[deniedFolders.length - 1];
+    const id = db.insert(folderTable, {
+      parent_id: parent,
+      owner_id: allowedChain ? deniedUser : deniedUser,
+      title: `folder-${i}`,
+      updated_at: ts + i,
+    });
+    if (allowedChain) {
+      allowedFolders.push(id);
+    } else {
+      deniedFolders.push(id);
+    }
+  }
+
+  const allowedDocumentIds: string[] = [];
+  const deniedDocumentIds: string[] = [];
+  const allowThreshold = Math.max(1, Math.min(99, Math.round(scenario.allow_fraction * 100)));
+  for (let i = 0; i < totalDocuments; i += 1) {
+    const useAllowed = rng.nextInt(100) < allowThreshold;
+    const folderList = useAllowed ? allowedFolders : deniedFolders;
+    const folderId = folderList[rng.nextInt(folderList.length)];
+    const id = db.insert(documentTable, {
+      folder_id: folderId,
+      body: `doc-${i}`,
+      revision: 0,
+      updated_at: ts + 10_000 + i,
+    });
+    if (useAllowed) {
+      allowedDocumentIds.push(id);
+    } else {
+      deniedDocumentIds.push(id);
+    }
+  }
+
+  return {
+    allowedDocumentIds,
+    deniedDocumentIds,
+  };
+}
+
+async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
+  progressLog("B5 start");
+  const dbName = uniqueDbName("b5");
+  const rng = new Lcg(b5.seed ^ config.seed);
+  const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
+  const documentTable = tableProxy<PermissionDocumentRow, Omit<PermissionDocumentRow, "id">>(
+    "documents",
+    permissionSchema,
+  );
+  const reads = Math.min(b5.read_request_count, 160);
+  const updates = Math.min(b5.update_attempt_count, 120);
+  const latencies: Record<string, number[]> = {};
+  let db: Db | null = null;
+
+  try {
+    db = await createServerDb(dbName, "realistic-b5-allowed");
+    const seeded = await seedPermissionDataset(db, b5, permissionSchema);
+    const deniedCount = seeded.deniedDocumentIds.length;
+    const allowedCount = seeded.allowedDocumentIds.length;
+    if (deniedCount === 0 || allowedCount === 0) {
+      throw new Error("B5 requires both allowed and denied document populations");
+    }
+
+    let allowedUpdateSuccess = 0;
+    let deniedUpdateRejected = 0;
+    let unexpectedDeniedForAllowed = 0;
+    let unexpectedAllowedForDenied = 0;
+
+    const wallStart = performance.now();
+    for (let i = 0; i < reads; i += 1) {
+      reportLoopProgress("B5 reads", i, reads);
+      const t0 = performance.now();
+      if (i % 2 === 0) {
+        await db.all(
+          query<PermissionDocumentRow>(
+            "documents",
+            [],
+            [["updated_at", "desc"]],
+            200,
+            permissionSchema,
+          ),
+        );
+      } else {
+        await db.all(
+          query<PermissionFolderRow>(
+            "folders",
+            [],
+            [["updated_at", "desc"]],
+            200,
+            permissionSchema,
+          ),
+        );
+      }
+      (latencies.permission_reads ||= []).push(performance.now() - t0);
+    }
+
+    for (let i = 0; i < updates; i += 1) {
+      reportLoopProgress("B5 updates", i, updates);
+      const shouldAllow =
+        seeded.deniedDocumentIds.length === 0 ||
+        rng.nextInt(100) < Math.round(b5.allow_fraction * 100);
+      const targetId = shouldAllow
+        ? seeded.allowedDocumentIds[rng.nextInt(seeded.allowedDocumentIds.length)]
+        : seeded.deniedDocumentIds[rng.nextInt(seeded.deniedDocumentIds.length)];
+      const t0 = performance.now();
+      try {
+        db.update(documentTable, targetId, {
+          body: `b5-update-${i}`,
+          revision: i + 1,
+          updated_at: nowMicros(),
+        });
+        if (shouldAllow) {
+          allowedUpdateSuccess += 1;
+          (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
+        } else {
+          unexpectedAllowedForDenied += 1;
+          (latencies.permission_updates_denied ||= []).push(performance.now() - t0);
+        }
+      } catch {
+        if (shouldAllow) {
+          unexpectedDeniedForAllowed += 1;
+          (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
+        } else {
+          deniedUpdateRejected += 1;
+          (latencies.permission_updates_denied ||= []).push(performance.now() - t0);
+        }
+      }
+    }
+    const wallMs = performance.now() - wallStart;
+
+    const visibleDocuments = await db.all(
+      query<PermissionDocumentRow>(
+        "documents",
+        [],
+        [["updated_at", "desc"]],
+        1000,
+        permissionSchema,
+      ),
+    );
+    const visibleIds = new Set(visibleDocuments.map((row) => row.id));
+    const leakedDeniedReads = seeded.deniedDocumentIds.filter((id) => visibleIds.has(id)).length;
+
+    const operationSummaries: Record<string, OpSummary> = {};
+    for (const [op, samples] of Object.entries(latencies)) {
+      operationSummaries[op] = summarizeLatencies(samples);
+    }
+
+    return {
+      scenario_id: b5.id,
+      scenario_name: b5.name,
+      profile_id: config.id,
+      topology: "single_hop_browser",
+      total_operations: reads + updates,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: (reads + updates) / Math.max(0.001, wallMs / 1000),
+      operation_summaries: operationSummaries,
+      extra: {
+        recursive_depth: b5.recursive_depth,
+        allowed_documents_seeded: allowedCount,
+        denied_documents_seeded: deniedCount,
+        allowed_updates_succeeded: allowedUpdateSuccess,
+        denied_updates_rejected: deniedUpdateRejected,
+        unexpected_denied_for_allowed: unexpectedDeniedForAllowed,
+        unexpected_allowed_for_denied: unexpectedAllowedForDenied,
+        denied_documents_visible: leakedDeniedReads,
+      },
+    };
+  } finally {
+    if (db) await db.shutdown();
+  }
+}
+
+async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
+  progressLog("B6 start");
+  const dbName = uniqueDbName("b6");
+  const rng = new Lcg(b6.seed ^ config.seed);
+  const updateCount = Math.min(b6.update_count, 300);
+  const latencies: number[] = [];
+  let db: Db | null = null;
+
+  try {
+    db = await createServerDb(dbName, "realistic-b6");
+    const state = await seedDataset(db, config);
+    const hotTaskCount = Math.max(1, Math.min(state.taskIds.length, b6.hot_task_count));
+    const hotTasks = state.taskIds.slice(0, hotTaskCount);
+    const beforeBytes = await storageUsageBytes();
+
+    const wallStart = performance.now();
+    for (let i = 0; i < updateCount; i += 1) {
+      reportLoopProgress("B6 hotspot updates", i, updateCount);
+      const taskId = hotTasks[rng.nextInt(hotTasks.length)];
+      const t0 = performance.now();
+      db.update(tasksTable, taskId, {
+        title: `Hotspot ${taskId.slice(0, 8)} rev ${i}`,
+        priority: 1 + (i % 4),
+        status: ["todo", "in_progress", "review", "done"][i % 4],
+        updated_at: nowMicros(),
+      });
+      latencies.push(performance.now() - t0);
+    }
+    const wallMs = performance.now() - wallStart;
+    const afterBytes = await storageUsageBytes();
+    const storageDelta =
+      beforeBytes != null && afterBytes != null ? Math.max(0, afterBytes - beforeBytes) : null;
+
+    await db.all(query<TaskRow>("tasks", [{ column: "id", op: "eq", value: hotTasks[0] }], [], 1));
+
+    return {
+      scenario_id: b6.id,
+      scenario_name: b6.name,
+      profile_id: config.id,
+      topology: "single_hop_browser",
+      total_operations: updateCount,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: updateCount / Math.max(0.001, wallMs / 1000),
+      operation_summaries: {
+        hotspot_update_sync: summarizeLatencies(latencies),
+      },
+      extra: {
+        hot_task_count: hotTaskCount,
+        storage_usage_before_bytes: beforeBytes,
+        storage_usage_after_bytes: afterBytes,
+        storage_usage_delta_bytes: storageDelta,
+      },
+    };
+  } finally {
+    if (db) await db.shutdown();
+  }
+}
+
 describe("realistic browser benchmark harness", () => {
-  it("runs W1/W3/W4 scenarios against worker OPFS runtime", async () => {
+  it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
     const dbName = uniqueDbName("w1");
@@ -699,14 +1621,19 @@ describe("realistic browser benchmark harness", () => {
         if (db) await db.shutdown();
       }
 
-      const w3Result = await runW3(cfg);
       const w4Result = await runW4(cfg);
+      const b1Result = await runB1(cfg);
+      const b2Result = await runB2(cfg);
+      const b3Result = await runB3(cfg);
+      const b4Result = await runB4(cfg);
+      const b5Result = await runB5(cfg);
+      const b6Result = await runB6(cfg);
 
       const report = {
         runner: "jazz-ts-browser-opfs",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
-        scenarios: [w1Result, w3Result, w4Result],
+        scenarios: [w1Result, w4Result, b1Result, b2Result, b3Result, b4Result, b5Result, b6Result],
       };
 
       // Keeping output machine-readable makes it easy to pipe into trend tooling.
@@ -715,12 +1642,18 @@ describe("realistic browser benchmark harness", () => {
 
       expect(w1Result.total_operations).toBeGreaterThan(0);
       expect(w1Result.throughput_ops_per_sec).toBeGreaterThan(0);
-      expect(w3Result.extra.observed_comments_after_reconnect).toBeDefined();
       expect(w4Result.operation_summaries.cold_reopen.count).toBeGreaterThan(0);
+      expect(b1Result.operation_summaries.insert_sync.count).toBeGreaterThan(0);
+      expect(b2Result.total_operations).toBeGreaterThan(0);
+      expect(b3Result.operation_summaries.cold_reopen_query.count).toBeGreaterThan(0);
+      expect(b4Result.operation_summaries.fanout_delivery.count).toBeGreaterThan(0);
+      expect(b5Result.operation_summaries.permission_reads.count).toBeGreaterThan(0);
+      expect(Number(b5Result.extra.denied_documents_seeded)).toBeGreaterThan(0);
+      expect(b6Result.operation_summaries.hotspot_update_sync.count).toBeGreaterThan(0);
     } finally {
       restoreLogs();
     }
-  }, 120_000);
+  }, 420_000);
 });
 
 function elevateBenchLogLevel(): () => void {
@@ -759,11 +1692,15 @@ function base64url(input: string | Uint8Array): string {
   return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-async function signJwt(sub: string, secret: string): Promise<string> {
+async function signJwt(
+  sub: string,
+  secret: string,
+  claims: Record<string, unknown> = {},
+): Promise<string> {
   const header = { alg: "HS256", typ: "JWT" };
   const payload = {
     sub,
-    claims: {},
+    claims,
     exp: Math.floor(Date.now() / 1000) + 3600,
   };
   const enc = new TextEncoder();
