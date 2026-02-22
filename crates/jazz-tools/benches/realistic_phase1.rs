@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use futures::executor::block_on;
 use groove::object::ObjectId;
+use groove::query_manager::query::QueryBuilder;
 use groove::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchema, Value};
 use groove::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use groove::schema_manager::{AppId, SchemaManager};
@@ -40,6 +42,14 @@ struct R1ScenarioConfig {
     mix: Vec<WeightedOperation>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct R2ScenarioConfig {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    mix: Vec<WeightedOperation>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CrudOperation {
     InsertTask,
@@ -53,6 +63,23 @@ struct R1Scenario {
     seed: u64,
     operation_count: usize,
     operations: Vec<CrudOperation>,
+    weights: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReadOperation {
+    QueryBoard,
+    QueryMyWork,
+    QueryTaskDetail,
+    QueryActivityFeed,
+}
+
+#[derive(Debug, Clone)]
+struct R2Scenario {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    operations: Vec<ReadOperation>,
     weights: Vec<u32>,
 }
 
@@ -113,10 +140,14 @@ struct R1State {
 
 impl R1State {
     fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
+        Self::seeded(profile, profile.seed ^ scenario.seed)
+    }
+
+    fn seeded(profile: &ProfileConfig, seed: u64) -> Self {
         let runtime = create_runtime(project_board_schema());
         let mut state = Self {
             runtime,
-            rng: Lcg::new(profile.seed ^ scenario.seed),
+            rng: Lcg::new(seed),
             users: Vec::with_capacity(profile.users),
             organizations: Vec::with_capacity(profile.organizations),
             projects: Vec::with_capacity(profile.projects),
@@ -306,6 +337,58 @@ impl R1State {
         executed
     }
 
+    fn run_read_batch(&mut self, scenario: &R2Scenario) -> usize {
+        let mut total_rows = 0usize;
+        for _ in 0..scenario.operation_count {
+            let op_idx = self.rng.pick_weighted_index(&scenario.weights);
+            let op = scenario.operations[op_idx];
+            total_rows += self.execute_read(op);
+        }
+        total_rows
+    }
+
+    fn execute_read(&mut self, op: ReadOperation) -> usize {
+        let query = match op {
+            ReadOperation::QueryBoard => {
+                let project_id = self.projects[self.rng.next_usize(self.projects.len())];
+                QueryBuilder::new("tasks")
+                    .filter_eq("project_id", Value::Uuid(project_id))
+                    .filter_ne("status", Value::Text("done".to_string()))
+                    .order_by_desc("updated_at")
+                    .limit(50)
+                    .build()
+            }
+            ReadOperation::QueryMyWork => {
+                let assignee_id = self.users[self.rng.next_usize(self.users.len())];
+                QueryBuilder::new("tasks")
+                    .filter_eq("assignee_id", Value::Uuid(assignee_id))
+                    .filter_ne("status", Value::Text("done".to_string()))
+                    .order_by_desc("updated_at")
+                    .limit(50)
+                    .build()
+            }
+            ReadOperation::QueryTaskDetail => {
+                let task_id = self.active_tasks[self.rng.next_usize(self.active_tasks.len())];
+                QueryBuilder::new("task_comments")
+                    .filter_eq("task_id", Value::Uuid(task_id))
+                    .order_by_desc("created_at")
+                    .limit(20)
+                    .build()
+            }
+            ReadOperation::QueryActivityFeed => {
+                let project_id = self.projects[self.rng.next_usize(self.projects.len())];
+                QueryBuilder::new("activity_events")
+                    .filter_eq("project_id", Value::Uuid(project_id))
+                    .order_by_desc("created_at")
+                    .limit(100)
+                    .build()
+            }
+        };
+
+        let rows = block_on(self.runtime.query(query, None, None)).expect("read query");
+        rows.len()
+    }
+
     fn insert_task(&mut self) {
         let project_id = self.projects[self.rng.next_usize(self.projects.len())];
         let assignee_id = self.users[self.rng.next_usize(self.users.len())];
@@ -416,6 +499,35 @@ fn realistic_r1_crud(c: &mut Criterion) {
     group.finish();
 }
 
+fn realistic_r2_reads(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let mut state = R1State::seeded(&profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+            });
+        },
+    );
+
+    group.finish();
+}
+
 fn load_r1_scenario(path: &str) -> R1Scenario {
     let raw: R1ScenarioConfig = load_json(path);
     let mut operations = Vec::with_capacity(raw.mix.len());
@@ -432,6 +544,31 @@ fn load_r1_scenario(path: &str) -> R1Scenario {
     }
 
     R1Scenario {
+        id: raw.id,
+        seed: raw.seed,
+        operation_count: raw.operation_count,
+        operations,
+        weights,
+    }
+}
+
+fn load_r2_scenario(path: &str) -> R2Scenario {
+    let raw: R2ScenarioConfig = load_json(path);
+    let mut operations = Vec::with_capacity(raw.mix.len());
+    let mut weights = Vec::with_capacity(raw.mix.len());
+    for op in raw.mix {
+        let parsed = match op.operation.as_str() {
+            "query_board" => ReadOperation::QueryBoard,
+            "query_my_work" => ReadOperation::QueryMyWork,
+            "query_task_detail" => ReadOperation::QueryTaskDetail,
+            "query_activity_feed" => ReadOperation::QueryActivityFeed,
+            unknown => panic!("unsupported R2 operation: {unknown}"),
+        };
+        operations.push(parsed);
+        weights.push(op.weight);
+    }
+
+    R2Scenario {
         id: raw.id,
         seed: raw.seed,
         operation_count: raw.operation_count,
@@ -532,5 +669,5 @@ fn project_board_schema() -> Schema {
         .build()
 }
 
-criterion_group!(benches, realistic_r1_crud);
+criterion_group!(benches, realistic_r1_crud, realistic_r2_reads);
 criterion_main!(benches);
