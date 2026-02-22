@@ -67,6 +67,14 @@ Run only the cold-load benchmark:
 cargo bench -p jazz-tools --features surrealkv --bench realistic_phase1 cold_load_surrealkv
 ```
 
+Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
+
+```bash
+pnpm bench:realistic:export-criterion -- \
+  --out bench-out/native/criterion_realistic_phase1.json \
+  --summary-md bench-out/native/criterion_realistic_phase1.md
+```
+
 ## Browser Runner (OPFS Worker)
 
 Run the browser benchmark test:
