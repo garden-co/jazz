@@ -1,226 +1,443 @@
-# Benchmarks & Performance — E2E Replacement Plan
+# Benchmarks & Performance — Concrete MVP Plan
 
-Replace `groove` crate microbenchmarks with end-to-end scenario benchmarks that reflect real Jazz usage.
+Define a practical benchmark suite that catches pathological regressions in Jazz now, while setting up a clean path to full browser/server end-to-end benchmarks later.
 
-## Why Replace Current Benches
+## Current Goal
 
-Current `crates/groove/benches/*` are useful for local profiling but not representative:
+Before investing in dedicated runner infra and long-term reporting, we want local benchmarks that exercise realistic schemas and load shapes and answer:
 
-- mostly in-process runtime + `MemoryStorage`
-- limited sync/tier topology coverage
-- synthetic schema and operation mix
-- weak comparability with browser/TypeScript runtime behavior
+- sustained write throughput for insert/update/delete
+- sustained read/query throughput
+- cold-start/cold-load time on larger persisted datasets
+- update fanout behavior to many subscribed clients
+- read/write cost under complex permission policies (including recursive checks)
+- time/space behavior with deep commit histories on a small hot object set
 
-The new benchmark system should answer: "Is Jazz fast enough for realistic collaborative apps across native and browser stacks?"
+## Grounding in Status Quo Runtime
 
-## Core Principles
+These benchmarks should reflect current architecture, not an idealized one:
 
-1. **E2E-first**: include storage, runtime ticks, sync routing, and settlement behavior.
-2. **Parity across stacks**: every benchmark scenario must run in:
-   - native client + native server (`surrealkv`)
-   - TypeScript client + worker runtime (`opfs-btree`) with equivalent topology
-3. **Realistic app model**: one canonical collaborative schema + realistic load profiles.
-4. **Tier-aware**: explicitly measure worker/edge/core settlement and propagation.
-5. **Deterministic and repeatable**: fixed seeds, fixed dataset profiles, reproducible harness.
+- Runtime uses two ticks:
+  - `immediate_tick()` for synchronous local settle/work
+  - `batched_tick()` for sync message flush and parked-message processing
+- Query engine is reactive and graph-based (`QueryGraph`, subscriptions, incremental settle)
+- Policy checks use simple checks plus graph-backed evaluation for `EXISTS`/`INHERITS`
+- Storage API is synchronous (MemoryStorage, SurrealKvStorage, OpfsBTreeStorage)
+- Object model is commit-graph based per row object, so hotspot history depth is first-class
+- Three-tier sync wiring is already test-proven in `runtime_core` via synthetic message routing
 
-## Scope and Phasing
+Relevant references:
 
-### MVP (Internal De-risking)
+- `specs/status-quo/batched_tick_orchestration.md`
+- `specs/status-quo/query_manager.md`
+- `specs/status-quo/query_sync_integration.md`
+- `specs/status-quo/storage.md`
 
-Goal: find show-stoppers before broader adoption.
+## Phasing
 
-- ship new e2e benchmark harness and retire current `groove` microbenchmarks
-- run daily on dedicated hardware (not CI-shared runners)
-- compare native vs TypeScript parity for same scenarios
+## Phase 1 (Now): Pure Rust + Criterion + Synthetic Transport
 
-### Launch (Publishable)
+Scope:
 
-Goal: externally defensible performance story.
-Build demo apps with realistic data volumes (see `../b_launch/example_apps.md`).
+- local-only and in-process synthetic client/server/tier topologies
+- deterministic seeded datasets
+- criterion-driven measurement harness
+- no browser/main-thread/worker IPC yet
 
-- publish selected benchmark results and methodology
-- include large-scale demo app traces (query + sync + settle by tier)
-- optionally include traditional DB comparisons (carefully normalized)
+Primary implementation location:
 
-## Canonical Benchmark App Schema
+- `crates/jazz-tools/benches/` (new realistic bench harness + scenarios)
 
-Use one realistic "collaborative project board" schema (same schema for all suites).
+## Phase 2 (Next): Browser + Server End-to-End
 
-### Tables
+Scope:
+
+- main thread + worker (`jazz-wasm`) + HTTP/SSE server transport (`jazz-tools server`)
+- OPFS-specific cold-start and persistence behavior
+- client/server network and serialization costs
+
+Primary implementation location:
+
+- `packages/jazz-tools/tests/browser/` + benchmark artifacts in `benchmarks/realistic/`
+
+## Phase 1 Harness Design (Concrete)
+
+## Topology Modes
+
+- `T0_local`:
+  - one RuntimeCore
+  - no network sync path
+- `T1_single_hop`:
+  - client RuntimeCore + server RuntimeCore
+  - synthetic transport by draining sender outbox and parking inbox entries
+- `T2_three_tier`:
+  - client -> worker-tier -> edge-tier RuntimeCores
+  - routing logic mirrors `runtime_core` three-tier tests
+- `T3_fanout`:
+  - one writer client + one server + N reader clients with active subscriptions
+
+## Storage Modes
+
+- `M0_mem`: MemoryStorage (logic throughput, policy/query/graph pressure)
+- `M1_surrealkv`: SurrealKvStorage (cold-load + persistence effects)
+
+## Execution Conventions
+
+- fixed seeds for dataset generation and operation selection
+- warmup and measurement windows long enough for sustained behavior
+- include both:
+  - operation latency stats (`p50/p95/p99`)
+  - sustained throughput (`ops/sec`/`queries/sec`)
+- always capture:
+  - run metadata (git SHA, scenario id, profile id, seed, topology, storage)
+  - failure counts (permission denials, query errors, retries)
+
+## Schema Set (Phase 1)
+
+## Schema S1: Project Board (baseline realistic app)
+
+Use the existing board model (already in `benchmarks/realistic/schema/project_board.schema.json`):
+
+- `users`, `organizations`, `memberships`, `projects`, `tasks`, `task_comments`, `task_watchers`, `activity_events`
+
+Representative queries:
+
+- board view: `tasks by project/status order by priority/updated_at`
+- my work: `tasks by assignee/status`
+- task detail: task + comments + recent activity
+- activity feed by project
+
+## Schema S2: Permission Graph (complex + recursive policy stress)
+
+Purpose: force `EXISTS`/`EXISTS_REL`/recursive `INHERITS` in read and write paths.
+
+Tables:
 
 - `users`
-- `organizations`
-- `memberships` (`organization_id`, `user_id`, `role`)
-- `projects` (`organization_id`, `name`, `archived`, `updated_at`)
-- `tasks` (`project_id`, `title`, `status`, `priority`, `assignee_id`, `updated_at`, `due_at`)
-- `task_comments` (`task_id`, `author_id`, `body`, `created_at`)
-- `task_watchers` (`task_id`, `user_id`)
-- `activity_events` (`project_id`, `task_id`, `actor_id`, `kind`, `created_at`, `payload`)
+- `teams` (`owner_id`)
+- `team_edges` (`parent_team_id`, `child_team_id`) for recursive hierarchy
+- `folders` (`team_id`, `parent_folder_id`, `owner_id`)
+- `documents` (`folder_id`, `author_id`, `status`, `updated_at`, `body`)
+- `memberships` (`team_id`, `user_id`, `role`)
+- `admins` (`user_id`)
 
-### Query Shapes (must be benchmarked)
+Policy shape (target):
 
-- board view: tasks by project + status, ordered by priority/updated_at
-- my work: tasks by `assignee_id` + status
-- task detail: task + comments + recent activity
-- project activity feed: recent `activity_events`
-- watch list: tasks watched by current user
+- `documents SELECT`:
+  - `author_id = @session.user_id`
+  - OR membership grants via `EXISTS_REL`
+  - OR recursive `INHERITS SELECT VIA folder_id` with bounded depth
+- `documents UPDATE USING`:
+  - same visibility rule as SELECT
+- `documents UPDATE WITH CHECK`:
+  - editor/admin role requirement via `EXISTS`/`EXISTS_REL`
+- `documents DELETE USING`:
+  - admin-only path (exercise deny-heavy flows)
 
-### Access Pattern Assumptions
+## Schema S3: Hotspot History (deep commit chain stress)
 
-- many reads/subscriptions, fewer writes
-- hot working set (active project), cold background data
-- high fan-out on shared projects
-- occasional offline burst followed by reconnect
+Purpose: model many edits against few rows and measure history growth effects.
 
-## Dataset Profiles
+Tables:
 
-Use fixed profiles so regressions are comparable over time.
+- `hot_docs` (`owner_id`, `title`, `body`, `updated_at`, `version_marker`)
+- optional `hot_doc_tags` for extra indexed updates
 
-- `S` (developer smoke): 10 users, 3 orgs, 30 projects, 3k tasks, 12k comments
-- `M` (team-scale): 100 users, 20 orgs, 500 projects, 100k tasks, 400k comments
-- `L` (launch-scale): 1k users, 100 orgs, 5k projects, 1M tasks, 4M comments
+Pattern:
 
-Each profile should include:
+- tiny hot set (e.g. 10-100 rows)
+- very deep update histories per row
+- periodic delete/undelete/hard-delete/truncate variants
 
-- skewed activity (top 10% projects receive most writes)
-- realistic text payload sizes (short titles, medium comments, occasional large comments)
-- mixed update locality (some users only touch own tasks, some shared hot projects)
+## Dataset Profiles (Phase 1)
 
-## Workload Profiles
+Profiles are per schema and deterministic by seed.
 
-All workloads are scenario-driven and replayable from seed.
+- `P0_smoke`:
+  - fast local sanity
+  - S1: ~3k tasks, ~12k comments
+  - S2: depth 3 hierarchies, low branching
+  - S3: 10 hot docs, target 5k commits/doc
+- `P1_team`:
+  - realistic team scale
+  - S1: ~100k tasks, ~400k comments
+  - S2: depth 6 hierarchies, moderate branching
+  - S3: 25 hot docs, target 20k commits/doc
+- `P2_large`:
+  - cold-load and stress profile
+  - S1: ~1M tasks, multi-million dependent rows
+  - S2: depth 8 hierarchies + larger ACL sets
+  - S3: 50 hot docs, target 50k+ commits/doc
 
-### W1: Interactive Board Session (Read-heavy)
+## Phase 1 Scenario Matrix
 
-- 60% query/subscription refresh work
-- 25% task updates (status/assignee/priority)
-- 10% comment inserts
-- 5% project/task metadata updates
+Each scenario is concrete and maps directly to the immediate goals.
 
-Measure:
+## R1: Sustained CRUD Throughput
 
-- end-user op latency (p50/p95/p99)
-- steady-state throughput
-- subscription update latency
+Goal:
 
-### W2: Collaboration Burst (Write-heavy)
+- sustained insert/update/delete throughput under realistic table/index pressure
 
-- multiple concurrent users editing same hot project
-- rapid status transitions, reassignments, comments
-- fan-out to many subscribers
+Setup:
 
-Measure:
+- schema/profile: `S1/P1`
+- topology: `T0_local`, `T1_single_hop`
+- storage: `M0_mem` baseline, `M1_surrealkv` variant
 
-- write throughput under contention
-- subscription fan-out latency
-- queue/backpressure behavior
+Operation mix (per writer stream):
 
-### W3: Offline Queue + Reconnect
+- 20% task inserts
+- 35% task updates (status, assignee, priority)
+- 20% comment inserts
+- 15% soft deletes
+- 5% undeletes
+- 5% hard-delete/truncate path
 
-- client disconnected, performs N local writes
-- reconnect and settle to configured tier
+Metrics:
 
-Measure:
+- write ops/sec by operation type
+- latency p50/p95/p99 by operation type
+- outbox batch sizes and sync message volume in `T1`
 
-- time-to-catch-up
-- bytes/messages transferred
-- reconciliation cost and tail latency
+## R2: Sustained Read Throughput
 
-### W4: Cold Start + Reopen
+Goal:
 
-- open runtime from persistent storage, run first board query, attach subscriptions
+- sustained query throughput and tail latency for realistic read mix
 
-Measure:
+Setup:
 
-- startup time
+- schema/profile: `S1/P1`
+- topology: `T0_local`, `T1_single_hop`
+- storage: `M0_mem`, `M1_surrealkv`
+
+Read mix:
+
+- 40% board query
+- 30% my-work query
+- 20% task-detail query
+- 10% activity feed query
+
+Variants:
+
+- read-only
+- 5% background write churn (from R1 writer mix) during reads
+
+Metrics:
+
+- queries/sec
+- latency p50/p95/p99 by query shape
+- result row counts and variance
+
+## R3: Cold Load Time on Large Data
+
+Goal:
+
+- quantify startup/open + first-query latency on persisted datasets
+
+Setup:
+
+- schema/profile: `S1/P2`, `S2/P1`
+- topology: `T0_local`
+- storage: `M1_surrealkv` only
+
+Flow per cycle:
+
+- open runtime on existing dataset
+- run first board/read query
+- run first permissioned read query (S2)
+- close runtime
+
+Metrics:
+
+- runtime open time
 - first-query latency
-- first-subscription settled time
+- first permissioned-query latency
+- trend over repeated reopen cycles
 
-### W5: Long-running Soak
+## R4: Update Fanout to Many Clients
 
-- 30-120 minute mixed workload run
+Goal:
 
-Measure:
+- detect pathological subscription fanout costs
+
+Setup:
+
+- schema/profile: `S1/P1` hot-project subset
+- topology: `T3_fanout` with `N in {10, 50, 200}`
+- storage: `M0_mem` first, `M1_surrealkv` optional
+
+Pattern:
+
+- one writer updates hot project tasks at sustained target rate
+- all readers subscribe to overlapping board queries
+
+Metrics:
+
+- end-to-end delivery latency (write commit -> client callback)
+- per-update subscriber fanout cost
+- missed/stale update count (if any)
+- throughput collapse point as N increases
+
+## R5: Complex Permission Read Load (Including Recursive)
+
+Goal:
+
+- read throughput under policy graphs and recursive checks
+
+Setup:
+
+- schema/profile: `S2/P1`
+- topology: `T0_local`, `T1_single_hop`
+- storage: `M0_mem` baseline
+
+Read/query pattern:
+
+- document visibility queries under policy filtering
+- subtree/team reachability queries touching recursive hierarchy
+
+Churn during reads:
+
+- 15% ACL/membership/folder-parent updates that force policy re-evaluation
+
+Depth variants:
+
+- recursion `max_depth` in `{1, 3, 6, 10}`
+
+Metrics:
+
+- permissioned query throughput
+- latency p50/p95/p99
+- settle cost sensitivity vs recursion depth
+
+## R6: Complex Permission Write Load (Including Recursive)
+
+Goal:
+
+- write throughput and deny-path cost under complex USING/WITH CHECK rules
+
+Setup:
+
+- schema/profile: `S2/P1`
+- topology: `T0_local`, `T1_single_hop`
+- storage: `M0_mem`
+
+Operation mix:
+
+- 25% insert document
+- 45% update document
+- 15% delete document
+- 15% ACL/membership updates
+
+Authorization mix:
+
+- ~70% expected allow
+- ~30% expected deny
+
+Metrics:
+
+- allowed ops/sec
+- denied ops/sec
+- latency split allow vs deny
+- error/denial reason distribution
+
+## R7: Deep History Hotspot (Time + Space)
+
+Goal:
+
+- characterize performance and storage growth when few objects accumulate very deep histories
+
+Setup:
+
+- schema/profile: `S3/P1`, `S3/P2`
+- topology: `T0_local`
+- storage: `M1_surrealkv` primary, `M0_mem` reference
+
+Pattern:
+
+- repeatedly update hot set (`10-50` docs) for large commit depth
+- interleave point reads and indexed queries on same docs
+
+Variants:
+
+- `R7a_no_compaction`: no hard-delete/truncate
+- `R7b_periodic_truncate`: periodic hard-delete/truncate and recreate
+
+Metrics:
+
+- update and read latency as depth grows
+- reopen/load time for hotspot rows
+- on-disk bytes growth vs commit count
+- memory usage growth (`ObjectManager` + `QueryManager` memory stats)
+
+## R8: Long-Run Mixed Soak
+
+Goal:
+
+- detect drift or pathological behavior only visible over longer runs
+
+Setup:
+
+- schema/profile: `S1/P1` + permission variant `S2/P1`
+- topology: `T1_single_hop`
+- storage: `M1_surrealkv`
+
+Mix:
+
+- combine R1+R2 workloads with low-frequency R5/R6 events
+
+Duration:
+
+- 30-120 minutes
+
+Metrics:
 
 - throughput stability
-- tail latency drift
-- storage growth (snapshot/WAL/db files)
-- memory growth and leak signals
+- p95/p99 drift
+- storage growth slope
+- memory growth slope
 
-## Topology Matrix (Required)
+## Outputs (Phase 1)
 
-Each workload must run on equivalent topologies:
+Each run should emit JSON with:
 
-1. **Local only**
-   - native: client runtime + `surrealkv`, no server
-   - TS: worker runtime + `opfs-btree`, no server
-2. **Single-hop**
-   - client -> edge server
-3. **Multi-tier**
-   - client -> edge -> core
-4. **Multi-client**
-   - 1 writer + N readers
-   - N writers + N readers on same hot project
+- metadata: scenario/profile/seed/topology/storage/git SHA
+- latency summaries per op/query type
+- throughput summaries per op/query type
+- sync/message counters (when topology includes transport)
+- memory/storage snapshots where relevant (R3/R7/R8)
 
-For each topology, capture settlement at relevant tiers (`worker`, `edge`, `core`).
+Also emit a concise markdown summary table for human review.
 
-## Stack-Specific Benchmark Suites
+## Phase 2 Benchmark Scenarios (Browser + Server)
 
-### Native Suite
+Phase 2 keeps the same scenario intent but adds browser architecture costs.
 
-- native client runtime with `surrealkv` local persistence
-- native server runtime(s) with `surrealkv`
-- process/network boundaries should mirror production where possible
+## B1: Main-thread <-> Worker throughput
 
-### TypeScript Suite
+- run S1 workload with real worker bridge
+- measure roundtrip latency for batched sync payloads
 
-- `jazz-ts` client with dedicated worker runtime
-- worker persistence via `opfs-btree`
-- same schema, same dataset profile, same workload script semantics
-- equivalent server topology for sync scenarios
+## B2: OPFS cold reopen
 
-## Metrics and Output Format
+- run cold-start cycles with persisted OPFS datasets
+- measure open + first-query + first-subscription-settled
 
-For every scenario run, record:
+## B3: Browser fanout over HTTP/SSE
 
-- metadata: git SHA, date, machine info, profile/workload/topology, seed
-- latency: p50/p95/p99 for key user operations
-- throughput: ops/sec and bytes/sec
-- sync: message counts, payload bytes, settle times by tier
-- durability: flush/checkpoint times, reopen/catch-up times
-- resource usage: RSS/heap (where possible), storage file sizes over time
+- one writer + many browser clients via server `/sync` + `/events`
+- measure fanout latency and stream stability
 
-Output:
+## B4: Permission-heavy browser flows
 
-- machine-readable JSON (raw)
-- markdown summary tables (human-readable)
-- trend charts for key KPIs over commits
+- run S2 permission read/write scenarios through browser runtime + server
+- compare against Rust-only baselines to isolate transport/worker overhead
 
-## Regression Policy
+## Out of Scope for This MVP Spec Update
 
-Two lanes:
+- publishing external benchmark claims
+- final regression thresholds for CI gating
+- dedicated machine scheduling/report automation details
 
-- **CI smoke lane** (`S` profile, short duration): fail on severe regressions
-- **daily performance lane** (`M` + selected `L` scenarios): track trends and alert
-
-Initial thresholds (to tune):
-
-- fail CI if p95 latency regresses >20% on stable scenarios
-- fail CI if throughput regresses >15%
-- daily alert if 7-day rolling median degrades >10%
-
-## Migration Plan (Groove Benches)
-
-1. mark current `crates/groove/benches/*` as deprecated
-2. introduce new e2e benchmark harness and scenario definitions
-3. keep a minimal internal microbench set only for local profiling (not performance claims)
-4. update docs/scripts so benchmark entry points run new suites by default
-
-## Open Design Decisions
-
-- exact harness split:
-  - single cross-language scenario spec (preferred), or
-  - parallel native/TS harnesses with shared seed + semantics
-- how to run multi-tier (`edge -> core`) in automation with stable timing
-- which `L` profile scenarios are feasible for daily runs vs weekly runs
-- which metrics become hard release gates vs advisory trends
+Those will be layered on top once Phase 1 scenarios are implemented and locally validated.
