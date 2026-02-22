@@ -1,0 +1,274 @@
+---
+title: Reading Data
+description: Query APIs across one-shot reads, subscriptions, reactive hooks, and local-first query semantics.
+---
+
+## One-shot Queries
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-oneshot-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Subscriptions
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-subscriptions-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Filters
+
+### API Reference
+
+- **Behavior:** `where(...)` adds AND-combined predicates to a query.
+- **Parameters:** Pass a partial row-shaped object.
+- **TypeScript operators:** scalar equality (`done: false`) plus operator objects like `{ eq, ne, contains, in, gt, gte, lt, lte, isNull }` where supported by the column type.
+- **Rust operators:** use explicit builder methods such as `filter_eq(...)`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-filters-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Sorting
+
+### API Reference
+
+- **Behavior:** `orderBy(...)` applies deterministic ordering to query results.
+- **Parameters:** `orderBy(column, direction?)` where `direction` is `"asc"` or `"desc"` in TypeScript.
+- **Recommendation:** always sort before paginating.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-sorting-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Pagination
+
+### API Reference
+
+- **Behavior:** `limit(...)` caps rows; `offset(...)` skips rows.
+- **Parameters:** choose a stable page size and compute offset from page index.
+- **Recommendation:** combine with a deterministic `orderBy(...)` so page boundaries are stable.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-pagination-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Resolving References via Includes
+
+### API Reference
+
+- **Behavior:** `include(...)` loads related rows and returns nested objects in one query result.
+- **Parameters (TypeScript):** `include({ relationName: true | nestedInclude })`.
+- **Nested includes:** pass nested objects to load multi-hop relations.
+- **Junction tables:** codegen does not currently synthesize implicit many-to-many shortcuts; model and query the junction table explicitly.
+
+Schema reference used by the include examples:
+
+```ts
+import { table, col } from "jazz-tools";
+
+table("projects", {
+  name: col.string(),
+});
+
+table("users", {
+  email: col.string(),
+});
+
+table("project_members", {
+  project: col.ref("projects"),
+  user: col.ref("users"),
+  role: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  project: col.ref("projects").optional(),
+  parent: col.ref("todos").optional(),
+});
+```
+
+```sql
+CREATE TABLE projects (
+    name TEXT NOT NULL
+);
+
+CREATE TABLE users (
+    email TEXT NOT NULL
+);
+
+CREATE TABLE project_members (
+    project UUID REFERENCES projects NOT NULL,
+    user UUID REFERENCES users NOT NULL,
+    role TEXT NOT NULL
+);
+
+CREATE TABLE todos (
+    title TEXT NOT NULL,
+    done BOOLEAN NOT NULL,
+    project UUID REFERENCES projects,
+    parent UUID REFERENCES todos
+);
+```
+
+```ts
+// Example schema shape:
+// project_members(project -> projects.id, user -> users.id)
+const memberships = await db.all(
+  app.projectMembers.where({ project: projectId }).include({ user: true, project: true }),
+);
+```
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Advanced: Recursive Queries
+
+Recursive queries compute bounded transitive closures from a seed row set (for example, walking team ancestry or folder hierarchies).
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    ```ts
+    const query = app.teams.gather({
+      start: { team_id: { eq: 1 } },
+      step: ({ current }) =>
+        app.team_edges.where({ child_team: current }).hopTo("parent_team"),
+      maxDepth: 10,
+    });
+    ```
+
+    `gather(...)` combines seed filtering (`start`) with recursive step traversal (`step`).
+    `hopTo(...)` is a one-hop relation traversal combinator.
+    `maxDepth` defaults to `10` when omitted.
+
+  </Tab>
+  <Tab value="Rust">
+    ```rs
+    use groove::{QueryBuilder, Value};
+
+    let query = QueryBuilder::new("teams")
+        .select(&["team_id"])
+        .filter_eq("team_id", Value::Integer(1))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "team_id")
+                .select(&["parent_team"])
+                .max_depth(10)
+        })
+        .build();
+    ```
+
+    `with_recursive(...)` uses the current query output as the seed relation.
+    The runtime executes recursion through a dedicated `RecursiveRelationNode` that orchestrates a bounded, internally unrolled stack of step subgraphs.
+    `max_depth` defaults to `10` when omitted.
+
+  </Tab>
+</Tabs>
+
+## Read Settled Tiers
+
+### API Reference
+
+- `db.all(query, settledTier?)`
+- `db.one(query, settledTier?)`
+- `db.subscribeAll(query, callback, settledTier?)`
+- `settledTier`: `"worker" | "edge" | "core"`
+
+Settled tiers control when initial query delivery is considered confirmed:
+
+- `worker`: wait for worker/local storage acknowledgement.
+- `edge`: wait for edge server acknowledgement.
+- `core`: wait for core server acknowledgement.
+
+Without a `settledTier`, reads are local-first and return immediately from the
+local runtime state.
+
+Tradeoff summary:
+
+- Lower settled tier: lower latency, narrower confirmation scope.
+- Higher settled tier: higher latency, broader confirmation scope.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-settled-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-settled-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+Read settled tiers pair naturally with write ack tiers:
+
+- Use write ack tiers to gate mutation durability checkpoints.
+- Use settled tiers to gate query/subscription delivery checkpoints.
+
+See [Write Ack Tiers](/docs/writing-data#write-ack-tiers) for write-side semantics.
+
+## Reactive Hooks (React)
+
+<Callout title="React-only section">
+  Reactive hook APIs currently map to React usage. Rust does not have a direct hooks equivalent.
+</Callout>
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
+</include>

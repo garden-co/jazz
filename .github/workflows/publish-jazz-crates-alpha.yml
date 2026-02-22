@@ -1,0 +1,39 @@
+name: Publish Jazz crates alpha
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run or publish"
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - publish
+
+jobs:
+  publish-crates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      - name: Publish crates in dependency order
+        run: ./scripts/publish-crates-alpha.sh "${{ inputs.mode }}"

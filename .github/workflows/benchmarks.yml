@@ -160,16 +160,16 @@ jobs:
           rustc -V > bench-out/browser/rustc.txt
           uname -a > bench-out/browser/uname.txt
 
-      - name: Build jazz CLI server binary
-        run: cargo build -p jazz-cli
+      - name: Build jazz-tools server binary
+        run: cargo build -p jazz-tools --features cli
 
-      - name: Build groove-wasm package
-        run: pnpm --dir crates/groove-wasm run build
+      - name: Build jazz-wasm package
+        run: pnpm --dir crates/jazz-wasm run build
 
       - name: Run browser benchmark suite
         run: |
           set -euo pipefail
-          pnpm --dir packages/jazz-ts run bench:realistic:browser | tee bench-out/browser/realistic.log
+          pnpm --dir packages/jazz-tools run bench:realistic:browser | tee bench-out/browser/realistic.log
 
       - name: Extract benchmark JSON line
         run: |

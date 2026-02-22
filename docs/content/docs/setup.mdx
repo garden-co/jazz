@@ -1,0 +1,76 @@
+---
+title: Setup
+description: Hosted and self-hosted setup, plus runtime context setup across client and backend environments.
+---
+
+## 1. Hosted Database Server (From Us)
+
+Current onboarding is manual.
+
+- App IDs are provisioned manually.
+- Request provisioning in the `jazz2-adopters` Discord channel.
+- Include:
+  - app name
+  - JWKS endpoint
+
+## 2. Run a Database Server Yourself (CLI)
+
+<include cwd lang="bash">
+  ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
+</include>
+
+For backend examples, set `JAZZ_SERVER_URL` to your server URL and keep `JAZZ_APP_ID` aligned across clients and backends.
+
+## 3. Context Setup
+
+Use `JAZZ_APP_ID` as the app ID configuration key across environments.
+For auth modes and upgrade/link flow, see [Authentication](/docs/authentication).
+
+<Tabs groupId="jazz-toolsent-framework" items={["React Client", "TS Client"]} persist>
+  <Tab value="React Client">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/App.tsx#context-setup-react
+    </include>
+  </Tab>
+  <Tab value="TS Client">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
+    </include>
+  </Tab>
+</Tabs>
+
+### Backend Context Setup
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/main.ts#context-setup-ts-backend
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
+    </include>
+  </Tab>
+</Tabs>
+
+### Backend Identity Pattern
+
+Client-side usage enforces permissions for the local user context.
+Backend usage should derive a requester-scoped client directly from the request.
+In TypeScript backends, `client.forRequest(req)` extracts the bearer JWT payload and scopes the client.
+
+#### Per-request user-scoped client
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
+    </include>
+  </Tab>
+</Tabs>

@@ -1,5 +1,5 @@
 /**
- * Global setup for browser tests — spawns a real jazz-cli server.
+ * Global setup for browser tests — spawns a real jazz-tools server.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -10,27 +10,46 @@ import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js
 
 export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
 
+const HEALTH_POLL_INTERVAL_MS = 100;
+const HEALTH_TIMEOUT_MS = 30_000;
+
 let serverProcess: ChildProcess | null = null;
 let dataDir: string | null = null;
 
-async function waitForHealth(port: number): Promise<void> {
+async function isHealthy(port: number): Promise<boolean> {
   const url = `http://127.0.0.1:${port}/health`;
-  for (let i = 0; i < 100; i++) {
-    try {
-      const resp = await fetch(url);
-      if (resp.ok) return;
-    } catch {
-      // Server not ready yet
-    }
-    await new Promise((r) => setTimeout(r, 100));
+  try {
+    const resp = await fetch(url);
+    return resp.ok;
+  } catch {
+    return false;
   }
-  throw new Error(`Server failed to become ready on port ${port} within 10 seconds`);
+}
+
+async function waitForHealth(port: number, timeoutMs = HEALTH_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await isHealthy(port)) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+  }
+
+  throw new Error(
+    `Server failed to become ready on port ${port} within ${Math.ceil(timeoutMs / 1000)} seconds`,
+  );
 }
 
 export async function setup(): Promise<void> {
-  dataDir = mkdtempSync(join(tmpdir(), "jazz-react-test-"));
+  // Vitest may invoke global setup more than once; reuse an existing healthy server.
+  if (await isHealthy(TEST_PORT)) {
+    return;
+  }
 
-  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz");
+  dataDir = mkdtempSync(join(tmpdir(), "jazz-tools-react-test-"));
+
+  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz-tools");
 
   serverProcess = spawn(
     jazzBinary,
@@ -38,7 +57,6 @@ export async function setup(): Promise<void> {
     {
       env: {
         ...process.env,
-        JAZZ_JWT_SECRET: JWT_SECRET,
         JAZZ_ADMIN_SECRET: ADMIN_SECRET,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -52,16 +70,30 @@ export async function setup(): Promise<void> {
     process.stderr.write(`[jazz-server] ${data}`);
   });
 
-  await waitForHealth(TEST_PORT);
+  try {
+    await waitForHealth(TEST_PORT);
+  } catch (error) {
+    // Another concurrent setup may have won the race to bind this port.
+    if (await isHealthy(TEST_PORT)) {
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function teardown(): Promise<void> {
   if (serverProcess) {
-    serverProcess.kill("SIGTERM");
+    try {
+      serverProcess.kill("SIGTERM");
+    } catch {
+      // Process may already be gone.
+    }
+
     await new Promise<void>((resolve) => {
       serverProcess?.on("exit", () => resolve());
       setTimeout(resolve, 2000);
     });
+
     serverProcess = null;
   }
 

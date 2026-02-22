@@ -35,7 +35,7 @@ RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
 Run the browser benchmark test:
 
 ```bash
-pnpm --dir packages/jazz-ts run bench:realistic:browser
+pnpm --dir packages/jazz-tools run bench:realistic:browser
 ```
 
 The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.

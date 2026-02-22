@@ -1,0 +1,14 @@
+{
+  "title": "Jazz 2",
+  "pages": [
+    "index",
+    "react-quick-start",
+    "setup",
+    "authentication",
+    "schemas",
+    "reading-data",
+    "writing-data",
+    "permissions",
+    "migrations"
+  ]
+}

@@ -1,5 +1,5 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
-import type { WasmSchema, QueryBuilder } from "jazz-ts";
+import type { WasmSchema, QueryBuilder } from "jazz-tools";
 
 export interface Project {
   id: string;
@@ -11,8 +11,9 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
   parent?: string;
-  project: string;
+  project?: string;
 }
 
 export interface ProjectInit {
@@ -23,8 +24,9 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
   parent?: string;
-  project: string;
+  project?: string;
 }
 
 export interface ProjectWhereInput {
@@ -37,8 +39,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
+  owner_id?: string | { eq?: string; ne?: string; contains?: string };
   parent?: string | { eq?: string; ne?: string; isNull?: boolean };
-  project?: string | { eq?: string; ne?: string };
+  project?: string | { eq?: string; ne?: string; isNull?: boolean };
 }
 
 export interface ProjectInclude {
@@ -127,6 +130,13 @@ export const wasmSchema: WasmSchema = {
           nullable: true,
         },
         {
+          name: "owner_id",
+          column_type: {
+            type: "Text",
+          },
+          nullable: false,
+        },
+        {
           name: "parent",
           column_type: {
             type: "Uuid",
@@ -139,10 +149,59 @@ export const wasmSchema: WasmSchema = {
           column_type: {
             type: "Uuid",
           },
-          nullable: false,
+          nullable: true,
           references: "projects",
         },
       ],
+      policies: {
+        select: {
+          using: {
+            type: "True",
+          },
+        },
+        insert: {
+          with_check: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+        update: {
+          using: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+          with_check: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+        delete: {
+          using: {
+            type: "Cmp",
+            column: "owner_id",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["user_id"],
+            },
+          },
+        },
+      },
     },
   },
 };

@@ -1,0 +1,30 @@
+{
+  "name": "jazz-wasm",
+  "version": "0.1.0",
+  "description": "WebAssembly bindings for the Groove database engine",
+  "keywords": [
+    "crdt",
+    "database",
+    "local-first",
+    "wasm"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/garden-co/jazz"
+  },
+  "files": [
+    "pkg/jazz_wasm_bg.wasm",
+    "pkg/jazz_wasm_bg.js",
+    "pkg/jazz_wasm.js",
+    "pkg/jazz_wasm.d.ts"
+  ],
+  "main": "pkg/jazz_wasm.js",
+  "types": "pkg/jazz_wasm.d.ts",
+  "scripts": {
+    "build": "wasm-pack build --target web --profiling"
+  },
+  "dependencies": {
+    "wasm-pack": "^0.14.0"
+  }
+}

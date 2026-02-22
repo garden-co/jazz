@@ -2,7 +2,7 @@
   "name": "@jazz/rust",
   "private": true,
   "scripts": {
-    "build:crates": "cargo build -p jazz-cli --bin jazz",
-    "test": "cargo test --workspace --lib --bins --tests"
+    "build:crates": "cargo build -p jazz-tools --bin jazz-tools --features cli && cargo build -p jazz-cloud-server",
+    "test": "cargo test --workspace --lib --bins --tests --exclude jazz-rn"
   }
 }

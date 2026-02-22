@@ -1,0 +1,2561 @@
+use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::{
+    Router,
+    extract::{Path as AxumPath, Query, State},
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    response::{IntoResponse, Json},
+    routing::{get, post},
+};
+use base64::Engine;
+use bytes::Bytes;
+use groove::jazz_transport::{
+    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
+};
+use groove::object::ObjectId;
+use groove::query_manager::query::QueryBuilder;
+use groove::query_manager::session::Session;
+use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use groove::runtime_tokio::TokioRuntime;
+use groove::schema_manager::{AppId, SchemaManager};
+use groove::storage::SurrealKvStorage;
+use groove::sync_manager::{
+    ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
+};
+use hmac::{Hmac, Mac};
+use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing::{info, warn};
+use uuid::Uuid;
+
+type HmacSha256 = Hmac<Sha256>;
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
+const WORKER_APP_QUANTUM: usize = 1;
+const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
+const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
+
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub port: u16,
+    pub data_root: String,
+    pub internal_api_secret: String,
+    pub secret_hash_key: String,
+    pub worker_threads: usize,
+}
+
+struct WorkerPool {
+    workers: Vec<WorkerHandle>,
+}
+
+struct WorkerHandle {
+    ingress: Option<tokio::sync::mpsc::Sender<WorkerCommand>>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+enum WorkerDispatchError {
+    QueueFull { worker: usize },
+    WorkerClosed { worker: usize },
+    WorkerUnavailable { worker: usize },
+    RuntimeError { worker: usize, message: String },
+}
+
+enum WorkerCommand {
+    CreateRuntime {
+        app_id: AppId,
+        data_dir: PathBuf,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    EnsureClientWithSession {
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SyncAsSession {
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+        payload: SyncPayload,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SyncAsAdmin {
+        app_id: AppId,
+        client_id: ClientId,
+        payload: SyncPayload,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
+impl WorkerCommand {
+    fn app_id(&self) -> AppId {
+        match self {
+            WorkerCommand::CreateRuntime { app_id, .. }
+            | WorkerCommand::EnsureClientWithSession { app_id, .. }
+            | WorkerCommand::SyncAsSession { app_id, .. }
+            | WorkerCommand::SyncAsAdmin { app_id, .. } => *app_id,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FairAppQueue<T> {
+    pending_by_app: HashMap<AppId, VecDeque<T>>,
+    runnable_apps: VecDeque<AppId>,
+    pending_total: usize,
+}
+
+impl<T> Default for FairAppQueue<T> {
+    fn default() -> Self {
+        Self {
+            pending_by_app: HashMap::new(),
+            runnable_apps: VecDeque::new(),
+            pending_total: 0,
+        }
+    }
+}
+
+impl<T> FairAppQueue<T> {
+    fn push(&mut self, app_id: AppId, item: T) {
+        let queue = self.pending_by_app.entry(app_id).or_default();
+        if queue.is_empty() {
+            self.runnable_apps.push_back(app_id);
+        }
+        queue.push_back(item);
+        self.pending_total += 1;
+    }
+
+    fn pop_batch(&mut self, quantum: usize) -> Option<Vec<T>> {
+        let quantum = quantum.max(1);
+        while let Some(app_id) = self.runnable_apps.pop_front() {
+            let mut queue = match self.pending_by_app.remove(&app_id) {
+                Some(queue) => queue,
+                None => continue,
+            };
+
+            if queue.is_empty() {
+                continue;
+            }
+
+            let take = queue.len().min(quantum);
+            let mut batch = Vec::with_capacity(take);
+            for _ in 0..take {
+                if let Some(item) = queue.pop_front() {
+                    batch.push(item);
+                }
+            }
+
+            self.pending_total = self.pending_total.saturating_sub(batch.len());
+
+            if !queue.is_empty() {
+                self.pending_by_app.insert(app_id, queue);
+                self.runnable_apps.push_back(app_id);
+            }
+
+            return Some(batch);
+        }
+
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending_total == 0
+    }
+}
+
+impl WorkerPool {
+    fn new(workers: usize) -> Self {
+        let worker_count = workers.max(1);
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for worker_idx in 0..worker_count {
+            let (ingress_tx, ingress_rx) =
+                tokio::sync::mpsc::channel::<WorkerCommand>(WORKER_SYNC_QUEUE_CAPACITY);
+            let thread_name = format!("jazz-multi-worker-{worker_idx}");
+            let join = std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build worker tokio runtime");
+                    runtime.block_on(run_worker_loop(worker_idx, ingress_rx));
+                })
+                .expect("failed to spawn worker thread");
+
+            handles.push(WorkerHandle {
+                ingress: Some(ingress_tx),
+                join: Some(join),
+            });
+        }
+
+        Self { workers: handles }
+    }
+
+    fn send_command(&self, command: WorkerCommand) -> Result<usize, WorkerDispatchError> {
+        let app_id = command.app_id();
+        let worker = self.worker_for_app(&app_id);
+        let Some(ingress) = self.workers[worker].ingress.as_ref() else {
+            return Err(WorkerDispatchError::WorkerClosed { worker });
+        };
+
+        ingress.try_send(command).map_err(|err| match err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                WorkerDispatchError::QueueFull { worker }
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                WorkerDispatchError::WorkerClosed { worker }
+            }
+        })?;
+
+        Ok(worker)
+    }
+
+    async fn await_result(
+        worker: usize,
+        response: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), WorkerDispatchError> {
+        match response.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn create_runtime(
+        &self,
+        app_id: AppId,
+        data_dir: PathBuf,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::CreateRuntime {
+            app_id,
+            data_dir,
+            sync_broadcast,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn ensure_client_with_session(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::EnsureClientWithSession {
+            app_id,
+            client_id,
+            session,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn sync_as_session(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+        payload: SyncPayload,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::SyncAsSession {
+            app_id,
+            client_id,
+            session,
+            payload,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn sync_as_admin(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        payload: SyncPayload,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::SyncAsAdmin {
+            app_id,
+            client_id,
+            payload,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    fn worker_for_app(&self, app_id: &AppId) -> usize {
+        let mut hasher = DefaultHasher::new();
+        app_id.hash(&mut hasher);
+        (hasher.finish() as usize) % self.workers.len()
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        for worker in &mut self.workers {
+            worker.ingress.take();
+        }
+
+        for worker in &mut self.workers {
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+enum AppStatus {
+    #[default]
+    Active,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAuthMode {
+    Anonymous,
+    Demo,
+}
+
+impl LocalAuthMode {
+    fn from_header(value: &str) -> Option<Self> {
+        match value {
+            "anonymous" => Some(Self::Anonymous),
+            "demo" => Some(Self::Demo),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Demo => "demo",
+        }
+    }
+}
+
+impl AppStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AppConfig {
+    app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
+    backend_secret_hash: String,
+    admin_secret_hash: String,
+    status: AppStatus,
+}
+
+#[derive(Debug, Clone)]
+struct MetaAppRow {
+    object_id: ObjectId,
+    app_id: AppId,
+    app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
+    backend_secret_hash: String,
+    admin_secret_hash: String,
+    status: AppStatus,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Clone)]
+struct MetaExternalIdentityRow {
+    principal_id: String,
+}
+
+struct MetaStore {
+    runtime: TokioRuntime<SurrealKvStorage>,
+    secret_hash_key: String,
+}
+
+impl MetaStore {
+    fn new(data_root: &Path, secret_hash_key: String) -> Result<Self, String> {
+        let meta_dir = data_root.join("meta");
+        std::fs::create_dir_all(&meta_dir)
+            .map_err(|e| format!("failed to create meta dir '{}': {e}", meta_dir.display()))?;
+
+        let meta_schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("apps")
+                    .column("app_id", ColumnType::Uuid)
+                    .column("app_name", ColumnType::Text)
+                    .column("jwks_endpoint", ColumnType::Text)
+                    .column("allow_anonymous", ColumnType::Boolean)
+                    .column("allow_demo", ColumnType::Boolean)
+                    .column("backend_secret_hash", ColumnType::Text)
+                    .column("admin_secret_hash", ColumnType::Text)
+                    .column("status", ColumnType::Text)
+                    .column("created_at", ColumnType::Timestamp)
+                    .column("updated_at", ColumnType::Timestamp),
+            )
+            .table(
+                TableSchema::builder("external_identities")
+                    .column("app_id", ColumnType::Uuid)
+                    .column("issuer", ColumnType::Text)
+                    .column("subject", ColumnType::Text)
+                    .column("principal_id", ColumnType::Text)
+                    .column("created_at", ColumnType::Timestamp)
+                    .column("updated_at", ColumnType::Timestamp),
+            )
+            .build();
+
+        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let schema_manager = SchemaManager::new(
+            sync_manager,
+            meta_schema,
+            AppId::from_name("jazz-cloud-server-meta"),
+            "meta",
+            "main",
+        )
+        .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
+
+        let db_path = meta_dir.join("groove.surrealkv");
+        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+            .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
+
+        // Meta app is local-only; no sync callback needed yet.
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        Ok(Self {
+            runtime,
+            secret_hash_key,
+        })
+    }
+
+    fn hash_secret(&self, secret: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(self.secret_hash_key.as_bytes())
+            .expect("HMAC key creation should not fail for arbitrary key length");
+        mac.update(secret.as_bytes());
+        let bytes = mac.finalize().into_bytes();
+        hex::encode(bytes)
+    }
+
+    fn verify_secret(&self, provided_secret: &str, expected_hash: &str) -> bool {
+        let hashed = self.hash_secret(provided_secret);
+        constant_time_eq(&hashed, expected_hash)
+    }
+
+    async fn list_apps(&self) -> Result<Vec<MetaAppRow>, String> {
+        let query = QueryBuilder::new("apps").build();
+        let future = self
+            .runtime
+            .query(query, None, None)
+            .map_err(|e| format!("meta query error: {e}"))?;
+
+        let rows = future
+            .await
+            .map_err(|e| format!("meta query await error: {e}"))?;
+
+        rows.into_iter()
+            .map(|(object_id, values)| Self::decode_row(object_id, &values))
+            .collect()
+    }
+
+    async fn get_by_app_id(&self, app_id: AppId) -> Result<Option<MetaAppRow>, String> {
+        let query = QueryBuilder::new("apps")
+            .filter_eq("app_id", Value::Uuid(app_id.as_object_id()))
+            .build();
+        let future = self
+            .runtime
+            .query(query, None, None)
+            .map_err(|e| format!("meta query error: {e}"))?;
+        let mut rows = future
+            .await
+            .map_err(|e| format!("meta query await error: {e}"))?;
+
+        if let Some((object_id, values)) = rows.pop() {
+            Ok(Some(Self::decode_row(object_id, &values)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_app(
+        &self,
+        app_id: AppId,
+        app_name: String,
+        jwks_endpoint: String,
+        allow_anonymous: bool,
+        allow_demo: bool,
+        backend_secret_hash: String,
+        admin_secret_hash: String,
+        status: AppStatus,
+    ) -> Result<MetaAppRow, String> {
+        let now = now_timestamp_us();
+        let values = vec![
+            Value::Uuid(app_id.as_object_id()),
+            Value::Text(app_name.clone()),
+            Value::Text(jwks_endpoint.clone()),
+            Value::Boolean(allow_anonymous),
+            Value::Boolean(allow_demo),
+            Value::Text(backend_secret_hash.clone()),
+            Value::Text(admin_secret_hash.clone()),
+            Value::Text(status.as_str().to_string()),
+            Value::Timestamp(now),
+            Value::Timestamp(now),
+        ];
+
+        let object_id = self
+            .runtime
+            .insert("apps", values, None)
+            .map_err(|e| format!("failed to insert meta app record: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush meta app record: {e}"))?;
+
+        Ok(MetaAppRow {
+            object_id,
+            app_id,
+            app_name,
+            jwks_endpoint,
+            allow_anonymous,
+            allow_demo,
+            backend_secret_hash,
+            admin_secret_hash,
+            status,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn update_app(&self, row: &MetaAppRow) -> Result<(), String> {
+        let updates = vec![
+            ("app_name".to_string(), Value::Text(row.app_name.clone())),
+            (
+                "jwks_endpoint".to_string(),
+                Value::Text(row.jwks_endpoint.clone()),
+            ),
+            (
+                "allow_anonymous".to_string(),
+                Value::Boolean(row.allow_anonymous),
+            ),
+            ("allow_demo".to_string(), Value::Boolean(row.allow_demo)),
+            (
+                "backend_secret_hash".to_string(),
+                Value::Text(row.backend_secret_hash.clone()),
+            ),
+            (
+                "admin_secret_hash".to_string(),
+                Value::Text(row.admin_secret_hash.clone()),
+            ),
+            (
+                "status".to_string(),
+                Value::Text(row.status.as_str().to_string()),
+            ),
+            ("updated_at".to_string(), Value::Timestamp(row.updated_at)),
+        ];
+
+        self.runtime
+            .update(row.object_id, updates, None)
+            .map_err(|e| format!("failed to update meta app record: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush meta app update: {e}"))?;
+        Ok(())
+    }
+
+    async fn delete_app(&self, object_id: ObjectId) -> Result<(), String> {
+        self.runtime
+            .delete(object_id, None)
+            .map_err(|e| format!("failed to delete meta app record: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush meta app delete: {e}"))?;
+        Ok(())
+    }
+
+    async fn get_external_identity(
+        &self,
+        app_id: AppId,
+        issuer: &str,
+        subject: &str,
+    ) -> Result<Option<MetaExternalIdentityRow>, String> {
+        let query = QueryBuilder::new("external_identities")
+            .filter_eq("app_id", Value::Uuid(app_id.as_object_id()))
+            .filter_eq("issuer", Value::Text(issuer.to_string()))
+            .filter_eq("subject", Value::Text(subject.to_string()))
+            .build();
+
+        let future = self
+            .runtime
+            .query(query, None, None)
+            .map_err(|e| format!("external identity query error: {e}"))?;
+        let mut rows = future
+            .await
+            .map_err(|e| format!("external identity query await error: {e}"))?;
+
+        if let Some((object_id, values)) = rows.pop() {
+            Ok(Some(Self::decode_external_identity_row(
+                object_id, &values,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn create_external_identity(
+        &self,
+        app_id: AppId,
+        issuer: &str,
+        subject: &str,
+        principal_id: &str,
+    ) -> Result<MetaExternalIdentityRow, String> {
+        let now = now_timestamp_us();
+        let values = vec![
+            Value::Uuid(app_id.as_object_id()),
+            Value::Text(issuer.to_string()),
+            Value::Text(subject.to_string()),
+            Value::Text(principal_id.to_string()),
+            Value::Timestamp(now),
+            Value::Timestamp(now),
+        ];
+
+        let object_id = self
+            .runtime
+            .insert("external_identities", values, None)
+            .map_err(|e| format!("failed to insert external identity: {e}"))?;
+        self.runtime
+            .flush()
+            .await
+            .map_err(|e| format!("failed to flush external identity: {e}"))?;
+
+        let _ = object_id;
+        Ok(MetaExternalIdentityRow {
+            principal_id: principal_id.to_string(),
+        })
+    }
+
+    fn decode_row(object_id: ObjectId, values: &[Value]) -> Result<MetaAppRow, String> {
+        if values.len() < 8 {
+            return Err(format!(
+                "meta row has invalid column count: expected at least 8, got {}",
+                values.len()
+            ));
+        }
+
+        let app_obj_id = match &values[0] {
+            Value::Uuid(id) => *id,
+            other => {
+                return Err(format!(
+                    "meta row field app_id expected uuid, got {other:?}"
+                ));
+            }
+        };
+
+        let app_name = match &values[1] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "meta row field app_name expected text, got {other:?}"
+                ));
+            }
+        };
+
+        let jwks_endpoint = match &values[2] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "meta row field jwks_endpoint expected text, got {other:?}"
+                ));
+            }
+        };
+        let (allow_anonymous, allow_demo, idx_shift) = if values.len() >= 10 {
+            let allow_anonymous = match &values[3] {
+                Value::Boolean(v) => *v,
+                other => {
+                    return Err(format!(
+                        "meta row field allow_anonymous expected boolean, got {other:?}"
+                    ));
+                }
+            };
+            let allow_demo = match &values[4] {
+                Value::Boolean(v) => *v,
+                other => {
+                    return Err(format!(
+                        "meta row field allow_demo expected boolean, got {other:?}"
+                    ));
+                }
+            };
+            (allow_anonymous, allow_demo, 2)
+        } else {
+            // Backward-compat for older rows before auth mode flags existed.
+            (true, true, 0)
+        };
+
+        let backend_secret_hash = match &values[3 + idx_shift] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "meta row field backend_secret_hash expected text, got {other:?}"
+                ));
+            }
+        };
+
+        let admin_secret_hash = match &values[4 + idx_shift] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "meta row field admin_secret_hash expected text, got {other:?}"
+                ));
+            }
+        };
+
+        let status = match &values[5 + idx_shift] {
+            Value::Text(s) => AppStatus::from_str(s)
+                .ok_or_else(|| format!("meta row has invalid status value: {s}"))?,
+            other => {
+                return Err(format!(
+                    "meta row field status expected text, got {other:?}"
+                ));
+            }
+        };
+
+        let created_at = match &values[6 + idx_shift] {
+            Value::Timestamp(ts) => *ts,
+            other => {
+                return Err(format!(
+                    "meta row field created_at expected timestamp, got {other:?}"
+                ));
+            }
+        };
+
+        let updated_at = match &values[7 + idx_shift] {
+            Value::Timestamp(ts) => *ts,
+            other => {
+                return Err(format!(
+                    "meta row field updated_at expected timestamp, got {other:?}"
+                ));
+            }
+        };
+
+        Ok(MetaAppRow {
+            object_id,
+            app_id: AppId::from_object_id(app_obj_id),
+            app_name,
+            jwks_endpoint,
+            allow_anonymous,
+            allow_demo,
+            backend_secret_hash,
+            admin_secret_hash,
+            status,
+            created_at,
+            updated_at,
+        })
+    }
+
+    fn decode_external_identity_row(
+        _object_id: ObjectId,
+        values: &[Value],
+    ) -> Result<MetaExternalIdentityRow, String> {
+        if values.len() < 6 {
+            return Err(format!(
+                "external identity row has invalid column count: expected at least 6, got {}",
+                values.len()
+            ));
+        }
+
+        let principal_id = match &values[3] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "external identity field principal_id expected text, got {other:?}"
+                ));
+            }
+        };
+
+        Ok(MetaExternalIdentityRow { principal_id })
+    }
+}
+
+struct ConnectionState {
+    _client_id: ClientId,
+}
+
+#[derive(Debug, Clone)]
+struct CachedJwks {
+    endpoint: String,
+    fetched_at_us: u64,
+    set: JwkSet,
+}
+
+struct AppRuntime {
+    runtime: TokioRuntime<SurrealKvStorage>,
+}
+
+impl AppRuntime {
+    fn new(
+        app_id: AppId,
+        data_dir: &Path,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    ) -> Result<Self, String> {
+        std::fs::create_dir_all(data_dir).map_err(|e| {
+            format!(
+                "failed to create app data dir '{}': {e}",
+                data_dir.display()
+            )
+        })?;
+
+        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
+
+        let db_path = data_dir.join("groove.surrealkv");
+        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+            .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
+
+        let sync_tx_clone = sync_broadcast.clone();
+        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
+            if let Destination::Client(client_id) = entry.destination {
+                let _ = sync_tx_clone.send((client_id, entry.payload));
+            }
+        });
+
+        Ok(Self { runtime })
+    }
+}
+
+struct AppEntry {
+    app_id: AppId,
+    meta_object_id: ObjectId,
+    config: tokio::sync::RwLock<AppConfig>,
+    connections: tokio::sync::RwLock<HashMap<u64, ConnectionState>>,
+    next_connection_id: AtomicU64,
+    sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+}
+
+impl AppEntry {
+    fn new(
+        app_id: AppId,
+        meta_object_id: ObjectId,
+        config: AppConfig,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            app_id,
+            meta_object_id,
+            config: tokio::sync::RwLock::new(config),
+            connections: tokio::sync::RwLock::new(HashMap::new()),
+            next_connection_id: AtomicU64::new(1),
+            sync_broadcast,
+        })
+    }
+}
+
+async fn run_worker_loop(
+    worker: usize,
+    mut ingress_rx: tokio::sync::mpsc::Receiver<WorkerCommand>,
+) {
+    let mut fair_queue = FairAppQueue::<WorkerCommand>::default();
+    let mut app_runtimes = HashMap::<AppId, AppRuntime>::new();
+
+    loop {
+        if fair_queue.is_empty() {
+            match ingress_rx.recv().await {
+                Some(command) => fair_queue.push(command.app_id(), command),
+                None => {
+                    info!(worker, "sync worker stopped");
+                    return;
+                }
+            }
+        }
+
+        while let Ok(command) = ingress_rx.try_recv() {
+            fair_queue.push(command.app_id(), command);
+        }
+
+        let Some(batch) = fair_queue.pop_batch(WORKER_APP_QUANTUM) else {
+            continue;
+        };
+
+        for command in batch {
+            match command {
+                WorkerCommand::CreateRuntime {
+                    app_id,
+                    data_dir,
+                    sync_broadcast,
+                    response,
+                } => {
+                    let result = if let std::collections::hash_map::Entry::Vacant(entry) =
+                        app_runtimes.entry(app_id)
+                    {
+                        AppRuntime::new(app_id, &data_dir, sync_broadcast).map(|runtime| {
+                            entry.insert(runtime);
+                        })
+                    } else {
+                        Err(format!("app runtime already exists for {app_id}"))
+                    };
+                    if response.send(result).is_err() {
+                        warn!(worker, app_id = %app_id, "create runtime response receiver dropped");
+                    }
+                }
+                WorkerCommand::EnsureClientWithSession {
+                    app_id,
+                    client_id,
+                    session,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .ensure_client_with_session(client_id, session)
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "ensure-client response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::SyncAsSession {
+                    app_id,
+                    client_id,
+                    session,
+                    payload,
+                    response,
+                } => {
+                    let result = match app_runtimes.get(&app_id) {
+                        Some(runtime) => {
+                            if let Err(err) = runtime
+                                .runtime
+                                .ensure_client_with_session(client_id, session)
+                            {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
+                                source: Source::Client(client_id),
+                                payload,
+                            }) {
+                                Err(err.to_string())
+                            } else {
+                                runtime.runtime.flush().await.map_err(|err| err.to_string())
+                            }
+                        }
+                        None => Err(format!("missing runtime for app {app_id}")),
+                    };
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "session-sync response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::SyncAsAdmin {
+                    app_id,
+                    client_id,
+                    payload,
+                    response,
+                } => {
+                    let result = match app_runtimes.get(&app_id) {
+                        Some(runtime) => {
+                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.set_client_admin(client_id) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
+                                source: Source::Client(client_id),
+                                payload,
+                            }) {
+                                Err(err.to_string())
+                            } else {
+                                runtime.runtime.flush().await.map_err(|err| err.to_string())
+                            }
+                        }
+                        None => Err(format!("missing runtime for app {app_id}")),
+                    };
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "admin-sync response receiver dropped"
+                        );
+                    }
+                }
+            }
+        }
+
+        tokio::task::yield_now().await;
+    }
+}
+
+struct ServerState {
+    apps: tokio::sync::RwLock<HashMap<AppId, Arc<AppEntry>>>,
+    data_root: PathBuf,
+    internal_api_secret: String,
+    workers: WorkerPool,
+    meta_store: Arc<MetaStore>,
+    jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
+    http_client: reqwest::Client,
+}
+
+impl ServerState {
+    async fn get_app(&self, app_id: AppId) -> Option<Arc<AppEntry>> {
+        self.apps.read().await.get(&app_id).cloned()
+    }
+
+    fn app_data_dir(&self, app_id: AppId) -> PathBuf {
+        self.data_root.join("apps").join(app_id.to_string())
+    }
+
+    async fn app_count(&self) -> usize {
+        self.apps.read().await.len()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AppPath {
+    app_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsParams {
+    client_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAppRequest {
+    app_name: String,
+    jwks_endpoint: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAppRequest {
+    app_name: Option<String>,
+    jwks_endpoint: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
+    status: Option<AppStatus>,
+    rotate_backend_secret: Option<bool>,
+    rotate_admin_secret: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppSummaryResponse {
+    app_id: String,
+    app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
+    status: AppStatus,
+    worker: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateAppResponse {
+    app_id: String,
+    app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
+    backend_secret: String,
+    admin_secret: String,
+    status: AppStatus,
+    worker: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateAppResponse {
+    app_id: String,
+    app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
+    status: AppStatus,
+    worker: usize,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkExternalResponse {
+    app_id: String,
+    principal_id: String,
+    issuer: String,
+    subject: String,
+    created: bool,
+}
+
+pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let data_root = PathBuf::from(&config.data_root);
+    std::fs::create_dir_all(data_root.join("apps"))?;
+
+    let meta_store = Arc::new(
+        MetaStore::new(&data_root, config.secret_hash_key)
+            .map_err(|e| format!("failed to initialize meta store: {e}"))?,
+    );
+
+    let workers = WorkerPool::new(config.worker_threads);
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("failed to initialize HTTP client: {e}"))?;
+
+    let persisted_rows = meta_store
+        .list_apps()
+        .await
+        .map_err(|e| format!("failed to load app registry from meta store: {e}"))?;
+
+    let mut app_map = HashMap::new();
+    for row in persisted_rows {
+        let app_id = row.app_id;
+        let app_config = app_config_from_row(&row);
+        let app_dir = data_root.join("apps").join(app_id.to_string());
+        let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
+
+        match workers
+            .create_runtime(app_id, app_dir, sync_tx.clone())
+            .await
+        {
+            Ok(()) => {
+                app_map.insert(
+                    app_id,
+                    AppEntry::new(app_id, row.object_id, app_config, sync_tx),
+                );
+            }
+            Err(err) => {
+                warn!(
+                    app_id = %app_id,
+                    error = ?err,
+                    "failed to rehydrate app runtime from meta store"
+                );
+            }
+        }
+    }
+
+    let state = Arc::new(ServerState {
+        apps: tokio::sync::RwLock::new(app_map),
+        data_root,
+        internal_api_secret: config.internal_api_secret,
+        workers,
+        meta_store,
+        jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
+        http_client,
+    });
+
+    info!(
+        workers = state.workers.worker_count(),
+        data_root = %state.data_root.display(),
+        app_count = state.app_count().await,
+        "starting multi-tenant Jazz server"
+    );
+    warn!(
+        "TODO(security): JWT auth currently validates signatures only; add claim validation before production."
+    );
+
+    let app = create_router(state);
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    info!("listening on http://{addr}");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("shutdown signal received");
+}
+
+fn create_router(state: Arc<ServerState>) -> Router {
+    Router::new()
+        .route("/apps/:app_id/events", get(events_handler))
+        .route("/apps/:app_id/sync", post(sync_handler))
+        .route(
+            "/apps/:app_id/auth/link-external",
+            post(link_external_handler),
+        )
+        .route(
+            "/internal/apps",
+            post(create_app_handler).get(list_apps_handler),
+        )
+        .route(
+            "/internal/apps/:app_id",
+            get(get_app_handler).patch(update_app_handler),
+        )
+        .route("/health", get(health_handler))
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
+fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
+    AppConfig {
+        app_name: row.app_name.clone(),
+        jwks_endpoint: row.jwks_endpoint.clone(),
+        allow_anonymous: row.allow_anonymous,
+        allow_demo: row.allow_demo,
+        backend_secret_hash: row.backend_secret_hash.clone(),
+        admin_secret_hash: row.admin_secret_hash.clone(),
+        status: row.status,
+    }
+}
+
+fn now_timestamp_us() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_micros().min(u128::from(u64::MAX)) as u64,
+        Err(_) => 0,
+    }
+}
+
+fn parse_app_id(value: &str) -> Result<AppId, (StatusCode, String)> {
+    AppId::from_string(value)
+        .map_err(|_| (StatusCode::BAD_REQUEST, format!("invalid app_id: {value}")))
+}
+
+fn encode_frame(event: &ServerEvent) -> Bytes {
+    let json = serde_json::to_vec(event).unwrap_or_default();
+    let len = (json.len() as u32).to_be_bytes();
+    let mut buf = Vec::with_capacity(4 + json.len());
+    buf.extend_from_slice(&len);
+    buf.extend_from_slice(&json);
+    Bytes::from(buf)
+}
+
+fn decode_session_header(b64: &str) -> Option<Session> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let json_str = std::str::from_utf8(&bytes).ok()?;
+    serde_json::from_str(json_str).ok()
+}
+
+fn derive_local_principal_id(app_id: AppId, mode: LocalAuthMode, token: &str) -> String {
+    let input = format!("{app_id}:{}:{token}", mode.as_str());
+    let digest = Sha256::digest(input.as_bytes());
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    format!("local:{encoded}")
+}
+
+fn derive_external_principal_id(app_id: AppId, issuer: &str, subject: &str) -> String {
+    let input = format!("{app_id}:external:{issuer}:{subject}");
+    let digest = Sha256::digest(input.as_bytes());
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    format!("external:{encoded}")
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut diff: u8 = 0;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+async fn resolve_external_session(
+    state: &ServerState,
+    app_id: AppId,
+    verified: VerifiedJwt,
+) -> Result<Session, (StatusCode, &'static str)> {
+    let subject = verified.subject.trim();
+    if subject.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid bearer token subject"));
+    }
+
+    let issuer = verified
+        .issuer
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let principal_claim = verified
+        .principal_id_claim
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let mapped_principal = if let Some(iss) = issuer {
+        match state
+            .meta_store
+            .get_external_identity(app_id, iss, subject)
+            .await
+        {
+            Ok(Some(row)) => Some(row.principal_id),
+            Ok(None) => None,
+            Err(err) => {
+                warn!(
+                    app_id = %app_id,
+                    issuer = %iss,
+                    subject = %subject,
+                    error = %err,
+                    "failed to resolve external identity mapping"
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to resolve external identity",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    match (principal_claim, mapped_principal.as_deref()) {
+        (Some(claim), Some(mapped)) if claim != mapped => {
+            warn!(
+                app_id = %app_id,
+                claim_principal = %claim,
+                mapped_principal = %mapped,
+                issuer = issuer.unwrap_or("<missing>"),
+                subject = %subject,
+                "external principal claim mismatches persisted identity mapping"
+            );
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "External identity mapping conflict",
+            ));
+        }
+        _ => {}
+    }
+
+    let principal_id = if let Some(claim) = principal_claim {
+        claim.to_string()
+    } else if let Some(mapped) = mapped_principal {
+        mapped
+    } else if let Some(iss) = issuer {
+        derive_external_principal_id(app_id, iss, subject)
+    } else {
+        subject.to_string()
+    };
+
+    let claims = match verified.claims {
+        serde_json::Value::Object(mut map) => {
+            map.insert("auth_mode".to_string(), serde_json::json!("external"));
+            map.insert("subject".to_string(), serde_json::json!(subject));
+            if let Some(iss) = issuer {
+                map.insert("issuer".to_string(), serde_json::json!(iss));
+            }
+            serde_json::Value::Object(map)
+        }
+        other => serde_json::json!({
+            "auth_mode": "external",
+            "subject": subject,
+            "issuer": issuer,
+            "raw_claims": other,
+        }),
+    };
+
+    Ok(Session {
+        user_id: principal_id,
+        claims,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct JwtClaims {
+    sub: String,
+    #[serde(default)]
+    iss: Option<String>,
+    #[serde(default)]
+    jazz_principal_id: Option<String>,
+    #[serde(default = "default_session_claims")]
+    claims: serde_json::Value,
+}
+
+fn default_session_claims() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedJwt {
+    subject: String,
+    issuer: Option<String>,
+    principal_id_claim: Option<String>,
+    claims: serde_json::Value,
+}
+
+#[derive(Debug)]
+enum JwtVerificationError {
+    Retryable(String),
+    Fatal(String),
+}
+
+fn map_key_algorithm(alg: KeyAlgorithm) -> Option<Algorithm> {
+    match alg {
+        KeyAlgorithm::HS256 => Some(Algorithm::HS256),
+        KeyAlgorithm::HS384 => Some(Algorithm::HS384),
+        KeyAlgorithm::HS512 => Some(Algorithm::HS512),
+        KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+        KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
+        KeyAlgorithm::RSA1_5 | KeyAlgorithm::RSA_OAEP | KeyAlgorithm::RSA_OAEP_256 => None,
+    }
+}
+
+fn signature_only_validation(alg: Algorithm) -> Validation {
+    let mut validation = Validation::new(alg);
+    // TODO(security): MVP intentionally validates JWT signatures only.
+    // Add exp/nbf/aud/iss/sub policy enforcement before production launch.
+    validation.required_spec_claims.clear();
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation
+}
+
+fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Vec<&'a Jwk> {
+    let mut candidates = Vec::new();
+
+    for jwk in &jwks.keys {
+        match kid {
+            Some(expected_kid) if jwk.common.key_id.as_deref() != Some(expected_kid) => continue,
+            _ => {}
+        }
+
+        if let Some(key_alg) = jwk.common.key_algorithm {
+            match map_key_algorithm(key_alg) {
+                Some(mapped_alg) if mapped_alg == alg => {}
+                Some(_) | None => continue,
+            }
+        }
+
+        candidates.push(jwk);
+    }
+
+    candidates
+}
+
+fn verify_jwt_signature_with_jwks(
+    token: &str,
+    jwks: &JwkSet,
+) -> Result<VerifiedJwt, JwtVerificationError> {
+    let header = decode_header(token)
+        .map_err(|err| JwtVerificationError::Fatal(format!("invalid JWT header: {err}")))?;
+
+    let candidates = select_jwk_candidates(jwks, header.kid.as_deref(), header.alg);
+    if candidates.is_empty() {
+        let reason = match header.kid.as_deref() {
+            Some(kid) => format!("no JWKS key matched token kid '{kid}'"),
+            None => "no compatible JWKS key found for token algorithm".to_string(),
+        };
+        return Err(JwtVerificationError::Retryable(reason));
+    }
+
+    let mut last_error = None;
+    let validation = signature_only_validation(header.alg);
+
+    for jwk in candidates {
+        let decoding_key = match DecodingKey::from_jwk(jwk) {
+            Ok(key) => key,
+            Err(err) => {
+                last_error = Some(format!("failed to build decoding key from JWK: {err}"));
+                continue;
+            }
+        };
+
+        match decode::<JwtClaims>(token, &decoding_key, &validation) {
+            Ok(token_data) => {
+                return Ok(VerifiedJwt {
+                    subject: token_data.claims.sub,
+                    issuer: token_data.claims.iss,
+                    principal_id_claim: token_data.claims.jazz_principal_id,
+                    claims: token_data.claims.claims,
+                });
+            }
+            Err(err) => {
+                last_error = Some(format!("JWT signature verification failed: {err}"));
+            }
+        }
+    }
+
+    Err(JwtVerificationError::Retryable(last_error.unwrap_or_else(
+        || "JWT signature verification failed".to_string(),
+    )))
+}
+
+async fn fetch_jwks(http_client: &reqwest::Client, jwks_endpoint: &str) -> Result<JwkSet, String> {
+    let response = http_client
+        .get(jwks_endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("JWKS request failed: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("JWKS endpoint returned status {status}"));
+    }
+
+    let jwks = response
+        .json::<JwkSet>()
+        .await
+        .map_err(|err| format!("failed to parse JWKS response: {err}"))?;
+
+    if jwks.keys.is_empty() {
+        return Err("JWKS response contained no keys".to_string());
+    }
+
+    Ok(jwks)
+}
+
+async fn load_jwks_for_app(
+    state: &ServerState,
+    app_id: AppId,
+    jwks_endpoint: &str,
+    force_refresh: bool,
+) -> Result<JwkSet, String> {
+    let ttl_us = JWKS_CACHE_TTL.as_micros().min(u128::from(u64::MAX)) as u64;
+
+    let cached_jwks = if force_refresh {
+        None
+    } else {
+        state.jwks_cache.read().await.get(&app_id).cloned()
+    };
+
+    if let Some(cached) = cached_jwks {
+        let age_us = now_timestamp_us().saturating_sub(cached.fetched_at_us);
+        if cached.endpoint == jwks_endpoint && age_us <= ttl_us {
+            return Ok(cached.set);
+        }
+    }
+
+    let jwks = fetch_jwks(&state.http_client, jwks_endpoint).await?;
+
+    state.jwks_cache.write().await.insert(
+        app_id,
+        CachedJwks {
+            endpoint: jwks_endpoint.to_string(),
+            fetched_at_us: now_timestamp_us(),
+            set: jwks.clone(),
+        },
+    );
+
+    Ok(jwks)
+}
+
+async fn validate_jwt_with_jwks(
+    state: &ServerState,
+    app_id: AppId,
+    app_config: &AppConfig,
+    token: &str,
+) -> Result<VerifiedJwt, (StatusCode, &'static str)> {
+    if app_config.jwks_endpoint.trim().is_empty() {
+        return Err((StatusCode::FORBIDDEN, "External auth disabled for app"));
+    }
+
+    let cached_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, false)
+        .await
+        .map_err(|err| {
+            warn!(
+                app_id = %app_id,
+                endpoint = %app_config.jwks_endpoint,
+                error = %err,
+                "failed to load cached JWKS"
+            );
+            (StatusCode::UNAUTHORIZED, "Unable to load JWKS")
+        })?;
+
+    match verify_jwt_signature_with_jwks(token, &cached_jwks) {
+        Ok(session) => return Ok(session),
+        Err(JwtVerificationError::Fatal(err)) => {
+            warn!(app_id = %app_id, error = %err, "JWT validation failed");
+            return Err((StatusCode::UNAUTHORIZED, "Invalid bearer token"));
+        }
+        Err(JwtVerificationError::Retryable(err)) => {
+            warn!(
+                app_id = %app_id,
+                error = %err,
+                "JWT validation failed with cached JWKS; forcing one refresh"
+            );
+        }
+    }
+
+    let refreshed_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, true)
+        .await
+        .map_err(|err| {
+            warn!(
+                app_id = %app_id,
+                endpoint = %app_config.jwks_endpoint,
+                error = %err,
+                "failed to refresh JWKS"
+            );
+            (StatusCode::UNAUTHORIZED, "Unable to refresh JWKS")
+        })?;
+
+    match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
+        Ok(session) => Ok(session),
+        Err(JwtVerificationError::Retryable(err)) | Err(JwtVerificationError::Fatal(err)) => {
+            warn!(
+                app_id = %app_id,
+                error = %err,
+                "JWT validation failed after JWKS refresh"
+            );
+            Err((StatusCode::UNAUTHORIZED, "Invalid bearer token"))
+        }
+    }
+}
+
+async fn extract_session(
+    headers: &HeaderMap,
+    app_id: AppId,
+    app_config: &AppConfig,
+    state: &ServerState,
+) -> Result<Option<Session>, (StatusCode, &'static str)> {
+    if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
+        let backend_secret = headers
+            .get("X-Jazz-Backend-Secret")
+            .and_then(|v| v.to_str().ok());
+
+        match backend_secret {
+            Some(got)
+                if state
+                    .meta_store
+                    .verify_secret(got, &app_config.backend_secret_hash) =>
+            {
+                let session = decode_session_header(session_b64)
+                    .ok_or((StatusCode::BAD_REQUEST, "Invalid session format"))?;
+                return Ok(Some(session));
+            }
+            Some(_) => {
+                return Err((StatusCode::UNAUTHORIZED, "Invalid backend secret"));
+            }
+            None => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Backend secret required for session impersonation",
+                ));
+            }
+        }
+    }
+
+    if let Some(token) = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth_value| auth_value.strip_prefix("Bearer "))
+    {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
+        }
+
+        let verified = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
+        let session = resolve_external_session(state, app_id, verified).await?;
+        return Ok(Some(session));
+    }
+
+    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers
+        .get(LOCAL_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
+
+    match (local_mode, local_token) {
+        (Some(mode), Some(token)) => {
+            let mode = LocalAuthMode::from_header(mode)
+                .ok_or((StatusCode::BAD_REQUEST, "Invalid local auth mode"))?;
+            if mode == LocalAuthMode::Anonymous && !app_config.allow_anonymous {
+                return Err((StatusCode::FORBIDDEN, "Anonymous auth disabled for app"));
+            }
+            if mode == LocalAuthMode::Demo && !app_config.allow_demo {
+                return Err((StatusCode::FORBIDDEN, "Demo auth disabled for app"));
+            }
+            let token = token.trim();
+            if token.is_empty() {
+                return Err((StatusCode::UNAUTHORIZED, "Empty local auth token"));
+            }
+
+            let principal_id = derive_local_principal_id(app_id, mode, token);
+            return Ok(Some(Session {
+                user_id: principal_id,
+                claims: serde_json::json!({
+                    "auth_mode": "local",
+                    "local_mode": mode.as_str(),
+                }),
+            }));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
+            ));
+        }
+        (None, None) => {}
+    }
+
+    Ok(None)
+}
+
+fn validate_admin_secret(
+    headers: &HeaderMap,
+    app_config: &AppConfig,
+    meta_store: &MetaStore,
+) -> Result<bool, (StatusCode, &'static str)> {
+    let provided = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match provided {
+        Some(got) if meta_store.verify_secret(got, &app_config.admin_secret_hash) => Ok(true),
+        Some(_) => Err((StatusCode::UNAUTHORIZED, "Invalid admin secret")),
+        None => Ok(false),
+    }
+}
+
+fn validate_internal_secret(
+    headers: &HeaderMap,
+    expected_secret: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    let provided = headers
+        .get("X-Jazz-Internal-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match provided {
+        Some(got) if got == expected_secret => Ok(()),
+        _ => Err((StatusCode::UNAUTHORIZED, "Invalid internal API secret")),
+    }
+}
+
+fn generate_secret() -> String {
+    format!("{}{}", Uuid::now_v7().simple(), Uuid::new_v4().simple())
+}
+
+fn worker_dispatch_status_and_message(err: WorkerDispatchError) -> (StatusCode, String) {
+    match err {
+        WorkerDispatchError::QueueFull { worker } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("worker {worker} queue is full"),
+        ),
+        WorkerDispatchError::WorkerClosed { worker } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worker {worker} is closed"),
+        ),
+        WorkerDispatchError::WorkerUnavailable { worker } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worker {worker} is unavailable"),
+        ),
+        WorkerDispatchError::RuntimeError { worker, message } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worker {worker} runtime error: {message}"),
+        ),
+    }
+}
+
+async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
+    let cfg = app.config.read().await;
+    AppSummaryResponse {
+        app_id: app.app_id.to_string(),
+        app_name: cfg.app_name.clone(),
+        jwks_endpoint: cfg.jwks_endpoint.clone(),
+        allow_anonymous: cfg.allow_anonymous,
+        allow_demo: cfg.allow_demo,
+        status: cfg.status,
+        worker,
+    }
+}
+
+async fn events_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Query(params): Query<EventsParams>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let app_id = parse_app_id(&path.app_id)?;
+    let worker = state.workers.worker_for_app(&app_id);
+    let app = state.get_app(app_id).await.ok_or((
+        StatusCode::NOT_FOUND,
+        format!("unknown app_id: {}", path.app_id),
+    ))?;
+
+    let cfg = app.config.read().await.clone();
+    if cfg.status == AppStatus::Disabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "app is disabled for sync traffic".to_string(),
+        ));
+    }
+
+    let session = extract_session(&headers, app_id, &cfg, &state)
+        .await
+        .map_err(|(status, msg)| (status, msg.to_string()))?
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "session required for event stream".to_string(),
+        ))?;
+
+    let client_id = match params.client_id {
+        Some(s) => ClientId::parse(&s)
+            .ok_or((StatusCode::BAD_REQUEST, format!("invalid client_id: {s}")))?,
+        None => ClientId::new(),
+    };
+
+    if let Err(err) = state
+        .workers
+        .ensure_client_with_session(app_id, client_id, session)
+        .await
+    {
+        return Err(worker_dispatch_status_and_message(err));
+    }
+
+    let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
+    {
+        let mut connections = app.connections.write().await;
+        connections.insert(
+            connection_id,
+            ConnectionState {
+                _client_id: client_id,
+            },
+        );
+    }
+
+    info!(
+        app_id = %app_id,
+        worker,
+        client_id = %client_id,
+        connection_id,
+        "events stream connected"
+    );
+
+    let mut sync_rx = app.sync_broadcast.subscribe();
+    let app_cleanup = app.clone();
+    let client_id_str = client_id.to_string();
+
+    let stream = async_stream::stream! {
+        let connected = ServerEvent::Connected {
+            connection_id: ConnectionId(connection_id),
+            client_id: client_id_str,
+        };
+        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
+
+        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+
+        loop {
+            tokio::select! {
+                result = sync_rx.recv() => {
+                    match result {
+                        Ok((target_client_id, payload)) => {
+                            if target_client_id == client_id {
+                                let event = ServerEvent::SyncUpdate { payload: Box::new(payload) };
+                                yield Ok(encode_frame(&event));
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            warn!(app_id = %app_id, connection_id, "events stream lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+                _ = heartbeat_interval.tick() => {
+                    yield Ok(encode_frame(&ServerEvent::Heartbeat));
+                }
+            }
+        }
+
+        let mut connections = app_cleanup.connections.write().await;
+        connections.remove(&connection_id);
+    };
+
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", "application/octet-stream")
+        .header("Transfer-Encoding", "chunked")
+        .header("Cache-Control", "no-cache")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap())
+}
+
+async fn sync_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<SyncPayloadRequest>,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    if cfg.status == AppStatus::Disabled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::forbidden("app is disabled for sync traffic")),
+        )
+            .into_response();
+    }
+
+    let is_admin = match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    let dispatch_result = if is_admin {
+        state
+            .workers
+            .sync_as_admin(app_id, request.client_id, request.payload)
+            .await
+    } else {
+        let session = match extract_session(&headers, app_id, &cfg, &state).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse::unauthorized(
+                        "session required for sync. provide JWT or backend secret",
+                    )),
+                )
+                    .into_response();
+            }
+            Err((status, msg)) => {
+                return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+            }
+        };
+
+        state
+            .workers
+            .sync_as_session(app_id, request.client_id, session, request.payload)
+            .await
+    };
+
+    match dispatch_result {
+        Ok(()) => Json(SuccessResponse::default()).into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn create_app_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAppRequest>,
+) -> impl IntoResponse {
+    if let Err((status, msg)) = validate_internal_secret(&headers, &state.internal_api_secret) {
+        return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+    }
+
+    let app_name = request.app_name.trim().to_string();
+    if app_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request("app_name is required")),
+        )
+            .into_response();
+    }
+    let jwks_endpoint = request.jwks_endpoint.unwrap_or_default().trim().to_string();
+
+    let backend_secret = request.backend_secret.unwrap_or_else(generate_secret);
+    let admin_secret = request.admin_secret.unwrap_or_else(generate_secret);
+    let allow_anonymous = request.allow_anonymous.unwrap_or(true);
+    let allow_demo = request.allow_demo.unwrap_or(true);
+
+    let backend_secret_hash = state.meta_store.hash_secret(&backend_secret);
+    let admin_secret_hash = state.meta_store.hash_secret(&admin_secret);
+
+    let app_id = loop {
+        let candidate = AppId::random();
+        if state.apps.read().await.contains_key(&candidate) {
+            continue;
+        }
+        break candidate;
+    };
+
+    let meta_row = match state
+        .meta_store
+        .create_app(
+            app_id,
+            app_name,
+            jwks_endpoint,
+            allow_anonymous,
+            allow_demo,
+            backend_secret_hash,
+            admin_secret_hash,
+            AppStatus::Active,
+        )
+        .await
+    {
+        Ok(row) => row,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(err)),
+            )
+                .into_response();
+        }
+    };
+
+    let app_config = app_config_from_row(&meta_row);
+    let data_dir = state.app_data_dir(app_id);
+    let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
+
+    if let Err(err) = state
+        .workers
+        .create_runtime(app_id, data_dir, sync_tx.clone())
+        .await
+    {
+        let _ = state.meta_store.delete_app(meta_row.object_id).await;
+        let (status, message) = worker_dispatch_status_and_message(err);
+        return (status, Json(ErrorResponse::internal(message))).into_response();
+    }
+
+    let app_entry = AppEntry::new(app_id, meta_row.object_id, app_config, sync_tx);
+
+    if state.apps.write().await.insert(app_id, app_entry).is_some() {
+        let _ = state.meta_store.delete_app(meta_row.object_id).await;
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::bad_request(
+                "app runtime already exists for generated app id",
+            )),
+        )
+            .into_response();
+    }
+
+    let worker = state.workers.worker_for_app(&app_id);
+
+    Json(CreateAppResponse {
+        app_id: app_id.to_string(),
+        app_name: meta_row.app_name,
+        jwks_endpoint: meta_row.jwks_endpoint,
+        allow_anonymous: meta_row.allow_anonymous,
+        allow_demo: meta_row.allow_demo,
+        backend_secret,
+        admin_secret,
+        status: meta_row.status,
+        worker,
+    })
+    .into_response()
+}
+
+async fn list_apps_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err((status, msg)) = validate_internal_secret(&headers, &state.internal_api_secret) {
+        return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+    }
+
+    let apps: Vec<Arc<AppEntry>> = state.apps.read().await.values().cloned().collect();
+    let mut response = Vec::with_capacity(apps.len());
+
+    for app in apps {
+        let worker = state.workers.worker_for_app(&app.app_id);
+        response.push(app_summary(app, worker).await);
+    }
+
+    Json(response).into_response()
+}
+
+async fn get_app_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err((status, msg)) = validate_internal_secret(&headers, &state.internal_api_secret) {
+        return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+    }
+
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let worker = state.workers.worker_for_app(&app_id);
+    Json(app_summary(app, worker).await).into_response()
+}
+
+async fn update_app_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateAppRequest>,
+) -> impl IntoResponse {
+    if let Err((status, msg)) = validate_internal_secret(&headers, &state.internal_api_secret) {
+        return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+    }
+
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let mut row = match state.meta_store.get_by_app_id(app_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(err)),
+            )
+                .into_response();
+        }
+    };
+
+    if row.object_id != app.meta_object_id {
+        warn!(
+            app_id = %app_id,
+            expected = %app.meta_object_id,
+            actual = %row.object_id,
+            "meta object id mismatch for app; using runtime's known object id"
+        );
+        row.object_id = app.meta_object_id;
+    }
+
+    let mut new_backend_secret = None;
+    let mut new_admin_secret = None;
+
+    if let Some(app_name) = request.app_name {
+        row.app_name = app_name;
+    }
+    if let Some(jwks_endpoint) = request.jwks_endpoint {
+        row.jwks_endpoint = jwks_endpoint;
+    }
+    if let Some(allow_anonymous) = request.allow_anonymous {
+        row.allow_anonymous = allow_anonymous;
+    }
+    if let Some(allow_demo) = request.allow_demo {
+        row.allow_demo = allow_demo;
+    }
+    if let Some(status) = request.status {
+        row.status = status;
+    }
+    if request.rotate_backend_secret.unwrap_or(false) {
+        let secret = generate_secret();
+        row.backend_secret_hash = state.meta_store.hash_secret(&secret);
+        new_backend_secret = Some(secret);
+    }
+    if request.rotate_admin_secret.unwrap_or(false) {
+        let secret = generate_secret();
+        row.admin_secret_hash = state.meta_store.hash_secret(&secret);
+        new_admin_secret = Some(secret);
+    }
+    row.updated_at = now_timestamp_us().max(row.created_at);
+
+    if let Err(err) = state.meta_store.update_app(&row).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(err)),
+        )
+            .into_response();
+    }
+
+    {
+        let mut cfg = app.config.write().await;
+        *cfg = app_config_from_row(&row);
+    }
+
+    let worker = state.workers.worker_for_app(&app_id);
+
+    Json(UpdateAppResponse {
+        app_id: app_id.to_string(),
+        app_name: row.app_name,
+        jwks_endpoint: row.jwks_endpoint,
+        allow_anonymous: row.allow_anonymous,
+        allow_demo: row.allow_demo,
+        status: row.status,
+        worker,
+        backend_secret: new_backend_secret,
+        admin_secret: new_admin_secret,
+    })
+    .into_response()
+}
+
+async fn link_external_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+
+    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
+    let local_token = headers
+        .get(LOCAL_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let (mode, token) = match (local_mode, local_token) {
+        (Some(mode), Some(token)) => (mode, token.trim()),
+        (Some(_), None) | (None, Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
+                )),
+            )
+                .into_response();
+        }
+        (None, None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Local auth headers are required for link-external",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let mode = match LocalAuthMode::from_header(mode) {
+        Some(mode) => mode,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request("Invalid local auth mode")),
+            )
+                .into_response();
+        }
+    };
+
+    if token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request("Empty local auth token")),
+        )
+            .into_response();
+    }
+
+    if mode == LocalAuthMode::Anonymous && !cfg.allow_anonymous {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::unauthorized(
+                "Anonymous auth disabled for app",
+            )),
+        )
+            .into_response();
+    }
+    if mode == LocalAuthMode::Demo && !cfg.allow_demo {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::unauthorized("Demo auth disabled for app")),
+        )
+            .into_response();
+    }
+
+    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Authorization bearer token is required",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let token_bearer = match auth_value.strip_prefix("Bearer ") {
+        Some(token) if !token.trim().is_empty() => token.trim(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "Invalid Authorization header format",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let verified = match validate_jwt_with_jwks(&state, app_id, &cfg, token_bearer).await {
+        Ok(verified) => verified,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    let issuer = match verified.issuer.as_deref().map(str::trim) {
+        Some(iss) if !iss.is_empty() => iss.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "JWT issuer (iss) is required for link-external",
+                )),
+            )
+                .into_response();
+        }
+    };
+    let subject = verified.subject.trim().to_string();
+    if subject.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
+        )
+            .into_response();
+    }
+
+    let local_principal_id = derive_local_principal_id(app_id, mode, token);
+
+    match verified
+        .principal_id_claim
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(claim_principal) if claim_principal != local_principal_id => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::bad_request(
+                    "JWT jazz_principal_id claim does not match local principal",
+                )),
+            )
+                .into_response();
+        }
+        _ => {}
+    }
+
+    let mut created = false;
+
+    match state
+        .meta_store
+        .get_external_identity(app_id, &issuer, &subject)
+        .await
+    {
+        Ok(Some(row)) => {
+            if row.principal_id != local_principal_id {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::bad_request(
+                        "external identity is already linked to a different principal",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+        Ok(None) => {
+            if let Err(err) = state
+                .meta_store
+                .create_external_identity(app_id, &issuer, &subject, &local_principal_id)
+                .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::internal(err)),
+                )
+                    .into_response();
+            }
+            created = true;
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(err)),
+            )
+                .into_response();
+        }
+    }
+
+    Json(LinkExternalResponse {
+        app_id: app_id.to_string(),
+        principal_id: local_principal_id,
+        issuer,
+        subject,
+        created,
+    })
+    .into_response()
+}
+
+async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "healthy",
+        "apps": state.app_count().await,
+        "workers": state.workers.worker_count(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fair_app_queue_round_robins_apps_with_quantum_one() {
+        let app_a = AppId::from_name("app-a");
+        let app_b = AppId::from_name("app-b");
+        let mut queue = FairAppQueue::default();
+
+        queue.push(app_a, "a1");
+        queue.push(app_a, "a2");
+        queue.push(app_b, "b1");
+        queue.push(app_b, "b2");
+
+        assert_eq!(queue.pop_batch(1), Some(vec!["a1"]));
+        assert_eq!(queue.pop_batch(1), Some(vec!["b1"]));
+        assert_eq!(queue.pop_batch(1), Some(vec!["a2"]));
+        assert_eq!(queue.pop_batch(1), Some(vec!["b2"]));
+        assert_eq!(queue.pop_batch(1), None);
+    }
+
+    #[test]
+    fn fair_app_queue_honors_quantum_then_requeues_app() {
+        let app_a = AppId::from_name("app-a");
+        let app_b = AppId::from_name("app-b");
+        let mut queue = FairAppQueue::default();
+
+        queue.push(app_a, 1);
+        queue.push(app_a, 2);
+        queue.push(app_a, 3);
+        queue.push(app_b, 9);
+        queue.push(app_b, 10);
+
+        assert_eq!(queue.pop_batch(2), Some(vec![1, 2]));
+        assert_eq!(queue.pop_batch(2), Some(vec![9, 10]));
+        assert_eq!(queue.pop_batch(2), Some(vec![3]));
+        assert_eq!(queue.pop_batch(2), None);
+    }
+}

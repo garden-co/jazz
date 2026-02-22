@@ -1,0 +1,122 @@
+---
+title: Schemas
+description: Define tables and relationships in TS DSL or SQL, then use the CLI for generated artifacts.
+---
+
+## Table Definitions
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-rs/schema/current.sql
+    </include>
+  </Tab>
+</Tabs>
+
+## Datatypes and References
+
+- TypeScript DSL defaults to `col.string`, `col.boolean`, and `col.ref` for relationships.
+- SQL keeps the same model via `TEXT`, `BOOLEAN`, and `UUID REFERENCES ...`.
+- Use SQL as the alternate path when your project is Rust-first.
+
+## Jazz CLI and Generated Files
+
+### TS Client Codegen
+
+<include cwd lang="bash">
+  ../examples/docs/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
+</include>
+
+Run this from a normal app root. It regenerates `schema/current.sql` and typed client bindings (for example `schema/app.ts`) from `schema/current.ts`.
+
+### Generated migration stubs
+
+TypeScript migration stubs encode both forward and backward behavior in one file.
+SQL migrations are split into explicit forward and backward files.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
+    >
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    Forward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
+    </include>
+    Backward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
+    </include>
+  </Tab>
+</Tabs>
+
+### Edited stubs (example customization)
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
+    </include>
+  </Tab>
+</Tabs>
+
+### Backwards default examples
+
+Backwards defaults define what older-schema clients see for fields dropped in newer schemas.
+When new clients write rows without that field, the backward lens supplies the configured default to old clients.
+In TypeScript, the same migration stub carries both forward and backward translation behavior.
+In SQL, the backward lens file explicitly reintroduces dropped columns with a default.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts"'
+    >
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    Forward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql
+    </include>
+    Backward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql
+    </include>
+  </Tab>
+</Tabs>

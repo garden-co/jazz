@@ -1,0 +1,4 @@
+interface:
+  display_name: "Spec"
+  short_description: "Plan features with SDD approval gates"
+  default_prompt: "Use $spec to create requirements (optional), design, and implementation tasks with approval gates before coding."
