@@ -1,8 +1,12 @@
 use std::fs;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
@@ -12,10 +16,16 @@ use groove::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchem
 use groove::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::MemoryStorage;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+use groove::storage::Storage;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+use groove::storage::SurrealKvStorage;
 use groove::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
 use serde::Deserialize;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
 
@@ -54,6 +64,16 @@ struct R2ScenarioConfig {
     mix: Vec<WeightedOperation>,
     #[serde(default)]
     background_write_ratio: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+struct R3ScenarioConfig {
+    id: String,
+    seed: u64,
+    profile_path: String,
+    cache_size_bytes: usize,
+    target_project_index: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +125,16 @@ struct R2Scenario {
     operations: Vec<ReadOperation>,
     weights: Vec<u32>,
     background_write_ratio: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+struct R3Scenario {
+    id: String,
+    seed: u64,
+    profile_path: String,
+    cache_size_bytes: usize,
+    target_project_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +233,20 @@ struct FanoutR4State {
     hot_task_cursor: usize,
     total_routed_messages: usize,
     delivered_notifications: Arc<AtomicUsize>,
+}
+
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+struct SeededProjectBoard {
+    projects: Vec<ObjectId>,
+    active_tasks: Vec<ObjectId>,
+}
+
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+struct ColdLoadSeededDb {
+    _tempdir: TempDir,
+    db_path: PathBuf,
+    target_project_id: ObjectId,
+    cache_size_bytes: usize,
 }
 
 impl R1State {
@@ -583,6 +627,208 @@ impl R1State {
     fn bump_timestamp(&mut self) -> u64 {
         self.timestamp += 1;
         self.timestamp
+    }
+}
+
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+fn seed_project_board_dataset<S: Storage>(
+    runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    profile: &ProfileConfig,
+    seed: u64,
+) -> SeededProjectBoard {
+    let mut rng = Lcg::new(seed);
+    let mut users = Vec::with_capacity(profile.users.max(1));
+    let mut organizations = Vec::with_capacity(profile.organizations.max(1));
+    let mut projects = Vec::with_capacity(profile.projects.max(1));
+    let mut active_tasks = Vec::with_capacity(profile.tasks.max(1));
+    let mut next_comment_seq = 0usize;
+    let mut timestamp = 1_770_000_000_000_000u64;
+    let mut next_timestamp = || {
+        timestamp += 1;
+        timestamp
+    };
+
+    for user_idx in 0..profile.users {
+        let user_id = runtime
+            .insert(
+                "users",
+                vec![
+                    Value::Text(format!("User {user_idx}")),
+                    Value::Text(format!("user{user_idx}@bench.local")),
+                ],
+                None,
+            )
+            .expect("seed users");
+        users.push(user_id);
+    }
+
+    for org_idx in 0..profile.organizations {
+        let org_id = runtime
+            .insert(
+                "organizations",
+                vec![
+                    Value::Text(format!("Org {org_idx}")),
+                    Value::Timestamp(next_timestamp()),
+                ],
+                None,
+            )
+            .expect("seed organizations");
+        organizations.push(org_id);
+    }
+
+    for user_idx in 0..users.len() {
+        let org_id = organizations[user_idx % organizations.len()];
+        let role = match user_idx % 3 {
+            0 => "owner",
+            1 => "editor",
+            _ => "member",
+        };
+        runtime
+            .insert(
+                "memberships",
+                vec![
+                    Value::Uuid(org_id),
+                    Value::Uuid(users[user_idx]),
+                    Value::Text(role.to_string()),
+                ],
+                None,
+            )
+            .expect("seed memberships");
+    }
+
+    for project_idx in 0..profile.projects {
+        let org_id = organizations[project_idx % organizations.len()];
+        let project_id = runtime
+            .insert(
+                "projects",
+                vec![
+                    Value::Uuid(org_id),
+                    Value::Text(format!("Project {project_idx}")),
+                    Value::Boolean(false),
+                    Value::Timestamp(next_timestamp()),
+                ],
+                None,
+            )
+            .expect("seed projects");
+        projects.push(project_id);
+    }
+
+    for task_idx in 0..profile.tasks {
+        let project_id = projects[task_idx % projects.len()];
+        let assignee_id = users[task_idx % users.len()];
+        let status = match task_idx % 4 {
+            0 => "todo",
+            1 => "in_progress",
+            2 => "in_review",
+            _ => "done",
+        };
+        let priority = ((task_idx % 5) + 1) as i32;
+        let task_id = runtime
+            .insert(
+                "tasks",
+                vec![
+                    Value::Uuid(project_id),
+                    Value::Text(format!("Task {task_idx}")),
+                    Value::Text(status.to_string()),
+                    Value::Integer(priority),
+                    Value::Uuid(assignee_id),
+                    Value::Timestamp(next_timestamp()),
+                    Value::Null,
+                ],
+                None,
+            )
+            .expect("seed tasks");
+        active_tasks.push(task_id);
+    }
+
+    for task_id in active_tasks.iter().copied() {
+        for watcher_offset in 0..profile.watchers_per_task.max(1) {
+            let user_id = users[(watcher_offset + rng.next_usize(users.len())) % users.len()];
+            runtime
+                .insert(
+                    "task_watchers",
+                    vec![Value::Uuid(task_id), Value::Uuid(user_id)],
+                    None,
+                )
+                .expect("seed task_watchers");
+        }
+    }
+
+    for _ in 0..profile.comments {
+        let task_id = active_tasks[rng.next_usize(active_tasks.len())];
+        let author_id = users[rng.next_usize(users.len())];
+        runtime
+            .insert(
+                "task_comments",
+                vec![
+                    Value::Uuid(task_id),
+                    Value::Uuid(author_id),
+                    Value::Text(format!("seed comment {next_comment_seq}")),
+                    Value::Timestamp(next_timestamp()),
+                ],
+                None,
+            )
+            .expect("seed task_comments");
+        next_comment_seq += 1;
+    }
+
+    for event_idx in 0..profile.activity_events {
+        let task_id = active_tasks[rng.next_usize(active_tasks.len())];
+        let project_id = projects[event_idx % projects.len()];
+        let actor_id = users[event_idx % users.len()];
+        runtime
+            .insert(
+                "activity_events",
+                vec![
+                    Value::Uuid(project_id),
+                    Value::Uuid(task_id),
+                    Value::Uuid(actor_id),
+                    Value::Text("status_change".to_string()),
+                    Value::Timestamp(next_timestamp()),
+                    Value::Text("{\"kind\":\"seed\"}".to_string()),
+                ],
+                None,
+            )
+            .expect("seed activity_events");
+    }
+
+    SeededProjectBoard {
+        projects,
+        active_tasks,
+    }
+}
+
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+impl ColdLoadSeededDb {
+    fn new(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
+        let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
+        let db_path = tempdir.path().join("r3_cold_load.surrealkv");
+
+        let seeded = {
+            let mut runtime = create_surrealkv_runtime(
+                project_board_schema(),
+                &db_path,
+                scenario.cache_size_bytes,
+            );
+            let seeded =
+                seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
+            runtime.flush_storage();
+            runtime.storage().close().expect("close seeded surrealkv");
+            seeded
+        };
+
+        assert!(
+            !seeded.active_tasks.is_empty(),
+            "cold-load dataset must contain tasks"
+        );
+        let target_project_id =
+            seeded.projects[scenario.target_project_index % seeded.projects.len()];
+        Self {
+            _tempdir: tempdir,
+            db_path,
+            target_project_id,
+            cache_size_bytes: scenario.cache_size_bytes,
+        }
     }
 }
 
@@ -997,6 +1243,65 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_surrealkv.json");
+    let profile: ProfileConfig = load_json(&scenario.profile_path);
+    let seeded = ColdLoadSeededDb::new(&profile, &scenario);
+    let benchmark_name = format!(
+        "{}_{}_surrealkv",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/cold_load_surrealkv");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, _scenario| {
+            b.iter(|| {
+                let open_start = Instant::now();
+                let mut runtime = create_surrealkv_runtime(
+                    project_board_schema(),
+                    &seeded.db_path,
+                    seeded.cache_size_bytes,
+                );
+                let open_elapsed = open_start.elapsed();
+
+                let query = QueryBuilder::new("tasks")
+                    .filter_eq("project_id", Value::Uuid(seeded.target_project_id))
+                    .filter_ne("status", Value::Text("done".to_string()))
+                    .order_by_desc("updated_at")
+                    .limit(200)
+                    .build();
+
+                let query_start = Instant::now();
+                let rows = block_on(runtime.query(query, None, None)).expect("cold-load query");
+                let query_elapsed = query_start.elapsed();
+
+                runtime.flush_storage();
+                runtime
+                    .storage()
+                    .close()
+                    .expect("close cold-load surrealkv");
+
+                black_box(open_elapsed);
+                black_box(query_elapsed);
+                black_box(rows.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "surrealkv", not(target_arch = "wasm32"))))]
+fn realistic_r3_cold_load_surrealkv(_c: &mut Criterion) {}
+
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
     let scenario = load_r4_scenario("benchmarks/realistic/scenarios/r4_fanout_updates.json");
@@ -1122,6 +1427,18 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
     }
 }
 
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+fn load_r3_scenario(path: &str) -> R3Scenario {
+    let raw: R3ScenarioConfig = load_json(path);
+    R3Scenario {
+        id: raw.id,
+        seed: raw.seed,
+        profile_path: raw.profile_path,
+        cache_size_bytes: raw.cache_size_bytes,
+        target_project_index: raw.target_project_index,
+    }
+}
+
 fn load_r4_scenario(path: &str) -> R4Scenario {
     let raw: R4ScenarioConfig = load_json(path);
     R4Scenario {
@@ -1171,6 +1488,30 @@ fn create_runtime(schema: Schema) -> BenchRuntime {
     RuntimeCore::new(
         schema_manager,
         MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    )
+}
+
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+fn create_surrealkv_runtime(
+    schema: Schema,
+    db_path: &Path,
+    cache_size_bytes: usize,
+) -> RuntimeCore<SurrealKvStorage, NoopScheduler, VecSyncSender> {
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(
+        sync_manager,
+        schema,
+        AppId::from_name("realistic-phase1-bench"),
+        "dev",
+        "main",
+    )
+    .expect("create schema manager");
+
+    RuntimeCore::new(
+        schema_manager,
+        SurrealKvStorage::open(db_path, cache_size_bytes).expect("open surrealkv for benchmark"),
         NoopScheduler,
         VecSyncSender::new(),
     )
@@ -1242,6 +1583,7 @@ criterion_group!(
     realistic_r2_reads,
     realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn,
+    realistic_r3_cold_load_surrealkv,
     realistic_r4_fanout_updates,
     realistic_r7_hotspot_history
 );
