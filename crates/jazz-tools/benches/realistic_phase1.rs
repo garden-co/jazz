@@ -10,7 +10,9 @@ use groove::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableSchem
 use groove::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::MemoryStorage;
-use groove::sync_manager::SyncManager;
+use groove::sync_manager::{
+    ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
+};
 use serde::Deserialize;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
@@ -138,13 +140,24 @@ struct R1State {
     min_task_floor: usize,
 }
 
+struct SingleHopR1State {
+    client: R1State,
+    server: BenchRuntime,
+    client_id_on_server: ClientId,
+    server_id_on_client: ServerId,
+    total_routed_messages: usize,
+}
+
 impl R1State {
     fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
         Self::seeded(profile, profile.seed ^ scenario.seed)
     }
 
     fn seeded(profile: &ProfileConfig, seed: u64) -> Self {
-        let runtime = create_runtime(project_board_schema());
+        Self::with_runtime(create_runtime(project_board_schema()), profile, seed)
+    }
+
+    fn with_runtime(runtime: BenchRuntime, profile: &ProfileConfig, seed: u64) -> Self {
         let mut state = Self {
             runtime,
             rng: Lcg::new(seed),
@@ -470,6 +483,79 @@ impl R1State {
     }
 }
 
+impl SingleHopR1State {
+    fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
+        let mut client_runtime = create_runtime(project_board_schema());
+        let mut server_runtime = create_runtime(project_board_schema());
+        let client_id_on_server = ClientId::new();
+        let server_id_on_client = ServerId::new();
+
+        server_runtime.add_client(client_id_on_server, None);
+        server_runtime.set_client_role_by_name(client_id_on_server, ClientRole::Peer);
+        client_runtime.add_server(server_id_on_client);
+
+        let client = R1State::with_runtime(client_runtime, profile, profile.seed ^ scenario.seed);
+        let mut state = Self {
+            client,
+            server: server_runtime,
+            client_id_on_server,
+            server_id_on_client,
+            total_routed_messages: 0,
+        };
+
+        state.total_routed_messages += state.pump_until_quiescent(64);
+        state
+    }
+
+    fn run_crud_batch(&mut self, scenario: &R1Scenario) -> usize {
+        let executed = self.client.run_crud_batch(scenario);
+        self.total_routed_messages += self.pump_until_quiescent(16);
+        executed
+    }
+
+    fn pump_until_quiescent(&mut self, max_rounds: usize) -> usize {
+        let mut routed_messages = 0usize;
+        for _ in 0..max_rounds {
+            let (client_to_server, server_to_client) = self.pump_single_round();
+            routed_messages += client_to_server + server_to_client;
+            if client_to_server == 0 && server_to_client == 0 {
+                break;
+            }
+        }
+        routed_messages
+    }
+
+    fn pump_single_round(&mut self) -> (usize, usize) {
+        let mut client_to_server = 0usize;
+        let mut server_to_client = 0usize;
+
+        self.client.runtime.batched_tick();
+        for entry in self.client.runtime.sync_sender().take() {
+            if entry.destination == Destination::Server(self.server_id_on_client) {
+                self.server.park_sync_message(InboxEntry {
+                    source: Source::Client(self.client_id_on_server),
+                    payload: entry.payload,
+                });
+                client_to_server += 1;
+            }
+        }
+
+        self.server.batched_tick();
+        for entry in self.server.sync_sender().take() {
+            if entry.destination == Destination::Client(self.client_id_on_server) {
+                self.client.runtime.park_sync_message(InboxEntry {
+                    source: Source::Server(self.server_id_on_client),
+                    payload: entry.payload,
+                });
+                server_to_client += 1;
+            }
+        }
+
+        self.client.runtime.batched_tick();
+        (client_to_server, server_to_client)
+    }
+}
+
 fn realistic_r1_crud(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
     let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
@@ -492,6 +578,36 @@ fn realistic_r1_crud(c: &mut Criterion) {
             b.iter(|| {
                 let executed = state.run_crud_batch(scenario);
                 black_box(executed);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn realistic_r1_crud_single_hop(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_single_hop",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let mut state = SingleHopR1State::new(&profile, scenario);
+            b.iter(|| {
+                let executed = state.run_crud_batch(scenario);
+                black_box(executed);
+                black_box(state.total_routed_messages);
             });
         },
     );
@@ -669,5 +785,10 @@ fn project_board_schema() -> Schema {
         .build()
 }
 
-criterion_group!(benches, realistic_r1_crud, realistic_r2_reads);
+criterion_group!(
+    benches,
+    realistic_r1_crud,
+    realistic_r1_crud_single_hop,
+    realistic_r2_reads
+);
 criterion_main!(benches);
