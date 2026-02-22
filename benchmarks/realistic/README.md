@@ -10,6 +10,12 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 - `scenarios/w1_interactive.json`: read-heavy interactive session
 - `scenarios/w3_offline_reconnect.json`: offline writes then reconnect
 - `scenarios/w4_cold_start.json`: reopen and first-query latency
+- `scenarios/b1_server_crud_sustained.json`: sustained insert/update/delete throughput
+- `scenarios/b2_server_reads_sustained.json`: sustained load request throughput
+- `scenarios/b3_server_cold_load_large.json`: cold reopen/query with larger seeded data
+- `scenarios/b4_server_fanout_updates.json`: update fanout delivery to many subscribers
+- `scenarios/b5_server_permission_recursive.json`: recursive-permission read/update mix
+- `scenarios/b6_server_hotspot_history.json`: deep-history hotspot updates + storage delta
 
 ## Native Runner (SurrealKV)
 
@@ -86,6 +92,17 @@ pnpm --dir packages/jazz-tools run bench:realistic:browser
 The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.
 
 The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
+
+Current browser scenarios:
+
+- `W1`: interactive local workload mix (worker/OPFS)
+- `W4`: cold reopen/query (worker/OPFS)
+- `B1`: server-connected CRUD sustained throughput
+- `B2`: server-connected read/load sustained throughput
+- `B3`: server-connected cold load over larger dataset
+- `B4`: fanout delivery latency/throughput across many subscribers
+- `B5`: recursive policy schema read/update stress
+- `B6`: hotspot deep-history update stress with storage usage sampling
 
 ## CI / Runner
 
