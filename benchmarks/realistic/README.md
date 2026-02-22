@@ -32,7 +32,7 @@ RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
 
 ## Rust Criterion (Phase 1 local baseline)
 
-Run the first local realistic benchmark (`R1` sustained CRUD throughput):
+Run the local realistic benchmark suite:
 
 ```bash
 cargo bench -p jazz-tools --bench realistic_phase1
@@ -41,8 +41,13 @@ cargo bench -p jazz-tools --bench realistic_phase1
 It currently loads:
 
 - profile: `benchmarks/realistic/profiles/s.json`
-- scenario: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
-- scenario: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
+- scenario `R1`: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
+- scenario `R2`: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
+
+Current topology coverage:
+
+- `T0_local`: `realistic_phase1/crud_sustained` and `realistic_phase1/reads_sustained`
+- `T1_single_hop`: `realistic_phase1/crud_sustained_single_hop`
 
 ## Browser Runner (OPFS Worker)
 
