@@ -271,6 +271,18 @@ export class SQLiteClient
     );
   }
 
+  deleteTransactionsForSession(sessionRowID: number) {
+    this.db.run("DELETE FROM transactions WHERE ses = ?", [sessionRowID]);
+  }
+
+  deleteSignaturesForSession(sessionRowID: number) {
+    this.db.run("DELETE FROM signatureAfter WHERE ses = ?", [sessionRowID]);
+  }
+
+  deleteSession(sessionRowID: number) {
+    this.db.run("DELETE FROM sessions WHERE rowID = ?", [sessionRowID]);
+  }
+
   getStorageReconciliationLock(
     key: string,
   ): StorageReconciliationLockRow | undefined {

@@ -23,7 +23,7 @@ import {
 import { Stringified, parseJSON } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
-import { NewContentMessage } from "../sync.js";
+import type { NewContentMessage, SessionNewContent } from "../sync.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import {
   CoValueKnownState,
@@ -405,6 +405,54 @@ export class VerifiedState {
       return undefined;
     }
     return this.getSessionLog(sessionID);
+  }
+
+  getFullSessionContent(sessionID: SessionID): SessionNewContent[] {
+    const session = this.getSession(sessionID);
+
+    if (
+      !session ||
+      session.transactions.length === 0 ||
+      session.lastSignature === undefined
+    ) {
+      return [];
+    }
+
+    const content: SessionNewContent[] = [];
+    let after = 0;
+    let pieceTransactions: Transaction[] = [];
+
+    for (let txIdx = 0; txIdx < session.transactions.length; txIdx++) {
+      const tx = session.transactions[txIdx];
+
+      if (!tx) {
+        continue;
+      }
+
+      pieceTransactions.push(tx);
+
+      const checkpointSignature = session.signatureAfter[txIdx];
+
+      if (checkpointSignature !== undefined) {
+        content.push({
+          after,
+          newTransactions: pieceTransactions,
+          lastSignature: checkpointSignature,
+        });
+        after = txIdx + 1;
+        pieceTransactions = [];
+      }
+    }
+
+    if (pieceTransactions.length > 0) {
+      content.push({
+        after,
+        newTransactions: pieceTransactions,
+        lastSignature: session.lastSignature,
+      });
+    }
+
+    return content;
   }
 
   getTransactionsCount(sessionID: SessionID): number | undefined {

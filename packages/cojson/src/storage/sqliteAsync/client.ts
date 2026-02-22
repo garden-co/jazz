@@ -116,6 +116,20 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
     );
   }
 
+  async deleteTransactionsForSession(sessionRowID: number): Promise<void> {
+    await this.tx.run("DELETE FROM transactions WHERE ses = ?", [sessionRowID]);
+  }
+
+  async deleteSignaturesForSession(sessionRowID: number): Promise<void> {
+    await this.tx.run("DELETE FROM signatureAfter WHERE ses = ?", [
+      sessionRowID,
+    ]);
+  }
+
+  async deleteSession(sessionRowID: number): Promise<void> {
+    await this.tx.run("DELETE FROM sessions WHERE rowID = ?", [sessionRowID]);
+  }
+
   async deleteCoValueContent(
     coValueRow: Pick<StoredCoValueRow, "rowID" | "id">,
   ): Promise<void> {

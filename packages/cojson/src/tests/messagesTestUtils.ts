@@ -1,5 +1,6 @@
 import { CoValueCore, LocalNode } from "../exports";
 import { NewContentMessage, SyncMessage } from "../sync";
+import type { ReplaceSessionHistoryInput } from "../storage/types.js";
 import { CoValueKnownState } from "../knownState.js";
 import { LazyLoadMessage, LazyLoadResultMessage } from "./testUtils.js";
 
@@ -26,7 +27,11 @@ function simplifyNewContent(content: NewContentMessage["new"]) {
     .join(" | ");
 }
 
-type TestMessage = SyncMessage | LazyLoadMessage | LazyLoadResultMessage;
+type TestMessage =
+  | SyncMessage
+  | LazyLoadMessage
+  | LazyLoadResultMessage
+  | ReplaceSessionHistoryInput;
 
 export function toSimplifiedMessages(
   coValues: Record<string, CoValueCore>,
@@ -64,6 +69,10 @@ export function toSimplifiedMessages(
         return `${from} -> ${to} | RECONCILE`;
       case "reconcile-ack":
         return `${from} -> ${to} | RECONCILE_ACK`;
+      case "error":
+        return `${from} -> ${to} | ERROR ${getCoValue(msg.id)} errorType: ${msg.errorType} reason: ${msg.reason}`;
+      case "replaceSessionHistory":
+        return `${from} -> ${to} | REPLACE_SESSION_HISTORY ${getCoValue(msg.coValueId)} session: ${msg.sessionID} chunks: ${msg.content.length}`;
     }
   }
 

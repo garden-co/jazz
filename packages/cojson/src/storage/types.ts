@@ -5,9 +5,17 @@ import type {
 import { Signature } from "../crypto/crypto.js";
 import type { CoValueCore, RawCoID, SessionID } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
+import type { SessionNewContent } from "../sync.js";
 import type { PeerID } from "../sync.js";
 import { CoValueKnownState } from "../knownState.js";
 import { StorageStreamingQueue } from "../queue/StorageStreamingQueue.js";
+
+export type ReplaceSessionHistoryInput = {
+  action: "replaceSessionHistory";
+  coValueId: RawCoID;
+  sessionID: SessionID;
+  content: SessionNewContent[];
+};
 
 export type CorrectionCallback = (
   correction: CoValueKnownState,
@@ -60,7 +68,10 @@ export interface StorageAPI {
     callback: (data: NewContentMessage) => void,
     done?: (found: boolean) => void,
   ): void;
-  store(data: NewContentMessage, handleCorrection: CorrectionCallback): void;
+  store(
+    data: NewContentMessage | ReplaceSessionHistoryInput,
+    handleCorrection: CorrectionCallback,
+  ): void;
 
   streamingQueue?: StorageStreamingQueue;
 
@@ -243,6 +254,12 @@ export interface DBTransactionInterfaceAsync {
   putStorageReconciliationLock(
     entry: StorageReconciliationLockRow,
   ): Promise<void>;
+
+  deleteTransactionsForSession(sessionRowID: number): Promise<void>;
+
+  deleteSignaturesForSession(sessionRowID: number): Promise<void>;
+
+  deleteSession(sessionRowID: number): Promise<void>;
 }
 
 export interface DBClientInterfaceAsync {
@@ -363,6 +380,12 @@ export interface DBTransactionInterfaceSync {
   ): StorageReconciliationLockRow | undefined;
 
   putStorageReconciliationLock(entry: StorageReconciliationLockRow): void;
+
+  deleteTransactionsForSession(sessionRowID: number): void;
+
+  deleteSignaturesForSession(sessionRowID: number): void;
+
+  deleteSession(sessionRowID: number): void;
 }
 
 export interface DBClientInterfaceSync {

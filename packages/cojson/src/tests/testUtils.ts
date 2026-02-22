@@ -25,6 +25,7 @@ import type { RawCoID, SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
+import type { ReplaceSessionHistoryInput } from "../storage/types.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
@@ -452,6 +453,7 @@ export function setupTestNode(
     secret?: AgentSecret;
     syncWhen?: SyncWhen;
     enableFullStorageReconciliation?: boolean;
+    sessionID?: SessionID;
   } = {},
 ) {
   const [admin, session] = opts.secret
@@ -460,7 +462,7 @@ export function setupTestNode(
 
   let node = new LocalNode(
     admin.agentSecret,
-    session,
+    opts.sessionID ?? session,
     Crypto,
     opts.syncWhen,
     opts.enableFullStorageReconciliation,
@@ -550,8 +552,9 @@ export function setupTestNode(
 
       return node;
     },
-    spawnNewSession: () => {
+    spawnNewSession: (sessionID?: SessionID) => {
       return setupTestNode({
+        sessionID: sessionID,
         secret: node.agentSecret,
         connected: opts.connected,
         isSyncServer: opts.isSyncServer,
@@ -711,7 +714,11 @@ export type LazyLoadResultMessage = {
 export type SyncTestMessage = {
   from: string;
   to: string;
-  msg: SyncMessage | LazyLoadMessage | LazyLoadResultMessage;
+  msg:
+    | SyncMessage
+    | LazyLoadMessage
+    | LazyLoadResultMessage
+    | ReplaceSessionHistoryInput;
 };
 
 export function connectedPeersWithMessagesTracking(opts: {

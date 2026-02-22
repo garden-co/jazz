@@ -9,7 +9,11 @@ import {
   type StorageAPI,
   logger,
 } from "../exports.js";
-import { NewContentMessage, type PeerID } from "../sync.js";
+import {
+  NewContentMessage,
+  type PeerID,
+  type SessionNewContent,
+} from "../sync.js";
 import { StorageKnownState } from "./knownState.js";
 import {
   CoValueKnownState,
@@ -26,6 +30,7 @@ import type {
   CorrectionCallback,
   DBClientInterfaceSync,
   DBTransactionInterfaceSync,
+  ReplaceSessionHistoryInput,
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
@@ -300,7 +305,21 @@ export class StorageApiSync implements StorageAPI {
     pushCallback(contentMessage);
   }
 
-  store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
+  store(
+    msg: NewContentMessage | ReplaceSessionHistoryInput,
+    correctionCallback: CorrectionCallback,
+  ) {
+    if (msg.action === "replaceSessionHistory") {
+      try {
+        this.storeSingleSessionReplacement(msg);
+      } catch (err) {
+        logger.error("Error replacing session history", {
+          err,
+        });
+      }
+      return;
+    }
+
     return this.storeSingle(msg, correctionCallback);
   }
 
@@ -349,17 +368,15 @@ export class StorageApiSync implements StorageAPI {
     if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
-
       return this.handleCorrection(knownState, correctionCallback);
     }
 
     const knownState = this.knownStates.getKnownState(id);
     knownState.header = true;
-
     let invalidAssumptions = false;
 
-    for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      this.dbClient.transaction((tx) => {
+    this.dbClient.transaction((tx) => {
+      for (const sessionID of Object.keys(msg.new) as SessionID[]) {
         if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
           tx.markCoValueAsDeleted(id);
         }
@@ -382,19 +399,17 @@ export class StorageApiSync implements StorageAPI {
         } else {
           const newLastIdx = this.putNewTxs(
             tx,
-            msg,
             sessionID,
+            msg.new[sessionID],
             sessionRow,
             storedCoValueRowID,
           );
           setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
-      });
-    }
+      }
+    });
 
-    this.inMemoryCoValues.add(id);
-
-    this.knownStates.handleUpdate(id, knownState);
+    this.markCoValueUpdated(id, knownState);
 
     if (invalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
@@ -403,17 +418,99 @@ export class StorageApiSync implements StorageAPI {
     return true;
   }
 
+  private storeSingleSessionReplacement(
+    input: ReplaceSessionHistoryInput,
+  ): boolean {
+    const { coValueId, sessionID, content } = input;
+
+    const coValueRowID = this.dbClient.upsertCoValue(coValueId);
+
+    if (!coValueRowID) {
+      throw new Error(
+        `Cannot replace session history for unknown CoValue ${coValueId}`,
+      );
+    }
+
+    this.dbClient.transaction((tx) => {
+      const existing = tx.getSingleCoValueSession(coValueRowID, sessionID);
+
+      if (existing) {
+        tx.deleteTransactionsForSession(existing.rowID);
+        tx.deleteSignaturesForSession(existing.rowID);
+        tx.deleteSession(existing.rowID);
+      }
+
+      if (content.length === 0) {
+        return;
+      }
+
+      let nextExpectedAfter = 0;
+      for (const piece of content) {
+        if (piece.after !== nextExpectedAfter) {
+          throw new Error(
+            `Invalid replacement content continuity for ${coValueId}/${sessionID}: expected after=${nextExpectedAfter}, got after=${piece.after}`,
+          );
+        }
+        nextExpectedAfter += piece.newTransactions.length;
+      }
+
+      const lastPiece = content[content.length - 1];
+
+      if (!lastPiece) {
+        return;
+      }
+
+      for (let i = 0; i < content.length; i++) {
+        const piece = content[i]!;
+        const isLastPiece = i === content.length - 1;
+
+        const currentSessionRow = tx.getSingleCoValueSession(
+          coValueRowID,
+          sessionID,
+        );
+        this.putNewTxs(tx, sessionID, piece, currentSessionRow, coValueRowID, {
+          forceSignatureAfter: !isLastPiece,
+          disableThresholdSignature: true,
+        });
+      }
+    });
+
+    this.refreshKnownStateFromStorage(coValueId);
+
+    return true;
+  }
+
+  private markCoValueUpdated(id: RawCoID, knownState: CoValueKnownState) {
+    this.inMemoryCoValues.add(id);
+    this.knownStates.handleUpdate(id, knownState);
+  }
+
+  private refreshKnownStateFromStorage(id: RawCoID) {
+    const knownState =
+      this.dbClient.getCoValueKnownState(id) ?? emptyKnownState(id);
+    this.knownStates.setKnownState(id, knownState);
+    this.markCoValueUpdated(id, knownState);
+  }
+
   private putNewTxs(
     tx: DBTransactionInterfaceSync,
-    msg: NewContentMessage,
     sessionID: SessionID,
+    sessionContent: SessionNewContent | undefined,
     sessionRow: StoredSessionRow | undefined,
     storedCoValueRowID: number,
+    options?: {
+      forceSignatureAfter?: boolean;
+      disableThresholdSignature?: boolean;
+    },
   ) {
-    const newTransactions = msg.new[sessionID]?.newTransactions || [];
+    if (!sessionContent) {
+      throw new Error("Session content not found");
+    }
+
+    const newTransactions = sessionContent.newTransactions;
     const lastIdx = sessionRow?.lastIdx || 0;
 
-    const actuallyNewOffset = lastIdx - (msg.new[sessionID]?.after || 0);
+    const actuallyNewOffset = lastIdx - sessionContent.after;
 
     const actuallyNewTransactions = newTransactions.slice(actuallyNewOffset);
 
@@ -429,22 +526,28 @@ export class StorageApiSync implements StorageAPI {
 
     let shouldWriteSignature = false;
 
-    if (exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)) {
+    if (
+      !options?.disableThresholdSignature &&
+      exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)
+    ) {
       shouldWriteSignature = true;
       bytesSinceLastSignature = 0;
     } else {
       bytesSinceLastSignature += newTransactionsSize;
     }
 
-    const nextIdx = sessionRow?.lastIdx || 0;
+    if (options?.forceSignatureAfter) {
+      shouldWriteSignature = true;
+      bytesSinceLastSignature = 0;
+    }
 
-    if (!msg.new[sessionID]) throw new Error("Session ID not found");
+    const nextIdx = sessionRow?.lastIdx || 0;
 
     const sessionUpdate = {
       coValue: storedCoValueRowID,
       sessionID,
       lastIdx: newLastIdx,
-      lastSignature: msg.new[sessionID].lastSignature,
+      lastSignature: sessionContent.lastSignature,
       bytesSinceLastSignature,
     };
 
@@ -457,7 +560,7 @@ export class StorageApiSync implements StorageAPI {
       tx.addSignatureAfter({
         sessionRowID,
         idx: newLastIdx - 1,
-        signature: msg.new[sessionID].lastSignature,
+        signature: sessionContent.lastSignature,
       });
     }
 

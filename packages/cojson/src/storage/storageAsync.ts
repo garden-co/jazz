@@ -10,7 +10,11 @@ import {
   logger,
 } from "../exports.js";
 import { StoreQueue } from "../queue/StoreQueue.js";
-import { NewContentMessage, type PeerID } from "../sync.js";
+import {
+  NewContentMessage,
+  type PeerID,
+  type SessionNewContent,
+} from "../sync.js";
 import {
   CoValueKnownState,
   emptyKnownState,
@@ -27,6 +31,7 @@ import type {
   CorrectionCallback,
   DBClientInterfaceAsync,
   DBTransactionInterfaceAsync,
+  ReplaceSessionHistoryInput,
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
@@ -267,7 +272,10 @@ export class StorageApiAsync implements StorageAPI {
 
   storeQueue = new StoreQueue();
 
-  async store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
+  async store(
+    msg: NewContentMessage | ReplaceSessionHistoryInput,
+    correctionCallback: CorrectionCallback,
+  ) {
     /**
      * The store operations must be done one by one, because we can't start a new transaction when there
      * is already a transaction open.
@@ -276,6 +284,10 @@ export class StorageApiAsync implements StorageAPI {
 
     this.storeQueue.processQueue(async (data, correctionCallback) => {
       this.interruptEraser("store");
+      if (data.action === "replaceSessionHistory") {
+        return this.storeSingleSessionReplacement(data);
+      }
+
       return this.storeSingle(data, correctionCallback);
     });
   }
@@ -351,26 +363,24 @@ export class StorageApiAsync implements StorageAPI {
       return false;
     }
 
+    let invalidAssumptions = false;
     const id = msg.id;
+    const knownState = this.knownStates.getKnownState(id);
     const storedCoValueRowID = await this.dbClient.upsertCoValue(
       id,
       msg.header,
     );
 
     if (!storedCoValueRowID) {
-      const knownState = emptyKnownState(id as RawCoID);
-      this.knownStates.setKnownState(id, knownState);
-
-      return this.handleCorrection(knownState, correctionCallback);
+      const emptyState = emptyKnownState(id as RawCoID);
+      this.knownStates.setKnownState(id, emptyState);
+      return this.handleCorrection(emptyState, correctionCallback);
     }
 
-    const knownState = this.knownStates.getKnownState(id);
-    knownState.header = true;
+    await this.dbClient.transaction(async (tx) => {
+      knownState.header = true;
 
-    let invalidAssumptions = false;
-
-    for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      await this.dbClient.transaction(async (tx) => {
+      for (const sessionID of Object.keys(msg.new) as SessionID[]) {
         const sessionRow = await tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
@@ -396,19 +406,17 @@ export class StorageApiAsync implements StorageAPI {
         } else {
           const newLastIdx = await this.putNewTxs(
             tx,
-            msg,
             sessionID,
+            msg.new[sessionID],
             sessionRow,
             storedCoValueRowID,
           );
           setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
-      });
-    }
+      }
+    });
 
-    this.inMemoryCoValues.add(id);
-
-    this.knownStates.handleUpdate(id, knownState);
+    this.markCoValueUpdated(id, knownState);
 
     if (invalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
@@ -417,17 +425,109 @@ export class StorageApiAsync implements StorageAPI {
     return true;
   }
 
+  private async storeSingleSessionReplacement(
+    input: ReplaceSessionHistoryInput,
+  ): Promise<boolean> {
+    const { coValueId, sessionID, content } = input;
+
+    const coValueRowID = await this.dbClient.upsertCoValue(coValueId);
+
+    if (!coValueRowID) {
+      throw new Error(
+        `Cannot replace session history for unknown CoValue ${coValueId}`,
+      );
+    }
+
+    await this.dbClient.transaction(async (tx) => {
+      const existing = await tx.getSingleCoValueSession(
+        coValueRowID,
+        sessionID,
+      );
+
+      if (existing) {
+        await tx.deleteTransactionsForSession(existing.rowID);
+        await tx.deleteSignaturesForSession(existing.rowID);
+        await tx.deleteSession(existing.rowID);
+      }
+
+      if (content.length === 0) {
+        return;
+      }
+
+      let nextExpectedAfter = 0;
+      for (const piece of content) {
+        if (piece.after !== nextExpectedAfter) {
+          throw new Error(
+            `Invalid replacement content continuity for ${coValueId}/${sessionID}: expected after=${nextExpectedAfter}, got after=${piece.after}`,
+          );
+        }
+        nextExpectedAfter += piece.newTransactions.length;
+      }
+
+      const lastPiece = content[content.length - 1];
+
+      if (!lastPiece) {
+        return;
+      }
+
+      for (let i = 0; i < content.length; i++) {
+        const piece = content[i]!;
+        const isLastPiece = i === content.length - 1;
+
+        const currentSessionRow = await tx.getSingleCoValueSession(
+          coValueRowID,
+          sessionID,
+        );
+        await this.putNewTxs(
+          tx,
+          sessionID,
+          piece,
+          currentSessionRow,
+          coValueRowID,
+          {
+            forceSignatureAfter: !isLastPiece,
+            disableThresholdSignature: true,
+          },
+        );
+      }
+    });
+
+    await this.refreshKnownStateFromStorage(coValueId);
+
+    return true;
+  }
+
+  private markCoValueUpdated(id: RawCoID, knownState: CoValueKnownState) {
+    this.inMemoryCoValues.add(id);
+    this.knownStates.handleUpdate(id, knownState);
+  }
+
+  private async refreshKnownStateFromStorage(id: RawCoID) {
+    const knownState =
+      (await this.dbClient.getCoValueKnownState(id)) ?? emptyKnownState(id);
+    this.knownStates.setKnownState(id, knownState);
+    this.markCoValueUpdated(id, knownState);
+  }
+
   private async putNewTxs(
     tx: DBTransactionInterfaceAsync,
-    msg: NewContentMessage,
     sessionID: SessionID,
+    sessionContent: SessionNewContent | undefined,
     sessionRow: StoredSessionRow | undefined,
     storedCoValueRowID: number,
+    options?: {
+      forceSignatureAfter?: boolean;
+      disableThresholdSignature?: boolean;
+    },
   ) {
-    const newTransactions = msg.new[sessionID]?.newTransactions || [];
+    if (!sessionContent) {
+      throw new Error("Session content not found");
+    }
+
+    const newTransactions = sessionContent.newTransactions;
     const lastIdx = sessionRow?.lastIdx || 0;
 
-    const actuallyNewOffset = lastIdx - (msg.new[sessionID]?.after || 0);
+    const actuallyNewOffset = lastIdx - sessionContent.after;
 
     const actuallyNewTransactions = newTransactions.slice(actuallyNewOffset);
 
@@ -442,22 +542,28 @@ export class StorageApiAsync implements StorageAPI {
 
     let shouldWriteSignature = false;
 
-    if (exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)) {
+    if (
+      !options?.disableThresholdSignature &&
+      exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)
+    ) {
       shouldWriteSignature = true;
       bytesSinceLastSignature = 0;
     } else {
       bytesSinceLastSignature += newTransactionsSize;
     }
 
-    const nextIdx = lastIdx;
+    if (options?.forceSignatureAfter) {
+      shouldWriteSignature = true;
+      bytesSinceLastSignature = 0;
+    }
 
-    if (!msg.new[sessionID]) throw new Error("Session ID not found");
+    const nextIdx = lastIdx;
 
     const sessionUpdate = {
       coValue: storedCoValueRowID,
       sessionID,
       lastIdx: newLastIdx,
-      lastSignature: msg.new[sessionID].lastSignature,
+      lastSignature: sessionContent.lastSignature,
       bytesSinceLastSignature,
     };
 
@@ -470,7 +576,7 @@ export class StorageApiAsync implements StorageAPI {
       await tx.addSignatureAfter({
         sessionRowID,
         idx: newLastIdx - 1,
-        signature: msg.new[sessionID].lastSignature,
+        signature: sessionContent.lastSignature,
       });
     }
 
