@@ -1583,9 +1583,9 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
     group.finish();
 }
 
-fn realistic_r5_permission_recursive(c: &mut Criterion) {
-    let scenario = load_r5_scenario("benchmarks/realistic/scenarios/r5_permission_recursive.json");
-    let mut group = c.benchmark_group("realistic_phase1/permission_recursive");
+fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &str) {
+    let scenario = load_r5_scenario(scenario_path);
+    let mut group = c.benchmark_group(group_name);
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
@@ -1608,6 +1608,22 @@ fn realistic_r5_permission_recursive(c: &mut Criterion) {
     }
 
     group.finish();
+}
+
+fn realistic_r5_permission_recursive(c: &mut Criterion) {
+    run_permission_scenario(
+        c,
+        "realistic_phase1/permission_recursive",
+        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+    );
+}
+
+fn realistic_r6_permission_write_heavy(c: &mut Criterion) {
+    run_permission_scenario(
+        c,
+        "realistic_phase1/permission_write_heavy",
+        "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+    );
 }
 
 fn realistic_r7_hotspot_history(c: &mut Criterion) {
@@ -1928,6 +1944,7 @@ criterion_group!(
     realistic_r3_cold_load_surrealkv,
     realistic_r4_fanout_updates,
     realistic_r5_permission_recursive,
+    realistic_r6_permission_write_heavy,
     realistic_r7_hotspot_history
 );
 criterion_main!(benches);
