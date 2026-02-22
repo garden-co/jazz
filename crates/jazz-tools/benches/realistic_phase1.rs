@@ -540,6 +540,12 @@ impl SingleHopR1State {
         executed
     }
 
+    fn run_read_batch(&mut self, scenario: &R2Scenario) -> usize {
+        let total_rows = self.client.run_read_batch(scenario);
+        self.total_routed_messages += self.pump_until_quiescent(16);
+        total_rows
+    }
+
     fn pump_until_quiescent(&mut self, max_rounds: usize) -> usize {
         let mut routed_messages = 0usize;
         for _ in 0..max_rounds {
@@ -664,6 +670,37 @@ fn realistic_r2_reads(c: &mut Criterion) {
             b.iter(|| {
                 let total_rows = state.run_read_batch(scenario);
                 black_box(total_rows);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn realistic_r2_reads_single_hop(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let seed_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_single_hop",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let mut state = SingleHopR1State::new(&profile, &seed_scenario);
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+                black_box(state.total_routed_messages);
             });
         },
     );
@@ -848,6 +885,7 @@ criterion_group!(
     realistic_r1_crud,
     realistic_r1_crud_single_hop,
     realistic_r2_reads,
+    realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn
 );
 criterion_main!(benches);
