@@ -1,0 +1,154 @@
+name: Publish jazz-tools alpha
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional npm version override (for example 2.0.0-alpha.1)"
+        required: false
+        type: string
+
+jobs:
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x64
+            output: jazz-tools-linux-x64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            output: jazz-tools-linux-arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build CLI binary
+        run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            output: jazz-tools-darwin-arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+            output: jazz-tools-darwin-x64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build CLI binary
+        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build CLI binary
+        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target x86_64-pc-windows-msvc
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/jazz-tools.exe dist/jazz-tools-windows-x64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-tools-windows-x64
+          path: dist/jazz-tools-windows-x64.exe
+
+  publish-npm:
+    name: Publish npm alpha
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos, build-windows]
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Stage binaries into npm package
+        run: |
+          mkdir -p packages/jazz-tools/bin/native
+          cp dist/jazz-tools-* packages/jazz-tools/bin/native/
+          chmod +x packages/jazz-tools/bin/native/jazz-tools-darwin-* packages/jazz-tools/bin/native/jazz-tools-linux-* || true
+
+      - name: Apply optional version override
+        if: ${{ inputs.version != '' }}
+        run: npm --prefix packages/jazz-tools version "${{ inputs.version }}" --no-git-tag-version
+
+      - name: Verify prerelease version
+        run: |
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(p.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${p.version}`);}console.log(`Publishing ${p.name}@${p.version}`);'
+
+      - name: Publish jazz-tools (alpha tag)
+        run: npm publish ./packages/jazz-tools --tag alpha --access public

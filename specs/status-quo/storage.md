@@ -33,6 +33,8 @@ Native server/CLI/client processes use SurrealKV for durable local storage.
 
 Browser workers use `opfs-btree` with `FileSystemSyncAccessHandle` for synchronous OPFS durability.
 
+This replaced the earlier browser persistence path that depended on WAL + snapshot behavior in worker contexts. The current browser durability path is `OpfsBTreeStorage` only.
+
 The key insight is using composite keys so that B-tree range scans naturally give us index lookups:
 
 ```
@@ -41,8 +43,20 @@ idx:{table}:{column}:{branch}:{encoded_value}:{row_id}
 
 A range scan over a prefix like `idx:todos:done:main:` returns all row IDs in the `done` index for the `todos` table on branch `main`.
 
+`opfs-btree` persistence is checkpoint-based with double superblock slots (A/B). Each checkpoint writes dirty data pages, flushes, then swaps the active superblock generation. On reopen, the highest valid generation wins, so torn/corrupt latest-slot writes recover to the previous valid checkpoint.
+
 > `crates/groove/src/storage/opfs_btree.rs`
 > `crates/opfs-btree/` (underlying synchronous OPFS B-tree crate)
+> `crates/opfs-btree/src/db.rs` (checkpoint + superblock slot swap)
+> `crates/opfs-btree/src/superblock.rs` (superblock codec + validation)
+
+## Benchmark Artifacts
+
+Storage performance tracking currently lives with the storage crates:
+
+- `crates/opfs-btree/BENCHMARK_OVERVIEW.md` consolidates current OPFS/native benchmark baselines and engine comparisons.
+- `crates/opfs-btree/src/wasm_bench.rs` + `crates/opfs-btree/wasm-bench/run-opfs-bench.cjs` cover browser OPFS scenarios.
+- `crates/opfs-btree/benches/compare_native.rs` runs cross-engine native comparisons (including `surrealkv` and `fjall` columns when enabled).
 
 ## Deployment Topology
 
@@ -68,8 +82,8 @@ The browser case is the interesting one. We can't block the main thread on stora
 
 OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Workers — no need for async storage abstractions.
 
-> `crates/groove-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
-> `packages/jazz-ts/src/worker/groove-worker.ts` (worker entry point)
+> `crates/jazz-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
+> `packages/jazz-tools/src/worker/groove-worker.ts` (worker entry point)
 
 ### Native (Node.js / Rust)
 
@@ -79,17 +93,17 @@ Single process, no worker needed. SurrealKvStorage backed by regular files.
 
 ## Platform Bindings
 
-### groove-napi (Node.js)
+### jazz-napi (Node.js)
 
 NAPI bindings exposing RuntimeCore to Node.js via TokioRuntime.
 
-> `crates/groove-napi/`
+> `crates/jazz-napi/`
 
-### groove-wasm (Browser)
+### jazz-wasm (Browser)
 
 WASM bindings exposing RuntimeCore via WasmRuntime. WasmScheduler uses `spawn_local`; JsSyncSender serializes messages to JSON for JS callbacks.
 
-> `crates/groove-wasm/`
+> `crates/jazz-wasm/`
 
 ## Design Decisions
 

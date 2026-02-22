@@ -5,12 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "jazz-ts build && vite build",
+    "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
-    "jazz-ts": "workspace:*"
+    "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "@vitest/browser": "catalog:default",

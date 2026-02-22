@@ -12,7 +12,7 @@ Read the status-quo specs in the order below — each builds on the ones before 
 
 ### 2. Storage
 
-**[Storage](status-quo/storage.md)** — How objects and indices are persisted. The `Storage` trait provides synchronous access to objects and indices. `MemoryStorage` for tests and browser main thread, `SurrealKvStorage` for native durability, and `OpfsBTreeStorage` for WASM + OPFS durability. Also covers platform bindings (groove-napi, groove-wasm) and deployment topology.
+**[Storage](status-quo/storage.md)** — How objects and indices are persisted. The `Storage` trait provides synchronous access to objects and indices. `MemoryStorage` for tests and browser main thread, `SurrealKvStorage` for native durability, and `OpfsBTreeStorage` for WASM + OPFS durability. Also covers platform bindings (jazz-napi, jazz-wasm) and deployment topology.
 
 ### 3. Query Engine
 
@@ -44,7 +44,7 @@ Read the status-quo specs in the order below — each builds on the ones before 
 
 ### 8. Testing
 
-Testing details are documented in the layer specs above (especially Query/Sync integration and RuntimeCore orchestration), and active test-hardening follow-up is tracked in **[Weak Tests](todo/a_week_2026_02_09/weak_tests.md)**.
+Testing details are documented in the layer specs above (especially Query/Sync integration and RuntimeCore orchestration), and active test-hardening follow-up is tracked in **[Weak Tests](todo/a_mvp/weak_tests.md)**.
 
 ## Architecture Diagram
 
@@ -70,6 +70,7 @@ Testing details are documented in the layer specs above (especially Query/Sync i
 
 Remaining work items and future designs live in [`specs/todo/`](todo/). Notable:
 
-- **[Sharding Design Sketch](todo/sharding_design_sketch.md)** — Future architecture for distributing data across storage shards (nothing implemented)
-- **[Storage](todo/storage.md)** — Multi-tab leader election and browser E2E verification
-- **[TypeScript Client Codegen](todo/ts_client_codegen.md)** — Example app relations demo, React/Vue bindings
+- **[Sharding Design Sketch](todo/b_launch/sharding_design_sketch.md)** — Future architecture for distributing data across storage shards (nothing implemented)
+- **[Storage: Multi-tab Leader Election](todo/a_mvp/multi_tab_leader_election.md)** — Browser tab ownership for OPFS-backed worker storage
+- **[Storage: Browser E2E Suite](todo/a_mvp/browser_e2e_test_suite.md)** — End-to-end verification for browser runtime + worker + sync
+- **[TypeScript Client Codegen: Relations Demo](todo/a_mvp/codegen_relations_demo.md)** — Example app coverage for generated relation APIs

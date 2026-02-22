@@ -1,10 +1,13 @@
 {
   "scripts": {
-    "format": "oxfmt .",
-    "format:check": "oxfmt --check . && cargo fmt --check",
-    "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
-    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build",
-    "test": "turbo run test",
+    "format": "oxfmt --ignore-path .oxfmtignore .",
+    "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
+    "lint": "oxlint . --ignore-path .oxlintignore && cargo clippy --workspace -- -D warnings",
+    "ensure:rust-toolchain": "bash scripts/install-jazz-rn-deps.sh",
+    "build:vercel-docs": "export PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" && JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
+    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
+    "build:all": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build:rn --filter=jazz-rn && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
+    "test": "turbo run test --filter=!jazz-rn --only",
     "bench:realistic:update-history": "node benchmarks/realistic/update_history.mjs",
     "bench:realistic:build-site": "node benchmarks/realistic/build_site.mjs",
     "bench:realistic:render": "node benchmarks/realistic/render_deltas.mjs",
@@ -12,10 +15,20 @@
   },
   "devDependencies": {
     "lefthook": "^2.0.15",
+    "next": "16.1.6",
     "oxfmt": "^0.27.0",
     "oxlint": "^1.42.0",
     "playwright": "^1.58.2",
     "turbo": "^2.0.0"
   },
-  "packageManager": "pnpm@10.14.0"
+  "packageManager": "pnpm@10.14.0",
+  "pnpm": {
+    "overrides": {
+      "react": "19.2.4",
+      "react-dom": "19.2.4"
+    },
+    "patchedDependencies": {
+      "uniffi-bindgen-react-native@0.29.3-1": "patches/uniffi-bindgen-react-native@0.29.3-1.patch"
+    }
+  }
 }

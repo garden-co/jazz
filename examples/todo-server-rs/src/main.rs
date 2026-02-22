@@ -1,4 +1,4 @@
-//! Todo Server - Example backend using jazz-rs.
+//! Todo Server - Example backend using jazz-tools.
 //!
 //! Demonstrates a simple todo list API backed by Jazz for local persistence
 //! and server sync.
@@ -7,8 +7,8 @@
 //!
 //! ```bash
 //! # First, create an app and start the Jazz server
-//! jazz create app --name todo-app
-//! jazz server <APP_ID> --port 1625
+//! jazz-tools create app --name todo-app
+//! jazz-tools server <APP_ID> --port 1625
 //!
 //! # Then run the todo backend
 //! cargo run -p todo-server
@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use groove::schema_manager::SchemaDirectory;
-use jazz_rs::{AppContext, AppId, JazzClient};
+use groove::{AppContext, AppId, JazzClient};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Configuration from environment or defaults
-    let app_name = std::env::var("TODO_APP_NAME").unwrap_or_else(|_| "todo-app".to_string());
+    let app_id = std::env::var("JAZZ_APP_ID").unwrap_or_else(|_| "todo-app".to_string());
     let server_url =
         std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(3000);
 
     info!("Starting todo server");
-    info!("App name: {}", app_name);
+    info!("App ID: {}", app_id);
     info!("Jazz server: {}", server_url);
     info!("Data directory: {}", data_dir);
 
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Jazz client
     let context = AppContext {
-        app_id: AppId::from_name(&app_name),
+        app_id: AppId::from_name(&app_id),
         client_id: None,
         schema,
         server_url,

@@ -1,5 +1,17 @@
-import { createDb, type DbConfig, type Db } from "jazz-ts";
+import {
+  createDb,
+  createSyntheticUserSwitcher,
+  getActiveSyntheticAuth,
+  resolveClientSession,
+  type DbConfig,
+  type Db,
+} from "jazz-tools";
 import { app, Todo } from "../schema/app.js";
+
+function readEnvAppId(): string | undefined {
+  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+    ?.JAZZ_APP_ID;
+}
 
 function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
   const todoIds = new Set(todos.map((todo) => todo.id));
@@ -46,14 +58,37 @@ export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  const db = await createDb({
-    appId: "todo-client-example",
+  const appId = config?.appId ?? readEnvAppId() ?? "todo-client-example";
+  const activeAuth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+  const resolvedConfig: DbConfig = {
+    appId,
     env: "dev",
     userBranch: "main",
+    localAuthMode: activeAuth.localAuthMode,
+    localAuthToken: activeAuth.localAuthToken,
     ...config,
-  });
+  };
+
+  // #region context-setup-ts-client
+  const [db, session] = await Promise.all([
+    createDb(resolvedConfig),
+    resolveClientSession(resolvedConfig),
+  ]);
+  // #endregion context-setup-ts-client
+  const sessionUserId = session?.user_id ?? null;
 
   // Build DOM
+  const authControls = document.createElement("div");
+  authControls.id = "auth-controls";
+  container.appendChild(authControls);
+
+  const switcher = createSyntheticUserSwitcher({
+    appId: resolvedConfig.appId,
+    container: authControls,
+    defaultMode: "demo",
+  });
+
   const h1 = document.createElement("h1");
   h1.textContent = "Todos";
   container.appendChild(h1);
@@ -68,6 +103,7 @@ export async function startApp(
   const btn = document.createElement("button");
   btn.type = "submit";
   btn.textContent = "Add";
+  btn.disabled = !sessionUserId;
   const parentSelect = document.createElement("select");
   parentSelect.id = "parent-select";
   const noParentOption = document.createElement("option");
@@ -101,8 +137,7 @@ export async function startApp(
       .map(
         ({ todo, depth }) => `
       <li class="${todo.done ? "done" : ""}" data-depth="${depth}" style="padding-left: ${depth * 20}px;">
-        <input type="checkbox" ${todo.done ? "checked" : ""}
-               data-id="${todo.id}" class="toggle">
+        <input type="checkbox" ${todo.done ? "checked" : ""} data-id="${todo.id}" class="toggle">
         <span>${todo.title}</span>
         ${todo.description ? `<small>${todo.description}</small>` : ""}
         <button data-id="${todo.id}" class="delete-btn">&times;</button>
@@ -115,10 +150,12 @@ export async function startApp(
   // Add todo form
   form.addEventListener("submit", (e) => {
     e.preventDefault();
+    if (!sessionUserId) return;
     const selectedParentId = parentSelect.value;
     db.insert(app.todos, {
       title: input.value,
       done: false,
+      owner_id: sessionUserId,
       project: selectedProjectId,
       ...(selectedParentId ? { parent: selectedParentId } : {}),
     });
@@ -143,6 +180,7 @@ export async function startApp(
   return {
     db,
     destroy: async () => {
+      switcher.destroy();
       await db.shutdown();
       container.innerHTML = "";
     },

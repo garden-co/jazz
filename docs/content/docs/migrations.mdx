@@ -1,0 +1,96 @@
+---
+title: Migrations
+description: Schema evolution workflow and generated migration stubs.
+---
+
+<Callout title="You can skip this first">
+  If you are trying to get your first app running, you can skip this page and return later.
+</Callout>
+
+## Traditional Migrations vs Jazz Lenses
+
+- Traditional migration systems run a linear sequence and require all peers to converge before old versions stop writing.
+- Jazz migration lenses are evaluated at read/write time, so mixed-version clients can continue operating while data is translated across schema versions.
+- This enables incremental rollouts where older and newer app versions overlap safely during migration windows.
+
+## CLI Workflow
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="bash">
+      ../examples/docs/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="bash">
+      ../examples/docs/todo-server-rs/docs/migrations-workflow.sh#migrations-workflow-sql
+    </include>
+  </Tab>
+</Tabs>
+
+For TypeScript DSL migrations, one generated file can define both forward and backward behavior in the same stub.
+For SQL migrations, keep explicit forward/backward files and edit each direction intentionally.
+
+## Generated Stubs
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
+    >
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    Forward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
+    </include>
+    Backward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
+    </include>
+  </Tab>
+</Tabs>
+
+## Edited Stubs
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
+    >
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    Forward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
+    </include>
+    Backward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
+    </include>
+  </Tab>
+</Tabs>
