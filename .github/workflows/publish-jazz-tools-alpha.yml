@@ -126,7 +126,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: win32-x64-msvc
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin-x64
           - os: macos-14
