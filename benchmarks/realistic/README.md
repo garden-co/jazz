@@ -42,6 +42,7 @@ It currently loads:
 
 - profile: `benchmarks/realistic/profiles/s.json`
 - scenario: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
+- scenario: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
 
 ## Browser Runner (OPFS Worker)
 
