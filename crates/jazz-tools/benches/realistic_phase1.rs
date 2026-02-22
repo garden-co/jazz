@@ -50,6 +50,8 @@ struct R2ScenarioConfig {
     seed: u64,
     operation_count: usize,
     mix: Vec<WeightedOperation>,
+    #[serde(default)]
+    background_write_ratio: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +85,7 @@ struct R2Scenario {
     operation_count: usize,
     operations: Vec<ReadOperation>,
     weights: Vec<u32>,
+    background_write_ratio: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -338,13 +341,7 @@ impl R1State {
     fn run_crud_batch(&mut self, scenario: &R1Scenario) -> usize {
         let mut executed = 0usize;
         for _ in 0..scenario.operation_count {
-            let op_idx = self.rng.pick_weighted_index(&scenario.weights);
-            let op = scenario.operations[op_idx];
-            match op {
-                CrudOperation::InsertTask => self.insert_task(),
-                CrudOperation::UpdateTask => self.update_task(),
-                CrudOperation::DeleteTask => self.delete_task(),
-            }
+            self.run_one_crud_operation(scenario);
             executed += 1;
         }
         executed
@@ -358,6 +355,36 @@ impl R1State {
             total_rows += self.execute_read(op);
         }
         total_rows
+    }
+
+    fn run_read_batch_with_churn(
+        &mut self,
+        read_scenario: &R2Scenario,
+        write_scenario: &R1Scenario,
+    ) -> usize {
+        let mut total_rows = 0usize;
+        let write_threshold =
+            ((read_scenario.background_write_ratio.clamp(0.0, 1.0)) * 10_000.0) as usize;
+
+        for _ in 0..read_scenario.operation_count {
+            if write_threshold > 0 && self.rng.next_usize(10_000) < write_threshold {
+                self.run_one_crud_operation(write_scenario);
+            }
+            let op_idx = self.rng.pick_weighted_index(&read_scenario.weights);
+            let op = read_scenario.operations[op_idx];
+            total_rows += self.execute_read(op);
+        }
+        total_rows
+    }
+
+    fn run_one_crud_operation(&mut self, scenario: &R1Scenario) {
+        let op_idx = self.rng.pick_weighted_index(&scenario.weights);
+        let op = scenario.operations[op_idx];
+        match op {
+            CrudOperation::InsertTask => self.insert_task(),
+            CrudOperation::UpdateTask => self.update_task(),
+            CrudOperation::DeleteTask => self.delete_task(),
+        }
     }
 
     fn execute_read(&mut self, op: ReadOperation) -> usize {
@@ -644,6 +671,36 @@ fn realistic_r2_reads(c: &mut Criterion) {
     group.finish();
 }
 
+fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let read_scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_with_churn.json");
+    let write_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_with_churn",
+        read_scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &read_scenario,
+        |b, scenario| {
+            let mut state = R1State::seeded(&profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch_with_churn(scenario, &write_scenario);
+                black_box(total_rows);
+            });
+        },
+    );
+
+    group.finish();
+}
+
 fn load_r1_scenario(path: &str) -> R1Scenario {
     let raw: R1ScenarioConfig = load_json(path);
     let mut operations = Vec::with_capacity(raw.mix.len());
@@ -690,6 +747,7 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
         operation_count: raw.operation_count,
         operations,
         weights,
+        background_write_ratio: raw.background_write_ratio,
     }
 }
 
@@ -789,6 +847,7 @@ criterion_group!(
     benches,
     realistic_r1_crud,
     realistic_r1_crud_single_hop,
-    realistic_r2_reads
+    realistic_r2_reads,
+    realistic_r2_reads_with_write_churn
 );
 criterion_main!(benches);
