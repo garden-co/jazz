@@ -44,12 +44,14 @@ It currently loads:
 - scenario `R1`: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
 - scenario `R2`: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
 - scenario `R2B`: `benchmarks/realistic/scenarios/r2_reads_with_churn.json` (5% background write churn)
+- scenario `R4`: `benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
 
 Current topology coverage:
 
 - `T0_local`: `realistic_phase1/crud_sustained` and `realistic_phase1/reads_sustained`
 - mixed read/write churn: `realistic_phase1/reads_sustained_with_write_churn`
 - `T1_single_hop`: `realistic_phase1/crud_sustained_single_hop` and `realistic_phase1/reads_sustained_single_hop`
+- fanout delivery: `realistic_phase1/fanout_updates`
 
 ## Browser Runner (OPFS Worker)
 

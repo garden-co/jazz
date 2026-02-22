@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -54,6 +56,15 @@ struct R2ScenarioConfig {
     background_write_ratio: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct R4ScenarioConfig {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    fanout_clients: Vec<usize>,
+    target_project_index: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CrudOperation {
     InsertTask,
@@ -86,6 +97,15 @@ struct R2Scenario {
     operations: Vec<ReadOperation>,
     weights: Vec<u32>,
     background_write_ratio: f64,
+}
+
+#[derive(Debug, Clone)]
+struct R4Scenario {
+    id: String,
+    seed: u64,
+    operation_count: usize,
+    fanout_clients: Vec<usize>,
+    target_project_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +169,24 @@ struct SingleHopR1State {
     client_id_on_server: ClientId,
     server_id_on_client: ServerId,
     total_routed_messages: usize,
+}
+
+struct FanoutReader {
+    runtime: BenchRuntime,
+    client_id_on_server: ClientId,
+    server_id_on_client: ServerId,
+}
+
+struct FanoutR4State {
+    writer: R1State,
+    server: BenchRuntime,
+    writer_client_id_on_server: ClientId,
+    writer_server_id_on_client: ServerId,
+    readers: Vec<FanoutReader>,
+    hot_task_ids: Vec<ObjectId>,
+    hot_task_cursor: usize,
+    total_routed_messages: usize,
+    delivered_notifications: Arc<AtomicUsize>,
 }
 
 impl R1State {
@@ -468,6 +506,10 @@ impl R1State {
         }
 
         let task_id = self.active_tasks[self.rng.next_usize(self.active_tasks.len())];
+        self.update_task_with_id(task_id);
+    }
+
+    fn update_task_with_id(&mut self, task_id: ObjectId) {
         let assignee_id = self.users[self.rng.next_usize(self.users.len())];
         let status = match self.rng.next_usize(4) {
             0 => "todo",
@@ -586,6 +628,189 @@ impl SingleHopR1State {
 
         self.client.runtime.batched_tick();
         (client_to_server, server_to_client)
+    }
+}
+
+impl FanoutR4State {
+    fn new(
+        profile: &ProfileConfig,
+        seed: u64,
+        target_project_index: usize,
+        fanout_clients: usize,
+    ) -> Self {
+        let mut writer_runtime = create_runtime(project_board_schema());
+        let mut server_runtime = create_runtime(project_board_schema());
+        let writer_client_id_on_server = ClientId::new();
+        let writer_server_id_on_client = ServerId::new();
+
+        server_runtime.add_client(writer_client_id_on_server, None);
+        server_runtime.set_client_role_by_name(writer_client_id_on_server, ClientRole::Peer);
+        writer_runtime.add_server(writer_server_id_on_client);
+
+        let writer = R1State::with_runtime(writer_runtime, profile, profile.seed ^ seed);
+        let mut state = Self {
+            writer,
+            server: server_runtime,
+            writer_client_id_on_server,
+            writer_server_id_on_client,
+            readers: Vec::with_capacity(fanout_clients),
+            hot_task_ids: Vec::new(),
+            hot_task_cursor: 0,
+            total_routed_messages: 0,
+            delivered_notifications: Arc::new(AtomicUsize::new(0)),
+        };
+
+        state.total_routed_messages += state.pump_until_quiescent(64);
+
+        let target_project_id =
+            state.writer.projects[target_project_index % state.writer.projects.len()];
+        state.hot_task_ids = state.collect_project_task_ids(target_project_id);
+        if state.hot_task_ids.is_empty() {
+            state.hot_task_ids = state.writer.active_tasks.clone();
+        }
+
+        for _ in 0..fanout_clients {
+            let mut reader_runtime = create_runtime(project_board_schema());
+            let reader_client_id_on_server = ClientId::new();
+            let reader_server_id_on_client = ServerId::new();
+
+            state.server.add_client(reader_client_id_on_server, None);
+            state
+                .server
+                .set_client_role_by_name(reader_client_id_on_server, ClientRole::Peer);
+            reader_runtime.add_server(reader_server_id_on_client);
+
+            let notification_counter = Arc::clone(&state.delivered_notifications);
+            let query = QueryBuilder::new("tasks")
+                .filter_eq("project_id", Value::Uuid(target_project_id))
+                .filter_ne("status", Value::Text("done".to_string()))
+                .order_by_desc("updated_at")
+                .limit(200)
+                .build();
+            let _subscription = reader_runtime
+                .subscribe(
+                    query,
+                    move |_delta| {
+                        notification_counter.fetch_add(1, Ordering::Relaxed);
+                    },
+                    None,
+                )
+                .expect("fanout subscription");
+
+            state.readers.push(FanoutReader {
+                runtime: reader_runtime,
+                client_id_on_server: reader_client_id_on_server,
+                server_id_on_client: reader_server_id_on_client,
+            });
+        }
+
+        state.total_routed_messages += state.pump_until_quiescent(128);
+        state.delivered_notifications.store(0, Ordering::Relaxed);
+        state
+    }
+
+    fn run_update_batch(&mut self, operation_count: usize) -> (usize, usize) {
+        let notifications_before = self.delivered_notifications.load(Ordering::Relaxed);
+        let mut updates = 0usize;
+
+        for _ in 0..operation_count {
+            if self.hot_task_ids.is_empty() {
+                break;
+            }
+            let task_id = self.hot_task_ids[self.hot_task_cursor % self.hot_task_ids.len()];
+            self.hot_task_cursor = self.hot_task_cursor.wrapping_add(1);
+            self.writer.update_task_with_id(task_id);
+            updates += 1;
+        }
+
+        self.total_routed_messages += self.pump_until_quiescent(64);
+        let notifications_after = self.delivered_notifications.load(Ordering::Relaxed);
+        (
+            updates,
+            notifications_after.saturating_sub(notifications_before),
+        )
+    }
+
+    fn collect_project_task_ids(&mut self, project_id: ObjectId) -> Vec<ObjectId> {
+        let query = QueryBuilder::new("tasks")
+            .filter_eq("project_id", Value::Uuid(project_id))
+            .limit(10_000)
+            .build();
+        let rows = block_on(self.writer.runtime.query(query, None, None)).expect("load hot tasks");
+        rows.into_iter().map(|(object_id, _)| object_id).collect()
+    }
+
+    fn pump_until_quiescent(&mut self, max_rounds: usize) -> usize {
+        let mut routed = 0usize;
+        for _ in 0..max_rounds {
+            let round_routed = self.pump_single_round();
+            routed += round_routed;
+            if round_routed == 0 {
+                break;
+            }
+        }
+        routed
+    }
+
+    fn pump_single_round(&mut self) -> usize {
+        let mut routed = 0usize;
+
+        self.writer.runtime.batched_tick();
+        for entry in self.writer.runtime.sync_sender().take() {
+            if entry.destination == Destination::Server(self.writer_server_id_on_client) {
+                self.server.park_sync_message(InboxEntry {
+                    source: Source::Client(self.writer_client_id_on_server),
+                    payload: entry.payload,
+                });
+                routed += 1;
+            }
+        }
+
+        for reader in &mut self.readers {
+            reader.runtime.batched_tick();
+            for entry in reader.runtime.sync_sender().take() {
+                if entry.destination == Destination::Server(reader.server_id_on_client) {
+                    self.server.park_sync_message(InboxEntry {
+                        source: Source::Client(reader.client_id_on_server),
+                        payload: entry.payload,
+                    });
+                    routed += 1;
+                }
+            }
+        }
+
+        self.server.batched_tick();
+        for entry in self.server.sync_sender().take() {
+            match entry.destination {
+                Destination::Client(client_id) if client_id == self.writer_client_id_on_server => {
+                    self.writer.runtime.park_sync_message(InboxEntry {
+                        source: Source::Server(self.writer_server_id_on_client),
+                        payload: entry.payload,
+                    });
+                    routed += 1;
+                }
+                Destination::Client(client_id) => {
+                    if let Some(reader) = self
+                        .readers
+                        .iter_mut()
+                        .find(|reader| reader.client_id_on_server == client_id)
+                    {
+                        reader.runtime.park_sync_message(InboxEntry {
+                            source: Source::Server(reader.server_id_on_client),
+                            payload: entry.payload,
+                        });
+                        routed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.writer.runtime.batched_tick();
+        for reader in &mut self.readers {
+            reader.runtime.batched_tick();
+        }
+        routed
     }
 }
 
@@ -738,6 +963,48 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     group.finish();
 }
 
+fn realistic_r4_fanout_updates(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r4_scenario("benchmarks/realistic/scenarios/r4_fanout_updates.json");
+
+    let mut group = c.benchmark_group("realistic_phase1/fanout_updates");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    for fanout_clients in scenario.fanout_clients.iter().copied() {
+        let bench_id = format!(
+            "{}_{}_n{}",
+            scenario.id.to_lowercase(),
+            profile.id.to_lowercase(),
+            fanout_clients
+        );
+        let scenario_seed = scenario.seed;
+        let target_project_index = scenario.target_project_index;
+        let operation_count = scenario.operation_count;
+        group.bench_with_input(
+            BenchmarkId::from_parameter(bench_id),
+            &fanout_clients,
+            |b, fanout_clients| {
+                let mut state = FanoutR4State::new(
+                    &profile,
+                    scenario_seed,
+                    target_project_index,
+                    *fanout_clients,
+                );
+                b.iter(|| {
+                    let (updates, notifications) = state.run_update_batch(operation_count);
+                    black_box(updates);
+                    black_box(notifications);
+                    black_box(state.total_routed_messages);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn load_r1_scenario(path: &str) -> R1Scenario {
     let raw: R1ScenarioConfig = load_json(path);
     let mut operations = Vec::with_capacity(raw.mix.len());
@@ -785,6 +1052,17 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
         operations,
         weights,
         background_write_ratio: raw.background_write_ratio,
+    }
+}
+
+fn load_r4_scenario(path: &str) -> R4Scenario {
+    let raw: R4ScenarioConfig = load_json(path);
+    R4Scenario {
+        id: raw.id,
+        seed: raw.seed,
+        operation_count: raw.operation_count,
+        fanout_clients: raw.fanout_clients,
+        target_project_index: raw.target_project_index,
     }
 }
 
@@ -886,6 +1164,7 @@ criterion_group!(
     realistic_r1_crud_single_hop,
     realistic_r2_reads,
     realistic_r2_reads_single_hop,
-    realistic_r2_reads_with_write_churn
+    realistic_r2_reads_with_write_churn,
+    realistic_r4_fanout_updates
 );
 criterion_main!(benches);
