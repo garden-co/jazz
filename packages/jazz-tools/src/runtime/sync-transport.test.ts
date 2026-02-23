@@ -6,13 +6,51 @@ import {
   linkExternalIdentity,
   normalizePathPrefix,
   sendSyncPayload,
+  SyncStreamController,
 } from "./sync-transport.js";
 
 describe("sync-transport", () => {
   const originalFetch = globalThis.fetch;
+  const textEncoder = new TextEncoder();
+
+  function encodeFrames(events: unknown[]): Uint8Array {
+    const chunks: Uint8Array[] = events.map((event) => {
+      const payload = textEncoder.encode(JSON.stringify(event));
+      const frame = new Uint8Array(4 + payload.length);
+      new DataView(frame.buffer).setUint32(0, payload.length, false);
+      frame.set(payload, 4);
+      return frame;
+    });
+
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const all = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      all.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return all;
+  }
+
+  function streamResponse(events: unknown[]): Response {
+    const bytes = encodeFrames(events);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body,
+    } as Response;
+  }
 
   afterEach(() => {
     (globalThis as { fetch: typeof fetch }).fetch = originalFetch;
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -134,5 +172,77 @@ describe("sync-transport", () => {
     expect(buildEventsUrl("http://localhost:1625", "client#1", "/apps/app-1")).toBe(
       "http://localhost:1625/apps/app-1/events?client_id=client%231",
     );
+  });
+
+  it("stream controller attaches on Connected and forwards sync payloads", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      streamResponse([
+        { type: "Connected", client_id: "server-client-1" },
+        { type: "SyncUpdate", payload: { Ping: {} } },
+      ]),
+    );
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const onConnected = vi.fn();
+    const onDisconnected = vi.fn();
+    const onSyncMessage = vi.fn();
+    let clientId = "initial-client-id";
+
+    const controller = new SyncStreamController({
+      getAuth: () => ({}),
+      getClientId: () => clientId,
+      setClientId: (nextClientId) => {
+        clientId = nextClientId;
+      },
+      onConnected,
+      onDisconnected,
+      onSyncMessage,
+    });
+
+    controller.start("http://localhost:3000");
+
+    await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
+    );
+    expect(clientId).toBe("server-client-1");
+    await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
+
+    controller.stop();
+  });
+
+  it("stream controller retries after non-OK connect responses", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 503 } as Response)
+      .mockResolvedValueOnce(streamResponse([{ type: "Connected", client_id: "server-client-2" }]));
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const onConnected = vi.fn();
+    let clientId = "initial-client-id";
+
+    const controller = new SyncStreamController({
+      getAuth: () => ({}),
+      getClientId: () => clientId,
+      setClientId: (nextClientId) => {
+        clientId = nextClientId;
+      },
+      onConnected,
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+    });
+
+    controller.start("http://localhost:3000");
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(clientId).toBe("server-client-2");
+
+    controller.stop();
   });
 });

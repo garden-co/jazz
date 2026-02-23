@@ -134,7 +134,7 @@ let _ = wasm_tracing::set_as_global_default_with_config(config);
 Add lightweight prefixed logs (`[main]`, `[worker]`) at these boundaries:
 
 - `db.ts`: bridge init, subscribe/unsubscribe requests, message relay to worker.
-- `groove-worker.ts`: worker init, stream connect/disconnect, sync POST, relay to WASM.
+- `jazz-worker.ts`: worker init, stream connect/disconnect, sync POST, relay to WASM.
 - `client.ts`: SSE connect, schema context send, sync POST lifecycle.
 
 ### Filtering and run config

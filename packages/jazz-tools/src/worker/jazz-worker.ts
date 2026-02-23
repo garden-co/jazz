@@ -9,10 +9,8 @@
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
 import {
   sendSyncPayload,
-  readBinaryFrames,
   generateClientId,
-  buildEventsUrl,
-  applyUserAuthHeaders,
+  SyncStreamController,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -29,19 +27,23 @@ let jwtToken: string | undefined;
 let localAuthMode: "anonymous" | "demo" | undefined;
 let localAuthToken: string | undefined;
 let adminSecret: string | undefined;
-let streamAbortController: AbortController | null = null;
 let serverClientId: string = generateClientId();
-let activeServerUrl: string | null = null;
-let activeServerPathPrefix: string | undefined;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectAttempt = 0;
-let streamConnecting = false;
-let streamAttached = false;
-let isShuttingDown = false;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
 let pendingSyncPayloadsForMain: string[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
+
+const streamController = new SyncStreamController({
+  logPrefix: "[worker] ",
+  getAuth: () => ({ jwtToken, localAuthMode, localAuthToken }),
+  getClientId: () => serverClientId,
+  setClientId: (clientId) => {
+    serverClientId = clientId;
+  },
+  onConnected: () => runtime?.addServer(),
+  onDisconnected: () => runtime?.removeServer(),
+  onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+});
 
 function enqueueSyncMessageForMain(payload: string): void {
   pendingSyncPayloadsForMain.push(payload);
@@ -87,21 +89,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
     initComplete = false;
-    isShuttingDown = false;
-    activeServerUrl = msg.serverUrl ?? null;
-    activeServerPathPrefix = msg.serverPathPrefix;
-    reconnectAttempt = 0;
-    streamAttached = false;
-    streamConnecting = false;
+    streamController.stop();
     serverClientId = generateClientId();
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    if (streamAbortController) {
-      streamAbortController.abort();
-      streamAbortController = null;
-    }
 
     // Open persistent OPFS-backed runtime with Worker tier
     runtime = await wasmModule.WasmRuntime.openPersistent(
@@ -132,11 +121,10 @@ async function handleInit(msg: InitMessage): Promise<void> {
         enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
       } else if (parsed.destination && "Server" in parsed.destination) {
         // Server-bound → HTTP POST to upstream
-        if (activeServerUrl) {
-          void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
+        if (streamController.getServerUrl()) {
+          void sendToServer(parsed.payload).catch((error) => {
             console.error("[worker] Sync POST error:", error);
-            detachServer();
-            scheduleReconnect();
+            streamController.notifyTransportFailure();
           });
         }
       }
@@ -155,8 +143,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
     post({ type: "init-ok", clientId: mainClientId! });
 
     // Connect upstream in background (do not block init).
-    if (activeServerUrl) {
-      void connectStream();
+    if (msg.serverUrl) {
+      streamController.start(msg.serverUrl, msg.serverPathPrefix);
     }
   } catch (e: any) {
     post({ type: "error", message: `Init failed: ${e.message}` });
@@ -168,7 +156,10 @@ async function handleInit(msg: InitMessage): Promise<void> {
 // ============================================================================
 
 /** POST a sync payload to the upstream server. */
-async function sendToServer(serverUrl: string, payload: any): Promise<void> {
+async function sendToServer(payload: any): Promise<void> {
+  const serverUrl = streamController.getServerUrl();
+  if (!serverUrl) return;
+
   await sendSyncPayload(
     serverUrl,
     payload,
@@ -178,100 +169,10 @@ async function sendToServer(serverUrl: string, payload: any): Promise<void> {
       localAuthToken,
       adminSecret,
       clientId: serverClientId,
-      pathPrefix: activeServerPathPrefix,
+      pathPrefix: streamController.getPathPrefix(),
     },
     "[worker] ",
   );
-}
-
-function attachServer(): void {
-  if (!runtime) return;
-  // Re-attach every time the stream reconnects so query subscriptions replay.
-  if (streamAttached) {
-    runtime.removeServer();
-  }
-  runtime.addServer();
-  streamAttached = true;
-  reconnectAttempt = 0;
-}
-
-function detachServer(): void {
-  if (!runtime || !streamAttached) return;
-  runtime.removeServer();
-  streamAttached = false;
-}
-
-function scheduleReconnect(): void {
-  if (isShuttingDown || !activeServerUrl) return;
-  if (reconnectTimer) return;
-
-  const baseMs = 300;
-  const maxMs = 10_000;
-  const jitterMs = Math.floor(Math.random() * 200);
-  const delayMs = Math.min(maxMs, baseMs * 2 ** reconnectAttempt) + jitterMs;
-  reconnectAttempt += 1;
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    void connectStream();
-  }, delayMs);
-}
-
-/** Connect to the server's binary streaming endpoint. */
-async function connectStream(): Promise<void> {
-  if (streamConnecting || !activeServerUrl || isShuttingDown) return;
-  streamConnecting = true;
-
-  const headers: Record<string, string> = {
-    Accept: "application/octet-stream",
-  };
-  applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
-
-  streamAbortController = new AbortController();
-
-  try {
-    const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
-
-    const response = await fetch(eventsUrl, {
-      headers,
-      signal: streamAbortController.signal,
-    });
-
-    if (!response.ok) {
-      console.error(`[worker] Stream connect failed: ${response.status}`);
-      detachServer();
-      streamConnecting = false;
-      scheduleReconnect();
-      return;
-    }
-
-    const reader = response.body!.getReader();
-    let connected = false;
-    await readBinaryFrames(
-      reader,
-      {
-        onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
-        onConnected: (clientId) => {
-          serverClientId = clientId;
-          if (!connected) {
-            connected = true;
-            attachServer();
-          }
-        },
-      },
-      "[worker] ",
-    );
-  } catch (e: any) {
-    if (e?.name === "AbortError") return;
-    console.error("[worker] Stream connect error:", e);
-  } finally {
-    streamConnecting = false;
-  }
-
-  if (streamAbortController && !streamAbortController.signal.aborted) {
-    detachServer();
-    scheduleReconnect();
-  }
 }
 
 // ============================================================================
@@ -303,31 +204,13 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       localAuthMode = msg.localAuthMode;
       localAuthToken = msg.localAuthToken;
       // Reconnect stream to bind the new token.
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
-      detachServer();
-      if (activeServerUrl && !isShuttingDown) {
-        scheduleReconnect();
-      }
+      streamController.updateAuth();
       break;
 
     case "shutdown":
-      isShuttingDown = true;
       initComplete = false;
-      activeServerUrl = null;
-      activeServerPathPrefix = undefined;
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
+      streamController.stop();
       if (runtime) {
-        detachServer();
         runtime.flush();
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
@@ -340,20 +223,9 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       // Flush WAL buffer to OPFS but do NOT write snapshot.
       // This simulates a crash where writes reached the WAL but no
       // clean checkpoint happened. Recovery must replay the WAL.
-      isShuttingDown = true;
       initComplete = false;
-      activeServerUrl = null;
-      activeServerPathPrefix = undefined;
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
+      streamController.stop();
       if (runtime) {
-        detachServer();
         runtime.flushWal(); // WAL buffer → OPFS, but no snapshot
         runtime.free(); // Drop → releases OPFS exclusive handles
         runtime = null;

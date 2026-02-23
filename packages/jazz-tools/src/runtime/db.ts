@@ -270,7 +270,7 @@ export class Db {
     const db = new Db(config, wasmModule);
 
     // Spawn dedicated worker
-    const worker = new Worker(new URL("../worker/groove-worker.js", import.meta.url), {
+    const worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
       type: "module",
     });
     db.worker = worker;
