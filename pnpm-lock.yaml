@@ -136,7 +136,7 @@ importers:
         version: 5.9.3
 
   crates/jazz-wasm:
-    dependencies:
+    devDependencies:
       wasm-pack:
         specifier: ^0.14.0
         version: 0.14.0
@@ -461,6 +461,10 @@ importers:
       vitest:
         specifier: catalog:default
         version: 4.0.18(@types/node@20.19.30)(@vitest/browser-playwright@4.0.18)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+    optionalDependencies:
+      jazz-napi:
+        specifier: workspace:*
+        version: link:../../crates/jazz-napi
 
 packages:
 
