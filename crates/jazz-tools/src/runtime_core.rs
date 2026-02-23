@@ -21,7 +21,7 @@
 //! let results = future.await?;
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -222,6 +222,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
+    /// Sequenced server messages buffered for in-order application.
+    parked_sync_messages_by_server_seq: HashMap<ServerId, BTreeMap<u64, InboxEntry>>,
+    /// Next expected per-server stream sequence.
+    next_expected_server_seq: HashMap<ServerId, u64>,
 
     /// Subscription tracking with callbacks.
     subscriptions: HashMap<SubscriptionHandle, SubscriptionState>,
@@ -249,6 +253,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             scheduler,
             sync_sender,
             parked_sync_messages: Vec::new(),
+            parked_sync_messages_by_server_seq: HashMap::new(),
+            next_expected_server_seq: HashMap::new(),
             subscriptions: HashMap::new(),
             subscription_reverse: HashMap::new(),
             next_subscription_handle: 0,
@@ -475,14 +481,51 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Apply parked sync messages and tick.
     fn handle_sync_messages(&mut self) {
         let messages = std::mem::take(&mut self.parked_sync_messages);
-        let had_messages = !messages.is_empty();
-        if had_messages {
-            debug!(count = messages.len(), "processing parked sync messages");
+        let mut applied_messages = 0usize;
+
+        if !messages.is_empty() {
+            debug!(
+                count = messages.len(),
+                "processing parked unsequenced sync messages"
+            );
         }
         for msg in messages {
             self.push_sync_inbox(msg);
+            applied_messages += 1;
         }
-        if had_messages {
+
+        let server_ids: Vec<ServerId> = self
+            .parked_sync_messages_by_server_seq
+            .keys()
+            .copied()
+            .collect();
+        for server_id in server_ids {
+            let mut next_expected = *self.next_expected_server_seq.get(&server_id).unwrap_or(&1);
+            let mut ready_messages = Vec::new();
+            let mut remove_buffer = false;
+            if let Some(buffered) = self.parked_sync_messages_by_server_seq.get_mut(&server_id) {
+                while let Some(msg) = buffered.remove(&next_expected) {
+                    ready_messages.push(msg);
+                    next_expected += 1;
+                }
+
+                if buffered.is_empty() {
+                    remove_buffer = true;
+                }
+            }
+            for msg in ready_messages {
+                self.push_sync_inbox(msg);
+                applied_messages += 1;
+            }
+            self.next_expected_server_seq
+                .insert(server_id, next_expected);
+            if remove_buffer {
+                self.parked_sync_messages_by_server_seq.remove(&server_id);
+            }
+        }
+
+        if applied_messages > 0 {
+            debug!(count = applied_messages, "applied parked sync messages");
             self.immediate_tick();
         }
     }
@@ -502,6 +545,44 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
         self.parked_sync_messages.push(message);
         self.scheduler.schedule_batched_tick();
+    }
+
+    /// Park a sequenced sync message for in-order processing in next batched_tick.
+    pub fn park_sync_message_with_sequence(&mut self, message: InboxEntry, sequence: u64) {
+        match message.source {
+            crate::sync_manager::Source::Server(server_id) => {
+                let next_expected = self
+                    .next_expected_server_seq
+                    .entry(server_id)
+                    .or_insert(sequence);
+                if sequence < *next_expected {
+                    trace!(
+                        ?server_id,
+                        sequence,
+                        next_expected = *next_expected,
+                        "dropping already-applied sequenced sync message"
+                    );
+                    return;
+                }
+
+                self.parked_sync_messages_by_server_seq
+                    .entry(server_id)
+                    .or_default()
+                    .insert(sequence, message);
+                self.scheduler.schedule_batched_tick();
+            }
+            _ => self.park_sync_message(message),
+        }
+    }
+
+    /// Set the next expected sequenced message for a server stream.
+    pub fn set_next_expected_server_sequence(&mut self, server_id: ServerId, next_sequence: u64) {
+        let next_sequence = next_sequence.max(1);
+        self.next_expected_server_seq
+            .insert(server_id, next_sequence);
+        if let Some(buffered) = self.parked_sync_messages_by_server_seq.get_mut(&server_id) {
+            buffered.retain(|seq, _| *seq >= next_sequence);
+        }
     }
 
     // =========================================================================
@@ -1950,38 +2031,54 @@ mod tests {
             "Expected ObjectUpdated payload for A"
         );
 
-        for payload in settled_to_a {
-            s.a.park_sync_message(InboxEntry {
-                source: Source::Server(s.b_server_for_a),
-                payload,
-            });
+        // Mirror connected stream initialization: first expected seq is 1.
+        s.a.set_next_expected_server_sequence(s.b_server_for_a, 1);
+
+        let mut next_update_seq = 1u64;
+        let settled_seq_base = updates_to_a.len() as u64 + 1;
+
+        for (idx, payload) in settled_to_a.into_iter().enumerate() {
+            s.a.park_sync_message_with_sequence(
+                InboxEntry {
+                    source: Source::Server(s.b_server_for_a),
+                    payload,
+                },
+                settled_seq_base + idx as u64,
+            );
         }
         s.a.batched_tick();
         s.a.immediate_tick();
 
-        // This assertion is intentionally strict and currently fails:
-        // one-shot query resolves before data arrives and unsubscribes.
+        assert!(
+            Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "Query should stay pending until lower sequence ObjectUpdated arrives"
+        );
+
+        for payload in updates_to_a {
+            s.a.park_sync_message_with_sequence(
+                InboxEntry {
+                    source: Source::Server(s.b_server_for_a),
+                    payload,
+                },
+                next_update_seq,
+            );
+            next_update_seq += 1;
+        }
+        s.a.batched_tick();
+        s.a.immediate_tick();
+
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Ok(results)) => {
                 assert_eq!(
                     results.len(),
                     1,
-                    "BUG: settled query resolved without upstream ObjectUpdated rows"
+                    "Sequenced delivery should prevent settled-before-data resolution"
                 );
                 assert_eq!(results[0].0, row_id);
             }
             Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-            Poll::Pending => panic!("Query should have resolved after QuerySettled"),
+            Poll::Pending => panic!("Query should resolve after ObjectUpdated and QuerySettled"),
         }
-
-        for payload in updates_to_a {
-            s.a.park_sync_message(InboxEntry {
-                source: Source::Server(s.b_server_for_a),
-                payload,
-            });
-        }
-        s.a.batched_tick();
-        s.a.immediate_tick();
     }
 
     #[test]
