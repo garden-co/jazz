@@ -1,0 +1,48 @@
+---
+title: Troubleshooting
+description: Common issues and how to resolve them.
+---
+
+## Schema mismatch — messages display garbled data
+
+**Symptom:** Messages render with unexpected prefixes or wrong content — for example, a text message showing `<Hello w` instead of `Hello world`, a canvas message showing `_[Canvas: ...]` instead of the canvas UI, or field values that are clearly from the wrong column (a UUID appearing where a name should be, an integer where text should be, etc.).
+
+**Cause:** A schema migration ran partially or was applied incorrectly, leaving the local database with a different column layout from what the current app expects. The row decoder reads columns by position, so a single missing or extra column shifts every subsequent field.
+
+**How to identify it:**
+
+1. Open DevTools → Application → Storage.
+2. Note the schema version stored in IndexedDB or OPFS (the key is usually `schema_version` or visible in the database name).
+3. Compare it against the current schema version in `schema/current.sql`. If they differ, a migration did not complete cleanly.
+4. As a quick check, look at the raw rows: if a text field contains a UUID, or a boolean field contains what looks like a sentence, columns are misaligned.
+
+**How to fix it:**
+
+The only reliable remedy when local data is corrupt or misaligned is to clear it and let the app start fresh. The database is a local cache — all data that was previously synced to the server will re-sync automatically on next load.
+
+In Chrome / Edge:
+
+1. Open DevTools → Application → Storage.
+2. Under **IndexedDB**, delete every database for the app's origin.
+3. Under **Storage → OPFS** (or **File System**), remove the app's directory if present.
+4. Reload the page.
+
+In Firefox:
+
+1. Open DevTools → Storage → IndexedDB.
+2. Right-click the database and choose **Delete**.
+3. Reload the page.
+
+Alternatively, from the browser console:
+
+```js
+// Delete all IndexedDB databases for this origin
+const dbs = await indexedDB.databases();
+for (const db of dbs) indexedDB.deleteDatabase(db.name);
+// Then reload
+location.reload();
+```
+
+**Preventing it going forward:**
+
+Always review generated migration stubs before committing. When a schema change removes or reorders columns across multiple tables, the auto-generated SQL may only cover the first affected table. Check that every changed table has a corresponding `ALTER TABLE` statement in the forward migration file. See [Migrations](/docs/migrations) for the full workflow.
