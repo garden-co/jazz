@@ -1614,7 +1614,11 @@ fn update_to_untracked_row_is_silent() {
     let _sub_id = qm.subscribe(query).unwrap();
 
     qm.process(&mut storage);
-    let _updates = qm.take_updates();
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 
     // Update score to 40 (still fails filter)
     qm.update(
@@ -1627,12 +1631,9 @@ fn update_to_untracked_row_is_silent() {
     qm.process(&mut storage);
 
     let updates = qm.take_updates();
-    // Should be no updates (or empty delta)
+    // No updates should be emitted since the row doesn't match the filter before or after the update
     assert!(
-        updates.is_empty()
-            || (updates[0].delta.added.is_empty()
-                && updates[0].delta.removed.is_empty()
-                && updates[0].delta.updated.is_empty()),
+        updates.is_empty(),
         "No delta for row that doesn't match filter before or after update"
     );
 }
