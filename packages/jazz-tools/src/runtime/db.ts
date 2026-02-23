@@ -21,10 +21,10 @@ import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
+const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
 
 function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
-  if (!level) return;
-  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level;
+  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
 }
 
 /**
@@ -62,7 +62,7 @@ export interface DbConfig {
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
   dbName?: string;
-  /** Optional WASM tracing level for benchmark/debug scenarios. */
+  /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
 }
 

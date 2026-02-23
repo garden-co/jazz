@@ -42,6 +42,7 @@ let pendingSyncMessages: string[] = []; // Buffer sync messages until init compl
 let pendingSyncPayloadsForMain: string[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
+const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function enqueueSyncMessageForMain(payload: string): void {
   pendingSyncPayloadsForMain.push(payload);
@@ -86,9 +87,7 @@ async function startup(): Promise<void> {
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
-    if (msg.logLevel) {
-      (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel;
-    }
+    (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;

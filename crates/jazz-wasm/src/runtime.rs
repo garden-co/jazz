@@ -48,7 +48,7 @@ fn wasm_log_level_from_global() -> tracing::Level {
         Some("info") => tracing::Level::INFO,
         Some("debug") => tracing::Level::DEBUG,
         Some("trace") => tracing::Level::TRACE,
-        _ => tracing::Level::TRACE,
+        _ => tracing::Level::WARN,
     }
 }
 
