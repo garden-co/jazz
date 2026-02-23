@@ -329,6 +329,23 @@ function closePeer(peerId: string): void {
   peerTermByPeerId.delete(peerId);
 }
 
+function flushWalBestEffort(): void {
+  if (!runtime || !initComplete) return;
+  try {
+    runtime.flushWal();
+  } catch (error) {
+    console.warn("[worker] flushWal on lifecycle hint failed:", error);
+  }
+}
+
+function nudgeReconnectAfterResume(): void {
+  if (!activeServerUrl || isShuttingDown) return;
+  if (streamAttached || streamConnecting) return;
+  if (reconnectTimer) return;
+  reconnectAttempt = 0;
+  scheduleReconnect();
+}
+
 // ============================================================================
 // Message handler
 // ============================================================================
@@ -380,6 +397,14 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "peer-close":
       closePeer(msg.peerId);
+      break;
+
+    case "lifecycle-hint":
+      if (msg.event === "visibility-hidden" || msg.event === "pagehide" || msg.event === "freeze") {
+        flushWalBestEffort();
+      } else if (msg.event === "visibility-visible" || msg.event === "resume") {
+        nudgeReconnectAfterResume();
+      }
       break;
 
     case "update-auth":

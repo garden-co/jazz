@@ -20,6 +20,7 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
+import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 
 /**
  * Configuration for creating a Db instance.
@@ -342,8 +343,23 @@ export class Db {
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private isShuttingDown = false;
+  private lifecycleHooksAttached = false;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
+  };
+  private readonly onVisibilityChange = (): void => {
+    if (typeof document === "undefined") return;
+    const hidden = document.visibilityState === "hidden";
+    this.sendLifecycleHint(hidden ? "visibility-hidden" : "visibility-visible");
+  };
+  private readonly onPageHide = (): void => {
+    this.sendLifecycleHint("pagehide");
+  };
+  private readonly onPageFreeze = (): void => {
+    this.sendLifecycleHint("freeze");
+  };
+  private readonly onPageResume = (): void => {
+    this.sendLifecycleHint("resume");
   };
 
   /**
@@ -388,7 +404,8 @@ export class Db {
 
       let initialLeader: LeaderSnapshot | null = null;
       try {
-        initialLeader = await election.waitForInitialLeader(600);
+        // Allow at least one startup election window with default heartbeat settings.
+        initialLeader = await election.waitForInitialLeader(1600);
       } catch {
         // Fall back to whatever state election has reached so far.
         initialLeader = election.snapshot();
@@ -397,6 +414,7 @@ export class Db {
       db.workerDbName = Db.resolveWorkerDbNameForSnapshot(db.primaryDbName, initialLeader);
       db.logLeaderDebug("initial-election");
       db.openSyncChannel();
+      db.attachLifecycleHooks();
       db.leaderElectionUnsubscribe = election.onChange((snapshot) => {
         db.onLeaderElectionChange(snapshot);
       });
@@ -406,6 +424,7 @@ export class Db {
       return db;
     } catch (error) {
       db.closeSyncChannel();
+      db.detachLifecycleHooks();
       if (db.leaderElectionUnsubscribe) {
         db.leaderElectionUnsubscribe();
         db.leaderElectionUnsubscribe = null;
@@ -532,6 +551,45 @@ export class Db {
 
   private postSyncChannelMessage(message: TabSyncMessage): void {
     this.syncChannel?.postMessage(message);
+  }
+
+  private attachLifecycleHooks(): void {
+    if (this.lifecycleHooksAttached) return;
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    window.addEventListener("pagehide", this.onPageHide);
+    // "freeze"/"resume" are non-standard but available in Chromium lifecycle APIs.
+    document.addEventListener("freeze", this.onPageFreeze as EventListener);
+    document.addEventListener("resume", this.onPageResume as EventListener);
+    this.lifecycleHooksAttached = true;
+  }
+
+  private detachLifecycleHooks(): void {
+    if (!this.lifecycleHooksAttached) return;
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    window.removeEventListener("pagehide", this.onPageHide);
+    document.removeEventListener("freeze", this.onPageFreeze as EventListener);
+    document.removeEventListener("resume", this.onPageResume as EventListener);
+    this.lifecycleHooksAttached = false;
+  }
+
+  private sendLifecycleHint(event: WorkerLifecycleEvent): void {
+    if (this.isShuttingDown || !this.worker) return;
+    this.logLeaderDebug("lifecycle-hint", { event });
+
+    if (this.workerBridge) {
+      this.workerBridge.sendLifecycleHint(event);
+      return;
+    }
+
+    this.worker.postMessage({
+      type: "lifecycle-hint",
+      event,
+      sentAtMs: Date.now(),
+    });
   }
 
   private logLeaderDebug(event: string, extra?: Record<string, unknown>): void {
@@ -1048,6 +1106,7 @@ export class Db {
     this.activeRemoteLeaderTabId = null;
     this.leaderPeerIds.clear();
     this.closeSyncChannel();
+    this.detachLifecycleHooks();
 
     if (this.leaderElectionUnsubscribe) {
       this.leaderElectionUnsubscribe();

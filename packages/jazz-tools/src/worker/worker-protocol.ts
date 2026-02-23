@@ -31,6 +31,20 @@ export interface SyncToWorkerMessage {
   payload: string[]; // JSON-encoded SyncPayloads
 }
 
+export type WorkerLifecycleEvent =
+  | "visibility-hidden"
+  | "visibility-visible"
+  | "pagehide"
+  | "freeze"
+  | "resume";
+
+/** Forward a best-effort page lifecycle hint to the worker runtime. */
+export interface LifecycleHintMessage {
+  type: "lifecycle-hint";
+  event: WorkerLifecycleEvent;
+  sentAtMs: number;
+}
+
 /** Open/update a follower peer mapping in the worker runtime. */
 export interface PeerOpenMessage {
   type: "peer-open";
@@ -81,6 +95,7 @@ export interface SimulateCrashMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | SyncToWorkerMessage
+  | LifecycleHintMessage
   | PeerOpenMessage
   | PeerSyncToWorkerMessage
   | PeerCloseMessage
