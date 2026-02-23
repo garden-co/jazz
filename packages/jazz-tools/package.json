@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "jazz-wasm": "workspace:*",
+    "pluralize-esm": "^9.0.5",
     "tsx": "^4.0.0"
   },
   "devDependencies": {

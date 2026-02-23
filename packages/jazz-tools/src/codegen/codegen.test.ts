@@ -262,7 +262,7 @@ describe("generateTypes", () => {
     expect(output).toContain("export interface UserProfileInit {");
   });
 
-  it("removes trailing s for plurals", () => {
+  it("singularises plural table names", () => {
     table("categories", { name: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -270,6 +270,26 @@ describe("generateTypes", () => {
 
     expect(output).toContain("export interface Category {");
     expect(output).toContain("export interface CategoryInit {");
+  });
+
+  it.each([
+    ["canvases", "Canvas"],
+    ["statuses", "Status"],
+    ["buses", "Bus"],
+    ["processes", "Process"],
+    ["heroes", "Hero"],
+    ["vertices", "Vertex"],
+    ["people", "Person"],
+    ["matrices", "Matrix"],
+    ["addresses", "Address"],
+  ])("singularises %s to %s", (tableName, expected) => {
+    table(tableName, { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(`export interface ${expected} {`);
+    expect(output).toContain(`export interface ${expected}Init {`);
   });
 
   it("maps boolean columns to boolean type", () => {

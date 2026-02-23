@@ -17,20 +17,20 @@ It also has no handling for irregular plurals (`people`, `geese`, `mice`, `indic
 
 ## Design
 
-Replace the hand-rolled function with the [`pluralize`](https://www.npmjs.com/package/pluralize) npm package (MIT, 17.7 kB, zero dependencies, ~9M weekly downloads). It handles all the suffix rules we'd need to write ourselves plus hundreds of irregular forms, and exposes `addSingularRule()` / `addIrregularRule()` for extending.
+Replace the hand-rolled function with [`pluralize-esm`](https://www.npmjs.com/package/pluralize-esm) (MIT, ESM fork of `pluralize` maintained by Sanity.io, zero dependencies, ships with types). It handles all the suffix rules we'd need to write ourselves plus hundreds of irregular forms, and exposes `addSingularRule()` / `addIrregularRule()` for extending.
 
-All usage is codegen-only (`type-generator.ts` and `query-builder-generator.ts`), so `pluralize` is a devDependency.
+All usage is codegen-only (`type-generator.ts` and `query-builder-generator.ts`), so `pluralize-esm` is a devDependency.
 
 ## Changes
 
 ### 1. Add dependency
 
-Add `pluralize` (and `@types/pluralize`) as devDependencies to `packages/jazz-tools`.
+Add `pluralize-esm` as a devDependency to `packages/jazz-tools`.
 
 ### 2. Replace `singularize()`
 
 ```typescript
-import pluralize from "pluralize";
+import pluralize from "pluralize-esm";
 
 function singularize(word: string): string {
   return pluralize.singular(word);
