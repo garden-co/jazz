@@ -137,13 +137,10 @@ function estimateMetrics(benchmarkJson, estimatesJson) {
 
   const elements = benchmarkJson?.throughput?.Elements;
   const iterPerSec = 1e9 / meanNs;
-  const iterPerSecCiLow =
-    Number.isFinite(ciUpperNs) && ciUpperNs > 0 ? 1e9 / ciUpperNs : null;
-  const iterPerSecCiHigh =
-    Number.isFinite(ciLowerNs) && ciLowerNs > 0 ? 1e9 / ciLowerNs : null;
+  const iterPerSecCiLow = Number.isFinite(ciUpperNs) && ciUpperNs > 0 ? 1e9 / ciUpperNs : null;
+  const iterPerSecCiHigh = Number.isFinite(ciLowerNs) && ciLowerNs > 0 ? 1e9 / ciLowerNs : null;
 
-  const elemsPerSec =
-    Number.isFinite(elements) && elements > 0 ? iterPerSec * elements : null;
+  const elemsPerSec = Number.isFinite(elements) && elements > 0 ? iterPerSec * elements : null;
   const elemsPerSecCiLow =
     Number.isFinite(elements) && elements > 0 && Number.isFinite(iterPerSecCiLow)
       ? iterPerSecCiLow * elements
@@ -233,7 +230,7 @@ function main() {
     if (!metrics) continue;
 
     const scenarioKey = extractScenarioKey(benchmarkJson.value_str);
-    const scenario = scenarioKey ? scenarioMap.get(scenarioKey) ?? null : null;
+    const scenario = scenarioKey ? (scenarioMap.get(scenarioKey) ?? null) : null;
 
     benchmarks.push({
       full_id: benchmarkJson.full_id,
@@ -249,9 +246,7 @@ function main() {
 
   benchmarks.sort((a, b) => a.full_id.localeCompare(b.full_id));
   if (benchmarks.length === 0) {
-    fail(
-      `No Criterion benchmark data found under ${criterionRoot} with prefix '${args.prefix}'`,
-    );
+    fail(`No Criterion benchmark data found under ${criterionRoot} with prefix '${args.prefix}'`);
   }
 
   const exportJson = {
@@ -261,8 +256,7 @@ function main() {
       criterion_root: path.relative(process.cwd(), criterionRoot),
       prefix: args.prefix,
       sha: process.env.GITHUB_SHA ?? safeGit("git rev-parse HEAD"),
-      branch:
-        process.env.GITHUB_REF_NAME ?? safeGit("git rev-parse --abbrev-ref HEAD"),
+      branch: process.env.GITHUB_REF_NAME ?? safeGit("git rev-parse --abbrev-ref HEAD"),
       host: os.hostname(),
     },
     benchmarks,
@@ -274,9 +268,7 @@ function main() {
   fs.mkdirSync(path.dirname(summaryFile), { recursive: true });
   fs.writeFileSync(summaryFile, buildSummaryMarkdown(exportJson));
 
-  console.log(
-    `Exported ${benchmarks.length} benchmarks to ${outFile} and ${summaryFile}`,
-  );
+  console.log(`Exported ${benchmarks.length} benchmarks to ${outFile} and ${summaryFile}`);
 }
 
 main();
