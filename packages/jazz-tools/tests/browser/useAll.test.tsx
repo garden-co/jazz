@@ -1,5 +1,5 @@
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import type { WasmSchema } from "../../src/drivers/types.js";
@@ -188,6 +188,7 @@ function UseAllProbe<T extends { id: string }>({
 
 describe("useAll browser integration", () => {
   const clients: JazzClient[] = [];
+  let conditionsClient: JazzClient;
   const conditionCases: Array<{
     name: string;
     query: QueryBuilder<Todo>;
@@ -303,6 +304,17 @@ describe("useAll browser integration", () => {
     return client;
   }
 
+  beforeAll(async () => {
+    conditionsClient = await createJazzClient({
+      appId: uniqueId("operators"),
+      dbName: uniqueId("operators"),
+    });
+  });
+
+  afterAll(async () => {
+    await conditionsClient.shutdown();
+  });
+
   afterEach(async () => {
     for (const client of clients.splice(0).reverse()) {
       await client.shutdown();
@@ -311,20 +323,13 @@ describe("useAll browser integration", () => {
 
   for (const testCase of conditionCases) {
     it(`supports condition operator ${testCase.name}`, async () => {
-      const client = track(
-        await createJazzClient({
-          appId: uniqueId(`operators-${testCase.name}`),
-          dbName: uniqueId(`operators-${testCase.name}`),
-        }),
-      );
-
       render(
-        <JazzProvider client={client} key={testCase.name}>
+        <JazzProvider client={conditionsClient} key={testCase.name}>
           <UseAllProbe query={testCase.query} pick={(row) => row.title} />
         </JazzProvider>,
       );
 
-      client.db.insert(todos, testCase.insert);
+      conditionsClient.db.insert(todos, testCase.insert);
 
       await waitForCondition(
         () => getText("rows").split("|").includes(testCase.pick),

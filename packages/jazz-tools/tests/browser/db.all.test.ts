@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 
@@ -141,10 +141,95 @@ function makeQuery<T>(
 
 describe("db.all browser integration", () => {
   const dbs: Db[] = [];
+  let conditionsDb: Db;
+  const conditionCases: Array<{
+    name: string;
+    conditions: Array<{ column: string; op: string; value?: unknown }>;
+    expectedTitles: string[];
+  }> = [
+    {
+      name: "eq",
+      conditions: [{ column: "title", op: "eq", value: "alpha" }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "ne",
+      conditions: [{ column: "title", op: "ne", value: "alpha" }],
+      expectedTitles: ["beta", "gamma"],
+    },
+    {
+      name: "gt",
+      conditions: [{ column: "priority", op: "gt", value: 1 }],
+      expectedTitles: ["beta"],
+    },
+    {
+      name: "gte",
+      conditions: [{ column: "priority", op: "gte", value: 2 }],
+      expectedTitles: ["beta"],
+    },
+    {
+      name: "lt",
+      conditions: [{ column: "priority", op: "lt", value: 2 }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "lte",
+      conditions: [{ column: "priority", op: "lte", value: 1 }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "isNull",
+      conditions: [{ column: "priority", op: "isNull" }],
+      expectedTitles: ["gamma"],
+    },
+    {
+      name: "contains-array",
+      conditions: [{ column: "tags", op: "contains", value: "work" }],
+      expectedTitles: ["alpha", "gamma"],
+    },
+    {
+      name: "contains-text",
+      conditions: [{ column: "title", op: "contains", value: "alp" }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "contains-text-empty",
+      conditions: [{ column: "title", op: "contains", value: "" }],
+      expectedTitles: ["alpha", "beta", "gamma"],
+    },
+  ];
 
   function track(db: Db): Db {
     dbs.push(db);
     return db;
+  }
+
+  function seedTodosForConditions(db: Db): void {
+    const orgId = db.insert(orgs, { name: "Acme" });
+    const teamId = db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
+    const userId = db.insert(users, { name: "Alice", team_id: teamId });
+
+    db.insert(todos, {
+      title: "alpha",
+      done: false,
+      priority: 1,
+      owner_id: userId,
+      tags: ["work", "backend"],
+    });
+    db.insert(todos, {
+      title: "beta",
+      done: true,
+      priority: 2,
+      owner_id: userId,
+      tags: ["home"],
+    });
+    db.insert(todos, {
+      title: "gamma",
+      done: true,
+      priority: undefined,
+      owner_id: userId,
+      tags: ["work", "urgent"],
+    });
   }
 
   afterEach(async () => {
@@ -153,89 +238,25 @@ describe("db.all browser integration", () => {
     }
   });
 
-  it("supports all condition operators", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("ops") }));
+  beforeAll(async () => {
+    conditionsDb = await createDb({ appId: "db-all-test", dbName: uniqueDbName("ops") });
+    seedTodosForConditions(conditionsDb);
+  });
 
-    const orgId = db.insert(orgs, { name: "Acme" });
-    const teamId = db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
-    const userId = db.insert(users, { name: "Alice", team_id: teamId });
+  afterAll(async () => {
+    await conditionsDb.shutdown();
+  });
 
-    const idA = db.insert(todos, {
-      title: "alpha",
-      done: false,
-      priority: 1,
-      owner_id: userId,
-      tags: ["work", "backend"],
-    });
-    const idB = db.insert(todos, {
-      title: "beta",
-      done: true,
-      priority: 2,
-      owner_id: userId,
-      tags: ["home"],
-    });
-    const idC = db.insert(todos, {
-      title: "gamma",
-      done: true,
-      priority: undefined,
-      owner_id: userId,
-      tags: ["work", "urgent"],
-    });
-
-    const cases: Array<{
-      name: string;
-      conditions: Array<{ column: string; op: string; value?: unknown }>;
-      expectedIds: string[];
-    }> = [
-      {
-        name: "eq",
-        conditions: [{ column: "title", op: "eq", value: "alpha" }],
-        expectedIds: [idA],
-      },
-      {
-        name: "ne",
-        conditions: [{ column: "title", op: "ne", value: "alpha" }],
-        expectedIds: [idB, idC],
-      },
-      { name: "gt", conditions: [{ column: "priority", op: "gt", value: 1 }], expectedIds: [idB] },
-      {
-        name: "gte",
-        conditions: [{ column: "priority", op: "gte", value: 2 }],
-        expectedIds: [idB],
-      },
-      { name: "lt", conditions: [{ column: "priority", op: "lt", value: 2 }], expectedIds: [idA] },
-      {
-        name: "lte",
-        conditions: [{ column: "priority", op: "lte", value: 1 }],
-        expectedIds: [idA],
-      },
-      { name: "isNull", conditions: [{ column: "priority", op: "isNull" }], expectedIds: [idC] },
-      {
-        name: "contains-array",
-        conditions: [{ column: "tags", op: "contains", value: "work" }],
-        expectedIds: [idA, idC],
-      },
-      {
-        name: "contains-text",
-        conditions: [{ column: "title", op: "contains", value: "alp" }],
-        expectedIds: [idA],
-      },
-      {
-        name: "contains-text-empty",
-        conditions: [{ column: "title", op: "contains", value: "" }],
-        expectedIds: [idA, idB, idC],
-      },
-    ];
-
-    for (const testCase of cases) {
-      const rows = await db.all<Todo>(
+  for (const testCase of conditionCases) {
+    it(`supports condition operator ${testCase.name}`, async () => {
+      const rows = await conditionsDb.all<Todo>(
         makeQuery<Todo>("todos", { conditions: testCase.conditions }),
       );
-      const actual = rows.map((row) => row.id).sort();
-      const expected = [...testCase.expectedIds].sort();
-      expect(actual, testCase.name).toEqual(expected);
-    }
-  });
+      const actual = rows.map((row) => row.title).sort();
+      const expected = [...testCase.expectedTitles].sort();
+      expect(actual).toEqual(expected);
+    });
+  }
 
   it("supports orderBy + limit + offset", async () => {
     const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("paginate") }));
