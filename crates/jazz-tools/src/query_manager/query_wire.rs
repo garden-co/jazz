@@ -14,60 +14,38 @@ const VALUE_VARIANTS: &[&str] = &[
     "Null",
 ];
 
-pub fn parse_query_json_compat(json: &str) -> Result<Query, String> {
+pub fn parse_query_json(json: &str) -> Result<Query, String> {
     let query_json: JsonValue =
         serde_json::from_str(json).map_err(|e| format!("Parse error: {}", e))?;
-    parse_query_value_compat(query_json)
+    parse_query_value(query_json)
 }
 
-pub fn parse_query_value_compat(mut value: JsonValue) -> Result<Query, String> {
-    let requires_relation_refresh = normalize_query_json_compat(&mut value)?;
-    let mut query: Query =
-        serde_json::from_value(value).map_err(|e| format!("Parse error: {}", e))?;
-    if requires_relation_refresh {
-        query
-            .refresh_relation_ir()
-            .map_err(|e| format!("Query build error: {}", e))?;
-    }
-    Ok(query)
+pub fn parse_query_value(mut value: JsonValue) -> Result<Query, String> {
+    normalize_relation_ir(&mut value)?;
+    serde_json::from_value(value).map_err(|e| format!("Parse error: {}", e))
 }
 
-fn normalize_query_json_compat(value: &mut JsonValue) -> Result<bool, String> {
+pub fn parse_query_json_compat(json: &str) -> Result<Query, String> {
+    parse_query_json(json)
+}
+
+pub fn parse_query_value_compat(value: JsonValue) -> Result<Query, String> {
+    parse_query_value(value)
+}
+
+fn normalize_relation_ir(value: &mut JsonValue) -> Result<(), String> {
     let object = expect_object_mut(value, "query payload")?;
-    let table = object
-        .get("table")
-        .and_then(JsonValue::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
-
-    let relation_ir = object.remove("relation_ir");
-    let mut requires_relation_refresh = false;
-
-    let normalized_relation = match relation_ir {
-        Some(rel) if rel.is_null() => {
-            requires_relation_refresh = true;
-            build_table_scan_relation(&table)?
-        }
-        Some(rel) if is_tagged_variant(&rel) => convert_relation_expr(&rel)?,
-        Some(rel) => rel,
-        None => {
-            requires_relation_refresh = true;
-            build_table_scan_relation(&table)?
-        }
-    };
-
-    object.insert("relation_ir".to_string(), normalized_relation);
-    Ok(requires_relation_refresh)
-}
-
-fn build_table_scan_relation(table: &str) -> Result<JsonValue, String> {
-    if table.is_empty() {
-        return Err("Parse error: query payload missing required field `table`".to_string());
+    let relation_ir = object.get_mut("relation_ir").ok_or_else(|| {
+        "Parse error: query payload missing required field `relation_ir`".to_string()
+    })?;
+    if relation_ir.is_null() {
+        return Err("Parse error: query payload field `relation_ir` must be non-null".to_string());
     }
-    Ok(wrap_variant(
-        "TableScan",
-        json_object(vec![("table", JsonValue::String(table.to_string()))]),
-    ))
+    if is_tagged_variant(relation_ir) {
+        let converted = convert_relation_expr(relation_ir)?;
+        *relation_ir = converted;
+    }
+    Ok(())
 }
 
 fn convert_relation_expr(value: &JsonValue) -> Result<JsonValue, String> {
@@ -689,7 +667,7 @@ fn optional_field<'a>(object: &'a Map<String, JsonValue>, keys: &[&str]) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::parse_query_json_compat;
+    use super::parse_query_json;
     use crate::query_manager::query::Query;
     use crate::query_manager::relation_ir::{PredicateExpr, RelExpr, ValueRef};
     use crate::query_manager::types::Value;
@@ -721,7 +699,7 @@ mod tests {
             }
         });
 
-        let query = parse_query_json_compat(&raw.to_string()).expect("parse query");
+        let query = parse_query_json(&raw.to_string()).expect("parse query");
         assert_eq!(query.table.as_str(), "todos");
         match query.relation_ir {
             RelExpr::Filter { input, predicate } => {
@@ -738,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_query_without_relation_ir_and_rebuilds_from_legacy_fields() {
+    fn rejects_query_without_relation_ir() {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
@@ -757,11 +735,12 @@ mod tests {
             "array_subqueries": []
         });
 
-        let query = parse_query_json_compat(&raw.to_string()).expect("parse query");
-        match query.relation_ir {
-            RelExpr::Filter { .. } => {}
-            other => panic!("expected filter relation, got {:?}", other),
-        }
+        let error =
+            parse_query_json(&raw.to_string()).expect_err("missing relation_ir should fail");
+        assert!(
+            error.contains("missing required field `relation_ir`"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -791,7 +770,7 @@ mod tests {
             }
         });
 
-        let query: Query = parse_query_json_compat(&raw.to_string()).expect("parse query");
+        let query: Query = parse_query_json(&raw.to_string()).expect("parse query");
         match query.relation_ir {
             RelExpr::Filter { predicate, .. } => match predicate {
                 PredicateExpr::Cmp { right, .. } => {

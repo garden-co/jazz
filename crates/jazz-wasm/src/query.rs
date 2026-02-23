@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 
 use groove::query_manager::query::{Query, QueryBuilder as GrooveQueryBuilder};
 use groove::query_manager::types::Value;
-use groove::query_manager::{parse_query_json_compat, parse_query_value_compat};
+use groove::query_manager::{parse_query_json, parse_query_value};
 
 use crate::types::WasmValue;
 
@@ -201,12 +201,12 @@ impl WasmQueryBuilder {
 
 /// Parse a Query from JSON string.
 pub fn parse_query(json: &str) -> Result<Query, String> {
-    parse_query_json_compat(json)
+    parse_query_json(json)
 }
 
 /// Parse a Query from JsValue.
 pub fn parse_query_js(value: JsValue) -> Result<Query, String> {
     let query_json: serde_json::Value =
         serde_wasm_bindgen::from_value(value).map_err(|e| format!("Parse error: {}", e))?;
-    parse_query_value_compat(query_json)
+    parse_query_value(query_json)
 }
