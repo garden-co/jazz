@@ -24,7 +24,7 @@ pub enum Predicate {
     Gt { col_index: usize, value: Vec<u8> },
     /// Column greater than or equal to value.
     Ge { col_index: usize, value: Vec<u8> },
-    /// Array column contains value.
+    /// Array column contains value, or text column contains substring.
     Contains { col_index: usize, value: Value },
     /// Column is null.
     IsNull { col_index: usize },
@@ -105,6 +105,10 @@ impl Predicate {
             Predicate::Contains { col_index, value } => {
                 match decode_column(descriptor, &row.data, *col_index) {
                     Ok(Value::Array(elements)) => elements.iter().any(|element| element == value),
+                    Ok(Value::Text(text)) => match value {
+                        Value::Text(substr) => text.contains(substr),
+                        _ => false,
+                    },
                     _ => false,
                 }
             }
@@ -247,6 +251,10 @@ impl FilterNode {
             Predicate::Contains { col_index, value } => {
                 match self.get_column_value(tuple, *col_index) {
                     Some(Value::Array(elements)) => elements.iter().any(|element| element == value),
+                    Some(Value::Text(text)) => match value {
+                        Value::Text(substr) => text.contains(substr),
+                        _ => false,
+                    },
                     _ => false,
                 }
             }
@@ -429,6 +437,23 @@ mod tests {
 
     fn make_array_tuple(id: ObjectId, values: &[Value]) -> Tuple {
         let descriptor = array_descriptor();
+        let data = encode_row(&descriptor, values).unwrap();
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn text_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ])
+    }
+
+    fn make_text_tuple(id: ObjectId, values: &[Value]) -> Tuple {
+        let descriptor = text_descriptor();
         let data = encode_row(&descriptor, values).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
@@ -719,6 +744,112 @@ mod tests {
         let result = node.process(delta);
         assert_eq!(result.added.len(), 1);
         assert!(contains_id(&result.added, id1));
+    }
+
+    #[test]
+    fn filter_contains_text_substring() {
+        let predicate = Predicate::Contains {
+            col_index: 1,
+            value: Value::Text("rust".into()),
+        };
+        let tuple_desc = TupleDescriptor::single_with_materialization("", text_descriptor(), true);
+        let mut node = FilterNode::with_tuple_descriptor(tuple_desc, predicate);
+
+        let id1 = ObjectId::new();
+        let id2 = ObjectId::new();
+        let tuple1 = make_text_tuple(
+            id1,
+            &[Value::Integer(1), Value::Text("rust query engine".into())],
+        );
+        let tuple2 = make_text_tuple(id2, &[Value::Integer(2), Value::Text("typescript".into())]);
+
+        let result = node.process(TupleDelta {
+            added: vec![tuple1, tuple2],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        assert_eq!(result.added.len(), 1);
+        assert!(contains_id(&result.added, id1));
+    }
+
+    #[test]
+    fn filter_contains_text_empty_substring_matches() {
+        let predicate = Predicate::Contains {
+            col_index: 1,
+            value: Value::Text("".into()),
+        };
+        let tuple_desc = TupleDescriptor::single_with_materialization("", text_descriptor(), true);
+        let mut node = FilterNode::with_tuple_descriptor(tuple_desc, predicate);
+
+        let id = ObjectId::new();
+        let tuple = make_text_tuple(id, &[Value::Integer(1), Value::Text("any text".into())]);
+
+        let result = node.process(TupleDelta {
+            added: vec![tuple],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        assert_eq!(result.added.len(), 1);
+        assert!(contains_id(&result.added, id));
+    }
+
+    #[test]
+    fn filter_contains_text_update_transitions() {
+        let predicate = Predicate::Contains {
+            col_index: 1,
+            value: Value::Text("needle".into()),
+        };
+        let tuple_desc = TupleDescriptor::single_with_materialization("", text_descriptor(), true);
+        let mut node = FilterNode::with_tuple_descriptor(tuple_desc, predicate);
+
+        let id = ObjectId::new();
+        let non_matching = make_text_tuple(
+            id,
+            &[
+                Value::Integer(1),
+                Value::Text("completely unrelated".into()),
+            ],
+        );
+        let matching = make_text_tuple(
+            id,
+            &[Value::Integer(1), Value::Text("hay needle value".into())],
+        );
+        let non_matching_again = make_text_tuple(
+            id,
+            &[Value::Integer(1), Value::Text("different text".into())],
+        );
+
+        // Initial add does not match "contains", so nothing is added.
+        let initial = node.process(TupleDelta {
+            added: vec![non_matching.clone()],
+            removed: vec![],
+            updated: vec![],
+        });
+        assert!(initial.added.is_empty());
+
+        // Update to matching text should be emitted as an addition.
+        let to_matching = node.process(TupleDelta {
+            added: vec![],
+            removed: vec![],
+            updated: vec![(non_matching, matching.clone())],
+        });
+        assert_eq!(to_matching.added.len(), 1);
+        assert!(contains_id(&to_matching.added, id));
+        assert!(to_matching.removed.is_empty());
+        assert!(to_matching.updated.is_empty());
+
+        // Update back to non-matching text should be emitted as a removal.
+        let to_non_matching = node.process(TupleDelta {
+            added: vec![],
+            removed: vec![],
+            updated: vec![(matching, non_matching_again)],
+        });
+        assert_eq!(to_non_matching.removed.len(), 1);
+        assert!(contains_id(&to_non_matching.removed, id));
+        assert!(to_non_matching.added.is_empty());
+        assert!(to_non_matching.updated.is_empty());
     }
 
     // ========================================================================
