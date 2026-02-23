@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::query_manager::encoding::{
     column_bytes, column_is_null, compare_column_to_value, decode_column,
 };
-use crate::query_manager::types::{Row, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value};
+use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value};
 
 use super::RowNode;
 
@@ -59,69 +59,6 @@ impl Predicate {
             }
             Predicate::Not(pred) => pred.required_columns(),
             Predicate::True => HashSet::new(),
-        }
-    }
-
-    /// Evaluate the predicate against a row.
-    pub fn evaluate(&self, descriptor: &RowDescriptor, row: &Row) -> bool {
-        match self {
-            Predicate::Eq { col_index, value } => {
-                match column_bytes(descriptor, &row.data, *col_index) {
-                    Ok(Some(bytes)) => bytes == value.as_slice(),
-                    _ => false,
-                }
-            }
-            Predicate::Ne { col_index, value } => {
-                match column_bytes(descriptor, &row.data, *col_index) {
-                    Ok(Some(bytes)) => bytes != value.as_slice(),
-                    Ok(None) => true, // null != value
-                    Err(_) => false,
-                }
-            }
-            Predicate::Lt { col_index, value } => {
-                matches!(
-                    compare_column_to_value(descriptor, &row.data, *col_index, value),
-                    Ok(Ordering::Less)
-                )
-            }
-            Predicate::Le { col_index, value } => {
-                matches!(
-                    compare_column_to_value(descriptor, &row.data, *col_index, value),
-                    Ok(Ordering::Less) | Ok(Ordering::Equal)
-                )
-            }
-            Predicate::Gt { col_index, value } => {
-                matches!(
-                    compare_column_to_value(descriptor, &row.data, *col_index, value),
-                    Ok(Ordering::Greater)
-                )
-            }
-            Predicate::Ge { col_index, value } => {
-                matches!(
-                    compare_column_to_value(descriptor, &row.data, *col_index, value),
-                    Ok(Ordering::Greater) | Ok(Ordering::Equal)
-                )
-            }
-            Predicate::Contains { col_index, value } => {
-                match decode_column(descriptor, &row.data, *col_index) {
-                    Ok(Value::Array(elements)) => elements.iter().any(|element| element == value),
-                    Ok(Value::Text(text)) => match value {
-                        Value::Text(substr) => text.contains(substr),
-                        _ => false,
-                    },
-                    _ => false,
-                }
-            }
-            Predicate::IsNull { col_index } => {
-                column_is_null(descriptor, &row.data, *col_index).unwrap_or(false)
-            }
-            Predicate::IsNotNull { col_index } => {
-                !column_is_null(descriptor, &row.data, *col_index).unwrap_or(true)
-            }
-            Predicate::And(predicates) => predicates.iter().all(|p| p.evaluate(descriptor, row)),
-            Predicate::Or(predicates) => predicates.iter().any(|p| p.evaluate(descriptor, row)),
-            Predicate::Not(predicate) => !predicate.evaluate(descriptor, row),
-            Predicate::True => true,
         }
     }
 }
