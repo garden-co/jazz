@@ -1,6 +1,36 @@
+use serde::Deserialize;
 use serde_json::{Map, Value as JsonValue};
 
-use super::query::Query;
+use super::query::{ArraySubquerySpec, Query};
+use super::relation_ir::RelExpr;
+use super::types::TableName;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryWirePayload {
+    table: TableName,
+    #[serde(default)]
+    branches: Vec<String>,
+    #[serde(default)]
+    include_deleted: bool,
+    #[serde(default)]
+    select_columns: Option<Vec<String>>,
+    #[serde(default)]
+    array_subqueries: Vec<ArraySubquerySpec>,
+    relation_ir: RelExpr,
+}
+
+impl QueryWirePayload {
+    fn into_query(self) -> Query {
+        let mut query = Query::new(self.table);
+        query.branches = self.branches;
+        query.include_deleted = self.include_deleted;
+        query.select_columns = self.select_columns;
+        query.array_subqueries = self.array_subqueries;
+        query.relation_ir = self.relation_ir;
+        query
+    }
+}
 
 const VALUE_VARIANTS: &[&str] = &[
     "Integer",
@@ -22,15 +52,9 @@ pub fn parse_query_json(json: &str) -> Result<Query, String> {
 
 pub fn parse_query_value(mut value: JsonValue) -> Result<Query, String> {
     normalize_relation_ir(&mut value)?;
-    serde_json::from_value(value).map_err(|e| format!("Parse error: {}", e))
-}
-
-pub fn parse_query_json_compat(json: &str) -> Result<Query, String> {
-    parse_query_json(json)
-}
-
-pub fn parse_query_value_compat(value: JsonValue) -> Result<Query, String> {
-    parse_query_value(value)
+    let payload: QueryWirePayload =
+        serde_json::from_value(value).map_err(|e| format!("Parse error: {}", e))?;
+    Ok(payload.into_query())
 }
 
 fn normalize_relation_ir(value: &mut JsonValue) -> Result<(), String> {
@@ -677,11 +701,6 @@ mod tests {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
-            "joins": [],
-            "disjuncts": [{"conditions": []}],
-            "order_by": [],
-            "offset": 0,
-            "limit": null,
             "include_deleted": false,
             "array_subqueries": [],
             "relation_ir": {
@@ -720,17 +739,6 @@ mod tests {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
-            "joins": [],
-            "disjuncts": [
-                {
-                    "conditions": [
-                        { "Eq": { "column": "done", "value": { "Boolean": false } } }
-                    ]
-                }
-            ],
-            "order_by": [],
-            "offset": 0,
-            "limit": null,
             "include_deleted": false,
             "array_subqueries": []
         });
@@ -748,11 +756,6 @@ mod tests {
         let raw = serde_json::json!({
             "table": "todos",
             "branches": ["main"],
-            "joins": [],
-            "disjuncts": [{"conditions": []}],
-            "order_by": [],
-            "offset": 0,
-            "limit": null,
             "include_deleted": false,
             "array_subqueries": [],
             "relation_ir": {
@@ -780,5 +783,23 @@ mod tests {
             },
             other => panic!("unexpected relation_ir: {:?}", other),
         }
+    }
+
+    #[test]
+    fn rejects_legacy_top_level_fields() {
+        let raw = serde_json::json!({
+            "table": "todos",
+            "branches": ["main"],
+            "disjuncts": [{"conditions": []}],
+            "array_subqueries": [],
+            "relation_ir": {
+                "type": "TableScan",
+                "table": "todos"
+            }
+        });
+
+        let error =
+            parse_query_json(&raw.to_string()).expect_err("legacy top-level fields must fail");
+        assert!(error.contains("unknown field `disjuncts`"), "{error}");
     }
 }
