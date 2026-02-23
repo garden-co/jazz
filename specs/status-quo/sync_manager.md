@@ -158,6 +158,62 @@ A key boundary: the SyncManager never touches query graphs or SQL. When a client
 
 > `crates/groove/src/sync_manager.rs:1217-1480`
 
+## QuerySettled and PersistenceAck
+
+### QuerySettled: read-settlement signal
+
+`QuerySettled` is a tier-tagged signal that says: "this query has settled here at tier `T`."
+
+One-hop flow (browser main thread -> worker):
+
+1. Main sends `QuerySubscription { query_id, query, session }`.
+2. Worker records `query_origin[query_id]` and queues `PendingQuerySubscription`.
+3. Worker `QueryManager` compiles and settles the server-side graph.
+4. On first settle only, worker emits `QuerySettled { query_id, tier: Worker }`.
+5. Main receives that payload, queues it in `pending_query_settled`, then `QueryManager::process()` moves it into `subscription.achieved_tiers`.
+6. First delivery is held until `achieved_tiers` satisfies `settled_tier`; then the first callback is a full snapshot.
+
+> [`sync_manager/inbox.rs:279`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L279)
+> [`sync_manager/inbox.rs:285`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L285)
+> [`query_manager/server_queries.rs:243`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L243)
+> [`query_manager/server_queries.rs:246`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L246)
+> [`sync_manager/mod.rs:393`](../../crates/jazz-tools/src/sync_manager/mod.rs#L393)
+> [`sync_manager/inbox.rs:113`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L113)
+> [`query_manager/manager.rs:528`](../../crates/jazz-tools/src/query_manager/manager.rs#L528)
+> [`query_manager/manager.rs:640`](../../crates/jazz-tools/src/query_manager/manager.rs#L640)
+> [`query_manager/manager.rs:651`](../../crates/jazz-tools/src/query_manager/manager.rs#L651)
+
+Key consequence: this is what makes `settled_tier` meaningful. Query state can settle and accumulate while delivery is gated, then unblock exactly when the required tier confirmation arrives.
+
+### PersistenceAck: write-durability signal
+
+`PersistenceAck` is a commit-level signal that says: "these commit IDs are durable at tier `T`."
+
+One-hop flow (browser main thread -> worker):
+
+1. Main sends `ObjectUpdated`.
+2. Worker applies commits; for newly persisted commit IDs and if `my_tier` is set, worker emits `PersistenceAck` back to the sender.
+3. Main receives `PersistenceAck`, stores tier state in storage, updates in-memory `commit.ack_state.confirmed_tiers`, and queues `(commit_id, tier)` for runtime consumers.
+4. `RuntimeCore` drains received acks and resolves ack watchers whose requested tier is `<= acked_tier`.
+5. `insert_persisted` / `update_persisted` / `delete_persisted` receivers resolve at this step.
+
+> [`sync_manager/inbox.rs:391`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L391)
+> [`sync_manager/inbox.rs:395`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L395)
+> [`sync_manager/inbox.rs:75`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L75)
+> [`storage/opfs_btree.rs:431`](../../crates/jazz-tools/src/storage/opfs_btree.rs#L431)
+> [`commit.rs:14`](../../crates/jazz-tools/src/commit.rs#L14)
+> [`sync_manager/mod.rs:384`](../../crates/jazz-tools/src/sync_manager/mod.rs#L384)
+> [`runtime_core.rs:389`](../../crates/jazz-tools/src/runtime_core.rs#L389)
+> [`runtime_core.rs:752`](../../crates/jazz-tools/src/runtime_core.rs#L752)
+
+Key consequence: delivery and durability are decoupled on purpose.
+
+- `QuerySettled` gates first query result delivery semantics.
+- `PersistenceAck` gates persisted-write completion semantics.
+- Both use the same ordered tier lattice (`Worker < EdgeServer < CoreServer`), but they answer different questions.
+
+> [`sync_manager/types.rs:22`](../../crates/jazz-tools/src/sync_manager/types.rs#L22)
+
 ## Invariants
 
 | Invariant                                                                   | Status                                                     |
