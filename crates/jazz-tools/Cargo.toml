@@ -100,3 +100,7 @@ tokio = { version = "1", features = ["test-util", "full"] }
 [[bench]]
 name = "realistic_phase1"
 harness = false
+
+[[example]]
+name = "realistic_bench"
+required-features = ["client"]
