@@ -2761,6 +2761,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client_a.process(&mut io_a);
@@ -2784,6 +2785,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::EdgeServer,
+                    through_seq: 0,
                 },
             });
         client_a.process(&mut io_a);
@@ -2862,6 +2864,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client.process(&mut storage);
@@ -2942,6 +2945,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client.process(&mut storage);
@@ -3013,6 +3017,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client.process(&mut storage);

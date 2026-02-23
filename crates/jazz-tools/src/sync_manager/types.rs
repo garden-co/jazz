@@ -243,6 +243,8 @@ pub enum SyncPayload {
     QuerySettled {
         query_id: QueryId,
         tier: PersistenceTier,
+        /// Highest stream sequence known to be emitted before this notification.
+        through_seq: u64,
     },
 
     /// Error response.

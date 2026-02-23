@@ -394,7 +394,11 @@ impl SyncManager {
         if let Some(tier) = self.my_tier {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(client_id),
-                payload: SyncPayload::QuerySettled { query_id, tier },
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier,
+                    through_seq: 0,
+                },
             });
         }
     }
