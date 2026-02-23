@@ -39,9 +39,13 @@ let streamConnecting = false;
 let streamAttached = false;
 let isShuttingDown = false;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
+let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
 let pendingSyncPayloadsForMain: string[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
+let peerRuntimeClientByPeerId = new Map<string, string>();
+let peerIdByRuntimeClient = new Map<string, string>();
+let peerTermByPeerId = new Map<string, number>();
 
 function enqueueSyncMessageForMain(payload: string): void {
   pendingSyncPayloadsForMain.push(payload);
@@ -94,6 +98,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
     streamAttached = false;
     streamConnecting = false;
     serverClientId = generateClientId();
+    peerRuntimeClientByPeerId.clear();
+    peerIdByRuntimeClient.clear();
+    peerTermByPeerId.clear();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -128,8 +135,25 @@ async function handleInit(msg: InitMessage): Promise<void> {
       const parsed = JSON.parse(envelope);
 
       if (parsed.destination && "Client" in parsed.destination) {
-        // Client-bound → send payload to main thread
-        enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+        const destinationClientId = parsed.destination.Client as string;
+        if (destinationClientId === mainClientId) {
+          // Local main-thread client-bound payload.
+          enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+          return;
+        }
+
+        // Follower peer client-bound payload.
+        const peerId = peerIdByRuntimeClient.get(destinationClientId);
+        if (!peerId) {
+          return;
+        }
+        const term = peerTermByPeerId.get(peerId) ?? 0;
+        post({
+          type: "peer-sync",
+          peerId,
+          term,
+          payload: [JSON.stringify(parsed.payload)],
+        });
       } else if (parsed.destination && "Server" in parsed.destination) {
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
@@ -150,6 +174,17 @@ async function handleInit(msg: InitMessage): Promise<void> {
     // Drain sync messages that arrived before init completed.
     for (const payload of bufferedSyncMessages) {
       runtime.onSyncMessageReceivedFromClient(mainClientId!, payload);
+    }
+
+    const bufferedPeerSyncMessages = pendingPeerSyncMessages;
+    pendingPeerSyncMessages = [];
+    for (const buffered of bufferedPeerSyncMessages) {
+      const peerClientId = ensurePeerClient(buffered.peerId);
+      if (!peerClientId) continue;
+      peerTermByPeerId.set(buffered.peerId, buffered.term);
+      for (const payload of buffered.payload) {
+        runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
+      }
     }
 
     post({ type: "init-ok", clientId: mainClientId! });
@@ -274,6 +309,43 @@ async function connectStream(): Promise<void> {
   }
 }
 
+function ensurePeerClient(peerId: string): string | null {
+  if (!runtime) return null;
+  const existing = peerRuntimeClientByPeerId.get(peerId);
+  if (existing) return existing;
+
+  const clientId = runtime.addClient();
+  runtime.setClientRole(clientId, "peer");
+  peerRuntimeClientByPeerId.set(peerId, clientId);
+  peerIdByRuntimeClient.set(clientId, peerId);
+  return clientId;
+}
+
+function closePeer(peerId: string): void {
+  const runtimeClientId = peerRuntimeClientByPeerId.get(peerId);
+  if (!runtimeClientId) return;
+  peerRuntimeClientByPeerId.delete(peerId);
+  peerIdByRuntimeClient.delete(runtimeClientId);
+  peerTermByPeerId.delete(peerId);
+}
+
+function flushWalBestEffort(): void {
+  if (!runtime || !initComplete) return;
+  try {
+    runtime.flushWal();
+  } catch (error) {
+    console.warn("[worker] flushWal on lifecycle hint failed:", error);
+  }
+}
+
+function nudgeReconnectAfterResume(): void {
+  if (!activeServerUrl || isShuttingDown) return;
+  if (streamAttached || streamConnecting) return;
+  if (reconnectTimer) return;
+  reconnectAttempt = 0;
+  scheduleReconnect();
+}
+
 // ============================================================================
 // Message handler
 // ============================================================================
@@ -297,6 +369,43 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       }
       break;
     }
+
+    case "peer-open":
+      if (runtime && initComplete) {
+        ensurePeerClient(msg.peerId);
+      }
+      break;
+
+    case "peer-sync": {
+      if (!runtime || !mainClientId || !initComplete) {
+        pendingPeerSyncMessages.push({
+          peerId: msg.peerId,
+          term: msg.term,
+          payload: msg.payload,
+        });
+        break;
+      }
+
+      const peerClientId = ensurePeerClient(msg.peerId);
+      if (!peerClientId) break;
+      peerTermByPeerId.set(msg.peerId, msg.term);
+      for (const payload of msg.payload) {
+        runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
+      }
+      break;
+    }
+
+    case "peer-close":
+      closePeer(msg.peerId);
+      break;
+
+    case "lifecycle-hint":
+      if (msg.event === "visibility-hidden" || msg.event === "pagehide" || msg.event === "freeze") {
+        flushWalBestEffort();
+      } else if (msg.event === "visibility-visible" || msg.event === "resume") {
+        nudgeReconnectAfterResume();
+      }
+      break;
 
     case "update-auth":
       jwtToken = msg.jwtToken;
@@ -332,6 +441,10 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
       }
+      peerRuntimeClientByPeerId.clear();
+      peerIdByRuntimeClient.clear();
+      peerTermByPeerId.clear();
+      pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
       break;
@@ -358,6 +471,10 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         runtime.free(); // Drop → releases OPFS exclusive handles
         runtime = null;
       }
+      peerRuntimeClientByPeerId.clear();
+      peerIdByRuntimeClient.clear();
+      peerTermByPeerId.clear();
+      pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
       break;
