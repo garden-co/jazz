@@ -4,7 +4,7 @@
 // generator runs UniFFI in "library mode", reading this crate's metadata.
 uniffi::setup_scaffolding!();
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +12,6 @@ use futures::executor::block_on;
 
 use groove::object::ObjectId;
 use groove::query_manager::encoding::decode_row;
-use groove::query_manager::graph_nodes::output::index_row_delta;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, SchemaHash, Value};
@@ -310,6 +309,63 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JazzRnError> {
                 tier
             ),
         }),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IndexedRowState {
+    pre_index_by_id: HashMap<ObjectId, usize>,
+    post_index_by_id: HashMap<ObjectId, usize>,
+    post_ids: Vec<ObjectId>,
+}
+
+fn index_row_delta(
+    current_ids: &[ObjectId],
+    delta: &groove::query_manager::types::RowDelta,
+) -> IndexedRowState {
+    let pre_index_by_id: HashMap<_, _> = current_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+
+    let mut ids_to_detach = HashSet::new();
+    for row in &delta.removed {
+        ids_to_detach.insert(row.id);
+    }
+    for (old, _) in &delta.updated {
+        ids_to_detach.insert(old.id);
+    }
+
+    let mut post_ids = Vec::with_capacity(current_ids.len() + delta.added.len());
+    let mut post_index_by_id = HashMap::new();
+
+    for id in current_ids {
+        if !ids_to_detach.contains(id) {
+            post_index_by_id.insert(*id, post_ids.len());
+            post_ids.push(*id);
+        }
+    }
+
+    let mut append_if_missing = |id: ObjectId| {
+        if let std::collections::hash_map::Entry::Vacant(entry) = post_index_by_id.entry(id) {
+            entry.insert(post_ids.len());
+            post_ids.push(id);
+        }
+    };
+
+    for row in &delta.added {
+        append_if_missing(row.id);
+    }
+
+    for (_, new) in &delta.updated {
+        append_if_missing(new.id);
+    }
+
+    IndexedRowState {
+        pre_index_by_id,
+        post_index_by_id,
+        post_ids,
     }
 }
 
