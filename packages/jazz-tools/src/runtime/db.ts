@@ -234,15 +234,15 @@ export interface TableProxy<T, Init> {
 export class Db {
   private clients = new Map<string, JazzClient>();
   private config: DbConfig;
-  private wasmModule: WasmModule;
+  private wasmModule: WasmModule | null;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private bridgeReady: Promise<void> | null = null;
 
   /**
-   * Private constructor - use createDb() factory function.
+   * Protected constructor - use createDb() in regular app code.
    */
-  private constructor(config: DbConfig, wasmModule: WasmModule) {
+  protected constructor(config: DbConfig, wasmModule: WasmModule | null) {
     this.config = config;
     this.wasmModule = wasmModule;
   }
@@ -306,7 +306,11 @@ export class Db {
    * In worker mode, the first call per schema also initializes the
    * WorkerBridge (async). Subsequent calls are sync.
    */
-  private getClient(schema: WasmSchema): JazzClient {
+  protected getClient(schema: WasmSchema): JazzClient {
+    if (!this.wasmModule) {
+      throw new Error("Db runtime module is not initialized for this Db implementation");
+    }
+
     // Use stringified schema as cache key
     const key = JSON.stringify(schema);
 

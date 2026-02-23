@@ -1,44 +1,35 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { createDb, Db, type DbConfig } from "./db.js";
+import type { ReactNode } from "react";
+import type { Db } from "./db.js";
+import {
+  JazzProvider as CoreJazzProvider,
+  useDb as useCoreDb,
+  useJazzClient as useCoreJazzClient,
+} from "../react-core/provider.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
-export interface JazzProviderProps {
-  config: DbConfig;
-  children: ReactNode;
-  fallback?: ReactNode;
+interface JazzClientContextValue {
+  db: Db;
+  manager: CreatedJazzClient["manager"];
+  shutdown: CreatedJazzClient["shutdown"];
 }
 
-const JazzContext = createContext<Db | null>(null);
+type JazzProviderClientProps = {
+  client: CreatedJazzClient | Promise<CreatedJazzClient>;
+  children: ReactNode;
+};
 
-export function JazzProvider({ config, children, fallback }: JazzProviderProps) {
-  const [db, setDb] = useState<Db | null>(null);
+export type JazzProviderProps = JazzProviderClientProps;
 
-  useEffect(() => {
-    let cancelled = false;
-    let instance: Db | null = null;
+export function JazzProvider({ client, children }: JazzProviderProps) {
+  return <CoreJazzProvider client={client}>{children}</CoreJazzProvider>;
+}
 
-    createDb(config).then((created) => {
-      if (cancelled) {
-        void created.shutdown();
-        return;
-      }
-      instance = created;
-      setDb(created);
-    });
-
-    return () => {
-      cancelled = true;
-      if (instance) {
-        void instance.shutdown();
-      }
-    };
-  }, []); // config is treated as stable (mount-only)
-
-  if (!db) return <>{fallback ?? null}</>;
-  return <JazzContext.Provider value={db}>{children}</JazzContext.Provider>;
+export function useJazzClient(): JazzClientContextValue {
+  return useCoreJazzClient() as JazzClientContextValue;
 }
 
 export function useDb(): Db {
-  const db = useContext(JazzContext);
-  if (!db) throw new Error("useDb must be used within <JazzProvider>");
-  return db;
+  return useCoreDb<Db>();
 }
+
+export type { JazzClientContextValue };
