@@ -73,6 +73,9 @@
   "peerDependencies": {
     "react": "^18 || ^19"
   },
+  "optionalDependencies": {
+    "jazz-napi": "workspace:*"
+  },
   "engines": {
     "node": ">=20"
   }
