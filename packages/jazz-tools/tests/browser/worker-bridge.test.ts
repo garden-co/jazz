@@ -112,6 +112,46 @@ describe("Worker Bridge with OPFS", () => {
     return db;
   }
 
+  function getTabRole(db: Db): "leader" | "follower" | null {
+    const role = (db as any).tabRole;
+    if (role === "leader" || role === "follower") {
+      return role;
+    }
+    return null;
+  }
+
+  async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
+    await waitForCondition(
+      async () => {
+        const roleA = getTabRole(a);
+        const roleB = getTabRole(b);
+        return roleA === "leader" && roleB === "follower";
+      },
+      12000,
+      "Expected one elected leader and one follower",
+    ).catch(async () => {
+      await waitForCondition(
+        async () => {
+          const roleA = getTabRole(a);
+          const roleB = getTabRole(b);
+          return roleA === "follower" && roleB === "leader";
+        },
+        12000,
+        "Expected one elected leader and one follower",
+      );
+    });
+
+    const roleA = getTabRole(a);
+    const roleB = getTabRole(b);
+    if (roleA === "leader" && roleB === "follower") {
+      return { leader: a, follower: b };
+    }
+    if (roleA === "follower" && roleB === "leader") {
+      return { leader: b, follower: a };
+    }
+    throw new Error("Unable to determine leader/follower roles");
+  }
+
   afterEach(async () => {
     for (const db of dbs) {
       try {
@@ -368,6 +408,78 @@ describe("Worker Bridge with OPFS", () => {
     const results = await db1.all(allTodos, "edge");
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0].title).toBe("Server-synced");
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Leader election + cross-tab peer routing
+  // -------------------------------------------------------------------------
+
+  it("routes follower writes through the elected leader", async () => {
+    const dbName = uniqueDbName("leader-route");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    const receivedByLeader: string[] = [];
+    const unsubscribe = leader.subscribeAll(
+      allTodos as QueryBuilder<Todo & { id: string }>,
+      (delta) => {
+        for (const todo of delta.all) {
+          receivedByLeader.push(todo.title);
+        }
+      },
+    );
+
+    follower.insert(todos, { title: "Routed via leader", done: false });
+
+    await waitForCondition(
+      async () => receivedByLeader.includes("Routed via leader"),
+      8000,
+      "Leader should receive follower write through peer routing",
+    );
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, "worker");
+        const followerRows = await follower.all(allTodos, "worker");
+        const leaderHas = leaderRows.some((row) => row.title === "Routed via leader");
+        const followerHas = followerRows.some((row) => row.title === "Routed via leader");
+        return leaderHas && followerHas;
+      },
+      8000,
+      "Both leader and follower should observe routed write",
+    );
+
+    unsubscribe();
+  });
+
+  it("fails over to follower after leader shutdown", async () => {
+    const dbName = uniqueDbName("leader-failover");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await leader.shutdown();
+    const leaderIndex = dbs.indexOf(leader);
+    if (leaderIndex >= 0) {
+      dbs.splice(leaderIndex, 1);
+    }
+
+    await waitForCondition(
+      async () => getTabRole(follower) === "leader",
+      12000,
+      "Follower should be promoted to leader after shutdown",
+    );
+
+    const id = follower.insert(todos, { title: "Post-failover", done: true });
+    await waitForCondition(
+      async () => {
+        const rows = await follower.all(allTodos, "worker");
+        return rows.some((row) => row.id === id && row.title === "Post-failover");
+      },
+      8000,
+      "New leader should continue processing writes after failover",
+    );
   });
 });
 
