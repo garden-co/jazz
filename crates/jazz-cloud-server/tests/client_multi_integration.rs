@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
@@ -86,8 +85,18 @@ struct ServerProcess {
     client: Client,
 }
 
+#[derive(Default)]
+struct ServerProcessOptions {
+    delay_server_send_object_updated_ms: Option<String>,
+    delay_server_send_object_updated_every: Option<String>,
+}
+
 impl ServerProcess {
     async fn start(data_root: &Path) -> Self {
+        Self::start_with_options(data_root, ServerProcessOptions::default()).await
+    }
+
+    async fn start_with_options(data_root: &Path, options: ServerProcessOptions) -> Self {
         let port = get_free_port();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
         cmd.args([
@@ -103,6 +112,13 @@ impl ServerProcess {
             "1",
         ])
         .stdout(Stdio::null());
+
+        if let Some(delay) = options.delay_server_send_object_updated_ms.as_deref() {
+            cmd.env("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_MS", delay);
+        }
+        if let Some(every) = options.delay_server_send_object_updated_every.as_deref() {
+            cmd.env("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_EVERY", every);
+        }
 
         if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
             cmd.stderr(Stdio::inherit());
@@ -240,40 +256,6 @@ fn make_context(
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
-    }
-}
-
-fn sender_delay_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct ScopedEnvVar {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        // SAFETY: Test-only env mutation scoped by Drop restore.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => {
-                // SAFETY: restoring previous test-only env value.
-                unsafe { std::env::set_var(self.key, value) };
-            }
-            None => {
-                // SAFETY: removing test-only env value.
-                unsafe { std::env::remove_var(self.key) };
-            }
-        }
     }
 }
 
@@ -486,10 +468,6 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
 
 #[tokio::test]
 async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_settled_rows() {
-    let _env_lock = sender_delay_env_lock()
-        .lock()
-        .expect("lock sender delay env");
-
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let seed_server = ServerProcess::start(server_data.path()).await;
@@ -531,9 +509,14 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     drop(seed_server);
 
     // Phase 2: restart with delayed server->client ObjectUpdated sends.
-    let _delay = ScopedEnvVar::set("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_MS", "1400-1800");
-    let _every = ScopedEnvVar::set("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_EVERY", "1");
-    let delayed_server = ServerProcess::start(server_data.path()).await;
+    let delayed_server = ServerProcess::start_with_options(
+        server_data.path(),
+        ServerProcessOptions {
+            delay_server_send_object_updated_ms: Some("1400-1800".to_string()),
+            delay_server_send_object_updated_every: Some("1".to_string()),
+        },
+    )
+    .await;
 
     let client_b_dir = TempDir::new().expect("client b dir");
     let client_b = JazzClient::connect(make_context(
