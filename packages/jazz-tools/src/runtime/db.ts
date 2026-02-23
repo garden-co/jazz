@@ -284,6 +284,21 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
   return false;
 }
 
+function isLeaderDebugEnabled(): boolean {
+  const globalFlag = (globalThis as { __JAZZ_LEADER_DEBUG__?: unknown }).__JAZZ_LEADER_DEBUG__;
+  if (globalFlag === true) return true;
+
+  try {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("jazz:leader-debug") === "1";
+    }
+  } catch {
+    // Ignore storage access errors (e.g. privacy mode / unavailable storage).
+  }
+
+  return false;
+}
+
 /**
  * High-level database interface for typed queries and mutations.
  *
@@ -380,6 +395,7 @@ export class Db {
       }
       db.adoptLeaderSnapshot(initialLeader);
       db.workerDbName = Db.resolveWorkerDbNameForSnapshot(db.primaryDbName, initialLeader);
+      db.logLeaderDebug("initial-election");
       db.openSyncChannel();
       db.leaderElectionUnsubscribe = election.onChange((snapshot) => {
         db.onLeaderElectionChange(snapshot);
@@ -493,11 +509,17 @@ export class Db {
   private openSyncChannel(): void {
     if (this.syncChannel || !this.primaryDbName) return;
     const ChannelCtor = resolveBroadcastChannelCtor();
-    if (!ChannelCtor) return;
+    if (!ChannelCtor) {
+      this.logLeaderDebug("sync-channel-unavailable");
+      return;
+    }
 
     const channelName = `jazz-tab-sync:${this.config.appId}:${this.primaryDbName}`;
     this.syncChannel = new ChannelCtor(channelName);
     this.syncChannel.addEventListener("message", this.onSyncChannelMessage);
+    this.logLeaderDebug("sync-channel-open", {
+      channelName,
+    });
   }
 
   private closeSyncChannel(): void {
@@ -505,10 +527,23 @@ export class Db {
     this.syncChannel.removeEventListener("message", this.onSyncChannelMessage);
     this.syncChannel.close();
     this.syncChannel = null;
+    this.logLeaderDebug("sync-channel-close");
   }
 
   private postSyncChannelMessage(message: TabSyncMessage): void {
     this.syncChannel?.postMessage(message);
+  }
+
+  private logLeaderDebug(event: string, extra?: Record<string, unknown>): void {
+    if (!isLeaderDebugEnabled()) return;
+    console.info("[db:leader]", event, {
+      tabId: this.tabId,
+      role: this.tabRole,
+      term: this.currentLeaderTerm,
+      leaderTabId: this.currentLeaderTabId,
+      workerDbName: this.workerDbName,
+      ...extra,
+    });
   }
 
   private handleSyncChannelMessage(raw: unknown): void {
@@ -537,6 +572,9 @@ export class Db {
     if (!this.leaderPeerIds.has(message.fromTabId)) {
       this.leaderPeerIds.add(message.fromTabId);
       this.workerBridge.openPeer(message.fromTabId);
+      this.logLeaderDebug("peer-open", {
+        peerId: message.fromTabId,
+      });
     }
     this.workerBridge.sendPeerSync(message.fromTabId, message.term, message.payload);
   }
@@ -562,6 +600,9 @@ export class Db {
 
     this.leaderPeerIds.delete(message.fromTabId);
     this.workerBridge.closePeer(message.fromTabId);
+    this.logLeaderDebug("peer-close", {
+      peerId: message.fromTabId,
+    });
   }
 
   private handleWorkerPeerSync(batch: PeerSyncBatch): void {
@@ -583,6 +624,11 @@ export class Db {
     if (!leaderTabId || !this.tabId) return;
     if (leaderTabId === this.tabId) return;
 
+    this.logLeaderDebug("follower-close", {
+      toLeaderTabId: leaderTabId,
+      closeTerm: term,
+    });
+
     this.postSyncChannelMessage({
       type: "follower-close",
       fromTabId: this.tabId,
@@ -598,6 +644,9 @@ export class Db {
     if (this.tabRole === "leader") {
       bridge.setServerPayloadForwarder(null);
       this.activeRemoteLeaderTabId = null;
+      this.logLeaderDebug("upstream-mode", {
+        mode: "leader-direct",
+      });
     } else {
       bridge.setServerPayloadForwarder((payload) => {
         if (!this.tabId || !this.currentLeaderTabId) return;
@@ -612,10 +661,15 @@ export class Db {
         });
       });
       this.activeRemoteLeaderTabId = this.currentLeaderTabId;
+      this.logLeaderDebug("upstream-mode", {
+        mode: "follower-via-leader",
+        upstreamLeaderTabId: this.currentLeaderTabId,
+      });
     }
 
     if (replayConnection) {
       bridge.replayServerConnection();
+      this.logLeaderDebug("upstream-replay");
     }
   }
 
@@ -626,6 +680,11 @@ export class Db {
     const previousLeaderTabId = this.currentLeaderTabId;
     const previousTerm = this.currentLeaderTerm;
     this.adoptLeaderSnapshot(snapshot);
+    this.logLeaderDebug("leader-change", {
+      previousRole,
+      previousLeaderTabId,
+      previousTerm,
+    });
 
     if (previousRole === "follower" && previousLeaderTabId !== this.currentLeaderTabId) {
       this.sendFollowerClose(previousLeaderTabId, previousTerm);
@@ -641,6 +700,9 @@ export class Db {
     this.enqueueWorkerReconfigure(async () => {
       if (this.isShuttingDown) return;
       if (dbNameChanged) {
+        this.logLeaderDebug("worker-restart", {
+          reason: "db-name-change",
+        });
         await this.restartWorkerWithCurrentDbName();
         return;
       }
@@ -981,6 +1043,7 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
     this.activeRemoteLeaderTabId = null;
     this.leaderPeerIds.clear();
