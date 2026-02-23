@@ -282,7 +282,7 @@ describe("react-core provider/hooks browser coverage", () => {
         { id: "a", title: "Alpha" },
         { id: "b", title: "Beta" },
       ],
-      added: [{ item: { id: "b", title: "Beta" }, index: 1 }],
+      added: [{ id: "b", title: "Beta" }],
       updated: [],
       removed: [],
     });
@@ -294,14 +294,7 @@ describe("react-core provider/hooks browser coverage", () => {
         { id: "a", title: "Alpha" },
       ],
       added: [],
-      updated: [
-        {
-          oldItem: { id: "b", title: "Beta" },
-          newItem: { id: "b", title: "Beta*" },
-          oldIndex: 1,
-          newIndex: 0,
-        },
-      ],
+      updated: [{ id: "b", title: "Beta*" }],
       removed: [],
     });
     await expectText("rows", "Beta*|Alpha");
@@ -310,7 +303,7 @@ describe("react-core provider/hooks browser coverage", () => {
       all: [{ id: "b", title: "Beta*" }],
       added: [],
       updated: [],
-      removed: [{ item: { id: "a", title: "Alpha" }, index: 1 }],
+      removed: [{ id: "a", title: "Alpha" }],
     });
     await expectText("rows", "Beta*");
   });
