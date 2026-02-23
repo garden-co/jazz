@@ -1634,7 +1634,7 @@ fn update_to_untracked_row_is_silent() {
     // No updates should be emitted since the row doesn't match the filter before or after the update
     assert!(
         updates.is_empty(),
-        "No delta for row that doesn't match filter before or after update"
+        "No updates for row that doesn't match filter before or after update"
     );
 }
 
