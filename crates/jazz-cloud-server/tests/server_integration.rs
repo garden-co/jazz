@@ -3,7 +3,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
+use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+use jazz_tools::schema_manager::encode_schema;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -186,6 +189,47 @@ impl ServerProcess {
             .send()
             .await
             .expect("sync request")
+    }
+
+    async fn sync_with_admin_payload(
+        &self,
+        app_id: &str,
+        admin_secret: &str,
+        payload: Value,
+    ) -> reqwest::Response {
+        self.client
+            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .json(&payload)
+            .send()
+            .await
+            .expect("admin sync request")
+    }
+
+    async fn get_schema_by_hash(
+        &self,
+        app_id: &str,
+        admin_secret: &str,
+        schema_hash: &str,
+    ) -> reqwest::Response {
+        self.client
+            .get(format!(
+                "{}/apps/{app_id}/schema/{schema_hash}",
+                self.base_url()
+            ))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .send()
+            .await
+            .expect("schema fetch request")
+    }
+
+    async fn get_schema_hashes(&self, app_id: &str, admin_secret: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}/apps/{app_id}/schemas", self.base_url()))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .send()
+            .await
+            .expect("schema hashes fetch request")
     }
 }
 
@@ -393,5 +437,110 @@ async fn app_registry_and_auth_survive_server_restart() {
         sync_after_restart.status(),
         StatusCode::UNAUTHORIZED,
         "backend secret auth should still work after restart"
+    );
+}
+
+#[tokio::test]
+async fn schema_catalogue_sync_and_retrieval_round_trip() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+
+    let created = server
+        .create_app(
+            "schema-catalogue-app",
+            "http://example.invalid/jwks",
+            Some("backend-secret"),
+            Some("admin-secret"),
+        )
+        .await;
+
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build();
+
+    let schema_hash = SchemaHash::compute(&schema);
+    let encoded_schema = encode_schema(&schema);
+    let object_id = schema_hash.to_object_id().to_string();
+    let author_id = Uuid::new_v4().to_string();
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        MetadataKey::Type.as_str().to_string(),
+        ObjectType::CatalogueSchema.as_str().to_string(),
+    );
+    metadata.insert(
+        MetadataKey::AppId.as_str().to_string(),
+        created.app_id.clone(),
+    );
+    metadata.insert(
+        MetadataKey::SchemaHash.as_str().to_string(),
+        hex::encode(schema_hash.as_bytes()),
+    );
+
+    let sync_payload = json!({
+        "client_id": Uuid::new_v4().to_string(),
+        "payload": {
+            "ObjectUpdated": {
+                "object_id": object_id,
+                "metadata": {
+                    "id": object_id,
+                    "metadata": metadata
+                },
+                "branch_name": "main",
+                "commits": [
+                    {
+                        "parents": [],
+                        "content": encoded_schema,
+                        "timestamp": 1,
+                        "author": author_id,
+                        "metadata": null
+                    }
+                ]
+            }
+        }
+    });
+
+    let sync_response = server
+        .sync_with_admin_payload(&created.app_id, "admin-secret", sync_payload)
+        .await;
+    assert_eq!(
+        sync_response.status(),
+        StatusCode::OK,
+        "admin catalogue sync should succeed"
+    );
+
+    let schema_hashes_response = server
+        .get_schema_hashes(&created.app_id, "admin-secret")
+        .await;
+    assert_eq!(schema_hashes_response.status(), StatusCode::OK);
+    let schema_hashes_json: Value = schema_hashes_response
+        .json()
+        .await
+        .expect("schema hashes json");
+    let expected_hash = schema_hash.to_string();
+    assert!(
+        schema_hashes_json["hashes"]
+            .as_array()
+            .is_some_and(|hashes| hashes
+                .iter()
+                .any(|hash| hash.as_str() == Some(&expected_hash)))
+    );
+
+    let schema_response = server
+        .get_schema_by_hash(&created.app_id, "admin-secret", &expected_hash)
+        .await;
+    assert_eq!(schema_response.status(), StatusCode::OK);
+
+    let schema_json: Value = schema_response.json().await.expect("schema json");
+    assert_eq!(
+        schema_json["tables"]["users"]["columns"][0]["name"],
+        Value::String("id".to_string())
+    );
+    assert_eq!(
+        schema_json["tables"]["users"]["columns"][1]["name"],
+        Value::String("name".to_string())
     );
 }
