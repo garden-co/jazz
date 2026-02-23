@@ -485,7 +485,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
 }
 
 #[tokio::test]
-async fn jazz_tools_sender_side_objectupdated_delay_can_repro_stale_settled_query() {
+async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_settled_rows() {
     let _env_lock = sender_delay_env_lock()
         .lock()
         .expect("lock sender delay env");
@@ -524,7 +524,6 @@ async fn jazz_tools_sender_side_objectupdated_delay_can_repro_stale_settled_quer
     let _every = ScopedEnvVar::set("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY", "2");
 
     let query = QueryBuilder::new("todos").build();
-    let mut observed_stale = false;
 
     for i in 0..30usize {
         client_a
@@ -543,17 +542,14 @@ async fn jazz_tools_sender_side_objectupdated_delay_can_repro_stale_settled_quer
         .expect("client b query timeout")
         .expect("client b query error");
 
-        let expected_min = i + 1;
-        if rows.len() < expected_min {
-            observed_stale = true;
-            break;
-        }
+        let expected_count = i + 1;
+        assert_eq!(
+            rows.len(),
+            expected_count,
+            "stale settled read at iteration {i}: expected {expected_count} rows, got {}",
+            rows.len()
+        );
     }
-
-    assert!(
-        observed_stale,
-        "Expected at least one stale settled query when sender-side ObjectUpdated sends are delayed"
-    );
 
     client_a.shutdown().await.expect("shutdown client a");
     client_b.shutdown().await.expect("shutdown client b");
