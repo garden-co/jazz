@@ -1,4 +1,5 @@
-import { JazzProvider } from "jazz-tools/react-native";
+import { Suspense } from "react";
+import { createJazzClient, JazzProvider } from "jazz-tools/react-native";
 import { ActivityIndicator, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
 import { TodoList } from "./src/TodoList";
 
@@ -9,6 +10,7 @@ const config = {
   // Optional override. If omitted, jazz-rn derives a default SurrealKV path from appId.
   // dataPath: "/absolute/path/to/todo-expo-example.surrealkv",
 };
+const client = createJazzClient(config);
 
 const styles = StyleSheet.create({
   container: {
@@ -49,14 +51,16 @@ const fallback = (
 
 export default function App() {
   return (
-    <JazzProvider config={config} fallback={fallback}>
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="dark-content" />
-        <View style={styles.content}>
-          <Text style={styles.title}>Todos</Text>
-          <TodoList />
-        </View>
-      </SafeAreaView>
-    </JazzProvider>
+    <Suspense fallback={fallback}>
+      <JazzProvider client={client}>
+        <SafeAreaView style={styles.container}>
+          <StatusBar barStyle="dark-content" />
+          <View style={styles.content}>
+            <Text style={styles.title}>Todos</Text>
+            <TodoList />
+          </View>
+        </SafeAreaView>
+      </JazzProvider>
+    </Suspense>
   );
 }
