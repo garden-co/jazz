@@ -7,10 +7,7 @@
  */
 
 import type { Runtime } from "./client.js";
-import type {
-  InitMessage,
-  WorkerToMainMessage,
-} from "../worker/worker-protocol.js";
+import type { InitMessage, WorkerToMainMessage } from "../worker/worker-protocol.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -79,7 +76,7 @@ export class WorkerBridge {
    *
    * Waits for the worker to respond with init-ok.
    */
-  async init(options: WorkerBridgeOptions): Promise<string> {
+  init(options: WorkerBridgeOptions): Promise<string> {
     if (this.initPromise) {
       return this.initPromise;
     }
@@ -181,10 +178,7 @@ export class WorkerBridge {
   }
 
   private flushPendingSyncToWorker(): void {
-    if (
-      this.initState !== "ready" ||
-      this.pendingSyncPayloadsForWorker.length === 0
-    ) {
+    if (this.initState !== "ready" || this.pendingSyncPayloadsForWorker.length === 0) {
       return;
     }
 

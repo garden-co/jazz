@@ -19,7 +19,12 @@ export type JazzProviderProps = JazzProviderClientProps;
 const JazzContext = createContext<CoreJazzClient | null>(null);
 
 export function JazzProvider({ client, children }: JazzProviderProps) {
-  const resolvedClient = "then" in client ? use(client) : client;
+  const isPromiseLike = typeof client === "object" && client !== null && "then" in client;
+  const resolvedClient = isPromiseLike ? use(client) : client;
+
+  if (!resolvedClient) {
+    throw new Error("JazzProvider requires a `client` prop.");
+  }
 
   return <JazzContext.Provider value={resolvedClient}>{children}</JazzContext.Provider>;
 }
