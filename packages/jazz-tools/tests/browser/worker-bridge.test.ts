@@ -142,6 +142,77 @@ describe("Worker Bridge with OPFS", () => {
     );
   }
 
+  function untrack(db: Db): void {
+    const index = dbs.indexOf(db);
+    if (index >= 0) {
+      dbs.splice(index, 1);
+    }
+  }
+
+  function getTabRole(db: Db): "leader" | "follower" | null {
+    const role = (db as any).tabRole;
+    if (role === "leader" || role === "follower") {
+      return role;
+    }
+    return null;
+  }
+
+  async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
+    await waitForCondition(
+      async () => {
+        const roleA = getTabRole(a);
+        const roleB = getTabRole(b);
+        return roleA === "leader" && roleB === "follower";
+      },
+      12000,
+      "Expected one elected leader and one follower",
+    ).catch(async () => {
+      await waitForCondition(
+        async () => {
+          const roleA = getTabRole(a);
+          const roleB = getTabRole(b);
+          return roleA === "follower" && roleB === "leader";
+        },
+        12000,
+        "Expected one elected leader and one follower",
+      );
+    });
+
+    const roleA = getTabRole(a);
+    const roleB = getTabRole(b);
+    if (roleA === "leader" && roleB === "follower") {
+      return { leader: a, follower: b };
+    }
+    if (roleA === "follower" && roleB === "leader") {
+      return { leader: b, follower: a };
+    }
+    throw new Error("Unable to determine leader/follower roles");
+  }
+
+  async function waitForSingleLeader(tabs: Db[]): Promise<Db> {
+    await waitForCondition(
+      async () => {
+        let leaders = 0;
+        let knownRoles = 0;
+        for (const tab of tabs) {
+          const role = getTabRole(tab);
+          if (!role) continue;
+          knownRoles += 1;
+          if (role === "leader") leaders += 1;
+        }
+        return knownRoles === tabs.length && leaders === 1;
+      },
+      12000,
+      "Expected exactly one elected leader across tabs",
+    );
+
+    const leader = tabs.find((tab) => getTabRole(tab) === "leader");
+    if (!leader) {
+      throw new Error("Expected one leader after convergence");
+    }
+    return leader;
+  }
+
   afterEach(async () => {
     for (const unsubscribe of subscriptions.splice(0)) {
       try {
@@ -275,6 +346,7 @@ describe("Worker Bridge with OPFS", () => {
     // Null out dead worker bridge so Db shutdown only frees client-side resources.
     (db1 as any).worker = null;
     (db1 as any).workerBridge = null;
+    await db1.shutdown();
 
     // New Db with same dbName — worker must recover from OPFS WAL
     const db2 = track(await createDb({ appId: "test-app", dbName }));
@@ -364,6 +436,29 @@ describe("Worker Bridge with OPFS", () => {
     unsub();
   });
 
+  it("forwards page lifecycle hints from main thread to worker bridge", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("lifecycle") }));
+
+    db.insert(todos, { title: "Prime bridge", done: false });
+    await (db as any).ensureBridgeReady();
+
+    const bridge = (db as any).workerBridge;
+    expect(bridge).toBeTruthy();
+
+    const seenEvents: string[] = [];
+    const originalSendLifecycleHint = bridge.sendLifecycleHint.bind(bridge);
+    bridge.sendLifecycleHint = (event: string) => {
+      seenEvents.push(event);
+      originalSendLifecycleHint(event);
+    };
+
+    (db as any).onPageHide();
+    (db as any).onPageFreeze();
+    (db as any).onPageResume();
+
+    expect(seenEvents).toEqual(["pagehide", "freeze", "resume"]);
+  });
+
   // -------------------------------------------------------------------------
   // 7. Server sync through worker
   // -------------------------------------------------------------------------
@@ -409,6 +504,110 @@ describe("Worker Bridge with OPFS", () => {
     );
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
+
+  // -------------------------------------------------------------------------
+  // 8. Leader election + cross-tab peer routing
+  // -------------------------------------------------------------------------
+
+  it("routes follower writes through the elected leader", async () => {
+    const dbName = uniqueDbName("leader-route");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    const receivedByLeader: string[] = [];
+    const unsubscribe = leader.subscribeAll(
+      allTodos as QueryBuilder<Todo & { id: string }>,
+      (delta) => {
+        for (const todo of delta.all) {
+          receivedByLeader.push(todo.title);
+        }
+      },
+    );
+
+    follower.insert(todos, { title: "Routed via leader", done: false });
+
+    await waitForCondition(
+      async () => receivedByLeader.includes("Routed via leader"),
+      8000,
+      "Leader should receive follower write through peer routing",
+    );
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, "worker");
+        const followerRows = await follower.all(allTodos, "worker");
+        const leaderHas = leaderRows.some((row) => row.title === "Routed via leader");
+        const followerHas = followerRows.some((row) => row.title === "Routed via leader");
+        return leaderHas && followerHas;
+      },
+      8000,
+      "Both leader and follower should observe routed write",
+    );
+
+    unsubscribe();
+  });
+
+  it("fails over to follower after leader shutdown", async () => {
+    const dbName = uniqueDbName("leader-failover");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await leader.shutdown();
+    untrack(leader);
+
+    await waitForCondition(
+      async () => getTabRole(follower) === "leader",
+      12000,
+      "Follower should be promoted to leader after shutdown",
+    );
+
+    const id = follower.insert(todos, { title: "Post-failover", done: true });
+    await waitForCondition(
+      async () => {
+        const rows = await follower.all(allTodos, "worker");
+        return rows.some((row) => row.id === id && row.title === "Post-failover");
+      },
+      8000,
+      "New leader should continue processing writes after failover",
+    );
+  });
+
+  it("re-elects cleanly when a closed leader tab is reopened", async () => {
+    const dbName = uniqueDbName("leader-reopen");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader: initialLeader, follower: survivor } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await initialLeader.shutdown();
+    untrack(initialLeader);
+
+    await waitForCondition(
+      async () => getTabRole(survivor) === "leader",
+      12000,
+      "Surviving tab should become leader after leader closes",
+    );
+
+    const reopened = track(await createDb({ appId: "test-app", dbName }));
+    const currentLeader = await waitForSingleLeader([survivor, reopened]);
+    const currentFollower = currentLeader === survivor ? reopened : survivor;
+
+    const marker = `reopen-${Date.now()}`;
+    currentFollower.insert(todos, { title: marker, done: false });
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await currentLeader.all(allTodos, "worker");
+        const followerRows = await currentFollower.all(allTodos, "worker");
+        const leaderHas = leaderRows.some((row) => row.title === marker);
+        const followerHas = followerRows.some((row) => row.title === marker);
+        return leaderHas && followerHas;
+      },
+      8000,
+      "Reopened tab and current leader should converge after re-election",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,45 @@ export interface SyncToWorkerMessage {
   payload: string[]; // JSON-encoded SyncPayloads
 }
 
+export type WorkerLifecycleEvent =
+  | "visibility-hidden"
+  | "visibility-visible"
+  | "pagehide"
+  | "freeze"
+  | "resume";
+
+/** Forward a best-effort page lifecycle hint to the worker runtime. */
+export interface LifecycleHintMessage {
+  type: "lifecycle-hint";
+  event: WorkerLifecycleEvent;
+  sentAtMs: number;
+}
+
+/** Open/update a follower peer mapping in the worker runtime. */
+export interface PeerOpenMessage {
+  type: "peer-open";
+  peerId: string;
+}
+
+/** Forward sync payload(s) for a follower peer through leader worker runtime. */
+export interface PeerSyncToWorkerMessage {
+  type: "peer-sync";
+  peerId: string;
+  term: number;
+  payload: string[]; // JSON-encoded SyncPayloads
+}
+
+/**
+ * Signal peer disconnection.
+ *
+ * Note: WASM runtime currently has no removeClient binding, so this is best-effort
+ * metadata cleanup in JS for now.
+ */
+export interface PeerCloseMessage {
+  type: "peer-close";
+  peerId: string;
+}
+
 /** Update auth credentials (e.g., token refresh). */
 export interface UpdateAuthMessage {
   type: "update-auth";
@@ -56,6 +95,10 @@ export interface SimulateCrashMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | SyncToWorkerMessage
+  | LifecycleHintMessage
+  | PeerOpenMessage
+  | PeerSyncToWorkerMessage
+  | PeerCloseMessage
   | UpdateAuthMessage
   | ShutdownMessage
   | SimulateCrashMessage;
@@ -81,6 +124,14 @@ export interface SyncToMainMessage {
   payload: string[]; // JSON-encoded SyncPayloads
 }
 
+/** Forward sync payload(s) to a specific follower peer through leader main thread. */
+export interface PeerSyncToMainMessage {
+  type: "peer-sync";
+  peerId: string;
+  term: number;
+  payload: string[]; // JSON-encoded SyncPayloads
+}
+
 /** Worker encountered an error. */
 export interface ErrorMessage {
   type: "error";
@@ -96,5 +147,6 @@ export type WorkerToMainMessage =
   | ReadyMessage
   | InitOkMessage
   | SyncToMainMessage
+  | PeerSyncToMainMessage
   | ErrorMessage
   | ShutdownOkMessage;
