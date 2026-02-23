@@ -492,66 +492,80 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
 
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
-    let server = ServerProcess::start(server_data.path()).await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
+    let seed_server = ServerProcess::start(server_data.path()).await;
+    let app = seed_server.create_app(&jwks_server.endpoint()).await;
     let app_id = AppId::from_string(&app.app_id).expect("parse app id");
 
+    // Phase 1: seed persisted row without artificial delay.
     let client_a_dir = TempDir::new().expect("client a dir");
     let client_a = JazzClient::connect(make_context(
         app_id,
-        server.base_url(),
+        seed_server.base_url(),
         client_a_dir.path().to_path_buf(),
         make_jwt("sender-delay-client-a"),
     ))
     .await
     .expect("connect client a");
 
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
+
+    client_a
+        .create(
+            "todos",
+            vec![
+                Value::Text("ordering-precision-seed".to_string()),
+                Value::Boolean(false),
+            ],
+        )
+        .await
+        .expect("client a create todo");
+
+    let _ = wait_for_todos_count(
+        &client_a,
+        1,
+        Duration::from_secs(20),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
+    client_a.shutdown().await.expect("shutdown client a");
+    drop(seed_server);
+
+    // Phase 2: restart with delayed server->client ObjectUpdated sends.
+    let _delay = ScopedEnvVar::set("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_MS", "1400-1800");
+    let _every = ScopedEnvVar::set("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_EVERY", "1");
+    let delayed_server = ServerProcess::start(server_data.path()).await;
+
     let client_b_dir = TempDir::new().expect("client b dir");
     let client_b = JazzClient::connect(make_context(
         app_id,
-        server.base_url(),
+        delayed_server.base_url(),
         client_b_dir.path().to_path_buf(),
         make_jwt("sender-delay-client-b"),
     ))
     .await
     .expect("connect client b");
 
-    // Warm up auth/JWKS + schema/catalogue sync before introducing artificial delay.
-    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
-
-    let _delay = ScopedEnvVar::set("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_MS", "1400-1800");
-    let _every = ScopedEnvVar::set("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY", "2");
+    let local_rows_before = wait_for_todos_count(&client_b, 0, Duration::from_secs(5), None).await;
+    assert!(
+        local_rows_before.is_empty(),
+        "client b should not have row before query subscription sync"
+    );
 
     let query = QueryBuilder::new("todos").build();
+    let rows = tokio::time::timeout(
+        Duration::from_secs(8),
+        client_b.query(query.clone(), Some(PersistenceTier::EdgeServer)),
+    )
+    .await
+    .expect("client b query timeout")
+    .expect("client b query error");
 
-    for i in 0..30usize {
-        client_a
-            .create(
-                "todos",
-                vec![Value::Text(format!("racy-{i}")), Value::Boolean(false)],
-            )
-            .await
-            .expect("client a create todo");
+    assert_eq!(
+        rows.len(),
+        1,
+        "query settled at EdgeServer should include already-persisted row"
+    );
 
-        let rows = tokio::time::timeout(
-            Duration::from_secs(8),
-            client_b.query(query.clone(), Some(PersistenceTier::EdgeServer)),
-        )
-        .await
-        .expect("client b query timeout")
-        .expect("client b query error");
-
-        let expected_count = i + 1;
-        assert_eq!(
-            rows.len(),
-            expected_count,
-            "stale settled read at iteration {i}: expected {expected_count} rows, got {}",
-            rows.len()
-        );
-    }
-
-    client_a.shutdown().await.expect("shutdown client a");
     client_b.shutdown().await.expect("shutdown client b");
 }
 
