@@ -157,6 +157,7 @@ async fn events_handler(
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
+            next_sync_seq: None,
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
@@ -171,7 +172,10 @@ async fn events_handler(
                         Ok((target_client_id, payload)) => {
                             // Only emit if this is for our client
                             if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate { payload: Box::new(payload) };
+                                let event = ServerEvent::SyncUpdate {
+                                    seq: None,
+                                    payload: Box::new(payload),
+                                };
                                 yield Ok(encode_frame(&event));
                             }
                         }
