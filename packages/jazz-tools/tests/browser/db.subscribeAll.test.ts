@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
@@ -156,6 +156,107 @@ async function waitForCondition(
 describe("db.subscribeAll browser integration", () => {
   const dbs: Db[] = [];
   const unsubscribes: Array<() => void> = [];
+  let conditionsDb: Db;
+  const conditionCases: Array<{
+    name: string;
+    query: QueryBuilder<Todo>;
+    insert: Omit<Todo, "id">;
+  }> = [
+    {
+      name: "eq",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
+      }),
+      insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
+    },
+    {
+      name: "ne",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "ne", value: "blocked" }],
+      }),
+      insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
+    },
+    {
+      name: "gt",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gt", value: 10 }],
+      }),
+      insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
+    },
+    {
+      name: "gte",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gte", value: 10 }],
+      }),
+      insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
+    },
+    {
+      name: "lt",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "lt", value: 0 }],
+      }),
+      insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
+    },
+    {
+      name: "lte",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "lte", value: 0 }],
+      }),
+      insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
+    },
+    {
+      name: "isNull",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "isNull" }],
+      }),
+      insert: {
+        title: "null-hit",
+        done: false,
+        priority: undefined,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+    },
+    {
+      name: "contains-array",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "tags", op: "contains", value: "needle" }],
+      }),
+      insert: {
+        title: "contains-array-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["needle", "hay"],
+      },
+    },
+    {
+      name: "contains-text",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "contains", value: "needle" }],
+      }),
+      insert: {
+        title: "hay-needle-title",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+    },
+    {
+      name: "contains-text-empty",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "contains", value: "" }],
+      }),
+      insert: {
+        title: "any-title",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+    },
+  ];
 
   function track(db: Db): Db {
     dbs.push(db);
@@ -179,6 +280,17 @@ describe("db.subscribeAll browser integration", () => {
     for (const db of dbs.splice(0).reverse()) {
       await db.shutdown();
     }
+  });
+
+  beforeAll(async () => {
+    conditionsDb = await createDb({
+      appId: "db-subscribe-test",
+      dbName: uniqueDbName("filters"),
+    });
+  });
+
+  afterAll(async () => {
+    await conditionsDb.shutdown();
   });
 
   it("emits added, updated, removed, and all", async () => {
@@ -232,121 +344,16 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
-  it("supports condition filters", async () => {
-    const db = track(
-      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("filters") }),
-    );
-
-    const cases: Array<{
-      name: string;
-      query: QueryBuilder<Todo>;
-      insert: Omit<Todo, "id">;
-    }> = [
-      {
-        name: "eq",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
-        }),
-        insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
-      },
-      {
-        name: "ne",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "ne", value: "blocked" }],
-        }),
-        insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
-      },
-      {
-        name: "gt",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "gt", value: 10 }],
-        }),
-        insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
-      },
-      {
-        name: "gte",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "gte", value: 10 }],
-        }),
-        insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
-      },
-      {
-        name: "lt",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "lt", value: 0 }],
-        }),
-        insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
-      },
-      {
-        name: "lte",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "lte", value: 0 }],
-        }),
-        insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
-      },
-      {
-        name: "isNull",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "isNull" }],
-        }),
-        insert: {
-          title: "null-hit",
-          done: false,
-          priority: undefined,
-          owner_id: undefined,
-          tags: ["x"],
-        },
-      },
-      {
-        name: "contains-array",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "tags", op: "contains", value: "needle" }],
-        }),
-        insert: {
-          title: "contains-array-hit",
-          done: false,
-          priority: 1,
-          owner_id: undefined,
-          tags: ["needle", "hay"],
-        },
-      },
-      {
-        name: "contains-text",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "contains", value: "needle" }],
-        }),
-        insert: {
-          title: "hay-needle-title",
-          done: false,
-          priority: 1,
-          owner_id: undefined,
-          tags: ["x"],
-        },
-      },
-      {
-        name: "contains-text-empty",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "contains", value: "" }],
-        }),
-        insert: {
-          title: "any-title",
-          done: false,
-          priority: 1,
-          owner_id: undefined,
-          tags: ["x"],
-        },
-      },
-    ];
-
-    for (const testCase of cases) {
+  for (const testCase of conditionCases) {
+    it(`supports condition filter ${testCase.name}`, async () => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];
       const unsubscribe = trackUnsubscribe(
-        db.subscribeAll(testCase.query, (delta) => {
+        conditionsDb.subscribeAll(testCase.query, (delta) => {
           deltas.push(delta);
         }),
       );
 
-      const insertedId = db.insert(todos, testCase.insert);
+      const insertedId = conditionsDb.insert(todos, testCase.insert);
 
       await waitForCondition(
         () => deltas.some((delta) => delta.added.some((row) => row.id === insertedId)),
@@ -355,8 +362,8 @@ describe("db.subscribeAll browser integration", () => {
       );
 
       unsubscribe();
-    }
-  });
+    });
+  }
 
   it("supports orderBy + limit + offset", async () => {
     const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("order") }));
