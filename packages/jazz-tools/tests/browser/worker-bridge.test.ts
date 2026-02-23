@@ -10,7 +10,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -294,6 +294,7 @@ describe("Worker Bridge with OPFS", () => {
     // Null out to prevent afterEach from trying clean shutdown on dead worker
     (db1 as any).worker = null;
     (db1 as any).workerBridge = null;
+    await db1.shutdown();
 
     // New Db with same dbName — worker must recover from OPFS WAL
     const db2 = track(await createDb({ appId: "test-app", dbName }));
@@ -388,14 +389,15 @@ describe("Worker Bridge with OPFS", () => {
 
   it("syncs data between two clients through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const token1 = await signJwt("user-a", JWT_SECRET);
+    const localAuthToken = `user-a-${Date.now()}`;
 
     const db1 = track(
       await createDb({
         appId: APP_ID,
         dbName: uniqueDbName("sync-a"),
         serverUrl,
-        jwtToken: token1,
+        localAuthMode: "anonymous",
+        localAuthToken,
         adminSecret: ADMIN_SECRET,
       }),
     );
@@ -482,37 +484,6 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 });
-
-// ---------------------------------------------------------------------------
-// JWT helper (Web Crypto — works in browser)
-// ---------------------------------------------------------------------------
-
-function base64url(input: string | Uint8Array): string {
-  const str = typeof input === "string" ? btoa(input) : btoa(String.fromCharCode(...input));
-  return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-async function signJwt(sub: string, secret: string): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = {
-    sub,
-    claims: {},
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  };
-  const enc = new TextEncoder();
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const data = enc.encode(`${headerB64}.${payloadB64}`);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, data);
-  return `${headerB64}.${payloadB64}.${base64url(new Uint8Array(sig))}`;
-}
 
 // ---------------------------------------------------------------------------
 // Polling helper
