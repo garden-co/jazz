@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use jazz_rs::{
+use groove::{
     AppContext, AppId, ColumnType, JazzClient, ObjectId, PersistenceTier, QueryBuilder, Schema,
     SchemaBuilder, TableSchema, Value,
 };
@@ -231,7 +231,7 @@ fn print_help() {
 realistic_bench
 
 Usage:
-  cargo run -p jazz-rs --example realistic_bench -- [options]
+  cargo run -p jazz-tools --features client --example realistic_bench -- [options]
 
 Options:
   --scenario <path>    Scenario JSON (default: benchmarks/realistic/scenarios/w1_interactive.json)

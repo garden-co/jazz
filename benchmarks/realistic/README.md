@@ -22,7 +22,7 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 Run from workspace root:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz-tools --features client --example realistic_bench -- \
   --profile benchmarks/realistic/profiles/s.json \
   --scenario benchmarks/realistic/scenarios/w1_interactive.json
 ```
@@ -30,7 +30,7 @@ RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
 `W3` requires a running server and `--server-url`:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz-tools --features client --example realistic_bench -- \
   --profile benchmarks/realistic/profiles/s.json \
   --scenario benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
