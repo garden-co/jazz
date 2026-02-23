@@ -26,6 +26,12 @@ export interface WorkerBridgeOptions {
   adminSecret?: string;
 }
 
+export interface PeerSyncBatch {
+  peerId: string;
+  term: number;
+  payload: string[];
+}
+
 /**
  * Bridge between main-thread runtime and dedicated worker.
  *
@@ -40,6 +46,8 @@ export class WorkerBridge {
   private workerClientId: string | null = null;
   private pendingSyncPayloadsForWorker: string[] = [];
   private syncBatchFlushQueued = false;
+  private disposed = false;
+  private peerSyncListener: ((batch: PeerSyncBatch) => void) | null = null;
 
   constructor(worker: Worker, runtime: Runtime) {
     this.worker = worker;
@@ -53,11 +61,18 @@ export class WorkerBridge {
         for (const payload of msg.payload) {
           this.runtime.onSyncMessageReceived(payload);
         }
+      } else if (msg.type === "peer-sync") {
+        this.peerSyncListener?.({
+          peerId: msg.peerId,
+          term: msg.term,
+          payload: msg.payload,
+        });
       }
     };
 
     // Wire main → worker: outgoing sync messages from runtime
     this.runtime.onSyncMessageToSend((envelope: string) => {
+      if (this.disposed) return;
       const parsed = JSON.parse(envelope);
       // Only forward server-bound messages (worker IS the server)
       if (parsed.destination && "Server" in parsed.destination) {
@@ -127,12 +142,22 @@ export class WorkerBridge {
    * @param worker The Worker instance (needed for listening to shutdown-ok)
    */
   async shutdown(worker: Worker): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+
+    // Detach upstream edge so the next bridge attach performs a clean replay.
+    this.runtime.removeServer();
+
     this.worker.postMessage({ type: "shutdown" });
     try {
       await waitForMessage<WorkerToMainMessage>(worker, (msg) => msg.type === "shutdown-ok", 5000);
     } catch {
       // Timeout — worker may have already closed
     }
+
+    // Drop any buffered payloads and stop forwarding from stale callbacks.
+    this.pendingSyncPayloadsForWorker = [];
+    this.runtime.onSyncMessageToSend(() => undefined);
   }
 
   /**
@@ -142,12 +167,43 @@ export class WorkerBridge {
     return this.workerClientId;
   }
 
+  onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
+    this.peerSyncListener = listener;
+  }
+
+  openPeer(peerId: string): void {
+    if (this.disposed) return;
+    this.worker.postMessage({ type: "peer-open", peerId });
+  }
+
+  sendPeerSync(peerId: string, term: number, payload: string[]): void {
+    if (this.disposed) return;
+    if (payload.length === 0) return;
+    this.worker.postMessage({
+      type: "peer-sync",
+      peerId,
+      term,
+      payload,
+    });
+  }
+
+  closePeer(peerId: string): void {
+    if (this.disposed) return;
+    this.worker.postMessage({ type: "peer-close", peerId });
+  }
+
   private enqueueSyncMessageForWorker(payload: string): void {
+    if (this.disposed) return;
     this.pendingSyncPayloadsForWorker.push(payload);
     if (this.syncBatchFlushQueued) return;
 
     this.syncBatchFlushQueued = true;
     queueMicrotask(() => {
+      if (this.disposed) {
+        this.syncBatchFlushQueued = false;
+        this.pendingSyncPayloadsForWorker = [];
+        return;
+      }
       this.syncBatchFlushQueued = false;
       const payloads = this.pendingSyncPayloadsForWorker;
       this.pendingSyncPayloadsForWorker = [];
