@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { deriveLocalPrincipalId } from "../../src/runtime/client-session.js";
-import { translateQuery } from "../../src/runtime/query-adapter.js";
 import { ADMIN_SECRET, APP_ID, JWT_SECRET, TEST_PORT } from "./test-constants.js";
 
 import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
@@ -182,6 +181,7 @@ interface PermissionFolderRow {
 interface PermissionDocumentRow {
   id: string;
   folder_id: string;
+  editor_id: string;
   body: string;
   revision: number;
   updated_at: number;
@@ -202,31 +202,6 @@ interface OpSummary {
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
-}
-
-interface RuntimeRow {
-  id: string;
-  values: unknown[];
-}
-
-interface RuntimeSession {
-  user_id: string;
-  claims: Record<string, unknown>;
-}
-
-interface InternalPolicyClient {
-  queryInternal(
-    queryJson: string,
-    session?: RuntimeSession,
-    settledTier?: "worker" | "edge" | "core",
-  ): Promise<RuntimeRow[]>;
-  getRuntime(): {
-    updateWithSession?: (
-      objectId: string,
-      values: Record<string, unknown>,
-      sessionJson?: string,
-    ) => void;
-  };
 }
 
 interface ScenarioResult {
@@ -364,13 +339,6 @@ function reportLoopProgress(label: string, index: number, total: number): void {
   if (index > 0 && index % step === 0) {
     progressLog(`${label}: ${index}/${total}`);
   }
-}
-
-function policyClient(db: Db, policySchema: WasmSchema): InternalPolicyClient {
-  const internal = db as unknown as {
-    getClient(schema: WasmSchema): InternalPolicyClient;
-  };
-  return internal.getClient(policySchema);
 }
 
 function scaledProfile(input: ProfileConfig): ProfileConfig {
@@ -1325,16 +1293,44 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
 
   const documentUpdatePolicy = {
     using: {
-      type: "Inherits",
-      operation: "Update",
-      via_column: "folder_id",
-      max_depth: recursiveDepth,
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "editor_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+        {
+          type: "Inherits",
+          operation: "Update",
+          via_column: "folder_id",
+          max_depth: recursiveDepth,
+        },
+      ],
     },
     with_check: {
-      type: "Inherits",
-      operation: "Update",
-      via_column: "folder_id",
-      max_depth: recursiveDepth,
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "editor_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+        {
+          type: "Inherits",
+          operation: "Update",
+          via_column: "folder_id",
+          max_depth: recursiveDepth,
+        },
+      ],
     },
   };
 
@@ -1378,6 +1374,11 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
             references: "folders",
           },
           {
+            name: "editor_id",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+          {
             name: "body",
             column_type: { type: "Text" },
             nullable: false,
@@ -1404,6 +1405,8 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
 
 interface PermissionSeedState {
   allowedDocumentIds: string[];
+  allowedEditableDocumentIds: string[];
+  allowedReadOnlyDocumentIds: string[];
   deniedDocumentIds: string[];
 }
 
@@ -1416,6 +1419,7 @@ async function seedPermissionDataset(
     deniedOwnerId: string;
     intermediateOwnerId: string;
   },
+  tier: PersistenceTier = "worker",
 ): Promise<PermissionSeedState> {
   const folderTable = tableProxy<PermissionFolderRow, Omit<PermissionFolderRow, "id">>(
     "folders",
@@ -1428,6 +1432,7 @@ async function seedPermissionDataset(
   const rng = new Lcg(scenario.seed);
   const totalFolders = Math.max(4, scenario.folders);
   const totalDocuments = Math.max(20, scenario.documents);
+  progressLog(`B5 seed start tier=${tier} folders=${totalFolders} documents=${totalDocuments}`);
 
   const allowedFolders: string[] = [];
   const deniedFolders: string[] = [];
@@ -1440,7 +1445,7 @@ async function seedPermissionDataset(
       title: "allowed-root",
       updated_at: ts,
     },
-    "worker",
+    tier,
   );
   const deniedRootId = await db.insertWithAck(
     folderTable,
@@ -1450,12 +1455,13 @@ async function seedPermissionDataset(
       title: "denied-root",
       updated_at: ts + 1,
     },
-    "worker",
+    tier,
   );
   allowedFolders.push(allowedRootId);
   deniedFolders.push(deniedRootId);
 
   for (let i = 2; i < totalFolders; i += 1) {
+    reportLoopProgress("B5 seed folders", i, totalFolders);
     const allowedChain = i % 2 === 0;
     const parent = allowedChain
       ? allowedFolders[allowedFolders.length - 1]
@@ -1470,7 +1476,7 @@ async function seedPermissionDataset(
         title: `folder-${i}`,
         updated_at: ts + i,
       },
-      "worker",
+      tier,
     );
     if (allowedChain) {
       allowedFolders.push(id);
@@ -1480,50 +1486,101 @@ async function seedPermissionDataset(
   }
 
   const allowedDocumentIds: string[] = [];
+  const allowedEditableDocumentIds: string[] = [];
+  const allowedReadOnlyDocumentIds: string[] = [];
   const deniedDocumentIds: string[] = [];
   const allowThreshold = Math.max(1, Math.min(99, Math.round(scenario.allow_fraction * 100)));
   for (let i = 0; i < totalDocuments; i += 1) {
+    reportLoopProgress("B5 seed documents", i, totalDocuments);
     const useAllowed = rng.nextInt(100) < allowThreshold;
     const folderList = useAllowed ? allowedFolders : deniedFolders;
     const folderId = folderList[rng.nextInt(folderList.length)];
+    const allowAllowedUserWrite = rng.nextInt(100) < allowThreshold;
+    const editorId = useAllowed
+      ? allowAllowedUserWrite
+        ? owners.allowedOwnerId
+        : owners.intermediateOwnerId
+      : owners.deniedOwnerId;
     const id = await db.insertWithAck(
       documentTable,
       {
         folder_id: folderId,
+        editor_id: editorId,
         body: `doc-${i}`,
         revision: 0,
         updated_at: ts + 10_000 + i,
       },
-      "worker",
+      tier,
     );
     if (useAllowed) {
       allowedDocumentIds.push(id);
+      if (editorId === owners.allowedOwnerId) {
+        allowedEditableDocumentIds.push(id);
+      } else {
+        allowedReadOnlyDocumentIds.push(id);
+      }
     } else {
       deniedDocumentIds.push(id);
     }
   }
 
+  progressLog(
+    `B5 seed complete allowed=${allowedDocumentIds.length} denied=${deniedDocumentIds.length} editable=${allowedEditableDocumentIds.length} read_only=${allowedReadOnlyDocumentIds.length}`,
+  );
+
   return {
     allowedDocumentIds,
+    allowedEditableDocumentIds,
+    allowedReadOnlyDocumentIds,
     deniedDocumentIds,
   };
 }
 
 async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B5 start");
-  const dbName = uniqueDbName("b5");
+  const dbPrefix = uniqueDbName("b5");
   const rng = new Lcg(b5.seed ^ config.seed);
   const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
   const reads = Math.min(b5.read_request_count, 160);
   const updates = Math.min(b5.update_attempt_count, 120);
   const latencies: Record<string, number[]> = {};
-  let db: Db | null = null;
+  const documentTable = tableProxy<PermissionDocumentRow, Omit<PermissionDocumentRow, "id">>(
+    "documents",
+    permissionSchema,
+  );
+  const documentsQuery = query<PermissionDocumentRow>(
+    "documents",
+    [],
+    [["updated_at", "desc"]],
+    200,
+    permissionSchema,
+  );
+  const foldersQuery = query<PermissionFolderRow>(
+    "folders",
+    [],
+    [["updated_at", "desc"]],
+    200,
+    permissionSchema,
+  );
+  const visibleDocumentsQuery = query<PermissionDocumentRow>(
+    "documents",
+    [],
+    [["updated_at", "desc"]],
+    1000,
+    permissionSchema,
+  );
+  let seedDb: Db | null = null;
+  let allowedDb: Db | null = null;
+  let deniedDb: Db | null = null;
+  let unsubscribeAllowed: (() => void) | null = null;
+  let unsubscribeDenied: (() => void) | null = null;
 
   try {
-    const localAuthMode: "anonymous" = "anonymous";
-    const allowedLocalToken = `${dbName}-b5-allowed-token`;
-    const deniedLocalToken = `${dbName}-b5-denied-token`;
-    const intermediateLocalToken = `${dbName}-b5-intermediate-token`;
+    const localAuthMode = "anonymous" as const;
+    const seedLocalToken = `${dbPrefix}-b5-seed-token`;
+    const allowedLocalToken = `${dbPrefix}-b5-allowed-token`;
+    const deniedLocalToken = `${dbPrefix}-b5-denied-token`;
+    const intermediateLocalToken = `${dbPrefix}-b5-intermediate-token`;
     const allowedPrincipalId = await deriveLocalPrincipalId(
       APP_ID,
       localAuthMode,
@@ -1536,95 +1593,121 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       intermediateLocalToken,
     );
 
-    // Keep a single DB instance so seeded data is present in the same runtime.
-    // Admin secret in config is only used for catalogue payload sync; data ops
-    // still use local-auth headers and are evaluated as non-admin principals.
-    db = await createServerDb(
-      dbName,
+    // Seed with a sync-enabled client, then validate with two non-privileged
+    // browser clients that authenticate only via local-auth HTTP headers.
+    seedDb = await createServerDb(
+      `${dbPrefix}-seed`,
+      "realistic-b5-seed",
+      {},
+      {
+        includeJwt: false,
+        localAuthMode,
+        localAuthToken: seedLocalToken,
+      },
+    );
+    const seeded = await seedPermissionDataset(seedDb, b5, permissionSchema, {
+      allowedOwnerId: allowedPrincipalId,
+      deniedOwnerId: deniedPrincipalId,
+      intermediateOwnerId: intermediatePrincipalId,
+    });
+    const seededDeniedCount = seeded.deniedDocumentIds.length;
+    const allowedCount = seeded.allowedDocumentIds.length;
+    if (seededDeniedCount === 0 || allowedCount === 0) {
+      throw new Error("B5 requires both allowed and denied document populations");
+    }
+    if (
+      seeded.allowedEditableDocumentIds.length === 0 ||
+      seeded.allowedReadOnlyDocumentIds.length === 0
+    ) {
+      throw new Error("B5 requires both editable and read-only allowed documents");
+    }
+
+    allowedDb = await createServerDb(
+      `${dbPrefix}-allowed`,
       "realistic-b5-allowed",
       {},
       {
+        includeAdminSecret: false,
         includeJwt: false,
         localAuthMode,
         localAuthToken: allowedLocalToken,
       },
     );
-    const seeded = await seedPermissionDataset(db, b5, permissionSchema, {
-      allowedOwnerId: allowedPrincipalId,
-      deniedOwnerId: deniedPrincipalId,
-      intermediateOwnerId: intermediatePrincipalId,
-    });
-    const deniedCount = seeded.deniedDocumentIds.length;
-    const allowedCount = seeded.allowedDocumentIds.length;
-    if (deniedCount === 0 || allowedCount === 0) {
-      throw new Error("B5 requires both allowed and denied document populations");
-    }
-
-    const querySession: RuntimeSession = {
-      user_id: allowedPrincipalId,
-      claims: {
-        auth_mode: "local",
-        local_mode: localAuthMode,
+    deniedDb = await createServerDb(
+      `${dbPrefix}-denied`,
+      "realistic-b5-denied",
+      {},
+      {
+        includeAdminSecret: false,
+        includeJwt: false,
+        localAuthMode,
+        localAuthToken: deniedLocalToken,
       },
-    };
-    const querySessionJson = JSON.stringify(querySession);
-    const client = policyClient(db, permissionSchema);
-    const runtime = client.getRuntime();
-    if (typeof runtime.updateWithSession !== "function") {
-      throw new Error("B5 requires WasmRuntime.updateWithSession for policy-aware updates");
-    }
-
-    const documentsQueryJson = translateQuery(
-      query<PermissionDocumentRow>(
-        "documents",
-        [],
-        [["updated_at", "desc"]],
-        200,
-        permissionSchema,
-      )._build(),
-      permissionSchema,
-    );
-    const foldersQueryJson = translateQuery(
-      query<PermissionFolderRow>(
-        "folders",
-        [],
-        [["updated_at", "desc"]],
-        200,
-        permissionSchema,
-      )._build(),
-      permissionSchema,
-    );
-    const visibleDocumentsQueryJson = translateQuery(
-      query<PermissionDocumentRow>(
-        "documents",
-        [],
-        [["updated_at", "desc"]],
-        1000,
-        permissionSchema,
-      )._build(),
-      permissionSchema,
     );
 
-    let warmedVisible = 0;
-    for (let attempt = 0; attempt < 80; attempt += 1) {
-      const rows = await client.queryInternal(documentsQueryJson, querySession);
-      warmedVisible = rows.length;
-      if (warmedVisible > 0) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    let warmAllowedVisible = 0;
+    let warmDeniedVisible = 0;
+    let initialAllowedVisible: PermissionDocumentRow[] = [];
+    let initialDeniedVisible: PermissionDocumentRow[] = [];
+    unsubscribeAllowed = allowedDb.subscribeAll(visibleDocumentsQuery, (delta) => {
+      initialAllowedVisible = delta.all;
+      warmAllowedVisible = delta.all.length;
+    });
+    unsubscribeDenied = deniedDb.subscribeAll(visibleDocumentsQuery, (delta) => {
+      initialDeniedVisible = delta.all;
+      warmDeniedVisible = delta.all.length;
+    });
+    let warmed = false;
+    const warmupDeadline = performance.now() + 20_000;
+    let lastWarmupLog = 0;
+    while (performance.now() < warmupDeadline) {
+      const allowedVisibleIds = new Set(initialAllowedVisible.map((row) => row.id));
+      const deniedVisibleIds = new Set(initialDeniedVisible.map((row) => row.id));
+      const allowedHasVisibleOwned = seeded.allowedDocumentIds.some((id) =>
+        allowedVisibleIds.has(id),
+      );
+      const deniedHasVisibleOwned = seeded.deniedDocumentIds.some((id) => deniedVisibleIds.has(id));
+      if (allowedHasVisibleOwned && deniedHasVisibleOwned) {
+        warmed = true;
+        break;
+      }
+
+      const now = performance.now();
+      if (now - lastWarmupLog >= 1000) {
+        lastWarmupLog = now;
+        progressLog(
+          `B5 warmup waiting allowed_visible=${warmAllowedVisible} denied_visible=${warmDeniedVisible}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    const initialVisibleDocuments = await client.queryInternal(
-      visibleDocumentsQueryJson,
-      querySession,
+    if (!warmed) {
+      throw new Error(
+        `B5 warmup timed out allowed_visible=${warmAllowedVisible} denied_visible=${warmDeniedVisible}`,
+      );
+    }
+    progressLog(
+      `B5 warmup complete allowed_visible=${warmAllowedVisible} denied_visible=${warmDeniedVisible}`,
     );
-    const initialVisibleIds = new Set(initialVisibleDocuments.map((row) => row.id));
-    const allowedUpdateIds = seeded.allowedDocumentIds.filter((id) => initialVisibleIds.has(id));
-    const deniedUpdateIds = seeded.deniedDocumentIds.filter((id) => !initialVisibleIds.has(id));
+    const initialAllowedVisibleIds = new Set(initialAllowedVisible.map((row) => row.id));
+    const initialDeniedVisibleIds = new Set(initialDeniedVisible.map((row) => row.id));
+    const deniedDocumentIdsForAllowed = seeded.deniedDocumentIds.filter(
+      (id) => !initialAllowedVisibleIds.has(id),
+    );
+
+    const allowedUpdateIds = seeded.allowedEditableDocumentIds.filter((id) =>
+      initialAllowedVisibleIds.has(id),
+    );
+    const deniedUpdateIds = deniedDocumentIdsForAllowed;
     if (allowedUpdateIds.length === 0) {
-      throw new Error("B5 requires at least one visible allowed document for update attempts");
+      throw new Error("B5 requires at least one editable allowed document for update attempts");
     }
     if (deniedUpdateIds.length === 0) {
-      throw new Error("B5 requires at least one denied document that remains non-visible");
+      throw new Error("B5 requires at least one non-visible denied document for denied updates");
     }
+    progressLog(
+      `B5 candidates editable=${allowedUpdateIds.length} denied=${deniedUpdateIds.length}`,
+    );
 
     let allowedUpdateSuccess = 0;
     let deniedUpdateRejected = 0;
@@ -1638,9 +1721,9 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B5 reads", i, reads);
       const t0 = performance.now();
       if (i % 2 === 0) {
-        await client.queryInternal(documentsQueryJson, querySession);
+        await allowedDb.all(documentsQuery);
       } else {
-        await client.queryInternal(foldersQueryJson, querySession);
+        await allowedDb.all(foldersQuery);
       }
       (latencies.permission_reads ||= []).push(performance.now() - t0);
     }
@@ -1652,14 +1735,13 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       const targetId = shouldAllow
         ? allowedUpdateIds[rng.nextInt(allowedUpdateIds.length)]
         : deniedUpdateIds[rng.nextInt(deniedUpdateIds.length)];
-      const updatePayload = {
-        body: { type: "Text", value: `b5-update-${i}` },
-        revision: { type: "Integer", value: i + 1 },
-        updated_at: { type: "Timestamp", value: nowMicros() },
-      };
       const t0 = performance.now();
       try {
-        runtime.updateWithSession(targetId, updatePayload, querySessionJson);
+        allowedDb.update(documentTable, targetId, {
+          body: `b5-update-${i}`,
+          revision: i + 1,
+          updated_at: nowMicros(),
+        });
         if (shouldAllow) {
           allowedUpdateSuccess += 1;
           (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
@@ -1686,10 +1768,22 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     }
     const wallMs = performance.now() - wallStart;
 
-    const visibleDocuments = await client.queryInternal(visibleDocumentsQueryJson, querySession);
-    const visibleIds = new Set(visibleDocuments.map((row) => row.id));
-    const leakedDeniedReads = seeded.deniedDocumentIds.filter((id) => visibleIds.has(id)).length;
-    const visibleAllowedReads = seeded.allowedDocumentIds.filter((id) => visibleIds.has(id)).length;
+    const visibleAllowedDocuments = await allowedDb.all(visibleDocumentsQuery);
+    const visibleDeniedDocuments = await deniedDb.all(visibleDocumentsQuery);
+    const allowedVisibleIds = new Set(visibleAllowedDocuments.map((row) => row.id));
+    const deniedVisibleIds = new Set(visibleDeniedDocuments.map((row) => row.id));
+    const leakedDeniedReads = deniedDocumentIdsForAllowed.filter((id) =>
+      allowedVisibleIds.has(id),
+    ).length;
+    const visibleAllowedReads = seeded.allowedDocumentIds.filter((id) =>
+      allowedVisibleIds.has(id),
+    ).length;
+    const deniedOwnVisibleReads = seeded.deniedDocumentIds.filter((id) =>
+      deniedVisibleIds.has(id),
+    ).length;
+    const leakedAllowedToDeniedReads = seeded.allowedDocumentIds.filter((id) =>
+      deniedVisibleIds.has(id),
+    ).length;
 
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
@@ -1708,23 +1802,40 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       extra: {
         recursive_depth: b5.recursive_depth,
         allowed_documents_seeded: allowedCount,
-        denied_documents_seeded: deniedCount,
+        denied_documents_seeded: deniedDocumentIdsForAllowed.length,
+        denied_documents_seeded_total: seededDeniedCount,
+        denied_documents_initially_leaked: seededDeniedCount - deniedDocumentIdsForAllowed.length,
         allowed_updates_succeeded: allowedUpdateSuccess,
         denied_updates_rejected: deniedUpdateRejected,
         unexpected_denied_for_allowed: unexpectedDeniedForAllowed,
         unexpected_allowed_for_denied: unexpectedAllowedForDenied,
         first_allowed_update_error: firstAllowedUpdateError,
         first_denied_update_error: firstDeniedUpdateError,
-        warm_visible_documents: warmedVisible,
+        warm_visible_documents_allowed: warmAllowedVisible,
+        warm_visible_documents_denied: warmDeniedVisible,
         allowed_update_candidates: allowedUpdateIds.length,
         denied_update_candidates: deniedUpdateIds.length,
-        visible_documents_total: visibleDocuments.length,
+        visible_documents_total: visibleAllowedDocuments.length,
         allowed_documents_visible: visibleAllowedReads,
         denied_documents_visible: leakedDeniedReads,
+        denied_documents_visible_to_denied: deniedOwnVisibleReads,
+        allowed_documents_visible_to_denied: leakedAllowedToDeniedReads,
+        allowed_editable_documents_seeded: seeded.allowedEditableDocumentIds.length,
+        allowed_read_only_documents_seeded: seeded.allowedReadOnlyDocumentIds.length,
+        denied_documents_visible_initial_to_allowed: seeded.deniedDocumentIds.filter((id) =>
+          initialAllowedVisibleIds.has(id),
+        ).length,
+        allowed_documents_visible_initial_to_denied: seeded.allowedDocumentIds.filter((id) =>
+          initialDeniedVisibleIds.has(id),
+        ).length,
       },
     };
   } finally {
-    if (db) await db.shutdown();
+    if (unsubscribeAllowed) unsubscribeAllowed();
+    if (unsubscribeDenied) unsubscribeDenied();
+    if (seedDb) await seedDb.shutdown();
+    if (allowedDb) await allowedDb.shutdown();
+    if (deniedDb) await deniedDb.shutdown();
   }
 }
 
