@@ -349,6 +349,28 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Push a sync message with an explicit stream sequence (from network).
+    pub fn push_sync_inbox_with_sequence(
+        &self,
+        entry: InboxEntry,
+        sequence: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.park_sync_message_with_sequence(entry, sequence);
+        Ok(())
+    }
+
+    /// Set the next expected stream sequence for a server.
+    pub fn set_server_next_sequence(
+        &self,
+        server_id: ServerId,
+        next_sequence: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_next_expected_server_sequence(server_id, next_sequence);
+        Ok(())
+    }
+
     /// Add a server connection.
     pub fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;

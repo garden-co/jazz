@@ -105,11 +105,41 @@ function uniqueDbName(label: string): string {
 
 describe("Worker Bridge with OPFS", () => {
   const dbs: Db[] = [];
+  const subscriptions: Array<() => void> = [];
 
   /** Track dbs for cleanup. */
   function track(db: Db): Db {
     dbs.push(db);
     return db;
+  }
+
+  /** Track subscriptions so they are always cleaned up, even on assertion failures. */
+  function trackSubscription(unsubscribe: () => void): () => void {
+    subscriptions.push(unsubscribe);
+    return () => {
+      try {
+        unsubscribe();
+      } finally {
+        const index = subscriptions.indexOf(unsubscribe);
+        if (index >= 0) {
+          subscriptions.splice(index, 1);
+        }
+      }
+    };
+  }
+
+  async function createSyncedDb(label: string, localAuthToken: string): Promise<Db> {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    return track(
+      await createDb({
+        appId: APP_ID,
+        dbName: uniqueDbName(label),
+        serverUrl,
+        localAuthMode: "anonymous",
+        localAuthToken,
+        adminSecret: ADMIN_SECRET,
+      }),
+    );
   }
 
   function untrack(db: Db): void {
@@ -184,14 +214,21 @@ describe("Worker Bridge with OPFS", () => {
   }
 
   afterEach(async () => {
-    for (const db of dbs) {
+    for (const unsubscribe of subscriptions.splice(0)) {
+      try {
+        unsubscribe();
+      } catch {
+        // Best effort
+      }
+    }
+
+    for (const db of dbs.splice(0).reverse()) {
       try {
         await db.shutdown();
       } catch {
         // Best effort
       }
     }
-    dbs.length = 0;
   });
 
   // -------------------------------------------------------------------------
@@ -291,7 +328,7 @@ describe("Worker Bridge with OPFS", () => {
   it("recovers data from WAL after crash (no snapshot flush)", async () => {
     const dbName = uniqueDbName("crash-recovery");
 
-    const db1 = await createDb({ appId: "test-app", dbName });
+    const db1 = track(await createDb({ appId: "test-app", dbName }));
 
     // insertWithAck ensures data is in OPFS WAL before we crash
     await db1.insertWithAck(todos, { title: "Crash-proof", done: false }, "worker");
@@ -304,25 +341,9 @@ describe("Worker Bridge with OPFS", () => {
     await (db1 as any).ensureBridgeReady();
     const worker = (db1 as any).worker as Worker;
     worker.postMessage({ type: "simulate-crash" });
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error("simulate-crash: no shutdown-ok received"));
-      }, 5000);
-      const handler = (event: MessageEvent) => {
-        if (event.data.type === "shutdown-ok") {
-          cleanup();
-          resolve();
-        }
-      };
-      const cleanup = () => {
-        clearTimeout(timeout);
-        worker.removeEventListener("message", handler);
-      };
-      worker.addEventListener("message", handler);
-    });
+    await waitForWorkerMessageType(worker, "shutdown-ok", 5000, "simulate-crash");
     worker.terminate();
-    // Null out to prevent afterEach from trying clean shutdown on dead worker
+    // Null out dead worker bridge so Db shutdown only frees client-side resources.
     (db1 as any).worker = null;
     (db1 as any).workerBridge = null;
     await db1.shutdown();
@@ -363,9 +384,11 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const unsub = db.subscribeAll(allTodos as QueryBuilder<Todo & { id: string }>, (delta) => {
-      received.push([...delta.all]);
-    });
+    const unsub = trackSubscription(
+      db.subscribeAll(allTodos, (delta) => {
+        received.push([...delta.all]);
+      }),
+    );
 
     db.insert(todos, { title: "Observed", done: false });
 
@@ -389,11 +412,10 @@ describe("Worker Bridge with OPFS", () => {
     const received: Todo[][] = [];
 
     const projectId = "00000000-0000-0000-0000-000000000123";
-    const unsub = db.subscribeAll(
-      todosByProject(projectId) as QueryBuilder<Todo & { id: string }>,
-      (delta) => {
+    const unsub = trackSubscription(
+      db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
-      },
+      }),
     );
 
     db.insert(todos, { title: "Observed", done: false, project: projectId });
@@ -441,30 +463,47 @@ describe("Worker Bridge with OPFS", () => {
   // 7. Server sync through worker
   // -------------------------------------------------------------------------
 
-  it("syncs data between two clients through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const localAuthToken = `user-a-${Date.now()}`;
+  it("propagates synced row from client A to client B", async () => {
+    const sharedLocalAuthToken = `sync-token-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb("sync-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb("sync-b", sharedLocalAuthToken);
 
-    const db1 = track(
-      await createDb({
-        appId: APP_ID,
-        dbName: uniqueDbName("sync-a"),
-        serverUrl,
-        localAuthMode: "anonymous",
-        localAuthToken,
-        adminSecret: ADMIN_SECRET,
-      }),
+    const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbA.insertWithAck(todos, { title, done: false }, "worker"),
+      10000,
+      "A insertWithAck(worker) did not resolve",
     );
 
-    // Insert and wait for server-tier acknowledgement
-    const id = await db1.insertWithAck(todos, { title: "Server-synced", done: false }, "edge");
-    expect(id).toBeTruthy();
+    const rowsOnB = await waitForTodos(
+      dbB,
+      (rows) => rows.some((row) => row.title === title),
+      "A -> B propagation",
+      20000,
+    );
+    expect(rowsOnB.some((row) => row.title === title)).toBe(true);
+  }, 60000);
 
-    // Query back from the server (edge-tier settlement)
-    const results = await db1.all(allTodos, "edge");
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0].title).toBe("Server-synced");
-  });
+  it("propagates synced row from client B to client A", async () => {
+    const sharedLocalAuthToken = `sync-token-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb("sync-a-reverse", sharedLocalAuthToken);
+    const dbB = await createSyncedDb("sync-b-reverse", sharedLocalAuthToken);
+
+    const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbB.insertWithAck(todos, { title, done: true }, "worker"),
+      10000,
+      "B insertWithAck(worker) did not resolve",
+    );
+
+    const rowsOnA = await waitForTodos(
+      dbA,
+      (rows) => rows.some((row) => row.title === title),
+      "B -> A propagation",
+      20000,
+    );
+    expect(rowsOnA.some((row) => row.title === title)).toBe(true);
+  }, 60000);
 
   // -------------------------------------------------------------------------
   // 8. Leader election + cross-tab peer routing
@@ -581,9 +620,104 @@ async function waitForCondition(
   message: string,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = undefined;
   while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((r) => setTimeout(r, 50));
+    try {
+      if (await check()) return;
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(50);
   }
-  throw new Error(`Timeout: ${message}`);
+
+  const lastErrorMessage =
+    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
+  throw new Error(`Timeout after ${timeoutMs}ms: ${message}; lastError=${lastErrorMessage}`);
+}
+
+async function waitForWorkerMessageType(
+  worker: Worker,
+  expectedType: string,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${label}: no ${expectedType} worker message within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { type?: string } | undefined;
+      if (data?.type === expectedType) {
+        cleanup();
+        resolve();
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+  });
+}
+
+async function waitForTodos(
+  db: Db,
+  predicate: (rows: Todo[]) => boolean,
+  label: string,
+  timeoutMs = 15000,
+  settledTier: "worker" | "edge" | undefined = undefined,
+): Promise<Todo[]> {
+  const deadline = Date.now() + timeoutMs;
+  let lastRows: Todo[] = [];
+  let lastError: unknown = undefined;
+
+  while (Date.now() < deadline) {
+    try {
+      const rows = await db.all(allTodos, settledTier);
+      if (predicate(rows)) {
+        return rows;
+      }
+      lastRows = rows;
+    } catch (error) {
+      lastError = error;
+    }
+
+    await sleep(150);
+  }
+
+  const rowPreview = JSON.stringify(
+    lastRows.slice(0, 10).map((row) => ({ id: row.id, title: row.title, done: row.done })),
+  );
+  const lastErrorMessage =
+    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
+  throw new Error(
+    `${label}: timed out after ${timeoutMs}ms (tier=${settledTier ?? "default"}); ` +
+      `lastRowsCount=${lastRows.length}; lastRows=${rowPreview}; lastError=${lastErrorMessage}`,
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

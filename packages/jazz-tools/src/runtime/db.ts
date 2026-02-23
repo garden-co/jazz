@@ -319,14 +319,14 @@ function isLeaderDebugEnabled(): boolean {
  * // Subscriptions
  * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
  *   console.log("All todos:", delta.all);
- *   console.log("Added:", delta.added.map(({ item, index }) => ({ item, index })));
+ *   console.log("Added:", delta.added);
  * });
  * ```
  */
 export class Db {
   private clients = new Map<string, JazzClient>();
   private config: DbConfig;
-  private wasmModule: WasmModule;
+  private wasmModule: WasmModule | null;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private bridgeReady: Promise<void> | null = null;
@@ -363,9 +363,9 @@ export class Db {
   };
 
   /**
-   * Private constructor - use createDb() factory function.
+   * Protected constructor - use createDb() in regular app code.
    */
-  private constructor(config: DbConfig, wasmModule: WasmModule) {
+  protected constructor(config: DbConfig, wasmModule: WasmModule | null) {
     this.config = config;
     this.wasmModule = wasmModule;
   }
@@ -444,7 +444,11 @@ export class Db {
    * In worker mode, the first call per schema also initializes the
    * WorkerBridge (async). Subsequent calls are sync.
    */
-  private getClient(schema: WasmSchema): JazzClient {
+  protected getClient(schema: WasmSchema): JazzClient {
+    if (!this.wasmModule) {
+      throw new Error("Db runtime module is not initialized for this Db implementation");
+    }
+
     // Use stringified schema as cache key
     const key = JSON.stringify(schema);
 
@@ -1051,7 +1055,7 @@ export class Db {
    * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   if (delta.added.length > 0) {
-   *     console.log("New todos:", delta.added.map(({ item }) => item));
+   *     console.log("New todos:", delta.added);
    *   }
    * });
    *

@@ -110,8 +110,7 @@ describe("WorkerBridge", () => {
   it("batches server-bound runtime payloads into one worker sync message", async () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
-
-    new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
 
     runtimeMock.emitSyncEnvelope({
       destination: { Server: {} },
@@ -126,9 +125,25 @@ describe("WorkerBridge", () => {
       payload: { ignored: true },
     });
 
+    // Outgoing payloads are buffered until init completes.
+    let syncMessages = worker.posted.filter(
+      (entry): entry is { type: "sync"; payload: string[] } =>
+        typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
+    );
+    expect(syncMessages).toHaveLength(0);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+    });
+    worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+    await initPromise;
     await Promise.resolve();
 
-    const syncMessages = worker.posted.filter(
+    syncMessages = worker.posted.filter(
       (entry): entry is { type: "sync"; payload: string[] } =>
         typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
     );

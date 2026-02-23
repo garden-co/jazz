@@ -1,69 +1,40 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { createDb, Db, type DbConfig } from "../index.js";
+import type { ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
-import { resolveClientSession } from "../runtime/client-session.js";
+import type { Db } from "../runtime/db.js";
+import {
+  JazzProvider as CoreJazzProvider,
+  useDb as useCoreDb,
+  useJazzClient as useCoreJazzClient,
+  useSession,
+} from "../react-core/provider.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
-export interface JazzProviderProps {
-  config: DbConfig;
-  children: ReactNode;
-  fallback?: ReactNode;
-}
-
-interface JazzContextValue {
+interface JazzClientContextValue {
   db: Db;
+  manager: CreatedJazzClient["manager"];
   session: Session | null;
+  shutdown: CreatedJazzClient["shutdown"];
 }
 
-const JazzContext = createContext<JazzContextValue | null>(null);
+type JazzProviderClientProps = {
+  client: CreatedJazzClient | Promise<CreatedJazzClient>;
+  children: ReactNode;
+};
 
-export function JazzProvider({ config, children, fallback }: JazzProviderProps) {
-  const [value, setValue] = useState<JazzContextValue | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+export type JazzProviderProps = JazzProviderClientProps;
 
-  useEffect(() => {
-    let cancelled = false;
-    let instance: Db | null = null;
+export function JazzProvider({ client, children }: JazzProviderProps) {
+  return <CoreJazzProvider client={client}>{children}</CoreJazzProvider>;
+}
 
-    const resolvedConfig = resolveLocalAuthDefaults(config);
-    Promise.all([createDb(resolvedConfig), resolveClientSession(resolvedConfig)])
-      .then(([created, session]) => {
-        if (cancelled) {
-          void created.shutdown();
-          return;
-        }
-        instance = created;
-        setValue({ db: created, session });
-      })
-      .catch((reason) => {
-        const nextError = reason instanceof Error ? reason : new Error(String(reason));
-        setError(nextError);
-      });
-
-    return () => {
-      cancelled = true;
-      if (instance) {
-        void instance.shutdown();
-      }
-    };
-  }, []); // config is treated as stable (mount-only)
-
-  if (error) {
-    throw error;
-  }
-
-  if (!value) return <>{fallback ?? null}</>;
-  return <JazzContext.Provider value={value}>{children}</JazzContext.Provider>;
+export function useJazzClient(): JazzClientContextValue {
+  return useCoreJazzClient() as JazzClientContextValue;
 }
 
 export function useDb(): Db {
-  const ctx = useContext(JazzContext);
-  if (!ctx) throw new Error("useDb must be used within <JazzProvider>");
-  return ctx.db;
+  return useCoreDb<Db>();
 }
 
-export function useSession(): Session | null {
-  const ctx = useContext(JazzContext);
-  if (!ctx) throw new Error("useSession must be used within <JazzProvider>");
-  return ctx.session;
-}
+export { useSession };
+
+export type { JazzClientContextValue };

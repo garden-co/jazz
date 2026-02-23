@@ -424,6 +424,9 @@ importers:
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm
+      pluralize-esm:
+        specifier: ^9.0.5
+        version: 9.0.5
       react:
         specifier: 19.2.4
         version: 19.2.4
@@ -437,6 +440,9 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.14)
       '@vitest/browser':
         specifier: catalog:default
         version: 4.0.18(vite@7.3.1(@types/node@20.19.30)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
@@ -449,6 +455,9 @@ importers:
       jazz-rn:
         specifier: workspace:*
         version: link:../../crates/jazz-rn
+      react-dom:
+        specifier: 19.2.4
+        version: 19.2.4(react@19.2.4)
       typescript:
         specifier: ^5.3.0
         version: 5.9.3
@@ -7217,6 +7226,10 @@ packages:
   plist@3.1.0:
     resolution: {integrity: sha512-uysumyrvkUX0rX/dEVqt8gC3sTBzd4zoWfLeS29nb53imdaXVvLINYXTI2GNqzaMuvacNx4uJQ8+b3zXR0pkgQ==}
     engines: {node: '>=10.4.0'}
+
+  pluralize-esm@9.0.5:
+    resolution: {integrity: sha512-Kb2dcpMsIutFw2hYrN0EhsAXOUJTd6FVMIxvNAkZCMQLVt9NGZqQczvGpYDxNWCZeCWLHUPxQIBudWzt1h7VVA==}
+    engines: {node: '>=14.0.0'}
 
   pngjs@3.4.0:
     resolution: {integrity: sha512-NCrCHhWmnQklfH4MtJMRjZ2a8c80qXeMlQMv2uVp9ISJMTt562SbGd6n2oq0PaPgKm7Z6pL9E2UlLIhC+SHL3w==}
@@ -16697,6 +16710,8 @@ snapshots:
       '@xmldom/xmldom': 0.8.11
       base64-js: 1.5.1
       xmlbuilder: 15.1.1
+
+  pluralize-esm@9.0.5: {}
 
   pngjs@3.4.0: {}
 

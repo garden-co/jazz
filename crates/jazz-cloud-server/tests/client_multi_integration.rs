@@ -85,8 +85,18 @@ struct ServerProcess {
     client: Client,
 }
 
+#[derive(Default)]
+struct ServerProcessOptions {
+    delay_server_send_object_updated_ms: Option<String>,
+    delay_server_send_object_updated_every: Option<String>,
+}
+
 impl ServerProcess {
     async fn start(data_root: &Path) -> Self {
+        Self::start_with_options(data_root, ServerProcessOptions::default()).await
+    }
+
+    async fn start_with_options(data_root: &Path, options: ServerProcessOptions) -> Self {
         let port = get_free_port();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
         cmd.args([
@@ -102,6 +112,13 @@ impl ServerProcess {
             "1",
         ])
         .stdout(Stdio::null());
+
+        if let Some(delay) = options.delay_server_send_object_updated_ms.as_deref() {
+            cmd.env("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_MS", delay);
+        }
+        if let Some(every) = options.delay_server_send_object_updated_every.as_deref() {
+            cmd.env("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_EVERY", every);
+        }
 
         if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
             cmd.stderr(Stdio::inherit());
@@ -446,6 +463,99 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     assert!(rows_after_delete.is_empty());
 
     client_a.shutdown().await.expect("shutdown client a");
+    client_b.shutdown().await.expect("shutdown client b");
+}
+
+#[tokio::test]
+async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_settled_rows() {
+    let jwks_server = JwksServer::start().await;
+    let server_data = TempDir::new().expect("temp server dir");
+    let seed_server = ServerProcess::start(server_data.path()).await;
+    let app = seed_server.create_app(&jwks_server.endpoint()).await;
+    let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+
+    // Phase 1: seed persisted row without artificial delay.
+    let client_a_dir = TempDir::new().expect("client a dir");
+    let client_a = JazzClient::connect(make_context(
+        app_id,
+        seed_server.base_url(),
+        client_a_dir.path().to_path_buf(),
+        make_jwt("sender-delay-client-a"),
+    ))
+    .await
+    .expect("connect client a");
+
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
+
+    client_a
+        .create(
+            "todos",
+            vec![
+                Value::Text("ordering-precision-seed".to_string()),
+                Value::Boolean(false),
+            ],
+        )
+        .await
+        .expect("client a create todo");
+
+    let _ = wait_for_todos_count(
+        &client_a,
+        1,
+        Duration::from_secs(20),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
+    client_a.shutdown().await.expect("shutdown client a");
+    drop(seed_server);
+
+    // Phase 2: restart with delayed server->client ObjectUpdated sends.
+    let delayed_server = ServerProcess::start_with_options(
+        server_data.path(),
+        ServerProcessOptions {
+            delay_server_send_object_updated_ms: Some("1400-1800".to_string()),
+            delay_server_send_object_updated_every: Some("1".to_string()),
+        },
+    )
+    .await;
+
+    let client_b_dir = TempDir::new().expect("client b dir");
+    let client_b = JazzClient::connect(make_context(
+        app_id,
+        delayed_server.base_url(),
+        client_b_dir.path().to_path_buf(),
+        make_jwt("sender-delay-client-b"),
+    ))
+    .await
+    .expect("connect client b");
+
+    let query = QueryBuilder::new("todos").build();
+    let mut rows = None;
+    for _ in 0..3 {
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            client_b.query(query.clone(), Some(PersistenceTier::EdgeServer)),
+        )
+        .await
+        {
+            Ok(Ok(result_rows)) => {
+                rows = Some(result_rows);
+                break;
+            }
+            Ok(Err(err)) => panic!("client b query error: {err}"),
+            Err(_) => {
+                // Stream can race startup; retry to exercise ordering once connected.
+                continue;
+            }
+        }
+    }
+    let rows = rows.expect("client b query timeout after retries");
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "query settled at EdgeServer should include already-persisted row"
+    );
+
     client_b.shutdown().await.expect("shutdown client b");
 }
 
