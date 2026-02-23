@@ -174,6 +174,19 @@ impl SchemaManager {
         self.known_schemas.get(hash)
     }
 
+    /// Get any known schema.
+    ///
+    /// Useful for server flows that need to inspect catalogue state
+    /// but do not target a specific schema hash.
+    pub fn any_known_schema(&self) -> Option<&Schema> {
+        self.known_schemas.values().next()
+    }
+
+    /// Return all known schema hashes (keys of known_schemas).
+    pub fn known_schema_hashes(&self) -> Vec<SchemaHash> {
+        self.known_schemas.keys().copied().collect()
+    }
+
     /// Check if a schema is known (either current, live, or in known_schemas).
     pub fn is_schema_known(&self, hash: &SchemaHash) -> bool {
         self.context.is_live(hash) || self.known_schemas.contains_key(hash)
@@ -1176,6 +1189,17 @@ mod tests {
             .translate_column_for_schema("users", "email_address", &v2_hash)
             .unwrap();
         assert_eq!(current, "email_address");
+    }
+
+    #[test]
+    fn schema_manager_any_known_schema_server_mode() {
+        let mut manager = SchemaManager::new_server(SyncManager::new(), test_app_id(), "prod");
+        assert!(manager.any_known_schema().is_none());
+
+        let schema = make_schema_v1();
+        manager.add_known_schema(schema.clone());
+
+        assert_eq!(manager.any_known_schema(), Some(&schema));
     }
 
     #[test]
