@@ -86,39 +86,13 @@ pub struct WasmRow {
     pub values: Vec<WasmValue>,
 }
 
-/// Row + post-delta index for added rows.
-#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
-pub struct WasmIndexedRow {
-    pub row: WasmRow,
-    pub index: usize,
-}
-
-/// Updated row pair with pre/post indices.
-#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
-pub struct WasmUpdatedIndexedRow {
-    pub old_row: WasmRow,
-    pub new_row: WasmRow,
-    pub old_index: usize,
-    pub new_index: usize,
-}
-
-/// Removed row + pre-delta index.
-#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
-pub struct WasmRemovedIndexedRow {
-    pub row: WasmRow,
-    pub index: usize,
-}
-
 /// Delta for row-level changes (mirrors groove::query_manager::types::RowDelta).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmRowDelta {
-    pub added: Vec<WasmIndexedRow>,
-    pub removed: Vec<WasmRemovedIndexedRow>,
-    pub updated: Vec<WasmUpdatedIndexedRow>,
+    pub added: Vec<WasmRow>,
+    pub removed: Vec<WasmRow>,
+    pub updated: Vec<(WasmRow, WasmRow)>,
     pub pending: bool,
 }
 
