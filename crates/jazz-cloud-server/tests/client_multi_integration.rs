@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
@@ -242,6 +243,40 @@ fn make_context(
     }
 }
 
+fn sender_delay_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        // SAFETY: Test-only env mutation scoped by Drop restore.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => {
+                // SAFETY: restoring previous test-only env value.
+                unsafe { std::env::set_var(self.key, value) };
+            }
+            None => {
+                // SAFETY: removing test-only env value.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+}
+
 async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
@@ -444,6 +479,81 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     client_a.delete(row_id).await.expect("client a delete todo");
     let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(15), None).await;
     assert!(rows_after_delete.is_empty());
+
+    client_a.shutdown().await.expect("shutdown client a");
+    client_b.shutdown().await.expect("shutdown client b");
+}
+
+#[tokio::test]
+async fn jazz_tools_sender_side_objectupdated_delay_can_repro_stale_settled_query() {
+    let _env_lock = sender_delay_env_lock()
+        .lock()
+        .expect("lock sender delay env");
+
+    let jwks_server = JwksServer::start().await;
+    let server_data = TempDir::new().expect("temp server dir");
+    let server = ServerProcess::start(server_data.path()).await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+    let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+
+    let client_a_dir = TempDir::new().expect("client a dir");
+    let client_a = JazzClient::connect(make_context(
+        app_id,
+        server.base_url(),
+        client_a_dir.path().to_path_buf(),
+        make_jwt("sender-delay-client-a"),
+    ))
+    .await
+    .expect("connect client a");
+
+    let client_b_dir = TempDir::new().expect("client b dir");
+    let client_b = JazzClient::connect(make_context(
+        app_id,
+        server.base_url(),
+        client_b_dir.path().to_path_buf(),
+        make_jwt("sender-delay-client-b"),
+    ))
+    .await
+    .expect("connect client b");
+
+    // Warm up auth/JWKS + schema/catalogue sync before introducing artificial delay.
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
+    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+
+    let _delay = ScopedEnvVar::set("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_MS", "1400-1800");
+    let _every = ScopedEnvVar::set("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY", "2");
+
+    let query = QueryBuilder::new("todos").build();
+    let mut observed_stale = false;
+
+    for i in 0..30usize {
+        client_a
+            .create(
+                "todos",
+                vec![Value::Text(format!("racy-{i}")), Value::Boolean(false)],
+            )
+            .await
+            .expect("client a create todo");
+
+        let rows = tokio::time::timeout(
+            Duration::from_secs(8),
+            client_b.query(query.clone(), Some(PersistenceTier::EdgeServer)),
+        )
+        .await
+        .expect("client b query timeout")
+        .expect("client b query error");
+
+        let expected_min = i + 1;
+        if rows.len() < expected_min {
+            observed_stale = true;
+            break;
+        }
+    }
+
+    assert!(
+        observed_stale,
+        "Expected at least one stale settled query when sender-side ObjectUpdated sends are delayed"
+    );
 
     client_a.shutdown().await.expect("shutdown client a");
     client_b.shutdown().await.expect("shutdown client b");
