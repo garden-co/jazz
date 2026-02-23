@@ -6033,6 +6033,83 @@ fn pump_messages(
     }
 }
 
+/// Helper to exchange messages in a 3-tier topology: client <-> edge <-> core.
+/// Runs multiple rounds until no more routable messages are produced.
+#[allow(clippy::too_many_arguments)]
+fn pump_messages_three_tier(
+    client: &mut QueryManager,
+    edge: &mut QueryManager,
+    core: &mut QueryManager,
+    client_io: &mut MemoryStorage,
+    edge_io: &mut MemoryStorage,
+    core_io: &mut MemoryStorage,
+    client_id_on_edge: crate::sync_manager::ClientId,
+    edge_server_id_for_client: crate::sync_manager::ServerId,
+    edge_id_on_core: crate::sync_manager::ClientId,
+    core_server_id_for_edge: crate::sync_manager::ServerId,
+) {
+    use crate::sync_manager::{Destination, InboxEntry, Source};
+
+    for _ in 0..20 {
+        let mut moved = false;
+
+        // Client -> Edge
+        let client_outbox = client.sync_manager_mut().take_outbox();
+        for entry in client_outbox {
+            if matches!(entry.destination, Destination::Server(id) if id == edge_server_id_for_client)
+            {
+                moved = true;
+                edge.sync_manager_mut().push_inbox(InboxEntry {
+                    source: Source::Client(client_id_on_edge),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        // Edge -> (Client or Core)
+        let edge_outbox = edge.sync_manager_mut().take_outbox();
+        for entry in edge_outbox {
+            match entry.destination {
+                Destination::Client(id) if id == client_id_on_edge => {
+                    moved = true;
+                    client.sync_manager_mut().push_inbox(InboxEntry {
+                        source: Source::Server(edge_server_id_for_client),
+                        payload: entry.payload,
+                    });
+                }
+                Destination::Server(id) if id == core_server_id_for_edge => {
+                    moved = true;
+                    core.sync_manager_mut().push_inbox(InboxEntry {
+                        source: Source::Client(edge_id_on_core),
+                        payload: entry.payload,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Core -> Edge
+        let core_outbox = core.sync_manager_mut().take_outbox();
+        for entry in core_outbox {
+            if matches!(entry.destination, Destination::Client(id) if id == edge_id_on_core) {
+                moved = true;
+                edge.sync_manager_mut().push_inbox(InboxEntry {
+                    source: Source::Server(core_server_id_for_edge),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        if !moved {
+            break;
+        }
+
+        client.process(client_io);
+        edge.process(edge_io);
+        core.process(core_io);
+    }
+}
+
 /// E2E: Client subscribes to query, receives matching data from server.
 #[test]
 fn e2e_client_receives_server_data_via_subscription() {
@@ -6453,4 +6530,129 @@ fn e2e_permissions_prevent_new_row_sync() {
     let results = client.get_subscription_results(sub_id);
     assert_eq!(results.len(), 1, "Client should NOT receive Bob's doc");
     assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
+}
+
+/// E2E: In a 3-tier topology, upstream must sync policy-evaluation dependencies.
+///
+/// Scenario:
+/// - documents SELECT policy: owner_id = @session.user_id OR INHERITS SELECT VIA folder_id
+/// - core has folder(owner=alice) and document(owner=bob, folder=alice_folder)
+/// - alice queries documents from downstream client via edge
+///
+/// Expected:
+/// - core deems the document visible (via INHERITS)
+/// - edge must receive enough rows to re-evaluate the same policy and relay to client
+#[test]
+fn e2e_three_tier_policy_dependencies_must_sync_downstream() {
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    );
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("folders"),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                PolicyExpr::inherits(Operation::Select, "folder_id"),
+            ])),
+        ),
+    );
+
+    // Core (upstream) has data.
+    let (mut core, mut core_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let folder_id = core
+        .insert(
+            &mut core_io,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Alice folder".into()),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    core.insert(
+        &mut core_io,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Bob doc in Alice folder".into()),
+            Value::Uuid(folder_id),
+        ],
+    )
+    .unwrap();
+    core.process(&mut core_io);
+
+    // Edge (mid-tier) starts empty.
+    let (mut edge, mut edge_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    // Downstream client starts empty.
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    // Topology: client <-> edge <-> core
+    let edge_server_id_for_client = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id_on_edge = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let core_server_id_for_edge = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let edge_id_on_core = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client
+        .sync_manager_mut()
+        .add_server(edge_server_id_for_client);
+    edge.sync_manager_mut().add_client(client_id_on_edge);
+    edge.sync_manager_mut().add_server(core_server_id_for_edge);
+    core.sync_manager_mut().add_client(edge_id_on_core);
+
+    // Clear non-query bootstrap traffic.
+    let _ = client.sync_manager_mut().take_outbox();
+    let _ = edge.sync_manager_mut().take_outbox();
+    let _ = core.sync_manager_mut().take_outbox();
+
+    // Client subscribes as alice.
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    pump_messages_three_tier(
+        &mut client,
+        &mut edge,
+        &mut core,
+        &mut client_io,
+        &mut edge_io,
+        &mut core_io,
+        client_id_on_edge,
+        edge_server_id_for_client,
+        edge_id_on_core,
+        core_server_id_for_edge,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "Client should receive docs visible via INHERITS through edge in 3-tier sync"
+    );
 }
