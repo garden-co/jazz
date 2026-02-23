@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -44,6 +44,8 @@ const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
+type ClientSyncUpdate = (ClientId, u64, SyncPayload);
+type ClientSendSeqMap = Arc<Mutex<HashMap<ClientId, u64>>>;
 
 fn parse_test_delay_ms(raw: &str) -> Option<Duration> {
     let trimmed = raw.trim();
@@ -115,7 +117,8 @@ enum WorkerCommand {
     CreateRuntime {
         app_id: AppId,
         data_dir: PathBuf,
-        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
+        send_seq_by_client: ClientSendSeqMap,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     EnsureClientWithSession {
@@ -278,13 +281,15 @@ impl WorkerPool {
         &self,
         app_id: AppId,
         data_dir: PathBuf,
-        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
+        send_seq_by_client: ClientSendSeqMap,
     ) -> Result<(), WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::CreateRuntime {
             app_id,
             data_dir,
             sync_broadcast,
+            send_seq_by_client,
             response: response_tx,
         };
         let worker = self.send_command(command)?;
@@ -876,7 +881,8 @@ impl AppRuntime {
     fn new(
         app_id: AppId,
         data_dir: &Path,
-        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
+        send_seq_by_client: ClientSendSeqMap,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| {
             format!(
@@ -893,17 +899,33 @@ impl AppRuntime {
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
 
         let sync_tx_clone = sync_broadcast.clone();
+        let send_seq_by_client_clone = send_seq_by_client.clone();
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                let payload = entry.payload;
+                let mut payload = entry.payload;
+
+                let (last_seq, seq) = {
+                    let mut counters = send_seq_by_client_clone
+                        .lock()
+                        .expect("send sequence mutex poisoned");
+                    let last = counters.entry(client_id).or_insert(0);
+                    let last_seq = *last;
+                    *last += 1;
+                    (last_seq, *last)
+                };
+
+                if let SyncPayload::QuerySettled { through_seq, .. } = &mut payload {
+                    *through_seq = last_seq;
+                }
+
                 if let Some(delay) = test_delay_server_send_object_updated(&payload) {
                     let tx = sync_tx_clone.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(delay).await;
-                        let _ = tx.send((client_id, payload));
+                        let _ = tx.send((client_id, seq, payload));
                     });
                 } else {
-                    let _ = sync_tx_clone.send((client_id, payload));
+                    let _ = sync_tx_clone.send((client_id, seq, payload));
                 }
             }
         });
@@ -918,7 +940,8 @@ struct AppEntry {
     config: tokio::sync::RwLock<AppConfig>,
     connections: tokio::sync::RwLock<HashMap<u64, ConnectionState>>,
     next_connection_id: AtomicU64,
-    sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
+    send_seq_by_client: ClientSendSeqMap,
 }
 
 impl AppEntry {
@@ -926,7 +949,8 @@ impl AppEntry {
         app_id: AppId,
         meta_object_id: ObjectId,
         config: AppConfig,
-        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
+        send_seq_by_client: ClientSendSeqMap,
     ) -> Arc<Self> {
         Arc::new(Self {
             app_id,
@@ -935,6 +959,7 @@ impl AppEntry {
             connections: tokio::sync::RwLock::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
             sync_broadcast,
+            send_seq_by_client,
         })
     }
 }
@@ -971,14 +996,17 @@ async fn run_worker_loop(
                     app_id,
                     data_dir,
                     sync_broadcast,
+                    send_seq_by_client,
                     response,
                 } => {
                     let result = if let std::collections::hash_map::Entry::Vacant(entry) =
                         app_runtimes.entry(app_id)
                     {
-                        AppRuntime::new(app_id, &data_dir, sync_broadcast).map(|runtime| {
-                            entry.insert(runtime);
-                        })
+                        AppRuntime::new(app_id, &data_dir, sync_broadcast, send_seq_by_client).map(
+                            |runtime| {
+                                entry.insert(runtime);
+                            },
+                        )
                     } else {
                         Err(format!("app runtime already exists for {app_id}"))
                     };
@@ -1209,16 +1237,23 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         let app_id = row.app_id;
         let app_config = app_config_from_row(&row);
         let app_dir = data_root.join("apps").join(app_id.to_string());
-        let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
+        let (sync_tx, _) = tokio::sync::broadcast::channel::<ClientSyncUpdate>(256);
+        let send_seq_by_client: ClientSendSeqMap = Arc::new(Mutex::new(HashMap::new()));
 
         match workers
-            .create_runtime(app_id, app_dir, sync_tx.clone())
+            .create_runtime(app_id, app_dir, sync_tx.clone(), send_seq_by_client.clone())
             .await
         {
             Ok(()) => {
                 app_map.insert(
                     app_id,
-                    AppEntry::new(app_id, row.object_id, app_config, sync_tx),
+                    AppEntry::new(
+                        app_id,
+                        row.object_id,
+                        app_config,
+                        sync_tx,
+                        send_seq_by_client,
+                    ),
                 );
             }
             Err(err) => {
@@ -1932,6 +1967,15 @@ async fn events_handler(
         );
     }
 
+    // New stream connection defines a fresh sequencing epoch for this client.
+    {
+        let mut seqs = app
+            .send_seq_by_client
+            .lock()
+            .expect("send sequence mutex poisoned");
+        seqs.insert(client_id, 0);
+    }
+
     info!(
         app_id = %app_id,
         worker,
@@ -1943,11 +1987,13 @@ async fn events_handler(
     let mut sync_rx = app.sync_broadcast.subscribe();
     let app_cleanup = app.clone();
     let client_id_str = client_id.to_string();
+    let next_sync_seq = 1u64;
 
     let stream = async_stream::stream! {
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
+            next_sync_seq: Some(next_sync_seq),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
@@ -1957,9 +2003,12 @@ async fn events_handler(
             tokio::select! {
                 result = sync_rx.recv() => {
                     match result {
-                        Ok((target_client_id, payload)) => {
+                        Ok((target_client_id, seq, payload)) => {
                             if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate { payload: Box::new(payload) };
+                                let event = ServerEvent::SyncUpdate {
+                                    seq: Some(seq),
+                                    payload: Box::new(payload),
+                                };
                                 yield Ok(encode_frame(&event));
                             }
                         }
@@ -2130,11 +2179,17 @@ async fn create_app_handler(
 
     let app_config = app_config_from_row(&meta_row);
     let data_dir = state.app_data_dir(app_id);
-    let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
+    let (sync_tx, _) = tokio::sync::broadcast::channel::<ClientSyncUpdate>(256);
+    let send_seq_by_client: ClientSendSeqMap = Arc::new(Mutex::new(HashMap::new()));
 
     if let Err(err) = state
         .workers
-        .create_runtime(app_id, data_dir, sync_tx.clone())
+        .create_runtime(
+            app_id,
+            data_dir,
+            sync_tx.clone(),
+            send_seq_by_client.clone(),
+        )
         .await
     {
         let _ = state.meta_store.delete_app(meta_row.object_id).await;
@@ -2142,7 +2197,13 @@ async fn create_app_handler(
         return (status, Json(ErrorResponse::internal(message))).into_response();
     }
 
-    let app_entry = AppEntry::new(app_id, meta_row.object_id, app_config, sync_tx);
+    let app_entry = AppEntry::new(
+        app_id,
+        meta_row.object_id,
+        app_config,
+        sync_tx,
+        send_seq_by_client,
+    );
 
     if state.apps.write().await.insert(app_id, app_entry).is_some() {
         let _ = state.meta_store.delete_app(meta_row.object_id).await;

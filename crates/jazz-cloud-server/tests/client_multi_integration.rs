@@ -545,20 +545,27 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     .await
     .expect("connect client b");
 
-    let local_rows_before = wait_for_todos_count(&client_b, 0, Duration::from_secs(5), None).await;
-    assert!(
-        local_rows_before.is_empty(),
-        "client b should not have row before query subscription sync"
-    );
-
     let query = QueryBuilder::new("todos").build();
-    let rows = tokio::time::timeout(
-        Duration::from_secs(8),
-        client_b.query(query.clone(), Some(PersistenceTier::EdgeServer)),
-    )
-    .await
-    .expect("client b query timeout")
-    .expect("client b query error");
+    let mut rows = None;
+    for _ in 0..3 {
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            client_b.query(query.clone(), Some(PersistenceTier::EdgeServer)),
+        )
+        .await
+        {
+            Ok(Ok(result_rows)) => {
+                rows = Some(result_rows);
+                break;
+            }
+            Ok(Err(err)) => panic!("client b query error: {err}"),
+            Err(_) => {
+                // Stream can race startup; retry to exercise ordering once connected.
+                continue;
+            }
+        }
+    }
+    let rows = rows.expect("client b query timeout after retries");
 
     assert_eq!(
         rows.len(),

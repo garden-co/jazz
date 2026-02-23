@@ -148,6 +148,7 @@ impl JazzClient {
         // Clone server connection for sync callback
         let server_conn_for_sync = server_connection.clone();
         let client_id_for_sync = client_id;
+        let server_id = ServerId::default();
 
         // Create runtime with sync callback
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
@@ -176,11 +177,10 @@ impl JazzClient {
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         // Register server with sync manager if connected
-        if server_connection.is_some() {
-            let server_id = ServerId::default();
-            if let Err(e) = runtime.add_server(server_id) {
-                tracing::warn!("Failed to register server with sync manager: {}", e);
-            }
+        if server_connection.is_some()
+            && let Err(e) = runtime.add_server(server_id)
+        {
+            tracing::warn!("Failed to register server with sync manager: {}", e);
         }
 
         // Create shared subscription senders map
@@ -193,6 +193,7 @@ impl JazzClient {
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
             let stream_headers = conn.build_stream_headers();
+            let server_id_for_stream = server_id;
 
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
@@ -239,13 +240,10 @@ impl JazzClient {
 
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
-                                                    eprintln!(
-                                                        "DEBUG [client stream]: Parsed event: {:?}",
-                                                        event.variant_name()
-                                                    );
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
+                                                        server_id_for_stream,
                                                     ) {
                                                         tracing::warn!(
                                                             "Error handling server event: {}",
@@ -538,27 +536,43 @@ fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration>
 }
 
 /// Handle incoming server events.
-fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<SurrealKvStorage>) -> Result<()> {
+fn handle_server_event(
+    event: ServerEvent,
+    runtime: &TokioRuntime<SurrealKvStorage>,
+    server_id: ServerId,
+) -> Result<()> {
     match event {
         ServerEvent::Connected {
             connection_id,
             client_id,
+            next_sync_seq,
         } => {
             tracing::info!(
                 "Stream connected with id: {:?}, client_id: {}",
                 connection_id,
                 client_id
             );
+            if let Some(next_sequence) = next_sync_seq {
+                runtime
+                    .set_server_next_sequence(server_id, next_sequence)
+                    .map_err(|e| JazzError::Sync(e.to_string()))?;
+            }
             Ok(())
         }
-        ServerEvent::SyncUpdate { payload } => {
+        ServerEvent::SyncUpdate { seq, payload } => {
             let entry = InboxEntry {
-                source: Source::Server(ServerId::default()),
+                source: Source::Server(server_id),
                 payload: *payload,
             };
-            runtime
-                .push_sync_inbox(entry)
-                .map_err(|e| JazzError::Sync(e.to_string()))?;
+            if let Some(sequence) = seq {
+                runtime
+                    .push_sync_inbox_with_sequence(entry, sequence)
+                    .map_err(|e| JazzError::Sync(e.to_string()))?;
+            } else {
+                runtime
+                    .push_sync_inbox(entry)
+                    .map_err(|e| JazzError::Sync(e.to_string()))?;
+            }
             Ok(())
         }
         ServerEvent::Subscribed { query_id } => {
