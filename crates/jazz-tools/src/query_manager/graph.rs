@@ -538,6 +538,7 @@ impl QueryGraph {
         }
 
         // Output node
+        graph.combined_descriptor = current_descriptor.clone();
         let output_tuple_desc =
             TupleDescriptor::single_with_materialization("", current_descriptor, true);
         let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
@@ -789,6 +790,7 @@ impl QueryGraph {
         }
 
         // Output node
+        graph.combined_descriptor = current_descriptor.clone();
         let output_tuple_desc =
             TupleDescriptor::single_with_materialization("", current_descriptor, true);
         let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);

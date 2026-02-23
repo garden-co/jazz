@@ -3524,6 +3524,80 @@ fn array_subquery_single_user_with_posts() {
 }
 
 #[test]
+fn array_subquery_update_descriptor_includes_array_column() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Hello world".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts").correlate("author_id", "users.id")
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("should have subscription update");
+
+    assert_eq!(
+        update.descriptor.columns.len(),
+        3,
+        "Update descriptor should have 3 columns (base + array), got {}: {:?}",
+        update.descriptor.columns.len(),
+        update
+            .descriptor
+            .columns
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
+    );
+
+    let row_data = &update.delta.added[0].data;
+    let values =
+        decode_row(&update.descriptor, row_data).expect("should decode with update descriptor");
+
+    assert_eq!(values[0], Value::Integer(1), "user id");
+    assert_eq!(
+        values[1],
+        Value::Text("Alice".into()),
+        "user name should be 'Alice', not corrupted"
+    );
+
+    // The included posts array should contain the post we inserted
+    let posts = values[2]
+        .as_array()
+        .expect("third column should be the posts array");
+    assert_eq!(posts.len(), 1, "Alice should have 1 post");
+    let post_row = posts[0].as_row().expect("post element should be a Row");
+    assert_eq!(post_row[0], Value::Integer(100), "post id");
+    assert_eq!(post_row[1], Value::Text("Hello world".into()), "post title");
+    assert_eq!(post_row[2], Value::Integer(1), "post author_id");
+}
+
+#[test]
 fn array_subquery_user_with_no_posts() {
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
