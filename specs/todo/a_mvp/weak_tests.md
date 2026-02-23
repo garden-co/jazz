@@ -10,12 +10,6 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## Remaining Weak Assertions
 
-## 1. Ambiguous Pass Conditions (high priority)
-
-- `crates/groove/src/query_manager/manager_tests.rs:update_to_untracked_row_is_silent`
-  - Current: allows either no update or empty delta payload.
-  - Needed: assert one deterministic no-op path.
-
 ## 2. Shape-Only Assertions (high priority)
 
 - `crates/groove/src/query_manager/manager_tests.rs:insert_and_query`
