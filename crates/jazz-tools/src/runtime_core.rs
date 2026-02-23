@@ -1898,6 +1898,93 @@ mod tests {
     }
 
     #[test]
+    fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
+        let mut s = create_3tier_rc();
+
+        // Seed data on server B that client A has not synced yet.
+        let values = vec![
+            Value::Uuid(ObjectId::new()),
+            Value::Text("upstream-row".into()),
+        ];
+        let row_id = s.b.insert("users", values, None).unwrap();
+        s.b.immediate_tick();
+        s.b.batched_tick();
+        s.b.sync_sender().take();
+
+        // One-shot settled query on A should wait for Worker settlement.
+        let mut future =
+            s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "Query should be pending before Worker settlement"
+        );
+
+        // Deliver A -> B query subscription and let B compute response traffic.
+        pump_a_to_b(&mut s);
+        s.b.batched_tick();
+        let b_out = s.b.sync_sender().take();
+
+        // Force QuerySettled before ObjectUpdated to expose ordering assumptions.
+        let mut settled_to_a = Vec::new();
+        let mut updates_to_a = Vec::new();
+        for entry in b_out {
+            if entry.destination != Destination::Client(s.a_client_of_b) {
+                continue;
+            }
+            match entry.payload {
+                payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
+                payload @ SyncPayload::ObjectUpdated { .. } => updates_to_a.push(payload),
+                _ => {}
+            }
+        }
+
+        assert!(
+            !settled_to_a.is_empty(),
+            "Expected QuerySettled notification for A"
+        );
+        assert!(
+            !updates_to_a.is_empty(),
+            "Expected ObjectUpdated payload for A"
+        );
+
+        for payload in settled_to_a {
+            s.a.park_sync_message(InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload,
+            });
+        }
+        s.a.batched_tick();
+        s.a.immediate_tick();
+
+        // This assertion is intentionally strict and currently fails:
+        // one-shot query resolves before data arrives and unsubscribes.
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Ok(results)) => {
+                assert_eq!(
+                    results.len(),
+                    1,
+                    "BUG: settled query resolved without upstream ObjectUpdated rows"
+                );
+                assert_eq!(results[0].0, row_id);
+            }
+            Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+            Poll::Pending => panic!("Query should have resolved after QuerySettled"),
+        }
+
+        for payload in updates_to_a {
+            s.a.park_sync_message(InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload,
+            });
+        }
+        s.a.batched_tick();
+        s.a.immediate_tick();
+    }
+
+    #[test]
     fn rc_subscribe_settled_tier() {
         let mut s = create_3tier_rc();
 

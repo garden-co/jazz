@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
@@ -14,7 +15,7 @@ use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
 use groove::storage::{Storage, StorageError, SurrealKvStorage};
 use groove::sync_manager::{
-    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
+    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -151,23 +152,21 @@ impl JazzClient {
         // Create runtime with sync callback
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             // Send to server if connected and destination is server
-            if let Destination::Server(_) = entry.destination {
-                eprintln!(
-                    "DEBUG [client sync_cb]: Sending to server: {:?}",
-                    entry.payload.variant_name()
-                );
-                if let Some(ref conn) = server_conn_for_sync {
-                    let conn = conn.clone();
-                    let payload = entry.payload.clone();
-                    let cid = client_id_for_sync;
-                    tokio::spawn(async move {
-                        if let Err(e) = conn.push_sync(payload, cid).await {
-                            tracing::warn!("Failed to push sync to server: {}", e);
-                        }
-                    });
-                } else {
-                    eprintln!("DEBUG [client sync_cb]: No server connection!");
-                }
+            if let Destination::Server(_) = entry.destination
+                && let Some(ref conn) = server_conn_for_sync
+            {
+                let conn = conn.clone();
+                let payload = entry.payload.clone();
+                let cid = client_id_for_sync;
+                tokio::spawn(async move {
+                    if let Some(delay) = test_send_delay_for_object_updated(&payload) {
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    if let Err(e) = conn.push_sync(payload, cid).await {
+                        tracing::warn!("Failed to push sync to server: {}", e);
+                    }
+                });
             }
         });
 
@@ -497,6 +496,45 @@ impl<'a> SessionClient<'a> {
             .subscribe_internal(query, Some(self.session.clone()))
             .await
     }
+}
+
+fn parse_delay_ms(raw: &str) -> Option<Duration> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((min_raw, max_raw)) = trimmed.split_once('-') {
+        let min = min_raw.trim().parse::<u64>().ok()?;
+        let max = max_raw.trim().parse::<u64>().ok()?;
+        if min > max {
+            return None;
+        }
+        return Some(Duration::from_millis(min + ((max - min) / 2)));
+    }
+
+    trimmed.parse::<u64>().ok().map(Duration::from_millis)
+}
+
+fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
+    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
+        return None;
+    }
+
+    let delay = parse_delay_ms(&std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_MS").ok()?)?;
+    let every_n = std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2);
+
+    static OBJECT_UPDATED_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
+    let seq = OBJECT_UPDATED_SEND_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if !seq.is_multiple_of(every_n) {
+        return None;
+    }
+
+    Some(delay)
 }
 
 /// Handle incoming server events.
