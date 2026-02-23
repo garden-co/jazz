@@ -12,13 +12,14 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
-import { WorkerBridge } from "./worker-bridge.js";
+import { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
+import { TabLeaderElection, type LeaderSnapshot } from "./tab-leader-election.js";
 
 /**
  * Configuration for creating a Db instance.
@@ -238,6 +239,12 @@ export class Db {
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private bridgeReady: Promise<void> | null = null;
+  private primaryDbName: string | null = null;
+  private workerDbName: string | null = null;
+  private leaderElection: TabLeaderElection | null = null;
+  private leaderElectionUnsubscribe: (() => void) | null = null;
+  private workerReconfigure: Promise<void> = Promise.resolve();
+  private isShuttingDown = false;
 
   /**
    * Private constructor - use createDb() factory function.
@@ -268,35 +275,43 @@ export class Db {
   static async createWithWorker(config: DbConfig): Promise<Db> {
     const wasmModule = await loadWasmModule();
     const db = new Db(config, wasmModule);
+    db.primaryDbName = config.dbName ?? config.appId;
+    db.workerDbName = db.primaryDbName;
 
-    // Spawn dedicated worker
-    const worker = new Worker(new URL("../worker/groove-worker.js", import.meta.url), {
-      type: "module",
-    });
-    db.worker = worker;
-
-    // Wait for worker to load WASM
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Worker WASM load timeout")), 15000);
-      const handler = (event: MessageEvent) => {
-        if (event.data.type === "ready") {
-          clearTimeout(timeout);
-          worker.removeEventListener("message", handler);
-          resolve();
-        } else if (event.data.type === "error") {
-          clearTimeout(timeout);
-          worker.removeEventListener("message", handler);
-          reject(new Error(event.data.message));
-        }
-      };
-      worker.addEventListener("message", handler);
-      worker.addEventListener("error", (e) => {
-        clearTimeout(timeout);
-        reject(new Error(`Worker load error: ${e.message}`));
+    try {
+      const election = new TabLeaderElection({
+        appId: config.appId,
+        dbName: db.primaryDbName,
       });
-    });
+      db.leaderElection = election;
+      election.start();
 
-    return db;
+      let initialLeader: LeaderSnapshot | null = null;
+      try {
+        initialLeader = await election.waitForInitialLeader(600);
+      } catch {
+        // Fall back to whatever state election has reached so far.
+        initialLeader = election.snapshot();
+      }
+      db.workerDbName = Db.resolveWorkerDbNameForSnapshot(db.primaryDbName, initialLeader);
+      db.leaderElectionUnsubscribe = election.onChange((snapshot) => {
+        db.onLeaderElectionChange(snapshot);
+      });
+
+      db.worker = await Db.spawnWorker();
+
+      return db;
+    } catch (error) {
+      if (db.leaderElectionUnsubscribe) {
+        db.leaderElectionUnsubscribe();
+        db.leaderElectionUnsubscribe = null;
+      }
+      if (db.leaderElection) {
+        db.leaderElection.stop();
+        db.leaderElection = null;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -329,25 +344,7 @@ export class Db {
 
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
-        const bridge = new WorkerBridge(this.worker, client.getRuntime());
-        this.workerBridge = bridge;
-
-        // Initialize worker — store promise so async methods can await it
-        this.bridgeReady = bridge
-          .init({
-            schemaJson: JSON.stringify(schema),
-            appId: this.config.appId,
-            env: this.config.env ?? "dev",
-            userBranch: this.config.userBranch ?? "main",
-            dbName: this.config.dbName ?? this.config.appId,
-            serverUrl: this.config.serverUrl,
-            serverPathPrefix: this.config.serverPathPrefix,
-            jwtToken: this.config.jwtToken,
-            localAuthMode: this.config.localAuthMode,
-            localAuthToken: this.config.localAuthToken,
-            adminSecret: this.config.adminSecret,
-          })
-          .then(() => undefined);
+        this.attachWorkerBridge(key, client);
       }
 
       this.clients.set(key, client);
@@ -361,9 +358,128 @@ export class Db {
    * No-op if not using a worker.
    */
   private async ensureBridgeReady(): Promise<void> {
+    await this.workerReconfigure;
     if (this.bridgeReady) {
       await this.bridgeReady;
     }
+  }
+
+  private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
+    if (!this.worker) {
+      throw new Error("Cannot attach worker bridge without an active worker");
+    }
+
+    const bridge = new WorkerBridge(this.worker, client.getRuntime());
+    this.workerBridge = bridge;
+    this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+  }
+
+  private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
+    return {
+      schemaJson,
+      appId: this.config.appId,
+      env: this.config.env ?? "dev",
+      userBranch: this.config.userBranch ?? "main",
+      dbName: this.workerDbName ?? this.config.dbName ?? this.config.appId,
+      serverUrl: this.config.serverUrl,
+      serverPathPrefix: this.config.serverPathPrefix,
+      jwtToken: this.config.jwtToken,
+      localAuthMode: this.config.localAuthMode,
+      localAuthToken: this.config.localAuthToken,
+      adminSecret: this.config.adminSecret,
+    };
+  }
+
+  private onLeaderElectionChange(snapshot: LeaderSnapshot): void {
+    if (this.isShuttingDown || !this.primaryDbName) return;
+
+    const nextDbName = Db.resolveWorkerDbNameForSnapshot(this.primaryDbName, snapshot);
+    if (nextDbName === this.workerDbName) return;
+
+    this.workerDbName = nextDbName;
+
+    // No bridge means no OPFS handles have been opened yet.
+    if (!this.workerBridge) return;
+
+    this.enqueueWorkerReconfigure(async () => {
+      if (this.isShuttingDown) return;
+      await this.restartWorkerWithCurrentDbName();
+    });
+  }
+
+  private enqueueWorkerReconfigure(task: () => Promise<void>): void {
+    this.workerReconfigure = this.workerReconfigure.then(task).catch((error) => {
+      console.error("[db] Worker reconfigure failed:", error);
+    });
+  }
+
+  private async restartWorkerWithCurrentDbName(): Promise<void> {
+    const currentWorker = this.worker;
+    if (!currentWorker) return;
+
+    // If bridge init is in flight, wait before tearing down.
+    if (this.bridgeReady) {
+      await this.bridgeReady;
+    }
+
+    if (this.workerBridge) {
+      try {
+        await this.workerBridge.shutdown(currentWorker);
+      } catch {
+        // Best effort
+      }
+      this.workerBridge = null;
+    }
+    this.bridgeReady = null;
+
+    currentWorker.terminate();
+    this.worker = await Db.spawnWorker();
+
+    // Re-attach immediately for existing client runtime(s) so subscriptions replay.
+    const first = this.clients.entries().next();
+    if (!first.done) {
+      const [schemaJson, client] = first.value;
+      this.attachWorkerBridge(schemaJson, client);
+      if (this.bridgeReady) {
+        await this.bridgeReady;
+      }
+    }
+  }
+
+  private static resolveWorkerDbNameForSnapshot(
+    primaryDbName: string,
+    snapshot: LeaderSnapshot,
+  ): string {
+    if (snapshot.role === "leader") return primaryDbName;
+    return `${primaryDbName}__fallback__${snapshot.tabId}`;
+  }
+
+  private static async spawnWorker(): Promise<Worker> {
+    const worker = new Worker(new URL("../worker/groove-worker.js", import.meta.url), {
+      type: "module",
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Worker WASM load timeout")), 15000);
+      const handler = (event: MessageEvent) => {
+        if (event.data.type === "ready") {
+          clearTimeout(timeout);
+          worker.removeEventListener("message", handler);
+          resolve();
+        } else if (event.data.type === "error") {
+          clearTimeout(timeout);
+          worker.removeEventListener("message", handler);
+          reject(new Error(event.data.message));
+        }
+      };
+      worker.addEventListener("message", handler);
+      worker.addEventListener("error", (e) => {
+        clearTimeout(timeout);
+        reject(new Error(`Worker load error: ${e.message}`));
+      });
+    });
+
+    return worker;
   }
 
   /**
@@ -620,6 +736,18 @@ export class Db {
    * Closes all memoized JazzClient connections and the worker.
    */
   async shutdown(): Promise<void> {
+    this.isShuttingDown = true;
+    if (this.leaderElectionUnsubscribe) {
+      this.leaderElectionUnsubscribe();
+      this.leaderElectionUnsubscribe = null;
+    }
+    if (this.leaderElection) {
+      this.leaderElection.stop();
+      this.leaderElection = null;
+    }
+
+    await this.workerReconfigure;
+
     // Ensure bridge init has completed before sending shutdown —
     // otherwise the worker may still be opening OPFS handles
     await this.ensureBridgeReady();
