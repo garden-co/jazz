@@ -230,4 +230,34 @@ describe("WorkerBridge", () => {
       },
     ]);
   });
+
+  it("can redirect outgoing server payloads and replay upstream connection", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+    const redirected: string[] = [];
+
+    bridge.setServerPayloadForwarder((payload) => {
+      redirected.push(payload);
+    });
+    runtimeMock.emitSyncEnvelope({
+      destination: { Server: {} },
+      payload: { routed: "peer" },
+    });
+    await Promise.resolve();
+
+    const workerSyncMessages = worker.posted.filter(
+      (entry): entry is { type: "sync"; payload: string[] } =>
+        typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
+    );
+    expect(workerSyncMessages).toHaveLength(0);
+    expect(redirected).toEqual([JSON.stringify({ routed: "peer" })]);
+
+    bridge.replayServerConnection();
+    expect(runtimeMock.removeServerCalls.count).toBe(1);
+    expect(runtimeMock.addServerCalls.count).toBe(2);
+
+    bridge.applyIncomingServerPayload("from-peer-leader");
+    expect(runtimeMock.receivedFromWorker).toEqual(["from-peer-leader"]);
+  });
 });

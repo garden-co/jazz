@@ -12,14 +12,14 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
-import { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
+import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
-import { TabLeaderElection, type LeaderSnapshot } from "./tab-leader-election.js";
+import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 
 /**
  * Configuration for creating a Db instance.
@@ -209,6 +209,81 @@ export interface TableProxy<T, Init> {
   readonly _initType: Init;
 }
 
+interface BroadcastChannelLike {
+  postMessage(data: unknown): void;
+  addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
+  removeEventListener(type: "message", listener: (event: MessageEvent) => void): void;
+  close(): void;
+}
+
+interface FollowerSyncMessage {
+  type: "follower-sync";
+  fromTabId: string;
+  toLeaderTabId: string;
+  term: number;
+  payload: string[];
+}
+
+interface LeaderSyncMessage {
+  type: "leader-sync";
+  fromLeaderTabId: string;
+  toTabId: string;
+  term: number;
+  payload: string[];
+}
+
+interface FollowerCloseMessage {
+  type: "follower-close";
+  fromTabId: string;
+  toLeaderTabId: string;
+  term: number;
+}
+
+type TabSyncMessage = FollowerSyncMessage | LeaderSyncMessage | FollowerCloseMessage;
+
+function resolveBroadcastChannelCtor(): (new (name: string) => BroadcastChannelLike) | null {
+  const ctor = (globalThis as { BroadcastChannel?: unknown }).BroadcastChannel;
+  if (typeof ctor !== "function") return null;
+  return ctor as new (name: string) => BroadcastChannelLike;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isTabSyncMessage(value: unknown): value is TabSyncMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const message = value as Record<string, unknown>;
+
+  if (message.type === "follower-sync") {
+    return (
+      typeof message.fromTabId === "string" &&
+      typeof message.toLeaderTabId === "string" &&
+      typeof message.term === "number" &&
+      isStringArray(message.payload)
+    );
+  }
+
+  if (message.type === "leader-sync") {
+    return (
+      typeof message.fromLeaderTabId === "string" &&
+      typeof message.toTabId === "string" &&
+      typeof message.term === "number" &&
+      isStringArray(message.payload)
+    );
+  }
+
+  if (message.type === "follower-close") {
+    return (
+      typeof message.fromTabId === "string" &&
+      typeof message.toLeaderTabId === "string" &&
+      typeof message.term === "number"
+    );
+  }
+
+  return false;
+}
+
 /**
  * High-level database interface for typed queries and mutations.
  *
@@ -243,8 +318,18 @@ export class Db {
   private workerDbName: string | null = null;
   private leaderElection: TabLeaderElection | null = null;
   private leaderElectionUnsubscribe: (() => void) | null = null;
+  private tabRole: LeaderRole = "follower";
+  private tabId: string | null = null;
+  private currentLeaderTabId: string | null = null;
+  private currentLeaderTerm = 0;
+  private syncChannel: BroadcastChannelLike | null = null;
+  private readonly leaderPeerIds = new Set<string>();
+  private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private isShuttingDown = false;
+  private readonly onSyncChannelMessage = (event: MessageEvent): void => {
+    this.handleSyncChannelMessage(event.data);
+  };
 
   /**
    * Private constructor - use createDb() factory function.
@@ -293,7 +378,9 @@ export class Db {
         // Fall back to whatever state election has reached so far.
         initialLeader = election.snapshot();
       }
+      db.adoptLeaderSnapshot(initialLeader);
       db.workerDbName = Db.resolveWorkerDbNameForSnapshot(db.primaryDbName, initialLeader);
+      db.openSyncChannel();
       db.leaderElectionUnsubscribe = election.onChange((snapshot) => {
         db.onLeaderElectionChange(snapshot);
       });
@@ -302,6 +389,7 @@ export class Db {
 
       return db;
     } catch (error) {
+      db.closeSyncChannel();
       if (db.leaderElectionUnsubscribe) {
         db.leaderElectionUnsubscribe();
         db.leaderElectionUnsubscribe = null;
@@ -370,6 +458,11 @@ export class Db {
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
+    this.leaderPeerIds.clear();
+    bridge.onPeerSync((batch) => {
+      this.handleWorkerPeerSync(batch);
+    });
+    this.applyBridgeRoutingForCurrentLeader(bridge, false);
     this.workerBridge = bridge;
     this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
   }
@@ -390,20 +483,171 @@ export class Db {
     };
   }
 
+  private adoptLeaderSnapshot(snapshot: LeaderSnapshot): void {
+    this.tabRole = snapshot.role;
+    this.tabId = snapshot.tabId;
+    this.currentLeaderTabId = snapshot.leaderTabId;
+    this.currentLeaderTerm = snapshot.term;
+  }
+
+  private openSyncChannel(): void {
+    if (this.syncChannel || !this.primaryDbName) return;
+    const ChannelCtor = resolveBroadcastChannelCtor();
+    if (!ChannelCtor) return;
+
+    const channelName = `jazz-tab-sync:${this.config.appId}:${this.primaryDbName}`;
+    this.syncChannel = new ChannelCtor(channelName);
+    this.syncChannel.addEventListener("message", this.onSyncChannelMessage);
+  }
+
+  private closeSyncChannel(): void {
+    if (!this.syncChannel) return;
+    this.syncChannel.removeEventListener("message", this.onSyncChannelMessage);
+    this.syncChannel.close();
+    this.syncChannel = null;
+  }
+
+  private postSyncChannelMessage(message: TabSyncMessage): void {
+    this.syncChannel?.postMessage(message);
+  }
+
+  private handleSyncChannelMessage(raw: unknown): void {
+    if (this.isShuttingDown || !this.tabId) return;
+    if (!isTabSyncMessage(raw)) return;
+
+    switch (raw.type) {
+      case "follower-sync":
+        this.handleFollowerSync(raw);
+        return;
+      case "leader-sync":
+        this.handleLeaderSync(raw);
+        return;
+      case "follower-close":
+        this.handleFollowerClose(raw);
+        return;
+    }
+  }
+
+  private handleFollowerSync(message: FollowerSyncMessage): void {
+    if (this.tabRole !== "leader") return;
+    if (!this.workerBridge) return;
+    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+
+    if (!this.leaderPeerIds.has(message.fromTabId)) {
+      this.leaderPeerIds.add(message.fromTabId);
+      this.workerBridge.openPeer(message.fromTabId);
+    }
+    this.workerBridge.sendPeerSync(message.fromTabId, message.term, message.payload);
+  }
+
+  private handleLeaderSync(message: LeaderSyncMessage): void {
+    if (this.tabRole !== "follower") return;
+    if (!this.workerBridge) return;
+    if (!this.tabId || message.toTabId !== this.tabId) return;
+    if (!this.currentLeaderTabId || message.fromLeaderTabId !== this.currentLeaderTabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+
+    for (const payload of message.payload) {
+      this.workerBridge.applyIncomingServerPayload(payload);
+    }
+  }
+
+  private handleFollowerClose(message: FollowerCloseMessage): void {
+    if (this.tabRole !== "leader") return;
+    if (!this.workerBridge) return;
+    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+    if (!this.leaderPeerIds.has(message.fromTabId)) return;
+
+    this.leaderPeerIds.delete(message.fromTabId);
+    this.workerBridge.closePeer(message.fromTabId);
+  }
+
+  private handleWorkerPeerSync(batch: PeerSyncBatch): void {
+    if (this.isShuttingDown) return;
+    if (this.tabRole !== "leader") return;
+    if (!this.tabId) return;
+    if (batch.term !== this.currentLeaderTerm) return;
+
+    this.postSyncChannelMessage({
+      type: "leader-sync",
+      fromLeaderTabId: this.tabId,
+      toTabId: batch.peerId,
+      term: batch.term,
+      payload: batch.payload,
+    });
+  }
+
+  private sendFollowerClose(leaderTabId: string | null, term: number): void {
+    if (!leaderTabId || !this.tabId) return;
+    if (leaderTabId === this.tabId) return;
+
+    this.postSyncChannelMessage({
+      type: "follower-close",
+      fromTabId: this.tabId,
+      toLeaderTabId: leaderTabId,
+      term,
+    });
+  }
+
+  private applyBridgeRoutingForCurrentLeader(
+    bridge: WorkerBridge,
+    replayConnection: boolean,
+  ): void {
+    if (this.tabRole === "leader") {
+      bridge.setServerPayloadForwarder(null);
+      this.activeRemoteLeaderTabId = null;
+    } else {
+      bridge.setServerPayloadForwarder((payload) => {
+        if (!this.tabId || !this.currentLeaderTabId) return;
+        if (this.currentLeaderTabId === this.tabId) return;
+
+        this.postSyncChannelMessage({
+          type: "follower-sync",
+          fromTabId: this.tabId,
+          toLeaderTabId: this.currentLeaderTabId,
+          term: this.currentLeaderTerm,
+          payload: [payload],
+        });
+      });
+      this.activeRemoteLeaderTabId = this.currentLeaderTabId;
+    }
+
+    if (replayConnection) {
+      bridge.replayServerConnection();
+    }
+  }
+
   private onLeaderElectionChange(snapshot: LeaderSnapshot): void {
     if (this.isShuttingDown || !this.primaryDbName) return;
 
-    const nextDbName = Db.resolveWorkerDbNameForSnapshot(this.primaryDbName, snapshot);
-    if (nextDbName === this.workerDbName) return;
+    const previousRole = this.tabRole;
+    const previousLeaderTabId = this.currentLeaderTabId;
+    const previousTerm = this.currentLeaderTerm;
+    this.adoptLeaderSnapshot(snapshot);
 
+    if (previousRole === "follower" && previousLeaderTabId !== this.currentLeaderTabId) {
+      this.sendFollowerClose(previousLeaderTabId, previousTerm);
+    }
+
+    const nextDbName = Db.resolveWorkerDbNameForSnapshot(this.primaryDbName, snapshot);
+    const dbNameChanged = nextDbName !== this.workerDbName;
     this.workerDbName = nextDbName;
 
-    // No bridge means no OPFS handles have been opened yet.
+    // No bridge means no runtime server edge exists yet.
     if (!this.workerBridge) return;
 
     this.enqueueWorkerReconfigure(async () => {
       if (this.isShuttingDown) return;
-      await this.restartWorkerWithCurrentDbName();
+      if (dbNameChanged) {
+        await this.restartWorkerWithCurrentDbName();
+        return;
+      }
+
+      if (this.workerBridge) {
+        this.applyBridgeRoutingForCurrentLeader(this.workerBridge, true);
+      }
     });
   }
 
@@ -737,6 +981,11 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
+    this.activeRemoteLeaderTabId = null;
+    this.leaderPeerIds.clear();
+    this.closeSyncChannel();
+
     if (this.leaderElectionUnsubscribe) {
       this.leaderElectionUnsubscribe();
       this.leaderElectionUnsubscribe = null;
