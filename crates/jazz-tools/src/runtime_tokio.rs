@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{Schema, Value};
+use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
     QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta,
@@ -432,6 +432,27 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn current_schema(&self) -> Result<Schema, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.current_schema().clone())
+    }
+
+    /// Get any known schema from catalogue state.
+    ///
+    /// This is primarily useful in server mode where no single current schema
+    /// exists, but known schemas are learned through catalogue sync.
+    pub fn any_known_schema(&self) -> Result<Option<Schema>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().any_known_schema().cloned())
+    }
+
+    /// Return all known schema hashes (for server mode).
+    pub fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().known_schema_hashes())
+    }
+
+    /// Get a known schema by hash from catalogue state.
+    pub fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
     /// Access the underlying storage (for flushing, etc).
