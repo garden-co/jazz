@@ -38,6 +38,35 @@ describe("TS Query API", () => {
     expect(results[0].name).toBe("Project A");
   });
 
+  it("text is not corrupted when using include", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        dbName: uniqueDbName("include-corruption"),
+      }),
+    );
+
+    const projectId = db.insert(app.projects, { name: "Announcements" });
+    const todoId = db.insert(app.todos, {
+      title: "Hello world",
+      done: false,
+      tags: ["general"],
+      project: projectId,
+    });
+
+    const baseline = await db.all(app.todos.where({ id: { eq: todoId } }));
+    expect(baseline[0].title).toBe("Hello world");
+
+    const withInclude = await db.all(
+      app.todos
+        .where({ id: { eq: todoId } })
+        .include({ project: true }),
+    );
+
+    expect(withInclude.length).toBe(1);
+    expect(withInclude[0].title).toBe("Hello world");
+  });
+
   describe("query by array column", () => {
     it("using eq", async () => {
       const db = track(
