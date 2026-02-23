@@ -260,4 +260,26 @@ describe("WorkerBridge", () => {
     bridge.applyIncomingServerPayload("from-peer-leader");
     expect(runtimeMock.receivedFromWorker).toEqual(["from-peer-leader"]);
   });
+
+  it("forwards lifecycle hints to worker", () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    bridge.sendLifecycleHint("visibility-hidden");
+    bridge.sendLifecycleHint("resume");
+
+    expect(worker.posted).toMatchObject([
+      {
+        type: "lifecycle-hint",
+        event: "visibility-hidden",
+      },
+      {
+        type: "lifecycle-hint",
+        event: "resume",
+      },
+    ]);
+    expect((worker.posted[0] as any).sentAtMs).toEqual(expect.any(Number));
+    expect((worker.posted[1] as any).sentAtMs).toEqual(expect.any(Number));
+  });
 });

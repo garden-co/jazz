@@ -7,7 +7,11 @@
  */
 
 import type { Runtime } from "./client.js";
-import type { InitMessage, WorkerToMainMessage } from "../worker/worker-protocol.js";
+import type {
+  InitMessage,
+  WorkerLifecycleEvent,
+  WorkerToMainMessage,
+} from "../worker/worker-protocol.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -140,6 +144,15 @@ export class WorkerBridge {
     localAuthToken?: string;
   }): void {
     this.worker.postMessage({ type: "update-auth", ...auth });
+  }
+
+  sendLifecycleHint(event: WorkerLifecycleEvent): void {
+    if (this.disposed) return;
+    this.worker.postMessage({
+      type: "lifecycle-hint",
+      event,
+      sentAtMs: Date.now(),
+    });
   }
 
   /**

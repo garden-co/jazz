@@ -112,6 +112,13 @@ describe("Worker Bridge with OPFS", () => {
     return db;
   }
 
+  function untrack(db: Db): void {
+    const index = dbs.indexOf(db);
+    if (index >= 0) {
+      dbs.splice(index, 1);
+    }
+  }
+
   function getTabRole(db: Db): "leader" | "follower" | null {
     const role = (db as any).tabRole;
     if (role === "leader" || role === "follower") {
@@ -150,6 +157,30 @@ describe("Worker Bridge with OPFS", () => {
       return { leader: b, follower: a };
     }
     throw new Error("Unable to determine leader/follower roles");
+  }
+
+  async function waitForSingleLeader(tabs: Db[]): Promise<Db> {
+    await waitForCondition(
+      async () => {
+        let leaders = 0;
+        let knownRoles = 0;
+        for (const tab of tabs) {
+          const role = getTabRole(tab);
+          if (!role) continue;
+          knownRoles += 1;
+          if (role === "leader") leaders += 1;
+        }
+        return knownRoles === tabs.length && leaders === 1;
+      },
+      12000,
+      "Expected exactly one elected leader across tabs",
+    );
+
+    const leader = tabs.find((tab) => getTabRole(tab) === "leader");
+    if (!leader) {
+      throw new Error("Expected one leader after convergence");
+    }
+    return leader;
   }
 
   afterEach(async () => {
@@ -383,6 +414,29 @@ describe("Worker Bridge with OPFS", () => {
     unsub();
   });
 
+  it("forwards page lifecycle hints from main thread to worker bridge", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("lifecycle") }));
+
+    db.insert(todos, { title: "Prime bridge", done: false });
+    await (db as any).ensureBridgeReady();
+
+    const bridge = (db as any).workerBridge;
+    expect(bridge).toBeTruthy();
+
+    const seenEvents: string[] = [];
+    const originalSendLifecycleHint = bridge.sendLifecycleHint.bind(bridge);
+    bridge.sendLifecycleHint = (event: string) => {
+      seenEvents.push(event);
+      originalSendLifecycleHint(event);
+    };
+
+    (db as any).onPageHide();
+    (db as any).onPageFreeze();
+    (db as any).onPageResume();
+
+    expect(seenEvents).toEqual(["pagehide", "freeze", "resume"]);
+  });
+
   // -------------------------------------------------------------------------
   // 7. Server sync through worker
   // -------------------------------------------------------------------------
@@ -462,10 +516,7 @@ describe("Worker Bridge with OPFS", () => {
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
 
     await leader.shutdown();
-    const leaderIndex = dbs.indexOf(leader);
-    if (leaderIndex >= 0) {
-      dbs.splice(leaderIndex, 1);
-    }
+    untrack(leader);
 
     await waitForCondition(
       async () => getTabRole(follower) === "leader",
@@ -481,6 +532,41 @@ describe("Worker Bridge with OPFS", () => {
       },
       8000,
       "New leader should continue processing writes after failover",
+    );
+  });
+
+  it("re-elects cleanly when a closed leader tab is reopened", async () => {
+    const dbName = uniqueDbName("leader-reopen");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader: initialLeader, follower: survivor } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await initialLeader.shutdown();
+    untrack(initialLeader);
+
+    await waitForCondition(
+      async () => getTabRole(survivor) === "leader",
+      12000,
+      "Surviving tab should become leader after leader closes",
+    );
+
+    const reopened = track(await createDb({ appId: "test-app", dbName }));
+    const currentLeader = await waitForSingleLeader([survivor, reopened]);
+    const currentFollower = currentLeader === survivor ? reopened : survivor;
+
+    const marker = `reopen-${Date.now()}`;
+    currentFollower.insert(todos, { title: marker, done: false });
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await currentLeader.all(allTodos, "worker");
+        const followerRows = await currentFollower.all(allTodos, "worker");
+        const leaderHas = leaderRows.some((row) => row.title === marker);
+        const followerHas = followerRows.some((row) => row.title === marker);
+        return leaderHas && followerHas;
+      },
+      8000,
+      "Reopened tab and current leader should converge after re-election",
     );
   });
 });

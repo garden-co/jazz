@@ -1,10 +1,27 @@
 /**
  * Cross-tab leader election for browser tabs using BroadcastChannel.
  *
+ * Lifecycle (per tab):
+ *
+ *   start
+ *     |
+ *     +--> request current leader
+ *     +--> arm initial-election timeout
+ *     |
+ *     +--> receive heartbeat/claim --------> follower (lease deadline armed)
+ *     |                                         |
+ *     |                                         +--> lease deadline expires
+ *     |                                               without heartbeat
+ *     |                                               |
+ *     +-----------------------------------------------+--> promote self to leader
+ *                                                           |
+ *                                                           +--> emit claim + heartbeat
+ *                                                           +--> send periodic heartbeats
+ *
  * Election model:
  * - Each tab has a stable random tab ID.
  * - Leaders send periodic heartbeats with term + leader ID.
- * - Followers start an election when leader lease expires.
+ * - Followers start an election when the lease deadline expires.
  * - Higher term always wins; same-term ties are broken by tab ID.
  */
 
@@ -60,8 +77,10 @@ interface BroadcastChannelLike {
 function randomTabId(): string {
   const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
   if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    // Prefer UUID when available to minimize collision risk across tabs/processes.
     return cryptoObj.randomUUID();
   }
+  // Fallback for environments lacking randomUUID (still sufficient for local tie-breaks).
   return `tab-${Math.random().toString(36).slice(2, 12)}`;
 }
 
@@ -115,7 +134,7 @@ export class TabLeaderElection {
   private lastLeaderSeenAtMs = 0;
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private leaseTimer: ReturnType<typeof setInterval> | null = null;
+  private leaseDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private initialElectionTimer: ReturnType<typeof setTimeout> | null = null;
 
   private readonly listeners = new Set<LeaderChangeListener>();
@@ -163,13 +182,8 @@ export class TabLeaderElection {
       requesterTabId: this.tabId,
     });
 
-    this.leaseTimer = setInterval(
-      () => {
-        this.checkLease();
-      },
-      Math.max(100, Math.floor(this.heartbeatMs / 2)),
-    );
-
+    // Startup liveness guard:
+    // if request/heartbeat messages are dropped or delayed, this tab must not wait forever.
     this.initialElectionTimer = setTimeout(() => {
       if (!this.leaderTabId) {
         this.promoteToLeader(this.term + 1);
@@ -189,10 +203,7 @@ export class TabLeaderElection {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    if (this.leaseTimer) {
-      clearInterval(this.leaseTimer);
-      this.leaseTimer = null;
-    }
+    this.clearLeaseDeadlineTimer();
     if (this.channel) {
       this.channel.removeEventListener("message", this.onMessage);
       this.channel.close();
@@ -272,6 +283,7 @@ export class TabLeaderElection {
 
     this.setLeader(message.leaderTabId, message.term);
     this.lastLeaderSeenAtMs = this.now();
+    this.scheduleLeaseDeadlineCheck();
   }
 
   private handleLeaderClaim(message: LeaderClaimMessage): void {
@@ -286,19 +298,7 @@ export class TabLeaderElection {
 
     this.setLeader(message.candidateTabId, message.term);
     this.lastLeaderSeenAtMs = this.now();
-  }
-
-  private checkLease(): void {
-    if (this.role === "leader") return;
-    if (!this.leaderTabId) {
-      this.promoteToLeader(this.term + 1);
-      return;
-    }
-
-    const elapsed = this.now() - this.lastLeaderSeenAtMs;
-    if (elapsed >= this.leaseMs) {
-      this.promoteToLeader(this.term + 1);
-    }
+    this.scheduleLeaseDeadlineCheck();
   }
 
   private promoteToLeader(nextTerm: number): void {
@@ -326,8 +326,10 @@ export class TabLeaderElection {
 
     if (this.role === "leader") {
       this.ensureHeartbeatTimer();
+      this.clearLeaseDeadlineTimer();
     } else {
       this.clearHeartbeatTimer();
+      this.scheduleLeaseDeadlineCheck();
     }
 
     this.resolveReadyIfNeeded();
@@ -349,6 +351,46 @@ export class TabLeaderElection {
     if (!this.heartbeatTimer) return;
     clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+  }
+
+  private scheduleLeaseDeadlineCheck(): void {
+    if (!this.started || this.role === "leader") {
+      this.clearLeaseDeadlineTimer();
+      return;
+    }
+
+    const referenceTime =
+      this.lastLeaderSeenAtMs > 0 ? this.lastLeaderSeenAtMs : this.now() - this.heartbeatMs;
+    const deadlineMs = referenceTime + this.leaseMs;
+    const delayMs = Math.max(0, deadlineMs - this.now());
+
+    this.clearLeaseDeadlineTimer();
+    this.leaseDeadlineTimer = setTimeout(() => {
+      this.leaseDeadlineTimer = null;
+      this.onLeaseDeadline();
+    }, delayMs);
+  }
+
+  private clearLeaseDeadlineTimer(): void {
+    if (!this.leaseDeadlineTimer) return;
+    clearTimeout(this.leaseDeadlineTimer);
+    this.leaseDeadlineTimer = null;
+  }
+
+  private onLeaseDeadline(): void {
+    if (!this.started || this.role === "leader") return;
+    if (!this.leaderTabId) {
+      this.promoteToLeader(this.term + 1);
+      return;
+    }
+
+    const elapsed = this.now() - this.lastLeaderSeenAtMs;
+    if (elapsed >= this.leaseMs) {
+      this.promoteToLeader(this.term + 1);
+      return;
+    }
+
+    this.scheduleLeaseDeadlineCheck();
   }
 
   private sendHeartbeat(): void {

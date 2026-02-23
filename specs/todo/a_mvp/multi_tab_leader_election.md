@@ -32,6 +32,7 @@ We need multi-tab coordination where:
 - Perfect zero-loss local durability during abrupt termination.
 - Guaranteed immediate lock recovery after every freeze/crash.
 - Cross-tab lock preemption.
+- `navigator.locks`-based central coordinator in this iteration.
 
 ## Design Summary
 
@@ -40,6 +41,7 @@ We need multi-tab coordination where:
 - Leader keeps OPFS handle open for its tenure (no per-op acquire/release).
 - Followers route sync traffic through leader.
 - Visibility/focus is a scheduling hint, not a hard election trigger.
+- Do not require `SharedWorker` or `navigator.locks` for correctness in MVP.
 
 ## Current Main-Thread/Worker Sync Shape
 
@@ -163,6 +165,8 @@ Election behavior:
 - New election starts when lease expires or leader explicitly steps down.
 - Candidate increments term and announces candidacy.
 - Tie-break by `(term, tabId)` if needed.
+- Followers use a deadline timeout (re-armed on heartbeat/claim) rather than interval polling.
+- A startup `initialElectionDelay` timeout ensures liveness if startup request/heartbeat messages are dropped.
 - Winner becomes provisional leader, then attempts OPFS lock acquire.
 - Only after lock acquire succeeds does it announce `leader-active`.
 
@@ -214,10 +218,19 @@ Page listens to:
 Page forwards lifecycle hints to its dedicated worker via `postMessage`.
 Worker performs best-effort actions:
 
-- Flush WAL (where possible)
-- Close runtime/handle on step-down or graceful handoff
+- Flush WAL on `visibility hidden`, `pagehide`, and `freeze` hints.
+- Nudge reconnect on `visibility visible` / `resume` if the upstream stream is detached.
 
 Correctness does not depend on receiving these hints; lease timeout + fencing remains the safety mechanism.
+
+## Test Coverage (Current)
+
+- Unit tests for election convergence, tie-breaks, stale/higher-term handling, startup liveness, and stop-before-ready behavior.
+- Browser integration tests for:
+  - follower write routing through leader
+  - leader failover after shutdown
+  - close + reopen (reload-like) re-election convergence
+  - persistence and WAL recovery across worker restarts
 
 ## Zombie Lock Handling
 
