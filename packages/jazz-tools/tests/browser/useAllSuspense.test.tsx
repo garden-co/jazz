@@ -1,5 +1,6 @@
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { userEvent } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
@@ -200,6 +201,115 @@ function UseAllProbe<T extends { id: string }>({
 
 describe("useAllSuspense browser integration", () => {
   const clients: JazzClient[] = [];
+  const conditionCases: Array<{
+    name: string;
+    query: QueryBuilder<Todo>;
+    insert: Omit<Todo, "id">;
+    pick: string;
+  }> = [
+    {
+      name: "eq",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
+      }),
+      insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
+      pick: "eq-hit",
+    },
+    {
+      name: "ne",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "ne", value: "blocked" }],
+      }),
+      insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
+      pick: "ne-hit",
+    },
+    {
+      name: "gt",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gt", value: 10 }],
+      }),
+      insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
+      pick: "gt-hit",
+    },
+    {
+      name: "gte",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gte", value: 10 }],
+      }),
+      insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
+      pick: "gte-hit",
+    },
+    {
+      name: "lt",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "lt", value: 0 }],
+      }),
+      insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
+      pick: "lt-hit",
+    },
+    {
+      name: "lte",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "lte", value: 0 }],
+      }),
+      insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
+      pick: "lte-hit",
+    },
+    {
+      name: "isNull",
+      query: makeQuery<Todo>("todos", { conditions: [{ column: "priority", op: "isNull" }] }),
+      insert: {
+        title: "null-hit",
+        done: false,
+        priority: undefined,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "null-hit",
+    },
+    {
+      name: "contains-array",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "tags", op: "contains", value: "needle" }],
+      }),
+      insert: {
+        title: "contains-array-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["needle", "hay"],
+      },
+      pick: "contains-array-hit",
+    },
+    {
+      name: "contains-text",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "contains", value: "needle" }],
+      }),
+      insert: {
+        title: "hay-needle-title",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "hay-needle-title",
+    },
+    {
+      name: "contains-text-empty",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "contains", value: "" }],
+      }),
+      insert: {
+        title: "any-title",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "any-title",
+    },
+  ];
 
   function track(client: JazzClient): JazzClient {
     clients.push(client);
@@ -212,118 +322,8 @@ describe("useAllSuspense browser integration", () => {
     }
   });
 
-  it("supports all condition operators", async () => {
-    const cases: Array<{
-      name: string;
-      query: QueryBuilder<Todo>;
-      insert: Omit<Todo, "id">;
-      pick: string;
-    }> = [
-      {
-        name: "eq",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
-        }),
-        insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
-        pick: "eq-hit",
-      },
-      {
-        name: "ne",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "ne", value: "blocked" }],
-        }),
-        insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
-        pick: "ne-hit",
-      },
-      {
-        name: "gt",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "gt", value: 10 }],
-        }),
-        insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
-        pick: "gt-hit",
-      },
-      {
-        name: "gte",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "gte", value: 10 }],
-        }),
-        insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
-        pick: "gte-hit",
-      },
-      {
-        name: "lt",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "lt", value: 0 }],
-        }),
-        insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
-        pick: "lt-hit",
-      },
-      {
-        name: "lte",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "priority", op: "lte", value: 0 }],
-        }),
-        insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
-        pick: "lte-hit",
-      },
-      {
-        name: "isNull",
-        query: makeQuery<Todo>("todos", { conditions: [{ column: "priority", op: "isNull" }] }),
-        insert: {
-          title: "null-hit",
-          done: false,
-          priority: undefined,
-          owner_id: undefined,
-          tags: ["x"],
-        },
-        pick: "null-hit",
-      },
-      {
-        name: "contains-array",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "tags", op: "contains", value: "needle" }],
-        }),
-        insert: {
-          title: "contains-array-hit",
-          done: false,
-          priority: 1,
-          owner_id: undefined,
-          tags: ["needle", "hay"],
-        },
-        pick: "contains-array-hit",
-      },
-      {
-        name: "contains-text",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "contains", value: "needle" }],
-        }),
-        insert: {
-          title: "hay-needle-title",
-          done: false,
-          priority: 1,
-          owner_id: undefined,
-          tags: ["x"],
-        },
-        pick: "hay-needle-title",
-      },
-      {
-        name: "contains-text-empty",
-        query: makeQuery<Todo>("todos", {
-          conditions: [{ column: "title", op: "contains", value: "" }],
-        }),
-        insert: {
-          title: "any-title",
-          done: false,
-          priority: 1,
-          owner_id: undefined,
-          tags: ["x"],
-        },
-        pick: "any-title",
-      },
-    ];
-
-    for (const testCase of cases) {
+  for (const testCase of conditionCases) {
+    it(`supports condition operator ${testCase.name}`, async () => {
       const client = track(
         await createJazzClient({
           appId: uniqueId(`operators-${testCase.name}`),
@@ -357,8 +357,8 @@ describe("useAllSuspense browser integration", () => {
         5000,
         `expected useAll rows to include ${testCase.name}`,
       );
-    }
-  });
+    });
+  }
 
   it("supports orderBy + limit + offset", async () => {
     const client = track(
@@ -601,9 +601,9 @@ describe("useAllSuspense browser integration", () => {
       "expected initial query to show only open task",
     );
 
-    container
-      ?.querySelector('[data-testid="toggle-query"]')
-      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const toggleQuery = container?.querySelector('[data-testid="toggle-query"]');
+    expect(toggleQuery).toBeTruthy();
+    await userEvent.click(toggleQuery as HTMLElement);
 
     await waitForCondition(
       () => getText("rows").includes("done-task") && !getText("rows").includes("open-task"),
