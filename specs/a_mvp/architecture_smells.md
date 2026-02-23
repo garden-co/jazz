@@ -53,7 +53,7 @@ Main-thread client and worker each implement similar reconnect/auth/streaming lo
 
 - Evidence:
   - `packages/jazz-tools/src/runtime/client.ts`
-  - `packages/jazz-tools/src/worker/groove-worker.ts`
+  - `packages/jazz-tools/src/worker/jazz-worker.ts`
 - Why it smells:
   - Divergence risk and duplicated bug-fix cost.
 - Direction:

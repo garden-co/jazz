@@ -10,12 +10,12 @@ export type TestRuntime = Runtime & { free?(): void };
 
 let wasmModulePromise: Promise<any> | null = null;
 
-type GrooveWasmPaths = {
+type JazzWasmPaths = {
   modulePath: string;
   wasmPath: string;
 };
 
-function resolveGrooveWasmPaths(): GrooveWasmPaths | null {
+function resolveJazzWasmPaths(): JazzWasmPaths | null {
   const require = createRequire(import.meta.url);
   let packageJsonPath: string;
   try {
@@ -35,14 +35,14 @@ function resolveGrooveWasmPaths(): GrooveWasmPaths | null {
   return { modulePath, wasmPath };
 }
 
-export function hasGrooveWasmBuild(): boolean {
-  return resolveGrooveWasmPaths() !== null;
+export function hasJazzWasmBuild(): boolean {
+  return resolveJazzWasmPaths() !== null;
 }
 
 function loadWasmModule(): Promise<any> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
-      const paths = resolveGrooveWasmPaths();
+      const paths = resolveJazzWasmPaths();
       if (!paths) {
         throw new Error(
           "jazz-wasm build artifacts not found. Run `pnpm --filter @jazz/rust build:crates` first.",

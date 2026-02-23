@@ -7,19 +7,19 @@
  */
 
 import type {
-  WasmColumnDescriptor as GrooveWasmColumnDescriptor,
-  WasmColumnType as GrooveWasmColumnType,
-  WasmRow as GrooveWasmRow,
-  WasmRowDelta as GrooveWasmRowDelta,
-  WasmTableSchema as GrooveWasmTableSchema,
-  WasmValue as GrooveWasmValue,
+  WasmColumnDescriptor as JazzWasmColumnDescriptor,
+  WasmColumnType as JazzWasmColumnType,
+  WasmRow as JazzWasmRow,
+  WasmRowDelta as JazzWasmRowDelta,
+  WasmTableSchema as JazzWasmTableSchema,
+  WasmValue as JazzWasmValue,
 } from "jazz-wasm";
 
-export type Value = GrooveWasmValue;
-export type WasmRow = GrooveWasmRow;
-export type RowDelta = GrooveWasmRowDelta;
-export type ColumnType = GrooveWasmColumnType;
-export type ColumnDescriptor = GrooveWasmColumnDescriptor;
+export type Value = JazzWasmValue;
+export type WasmRow = JazzWasmRow;
+export type RowDelta = JazzWasmRowDelta;
+export type ColumnType = JazzWasmColumnType;
+export type ColumnDescriptor = JazzWasmColumnDescriptor;
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
 export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
@@ -96,7 +96,7 @@ export interface TablePolicies {
   delete?: OperationPolicy;
 }
 
-export interface TableSchema extends GrooveWasmTableSchema {
+export interface TableSchema extends JazzWasmTableSchema {
   policies?: TablePolicies;
 }
 

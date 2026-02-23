@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { translateQuery } from "./query-adapter.js";
 import { sendSyncPayload } from "./sync-transport.js";
-import { hasGrooveWasmBuild } from "./testing/wasm-runtime-test-utils.js";
+import { hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 type AppContext = import("./context.js").AppContext;
@@ -117,14 +117,14 @@ function findCloudServerBinary(): string | null {
 }
 
 function assertIntegrationPrerequisites(): void {
-  const hasWasm = hasGrooveWasmBuild();
+  const hasWasm = hasJazzWasmBuild();
   const targetDir = resolveCargoTargetDir();
   const binaryPath = findCloudServerBinary();
   if (hasWasm && binaryPath) return;
 
   const missing: string[] = [];
   if (!hasWasm) {
-    missing.push("missing Groove WASM runtime artifacts");
+    missing.push("missing Jazz WASM runtime artifacts");
   }
   if (!binaryPath) {
     missing.push(

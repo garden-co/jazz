@@ -9,12 +9,11 @@ import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import {
   sendSyncPayload,
-  readBinaryFrames,
   generateClientId,
-  buildEventsUrl,
   buildEndpointUrl,
   applyUserAuthHeaders,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
+  SyncStreamController,
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
@@ -297,20 +296,28 @@ export class SessionClient {
  */
 export class JazzClient {
   private runtime: Runtime;
-  private streamAbortController: AbortController | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectAttempt = 0;
-  private streamConnecting = false;
-  private streamAttached = false;
+  private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private activeServerUrl: string | null = null;
-  private activeServerPathPrefix: string | undefined;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
 
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
+    this.streamController = new SyncStreamController({
+      getAuth: () => ({
+        jwtToken: this.context.jwtToken,
+        localAuthMode: this.context.localAuthMode,
+        localAuthToken: this.context.localAuthToken,
+      }),
+      getClientId: () => this.serverClientId,
+      setClientId: (clientId) => {
+        this.serverClientId = clientId;
+      },
+      onConnected: () => this.runtime.addServer(),
+      onDisconnected: () => this.runtime.removeServer(),
+      onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
+    });
   }
 
   /**
@@ -731,18 +738,7 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.activeServerUrl = null;
-    this.detachServer();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    // Abort stream connection
-    if (this.streamAbortController) {
-      this.streamAbortController.abort();
-      this.streamAbortController = null;
-    }
+    this.streamController.stop();
 
     // Close driver if it supports it
     if (this.context.driver?.close) {
@@ -756,9 +752,6 @@ export class JazzClient {
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
-    this.activeServerUrl = serverUrl;
-    this.activeServerPathPrefix = serverPathPrefix;
-
     // Set up outgoing message handler
     this.runtime.onSyncMessageToSend((envelope: string) => {
       // Envelope is now {destination, payload}
@@ -767,123 +760,29 @@ export class JazzClient {
 
       // Only send server-bound messages
       if (parsed.destination && "Server" in parsed.destination) {
-        void this.sendSyncMessage(serverUrl, payload).catch((error) => {
+        void this.sendSyncMessage(payload).catch((error) => {
           console.error("Sync POST error:", error);
-          this.detachServer();
-          this.scheduleReconnect();
+          this.streamController.notifyTransportFailure();
         });
       }
     });
 
     // Connect to binary stream for incoming messages
-    this.connectStream();
+    this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
+  private async sendSyncMessage(payload: any): Promise<void> {
+    const serverUrl = this.streamController.getServerUrl();
+    if (!serverUrl) return;
+
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
       localAuthMode: this.context.localAuthMode,
       localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
       clientId: this.serverClientId,
-      pathPrefix: this.activeServerPathPrefix,
+      pathPrefix: this.streamController.getPathPrefix(),
     });
-  }
-
-  private detachServer(): void {
-    if (!this.streamAttached) return;
-    this.runtime.removeServer();
-    this.streamAttached = false;
-  }
-
-  private attachServer(): void {
-    // Re-attach every time the stream reconnects so query subscriptions replay.
-    if (this.streamAttached) {
-      this.runtime.removeServer();
-    }
-    this.runtime.addServer();
-    this.streamAttached = true;
-    this.reconnectAttempt = 0;
-  }
-
-  private scheduleReconnect(): void {
-    if (!this.activeServerUrl) return;
-    if (this.reconnectTimer) return;
-
-    const baseMs = 300;
-    const maxMs = 10_000;
-    const jitterMs = Math.floor(Math.random() * 200);
-    const delayMs = Math.min(maxMs, baseMs * 2 ** this.reconnectAttempt) + jitterMs;
-    this.reconnectAttempt += 1;
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connectStream();
-    }, delayMs);
-  }
-
-  /**
-   * Connect to binary streaming endpoint for incoming messages.
-   *
-   * Uses length-prefixed binary frames over a long-lived HTTP response.
-   * Supports auth via Authorization header (unlike EventSource).
-   */
-  private async connectStream(): Promise<void> {
-    if (this.streamConnecting || !this.activeServerUrl) return;
-    this.streamConnecting = true;
-
-    const serverUrl = this.activeServerUrl;
-    const headers: Record<string, string> = {
-      Accept: "application/octet-stream",
-    };
-    applyUserAuthHeaders(headers, {
-      jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
-    });
-
-    this.streamAbortController = new AbortController();
-
-    try {
-      const eventsUrl = buildEventsUrl(serverUrl, this.serverClientId, this.activeServerPathPrefix);
-
-      const response = await fetch(eventsUrl, {
-        headers,
-        signal: this.streamAbortController.signal,
-      });
-
-      if (!response.ok) {
-        console.error(`Stream connect failed: ${response.status}`);
-        this.detachServer();
-        this.streamConnecting = false;
-        this.scheduleReconnect();
-        return;
-      }
-
-      const reader = response.body!.getReader();
-      let connected = false;
-      await readBinaryFrames(reader, {
-        onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
-        onConnected: (clientId) => {
-          this.serverClientId = clientId;
-          if (!connected) {
-            connected = true;
-            this.attachServer();
-          }
-        },
-      });
-    } catch (e: any) {
-      if (e?.name === "AbortError") return; // Intentional shutdown
-      console.error("Stream error:", e);
-    } finally {
-      this.streamConnecting = false;
-    }
-
-    // Reconnect after delay (unless aborted)
-    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
-      this.detachServer();
-      this.scheduleReconnect();
-    }
   }
 }
 
