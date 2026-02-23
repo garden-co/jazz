@@ -48,6 +48,7 @@ export class WorkerBridge {
   private syncBatchFlushQueued = false;
   private disposed = false;
   private peerSyncListener: ((batch: PeerSyncBatch) => void) | null = null;
+  private serverPayloadForwarder: ((payload: string) => void) | null = null;
 
   constructor(worker: Worker, runtime: Runtime) {
     this.worker = worker;
@@ -76,7 +77,12 @@ export class WorkerBridge {
       const parsed = JSON.parse(envelope);
       // Only forward server-bound messages (worker IS the server)
       if (parsed.destination && "Server" in parsed.destination) {
-        this.enqueueSyncMessageForWorker(JSON.stringify(parsed.payload));
+        const payload = JSON.stringify(parsed.payload);
+        if (this.serverPayloadForwarder) {
+          this.serverPayloadForwarder(payload);
+        } else {
+          this.enqueueSyncMessageForWorker(payload);
+        }
       }
     });
 
@@ -157,6 +163,7 @@ export class WorkerBridge {
 
     // Drop any buffered payloads and stop forwarding from stale callbacks.
     this.pendingSyncPayloadsForWorker = [];
+    this.serverPayloadForwarder = null;
     this.runtime.onSyncMessageToSend(() => undefined);
   }
 
@@ -165,6 +172,22 @@ export class WorkerBridge {
    */
   getWorkerClientId(): string | null {
     return this.workerClientId;
+  }
+
+  setServerPayloadForwarder(forwarder: ((payload: string) => void) | null): void {
+    if (this.disposed) return;
+    this.serverPayloadForwarder = forwarder;
+  }
+
+  applyIncomingServerPayload(payload: string): void {
+    if (this.disposed) return;
+    this.runtime.onSyncMessageReceived(payload);
+  }
+
+  replayServerConnection(): void {
+    if (this.disposed) return;
+    this.runtime.removeServer();
+    this.runtime.addServer();
   }
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
