@@ -45,6 +45,46 @@ const WORKER_APP_QUANTUM: usize = 1;
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 
+fn parse_test_delay_ms(raw: &str) -> Option<Duration> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((min_raw, max_raw)) = trimmed.split_once('-') {
+        let min = min_raw.trim().parse::<u64>().ok()?;
+        let max = max_raw.trim().parse::<u64>().ok()?;
+        if min > max {
+            return None;
+        }
+        return Some(Duration::from_millis(min + ((max - min) / 2)));
+    }
+
+    trimmed.parse::<u64>().ok().map(Duration::from_millis)
+}
+
+fn test_delay_server_send_object_updated(payload: &SyncPayload) -> Option<Duration> {
+    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
+        return None;
+    }
+
+    let delay =
+        parse_test_delay_ms(&std::env::var("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_MS").ok()?)?;
+    let every_n = std::env::var("JAZZ_TEST_DELAY_SERVER_SEND_OBJECT_UPDATED_EVERY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1);
+
+    static SERVER_SEND_OBJECT_UPDATED_COUNT: AtomicU64 = AtomicU64::new(0);
+    let seq = SERVER_SEND_OBJECT_UPDATED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if !seq.is_multiple_of(every_n) {
+        return None;
+    }
+
+    Some(delay)
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
@@ -855,7 +895,16 @@ impl AppRuntime {
         let sync_tx_clone = sync_broadcast.clone();
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                let _ = sync_tx_clone.send((client_id, entry.payload));
+                let payload = entry.payload;
+                if let Some(delay) = test_delay_server_send_object_updated(&payload) {
+                    let tx = sync_tx_clone.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = tx.send((client_id, payload));
+                    });
+                } else {
+                    let _ = sync_tx_clone.send((client_id, payload));
+                }
             }
         });
 
