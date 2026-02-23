@@ -3567,7 +3567,12 @@ fn array_subquery_update_descriptor_includes_array_column() {
         3,
         "Update descriptor should have 3 columns (base + array), got {}: {:?}",
         update.descriptor.columns.len(),
-        update.descriptor.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        update
+            .descriptor
+            .columns
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
     );
 
     let row_data = &update.delta.added[0].data;
@@ -3580,6 +3585,16 @@ fn array_subquery_update_descriptor_includes_array_column() {
         Value::Text("Alice".into()),
         "user name should be 'Alice', not corrupted"
     );
+
+    // The included posts array should contain the post we inserted
+    let posts = values[2]
+        .as_array()
+        .expect("third column should be the posts array");
+    assert_eq!(posts.len(), 1, "Alice should have 1 post");
+    let post_row = posts[0].as_row().expect("post element should be a Row");
+    assert_eq!(post_row[0], Value::Integer(100), "post id");
+    assert_eq!(post_row[1], Value::Text("Hello world".into()), "post title");
+    assert_eq!(post_row[2], Value::Integer(1), "post author_id");
 }
 
 #[test]

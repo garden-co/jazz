@@ -58,13 +58,40 @@ describe("TS Query API", () => {
     expect(baseline[0].title).toBe("Hello world");
 
     const withInclude = await db.all(
-      app.todos
-        .where({ id: { eq: todoId } })
-        .include({ project: true }),
+      app.todos.where({ id: { eq: todoId } }).include({ project: true }),
     );
 
     expect(withInclude.length).toBe(1);
     expect(withInclude[0].title).toBe("Hello world");
+  });
+
+  it("include returns the related entity", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        dbName: uniqueDbName("include-returns-entity"),
+      }),
+    );
+
+    const projectId = db.insert(app.projects, { name: "Announcements" });
+    const todoId = db.insert(app.todos, {
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+    });
+
+    const results = await db.all(
+      app.todos.where({ id: { eq: todoId } }).include({ project: true }),
+    );
+
+    expect(results.length).toBe(1);
+    const todo = results[0] as Record<string, unknown>;
+    expect(todo.title).toBe("Write tests");
+
+    const project = todo.project as { name: string };
+    expect(project).toBeDefined();
+    expect(project.name).toBe("Announcements");
   });
 
   describe("query by array column", () => {
