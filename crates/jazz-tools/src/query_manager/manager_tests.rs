@@ -1512,8 +1512,12 @@ fn update_passes_filter_emits_addition() {
 
     qm.process(&mut storage);
     let updates = qm.take_updates();
-    // Row doesn't match filter, so no delta or empty delta
-    assert!(updates.is_empty() || updates[0].delta.added.is_empty());
+    // Row doesn't match filter, so no addition/removals, but we should still get an update for the subscription
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 
     // Update score to 100 (passes filter)
     qm.update(
@@ -1533,6 +1537,9 @@ fn update_passes_filter_emits_addition() {
         1,
         "Row should be added when it now passes filter"
     );
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 }
 
 #[test]
