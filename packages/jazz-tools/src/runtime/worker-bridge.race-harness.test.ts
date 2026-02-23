@@ -5,8 +5,9 @@ import type { MainToWorkerMessage, WorkerToMainMessage } from "../worker/worker-
 
 type ScriptOptions = {
   dropSyncBeforeInit?: boolean;
-  synchronousInitOk?: boolean;
-  synchronousShutdownOk?: boolean;
+  initAckMode?: "manual" | "sync-ok" | "async-ok" | "sync-error" | "async-error";
+  shutdownAckMode?: "sync-ok" | "async-ok" | "timeout";
+  initErrorMessage?: string;
 };
 
 type WorkerMessageHandler = (event: MessageEvent<WorkerToMainMessage>) => void;
@@ -16,6 +17,8 @@ class FakeWorkerScript {
   private pendingSyncPayloads: string[] = [];
   readonly receivedSyncPayloads: string[] = [];
   readonly droppedSyncPayloads: string[] = [];
+  initMessageCount = 0;
+  shutdownMessageCount = 0;
 
   constructor(
     private readonly worker: FakeWorker,
@@ -25,37 +28,66 @@ class FakeWorkerScript {
   onMainMessage(message: MainToWorkerMessage): void {
     switch (message.type) {
       case "init":
-        if (this.options.synchronousInitOk) {
-          this.completeInit();
-        }
+        this.initMessageCount += 1;
+        this.handleInit();
         return;
       case "sync":
         if (!this.initialized) {
           if (this.options.dropSyncBeforeInit) {
-            this.droppedSyncPayloads.push(message.payload);
+            this.droppedSyncPayloads.push(...message.payload);
           } else {
-            this.pendingSyncPayloads.push(message.payload);
+            this.pendingSyncPayloads.push(...message.payload);
           }
           return;
         }
-        this.receivedSyncPayloads.push(message.payload);
+        this.receivedSyncPayloads.push(...message.payload);
         return;
-      case "shutdown": {
-        const emitShutdownOk = () => {
-          this.worker.emitToMain({ type: "shutdown-ok" });
-        };
-
-        if (this.options.synchronousShutdownOk) {
-          emitShutdownOk();
-        } else {
-          queueMicrotask(emitShutdownOk);
-        }
+      case "shutdown":
+        this.shutdownMessageCount += 1;
+        this.handleShutdown();
         return;
-      }
       case "update-auth":
       case "simulate-crash":
         return;
     }
+  }
+
+  private handleInit(): void {
+    const mode = this.options.initAckMode ?? "manual";
+    switch (mode) {
+      case "sync-ok":
+        this.completeInit();
+        return;
+      case "async-ok":
+        queueMicrotask(() => this.completeInit());
+        return;
+      case "sync-error":
+        this.failInit();
+        return;
+      case "async-error":
+        queueMicrotask(() => this.failInit());
+        return;
+      case "manual":
+        return;
+    }
+  }
+
+  private handleShutdown(): void {
+    const mode = this.options.shutdownAckMode ?? "async-ok";
+    if (mode === "timeout") {
+      return;
+    }
+
+    const emitShutdownOk = () => {
+      this.worker.emitToMain({ type: "shutdown-ok" });
+    };
+
+    if (mode === "sync-ok") {
+      emitShutdownOk();
+      return;
+    }
+
+    queueMicrotask(emitShutdownOk);
   }
 
   completeInit(clientId = "worker-client"): void {
@@ -71,8 +103,12 @@ class FakeWorkerScript {
     }
   }
 
-  emitSyncToMain(payload: string): void {
-    this.worker.emitToMain({ type: "sync", payload });
+  failInit(message = this.options.initErrorMessage ?? "init failed"): void {
+    this.worker.emitToMain({ type: "error", message });
+  }
+
+  emitSyncToMain(...payloads: string[]): void {
+    this.worker.emitToMain({ type: "sync", payload: payloads });
   }
 }
 
@@ -152,7 +188,7 @@ function makeBridgeOptions(): WorkerBridgeOptions {
 }
 
 describe("WorkerBridge race harness", () => {
-  it("queues outbound sync until init completes", async () => {
+  it("WB-U01 queues outbound sync until init completes", async () => {
     const worker = new FakeWorker({ dropSyncBeforeInit: true });
     const { runtime, emitServerPayload } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
@@ -175,7 +211,7 @@ describe("WorkerBridge race harness", () => {
     ]);
   });
 
-  it("preserves outbound ordering across init boundary", async () => {
+  it("WB-U02 preserves outbound ordering across init boundary", async () => {
     const worker = new FakeWorker({ dropSyncBeforeInit: true });
     const { runtime, emitServerPayload } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
@@ -187,6 +223,7 @@ describe("WorkerBridge race harness", () => {
     worker.script.completeInit("worker-client-2");
     await initPromise;
     emitServerPayload({ kind: "sub", seq: 3 });
+    await Promise.resolve();
 
     expect(worker.script.receivedSyncPayloads).toEqual([
       JSON.stringify({ kind: "sub", seq: 1 }),
@@ -195,10 +232,10 @@ describe("WorkerBridge race harness", () => {
     ]);
   });
 
-  it("does not miss synchronous init-ok responses", async () => {
+  it("WB-U03 does not miss synchronous init-ok responses", async () => {
     vi.useFakeTimers();
     try {
-      const worker = new FakeWorker({ synchronousInitOk: true });
+      const worker = new FakeWorker({ initAckMode: "sync-ok" });
       const { runtime } = createRuntimeHarness();
       const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
 
@@ -211,7 +248,7 @@ describe("WorkerBridge race harness", () => {
     }
   });
 
-  it("forwards worker->main sync while init is pending", async () => {
+  it("WB-U04 forwards worker->main sync while init is pending", async () => {
     const worker = new FakeWorker();
     const { runtime, receivedFromWorker } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
@@ -223,5 +260,64 @@ describe("WorkerBridge race harness", () => {
 
     worker.script.completeInit("worker-client-3");
     await initPromise;
+  });
+
+  it("WB-U05 init memoizes and returns the same in-flight promise", async () => {
+    const worker = new FakeWorker();
+    const { runtime } = createRuntimeHarness();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+    const initPromiseA = bridge.init(makeBridgeOptions());
+    const initPromiseB = bridge.init(makeBridgeOptions());
+
+    expect(initPromiseA).toBe(initPromiseB);
+    expect(worker.script.initMessageCount).toBe(1);
+
+    worker.script.completeInit("worker-client-5");
+    await expect(initPromiseA).resolves.toBe("worker-client-5");
+    await expect(initPromiseB).resolves.toBe("worker-client-5");
+  });
+
+  it("WB-U06 init failure transitions state and clears queued sync", async () => {
+    const worker = new FakeWorker();
+    const { runtime, emitServerPayload } = createRuntimeHarness();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+    const initPromise = bridge.init(makeBridgeOptions());
+    emitServerPayload({ kind: "sub", seq: 1 });
+    emitServerPayload({ kind: "sub", seq: 2 });
+
+    worker.script.failInit("boom");
+    await expect(initPromise).rejects.toThrow("Worker init failed: boom");
+
+    expect((bridge as any).initState).toBe("failed");
+    expect((bridge as any).pendingSyncPayloadsForWorker).toEqual([]);
+    expect(worker.script.receivedSyncPayloads).toEqual([]);
+  });
+
+  it("WB-U07 handles synchronous shutdown-ok acknowledgements", async () => {
+    const worker = new FakeWorker({ shutdownAckMode: "sync-ok" });
+    const { runtime } = createRuntimeHarness();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+    await expect(bridge.shutdown(worker as unknown as Worker)).resolves.toBeUndefined();
+    expect(worker.script.shutdownMessageCount).toBe(1);
+  });
+
+  it("WB-U08 does not throw when shutdown acknowledgement times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeWorker({ shutdownAckMode: "timeout" });
+      const { runtime } = createRuntimeHarness();
+      const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+      const shutdownPromise = bridge.shutdown(worker as unknown as Worker);
+      await vi.advanceTimersByTimeAsync(5001);
+
+      await expect(shutdownPromise).resolves.toBeUndefined();
+      expect(worker.script.shutdownMessageCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

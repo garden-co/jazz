@@ -65,10 +65,12 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "fake-indexeddb": "^5.0.2",
     "jazz-rn": "workspace:*",
+    "react-dom": "^19.0.0",
     "typescript": "^5.3.0",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",

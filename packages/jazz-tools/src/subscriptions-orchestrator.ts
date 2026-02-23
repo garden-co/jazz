@@ -236,6 +236,10 @@ export class SubscriptionsOrchestrator {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
 
+        if (entry.state.status === "rejected") {
+          callbacks.onError?.(entry.state.error);
+        }
+
         return () => {
           if (!entry.listeners.delete(callbacks)) {
             return;
@@ -251,7 +255,9 @@ export class SubscriptionsOrchestrator {
       get rejected() {
         return entry.state.status === "rejected" ? entry.state.error : null;
       },
-      error: null,
+      get error() {
+        return entry.state.status === "rejected" ? entry.state.error : null;
+      },
     } as InternalCacheEntry<T>;
 
     try {
