@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   FlatList,
   Pressable,
@@ -9,34 +9,72 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
+import { resolveClientSession, type LocalAuthMode } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema/app";
 
-export function TodoList() {
+interface TodoListProps {
+  appId: string;
+  localAuthMode?: LocalAuthMode;
+  localAuthToken?: string;
+  jwtToken?: string;
+}
+
+export function TodoList({ appId, localAuthMode, localAuthToken, jwtToken }: TodoListProps) {
   const db = useDb();
   const todos = useAll(app.todos);
   const [title, setTitle] = useState("");
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    resolveClientSession({ appId, localAuthMode, localAuthToken, jwtToken })
+      .then((session) => {
+        if (!cancelled) {
+          setSessionUserId(session?.user_id ?? null);
+        }
+      })
+      .catch((error) => {
+        // Keep a visible signal for local session derivation failures on device.
+        console.warn("[todo-client-localfirst-expo] failed to resolve local session", error);
+        if (!cancelled) {
+          setSessionUserId(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, localAuthMode, localAuthToken, jwtToken]);
 
   const addTodo = () => {
     const trimmed = title.trim();
-    if (!trimmed) return;
-    db.insert(app.todos, { title: trimmed, done: false });
+    if (!trimmed || !sessionUserId) return;
+    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
   const renderItem: ListRenderItem<Todo> = ({ item }) => {
+    const canEdit = sessionUserId === item.owner_id;
+
     return (
       <View style={styles.todoRow}>
         <Switch
           value={item.done}
+          disabled={!canEdit}
           onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
         />
         <View style={styles.todoTextWrap}>
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
-        <Pressable onPress={() => db.deleteFrom(app.todos, item.id)} style={styles.deleteButton}>
-          <Text style={styles.deleteButtonText}>Delete</Text>
+        <Pressable
+          disabled={!canEdit}
+          onPress={() => db.deleteFrom(app.todos, item.id)}
+          style={styles.deleteButton}
+        >
+          <Text style={[styles.deleteButtonText, !canEdit && styles.disabledText]}>Delete</Text>
         </Pressable>
       </View>
     );
@@ -50,13 +88,21 @@ export function TodoList() {
           onChangeText={setTitle}
           placeholder="What needs to be done?"
           style={styles.input}
+          editable={!!sessionUserId}
           returnKeyType="done"
           onSubmitEditing={addTodo}
         />
-        <Pressable onPress={addTodo} style={styles.addButton}>
+        <Pressable
+          disabled={!sessionUserId}
+          onPress={addTodo}
+          style={[styles.addButton, !sessionUserId && styles.disabledButton]}
+        >
           <Text style={styles.addButtonText}>Add</Text>
         </Pressable>
       </View>
+      {!sessionUserId ? (
+        <Text style={styles.emptyText}>Waiting for local auth session...</Text>
+      ) : null}
 
       <FlatList
         data={todos}
@@ -93,6 +139,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: 10,
     backgroundColor: "#111827",
+  },
+  disabledButton: {
+    opacity: 0.5,
   },
   addButtonText: {
     color: "#fff",
@@ -141,5 +190,8 @@ const styles = StyleSheet.create({
     color: "#b91c1c",
     fontSize: 13,
     fontWeight: "600",
+  },
+  disabledText: {
+    opacity: 0.4,
   },
 });

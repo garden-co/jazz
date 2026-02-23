@@ -88,6 +88,32 @@ describe("client session resolution", () => {
     });
   });
 
+  it("derives local principal id without crypto.subtle (fallback hash path)", async () => {
+    const appId = "app-local-fallback";
+    const mode = "demo";
+    const token = "device-token-fallback";
+    const digest = createHash("sha256")
+      .update(`${appId}:${mode}:${token}`, "utf8")
+      .digest("base64");
+    const expected = `local:${digest.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
+
+    const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: undefined,
+    });
+
+    try {
+      expect(await deriveLocalPrincipalId(appId, mode, token)).toBe(expected);
+    } finally {
+      if (originalCryptoDescriptor) {
+        Object.defineProperty(globalThis, "crypto", originalCryptoDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "crypto");
+      }
+    }
+  });
+
   it("returns null when no auth is configured", async () => {
     const session = await resolveClientSession({ appId: "no-auth" });
     expect(session).toBeNull();

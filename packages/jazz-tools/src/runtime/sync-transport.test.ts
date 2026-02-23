@@ -56,13 +56,16 @@ describe("sync-transport", () => {
   });
 
   it("throws on non-2xx sync POST responses", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      text: async () => "upstream unavailable",
+    });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: 503 Service Unavailable",
+      "Sync POST failed: 503 Service Unavailable: upstream unavailable",
     );
   });
 
@@ -115,7 +118,10 @@ describe("sync-transport", () => {
       "http://localhost:3000/apps/app-123/auth/link-external",
     );
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    const headers = Object.fromEntries(
+      fetchMock.mock.calls[0][1].headers as Array<[string, string]>,
+    );
+    expect(headers).toMatchObject({
       Authorization: "Bearer jwt-token",
       "X-Jazz-Local-Mode": "anonymous",
       "X-Jazz-Local-Token": "device-token",
@@ -134,5 +140,41 @@ describe("sync-transport", () => {
     expect(buildEventsUrl("http://localhost:1625", "client#1", "/apps/app-1")).toBe(
       "http://localhost:1625/apps/app-1/events?client_id=client%231",
     );
+  });
+
+  it("normalizes stringified JSON payloads before sending", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload("http://localhost:3000", '{"Ping":{}}', {});
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.payload).toEqual({ Ping: {} });
+  });
+
+  it("backfills relation_ir for legacy QuerySubscription payloads", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload(
+      "http://localhost:3000",
+      {
+        QuerySubscription: {
+          query_id: 1,
+          query: {
+            table: "todos",
+            branches: ["main"],
+            disjuncts: [{ conditions: [] }],
+          },
+          session: null,
+        },
+      },
+      {},
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.payload.QuerySubscription.query.relation_ir).toEqual({
+      TableScan: { table: "todos" },
+    });
   });
 });

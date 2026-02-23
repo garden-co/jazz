@@ -209,13 +209,21 @@ export const wasmSchema: WasmSchema = {
 export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Project;
-  declare readonly _initType: ProjectInit;
+  readonly _rowType!: Project;
+  readonly _initType!: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
 
   where(conditions: ProjectWhereInput): ProjectQueryBuilder<I> {
     const clone = this._clone();
@@ -258,6 +266,93 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     return clone;
   }
 
+  hopTo(relation: "todosViaProject"): ProjectQueryBuilder<I> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: ProjectWhereInput;
+    step: (ctx: { current: any }) => unknown;
+    maxDepth?: number;
+  }): ProjectQueryBuilder<I> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
+
+    const currentCondition = currentConditions[0];
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
   _build(): string {
     return JSON.stringify({
       table: this._table,
@@ -266,6 +361,8 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
     });
   }
 
@@ -276,6 +373,14 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
     return clone;
   }
 }
@@ -283,13 +388,21 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
 export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<Todo> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Todo;
-  declare readonly _initType: TodoInit;
+  readonly _rowType!: Todo;
+  readonly _initType!: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
 
   where(conditions: TodoWhereInput): TodoQueryBuilder<I> {
     const clone = this._clone();
@@ -332,6 +445,93 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     return clone;
   }
 
+  hopTo(relation: "parent" | "todosViaParent" | "project"): TodoQueryBuilder<I> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: TodoWhereInput;
+    step: (ctx: { current: any }) => unknown;
+    maxDepth?: number;
+  }): TodoQueryBuilder<I> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
+
+    const currentCondition = currentConditions[0];
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
   _build(): string {
     return JSON.stringify({
       table: this._table,
@@ -340,6 +540,8 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
     });
   }
 
@@ -350,6 +552,14 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
     return clone;
   }
 }

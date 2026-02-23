@@ -13,6 +13,7 @@ import {
   generateClientId,
   buildEventsUrl,
   applyUserAuthHeaders,
+  toFetchHeaders,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -233,7 +234,7 @@ async function connectStream(): Promise<void> {
     const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
 
     const response = await fetch(eventsUrl, {
-      headers,
+      headers: toFetchHeaders(headers),
       signal: streamAbortController.signal,
     });
 

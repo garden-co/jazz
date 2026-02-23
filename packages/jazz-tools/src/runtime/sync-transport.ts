@@ -108,6 +108,77 @@ export function applyUserAuthHeaders(headers: Record<string, string>, auth: Sync
 }
 
 /**
+ * Convert a plain header record to tuple-style HeadersInit.
+ *
+ * Expo's fetch polyfill can throw when evaluating `instanceof Headers`
+ * in runtimes where `globalThis.Headers` is missing. Tuple headers avoid
+ * that branch and remain standards-compliant.
+ */
+export function toFetchHeaders(headers: Record<string, string>): Array<[string, string]> {
+  return Object.entries(headers);
+}
+
+/**
+ * Normalize sync payload shape across runtimes.
+ *
+ * Some native bridges can deliver payload JSON as a string. Server expects
+ * `payload` to be a structured object, so we decode stringified JSON when possible.
+ */
+function normalizeSyncPayload(payload: any): any {
+  if (typeof payload !== "string") return payload;
+  const trimmed = payload.trim();
+  if (!trimmed) return payload;
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return payload;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return payload;
+  }
+}
+
+/**
+ * Backfill `QuerySubscription.query.relation_ir` for legacy clients.
+ *
+ * Older client payloads can omit `relation_ir`; modern servers require it.
+ * We synthesize a minimal `TableScan` relation from `query.table`.
+ */
+function ensureQueryRelationIr(payload: any): any {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+
+  const querySubscription = (payload as { QuerySubscription?: any }).QuerySubscription;
+  if (
+    !querySubscription ||
+    typeof querySubscription !== "object" ||
+    Array.isArray(querySubscription)
+  ) {
+    return payload;
+  }
+
+  const query = (querySubscription as { query?: any }).query;
+  if (!query || typeof query !== "object" || Array.isArray(query)) return payload;
+  if ("relation_ir" in query && query.relation_ir != null) return payload;
+
+  const table = typeof query.table === "string" ? query.table.trim() : "";
+  if (!table) return payload;
+
+  return {
+    ...payload,
+    QuerySubscription: {
+      ...querySubscription,
+      query: {
+        ...query,
+        relation_ir: {
+          TableScan: {
+            table,
+          },
+        },
+      },
+    },
+  };
+}
+
+/**
  * Check if a sync payload is for a catalogue object (schema or lens).
  * Catalogue payloads use admin-secret auth instead of JWT.
  */
@@ -131,11 +202,12 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
+  const normalizedPayload = ensureQueryRelationIr(normalizeSyncPayload(payload));
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
-  if (isCataloguePayload(payload)) {
+  if (isCataloguePayload(normalizedPayload)) {
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
@@ -144,7 +216,7 @@ export async function sendSyncPayload(
   }
 
   const body = JSON.stringify({
-    payload,
+    payload: normalizedPayload,
     client_id: auth.clientId ?? fallbackClientId,
   });
 
@@ -152,7 +224,7 @@ export async function sendSyncPayload(
   try {
     response = await fetch(buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix), {
       method: "POST",
-      headers,
+      headers: toFetchHeaders(headers),
       body,
     });
   } catch (e) {
@@ -162,7 +234,9 @@ export async function sendSyncPayload(
 
   if (!response.ok) {
     const statusText = response.statusText ? ` ${response.statusText}` : "";
-    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
+    const responseBody = await response.text().catch(() => "");
+    const bodySuffix = responseBody ? `: ${responseBody}` : "";
+    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}${bodySuffix}`);
   }
 }
 
@@ -188,7 +262,7 @@ export async function linkExternalIdentity(
   try {
     response = await fetch(buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix), {
       method: "POST",
-      headers,
+      headers: toFetchHeaders(headers),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

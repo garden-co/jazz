@@ -1,0 +1,3 @@
+ALTER TABLE todos DROP COLUMN parent;
+ALTER TABLE todos DROP COLUMN owner_id;
+ALTER TABLE todos DROP COLUMN project;

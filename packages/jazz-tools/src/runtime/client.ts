@@ -14,6 +14,7 @@ import {
   buildEventsUrl,
   buildEndpointUrl,
   applyUserAuthHeaders,
+  toFetchHeaders,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type LinkExternalResponse,
 } from "./sync-transport.js";
@@ -679,7 +680,7 @@ export class JazzClient {
 
     return fetch(url, {
       method,
-      headers,
+      headers: toFetchHeaders(headers),
       body: JSON.stringify(body),
     });
   }
@@ -848,7 +849,7 @@ export class JazzClient {
       const eventsUrl = buildEventsUrl(serverUrl, this.serverClientId, this.activeServerPathPrefix);
 
       const response = await fetch(eventsUrl, {
-        headers,
+        headers: toFetchHeaders(headers),
         signal: this.streamAbortController.signal,
       });
 
@@ -860,7 +861,17 @@ export class JazzClient {
         return;
       }
 
-      const reader = response.body!.getReader();
+      if (!response.body || typeof response.body.getReader !== "function") {
+        console.error(
+          "Stream transport unavailable: fetch response body is not a ReadableStream in this runtime.",
+        );
+        this.detachServer();
+        this.streamConnecting = false;
+        this.scheduleReconnect();
+        return;
+      }
+
+      const reader = response.body.getReader();
       let connected = false;
       await readBinaryFrames(reader, {
         onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),

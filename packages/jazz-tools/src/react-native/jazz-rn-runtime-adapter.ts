@@ -99,11 +99,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
         // Avoid re-entering Rust while the originating call still holds its mutex.
         Promise.resolve()
           .then(() => {
+            console.log("batched tick requested by native runtime");
             if (!this.closed) {
+              console.log("executing deferred batched tick");
               this.binding.batchedTick();
             }
           })
           .catch(() => {
+            console.error("deferred batched tick failed");
             // Ignore callback failures from deferred ticks.
           });
       },

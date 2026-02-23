@@ -15,6 +15,7 @@ use groove::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -66,6 +67,27 @@ fn encode_frame(event: &ServerEvent) -> Bytes {
     buf.extend_from_slice(&len);
     buf.extend_from_slice(&json);
     Bytes::from(buf)
+}
+
+/// Deserialize `/sync` request JSON with backward compatibility for query payloads.
+///
+/// Legacy clients can send `QuerySubscription.query` without `relation_ir`.
+/// We normalize through `parse_query_value_compat` so modern servers accept it.
+fn deserialize_sync_request_compat(mut raw: JsonValue) -> Result<SyncPayloadRequest, String> {
+    if let Some(query_value) = raw
+        .get_mut("payload")
+        .and_then(|payload| payload.get_mut("QuerySubscription"))
+        .and_then(|subscription| subscription.get_mut("query"))
+    {
+        let normalized_query = groove::query_manager::parse_query_value_compat(query_value.take())
+            .map_err(|e| format!("Failed to normalize QuerySubscription.query: {e}"))?;
+
+        *query_value = serde_json::to_value(normalized_query)
+            .map_err(|e| format!("Failed to serialize normalized query: {e}"))?;
+    }
+
+    serde_json::from_value(raw)
+        .map_err(|e| format!("Failed to deserialize the JSON body into the target type: {e}"))
 }
 
 /// Binary streaming events endpoint - clients connect here for all updates.
@@ -221,9 +243,20 @@ async fn events_handler(
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<SyncPayloadRequest>,
+    Json(raw_request): Json<JsonValue>,
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
+
+    let request = match deserialize_sync_request_compat(raw_request) {
+        Ok(request) => request,
+        Err(message) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
 
     let payload_size = serde_json::to_vec(&request.payload)
         .map(|v| v.len())
@@ -521,4 +554,40 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy"
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deserialize_sync_request_compat;
+    use groove::query_manager::relation_ir::RelExpr;
+    use groove::sync_manager::SyncPayload;
+    use serde_json::json;
+
+    #[test]
+    fn sync_request_compat_rebuilds_missing_relation_ir() {
+        let raw = json!({
+            "payload": {
+                "QuerySubscription": {
+                    "query_id": 1,
+                    "query": {
+                        "table": "todos",
+                        "branches": ["main"],
+                        "disjuncts": [{ "conditions": [] }]
+                    },
+                    "session": null
+                }
+            },
+            "client_id": "00000000-0000-0000-0000-000000000001"
+        });
+
+        let request = deserialize_sync_request_compat(raw).expect("compat parse should succeed");
+
+        match request.payload {
+            SyncPayload::QuerySubscription { query, .. } => match &query.relation_ir {
+                RelExpr::TableScan { table } => assert_eq!(table.as_str(), "todos"),
+                other => panic!("expected TableScan relation_ir, got {other:?}"),
+            },
+            other => panic!("expected QuerySubscription payload, got {other:?}"),
+        }
+    }
 }

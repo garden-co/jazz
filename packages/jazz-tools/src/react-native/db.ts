@@ -15,6 +15,8 @@ export interface DbConfig {
   userBranch?: string;
   dataPath?: string;
   jwtToken?: string;
+  localAuthMode?: "anonymous" | "demo";
+  localAuthToken?: string;
   adminSecret?: string;
   tier?: PersistenceTier;
 }
@@ -166,6 +168,8 @@ export class Db {
         env: this.config.env,
         userBranch: this.config.userBranch,
         jwtToken: this.config.jwtToken,
+        localAuthMode: this.config.localAuthMode,
+        localAuthToken: this.config.localAuthToken,
         adminSecret: this.config.adminSecret,
         tier: this.config.tier,
       });
