@@ -4,8 +4,8 @@
  * QueryBuilder produces a compact JSON structure:
  * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
  *
- * Runtime semantics are driven by `relation_ir`. Legacy top-level query fields
- * are still populated in minimal form to satisfy the wire/query schema.
+ * Runtime semantics are driven by `relation_ir`. The wire payload keeps only
+ * fields required for execution (`table`, `relation_ir`, and `array_subqueries`).
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
@@ -78,14 +78,6 @@ function stripQualifier(column: string): string {
 }
 
 /**
- * Map public QueryBuilder columns to runtime/internal column names.
- */
-function toRuntimeColumn(column: string): string {
-  // Runtime indices use "_id" for the implicit row id column.
-  return column === "id" ? "_id" : column;
-}
-
-/**
  * Translate a JavaScript value to WasmValue format.
  */
 function toWasmValue(value: unknown, columnType: ColumnType): object {
@@ -117,54 +109,6 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
     return { Text: value };
   }
   throw new Error(`Unsupported value type: ${typeof value}`);
-}
-
-/**
- * Translate operator string to Condition enum variant.
- */
-function toCondition(
-  cond: { column: string; op: string; value: unknown },
-  schema: WasmSchema,
-  table: string,
-): object {
-  const column = stripQualifier(cond.column);
-  const columnType = getColumnType(schema, table, column);
-  if (!columnType) {
-    throw new Error(`Unknown column "${column}" in table "${table}"`);
-  }
-  const valueTypeForCondition =
-    cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const value = toWasmValue(cond.value, valueTypeForCondition);
-  const runtimeColumn = toRuntimeColumn(column);
-
-  switch (cond.op) {
-    case "eq":
-      return { Eq: { column: runtimeColumn, value } };
-    case "ne":
-      return { Ne: { column: runtimeColumn, value } };
-    case "gt":
-      return { Gt: { column: runtimeColumn, value } };
-    case "gte":
-      return { Ge: { column: runtimeColumn, value } };
-    case "lt":
-      return { Lt: { column: runtimeColumn, value } };
-    case "lte":
-      return { Le: { column: runtimeColumn, value } };
-    case "isNull":
-      return { IsNull: { column: runtimeColumn } };
-    case "contains":
-      return { Contains: { column: runtimeColumn, value } };
-    case "in":
-      // Handle IN operator with array of values
-      if (Array.isArray(cond.value)) {
-        return {
-          In: { column: runtimeColumn, values: cond.value.map((v) => toWasmValue(v, columnType)) },
-        };
-      }
-      throw new Error(`"in" operator requires an array value`);
-    default:
-      throw new Error(`Unknown operator: ${cond.op}`);
-  }
 }
 
 /**
@@ -559,23 +503,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const relation = translateBuilderToRelationIr(builderJson, schema);
   const query = {
     table: builder.table,
-    branches: [],
-    disjuncts: [
-      {
-        conditions: (builder.conditions ?? []).map((cond) =>
-          toCondition(cond, schema, builder.table),
-        ),
-      },
-    ],
-    order_by: (builder.orderBy ?? []).map(([column, direction]) => [
-      column,
-      direction === "desc" ? "Descending" : "Ascending",
-    ]),
-    offset: typeof builder.offset === "number" ? builder.offset : 0,
-    limit: typeof builder.limit === "number" ? builder.limit : null,
-    include_deleted: false,
     array_subqueries: toArraySubqueries(builder.includes ?? {}, builder.table, relations),
-    joins: [],
     relation_ir: relation,
   };
 
