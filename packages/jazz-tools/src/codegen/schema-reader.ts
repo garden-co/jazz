@@ -182,6 +182,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       if (col.references) {
         descriptor.references = col.references;
       }
+      if (col.inheritPolicy) {
+        descriptor.inherit_policy = true;
+      }
       return descriptor;
     });
 

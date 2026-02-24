@@ -16,7 +16,7 @@ use crate::query_manager::policy::{
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement, Value,
+    ColumnType, Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement, Value,
 };
 
 use crate::storage::Storage;
@@ -42,10 +42,12 @@ pub struct PolicyFilterNode {
     initial_depth: usize,
     /// Current tuples that pass the policy.
     current_tuples: AHashSet<Tuple>,
+    /// All current input tuples (including rows hidden by policy).
+    input_tuples: AHashSet<Tuple>,
     dirty: bool,
     /// Whether the policy contains clauses that need graph-backed context evaluation.
     has_inherits: bool,
-    /// Tables referenced by INHERITS / EXISTS clauses (for dirty tracking).
+    /// Tables referenced by INHERITS / EXISTS and declared inbound inheritance edges.
     inherits_tables: HashSet<String>,
     /// Whether any dependency table has changed.
     inherits_dirty: bool,
@@ -86,7 +88,8 @@ impl PolicyFilterNode {
         initial_depth: usize,
     ) -> Self {
         let table_name = table_name.into();
-        let inherits_tables = collect_inherits_tables(&policy, &descriptor);
+        let mut inherits_tables = collect_inherits_tables(&policy, &descriptor);
+        inherits_tables.extend(collect_declared_inbound_tables(&schema, &table_name));
         let has_inherits = !inherits_tables.is_empty();
         Self {
             descriptor,
@@ -97,6 +100,7 @@ impl PolicyFilterNode {
             branch: branch.into(),
             initial_depth,
             current_tuples: AHashSet::new(),
+            input_tuples: AHashSet::new(),
             dirty: true,
             has_inherits,
             inherits_tables,
@@ -109,7 +113,7 @@ impl PolicyFilterNode {
         self.has_inherits
     }
 
-    /// Returns the tables referenced by INHERITS / EXISTS clauses.
+    /// Returns tables that can affect policy outcome for this node.
     pub fn inherits_tables(&self) -> &HashSet<String> {
         &self.inherits_tables
     }
@@ -149,6 +153,7 @@ impl PolicyFilterNode {
 
         // Process added tuples
         for tuple in input.added {
+            self.input_tuples.insert(tuple.clone());
             let Some(row) = tuple_to_row(&tuple) else {
                 continue;
             };
@@ -161,6 +166,7 @@ impl PolicyFilterNode {
 
         // Process removed tuples
         for tuple in input.removed {
+            self.input_tuples.remove(&tuple);
             if self.current_tuples.remove(&tuple) {
                 result.removed.push(tuple);
             }
@@ -168,6 +174,9 @@ impl PolicyFilterNode {
 
         // Process updated tuples
         for (old_tuple, new_tuple) in input.updated {
+            self.input_tuples.remove(&old_tuple);
+            self.input_tuples.insert(new_tuple.clone());
+
             let old_row = tuple_to_row(&old_tuple);
             let new_row = tuple_to_row(&new_tuple);
 
@@ -206,15 +215,24 @@ impl PolicyFilterNode {
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
         let mut result = TupleDelta::default();
-        let old_tuples: Vec<_> = self.current_tuples.iter().cloned().collect();
+        let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
 
-        for tuple in old_tuples {
-            if let Some(row) = tuple_to_row(&tuple) {
-                let still_passes = self.evaluate_with_context(&row, io, row_loader);
-                if !still_passes {
+        for tuple in all_tuples {
+            let passes = tuple_to_row(&tuple)
+                .map(|row| self.evaluate_with_context(&row, io, row_loader))
+                .unwrap_or(false);
+            let currently_visible = self.current_tuples.contains(&tuple);
+
+            match (currently_visible, passes) {
+                (true, false) => {
                     self.current_tuples.remove(&tuple);
                     result.removed.push(tuple);
                 }
+                (false, true) => {
+                    self.current_tuples.insert(tuple.clone());
+                    result.added.push(tuple);
+                }
+                _ => {}
             }
         }
 
@@ -229,17 +247,167 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
-        let mut visited = HashSet::new();
-        self.evaluate_expr_with_context(
-            &self.policy,
+        let mut visited_declared = HashSet::new();
+        self.evaluate_row_access_with_declared(
+            Operation::Select,
             row,
             &self.descriptor,
             &self.table_name,
+            Some(&self.policy),
             io,
             row_loader,
             self.initial_depth,
-            &mut visited,
+            &mut visited_declared,
         )
+    }
+
+    /// Evaluate row access for an operation with declarative inbound inheritance.
+    ///
+    /// Final decision is `local_policy_allow OR declared_inbound_allow`.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_row_access_with_declared(
+        &self,
+        operation: Operation,
+        row: &Row,
+        descriptor: &RowDescriptor,
+        table_name: &str,
+        local_policy_override: Option<&PolicyExpr>,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        depth: usize,
+        visited_declared: &mut HashSet<(TableName, ObjectId, Operation)>,
+    ) -> bool {
+        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+            return false;
+        }
+
+        let table = TableName::new(table_name);
+        let key = (table, row.id, operation);
+        if !visited_declared.insert(key) {
+            // Cycle detected for this recursion branch: fail closed.
+            return false;
+        }
+
+        let local_allow = local_policy_override
+            .or_else(|| self.policy_for_operation(table, operation))
+            .map(|policy| {
+                let mut visited_inherits = HashSet::new();
+                self.evaluate_expr_with_context(
+                    policy,
+                    row,
+                    descriptor,
+                    table_name,
+                    io,
+                    row_loader,
+                    depth,
+                    &mut visited_inherits,
+                )
+            })
+            .unwrap_or(true);
+
+        if local_allow {
+            visited_declared.remove(&(table, row.id, operation));
+            return true;
+        }
+
+        let inherited_allow = self.evaluate_declared_inbound_access(
+            operation,
+            table,
+            row.id,
+            io,
+            row_loader,
+            depth + 1,
+            visited_declared,
+        );
+
+        visited_declared.remove(&(table, row.id, operation));
+        inherited_allow
+    }
+
+    fn policy_for_operation(
+        &self,
+        table_name: TableName,
+        operation: Operation,
+    ) -> Option<&PolicyExpr> {
+        let table_schema = self.schema.get(&table_name)?;
+        match operation {
+            Operation::Select => table_schema.policies.select.using.as_ref(),
+            Operation::Insert => table_schema.policies.insert.with_check.as_ref(),
+            Operation::Update => table_schema.policies.update.using.as_ref(),
+            Operation::Delete => table_schema.policies.effective_delete_using(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_declared_inbound_access(
+        &self,
+        operation: Operation,
+        target_table: TableName,
+        target_row_id: ObjectId,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        depth: usize,
+        visited_declared: &mut HashSet<(TableName, ObjectId, Operation)>,
+    ) -> bool {
+        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+            return false;
+        }
+
+        for (source_table, source_schema) in &self.schema {
+            for (col_idx, col) in source_schema.descriptor.columns.iter().enumerate() {
+                if !col.inherit_policy {
+                    continue;
+                }
+                if col.references != Some(target_table) {
+                    continue;
+                }
+
+                let candidate_ids = match &col.column_type {
+                    ColumnType::Uuid => io.index_lookup(
+                        source_table.as_str(),
+                        col.name.as_str(),
+                        &self.branch,
+                        &Value::Uuid(target_row_id),
+                    ),
+                    ColumnType::Array(element) if **element == ColumnType::Uuid => {
+                        io.index_scan_all(source_table.as_str(), col.name.as_str(), &self.branch)
+                    }
+                    _ => continue,
+                };
+
+                for source_row_id in candidate_ids {
+                    let Some((source_content, source_commit_id)) = row_loader(source_row_id) else {
+                        continue;
+                    };
+
+                    if !declared_edge_matches_target(
+                        &source_schema.descriptor,
+                        &source_content,
+                        col_idx,
+                        target_row_id,
+                    ) {
+                        continue;
+                    }
+
+                    let source_row = Row::new(source_row_id, source_content, source_commit_id);
+                    if self.evaluate_row_access_with_declared(
+                        operation,
+                        &source_row,
+                        &source_schema.descriptor,
+                        source_table.as_str(),
+                        None,
+                        io,
+                        row_loader,
+                        depth,
+                        visited_declared,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Evaluate a policy expression with context for INHERITS.
@@ -541,6 +709,21 @@ impl PolicyFilterNode {
     }
 }
 
+fn declared_edge_matches_target(
+    descriptor: &RowDescriptor,
+    row_content: &[u8],
+    column_index: usize,
+    target_row_id: ObjectId,
+) -> bool {
+    match decode_column(descriptor, row_content, column_index) {
+        Ok(Value::Uuid(id)) => id == target_row_id,
+        Ok(Value::Array(values)) => values
+            .iter()
+            .any(|value| matches!(value, Value::Uuid(id) if *id == target_row_id)),
+        _ => false,
+    }
+}
+
 /// Collect all tables referenced by policy clauses that require contextual re-evaluation.
 ///
 /// Includes:
@@ -549,6 +732,25 @@ impl PolicyFilterNode {
 fn collect_inherits_tables(policy: &PolicyExpr, descriptor: &RowDescriptor) -> HashSet<String> {
     let mut tables = HashSet::new();
     collect_inherits_tables_recursive(policy, descriptor, &mut tables);
+    tables
+}
+
+/// Collect tables that can grant access to `target_table` via `INHERIT POLICY` FK declarations.
+fn collect_declared_inbound_tables(schema: &Schema, target_table: &str) -> HashSet<String> {
+    let target = TableName::new(target_table);
+    let mut tables = HashSet::new();
+
+    for (source_table, source_schema) in schema {
+        if source_schema
+            .descriptor
+            .columns
+            .iter()
+            .any(|col| col.inherit_policy && col.references == Some(target))
+        {
+            tables.insert(source_table.as_str().to_string());
+        }
+    }
+
     tables
 }
 
@@ -631,6 +833,7 @@ impl RowNode for PolicyFilterNode {
 
         // Process added tuples
         for tuple in input.added {
+            self.input_tuples.insert(tuple.clone());
             let Some(row) = tuple_to_row(&tuple) else {
                 continue;
             };
@@ -642,6 +845,7 @@ impl RowNode for PolicyFilterNode {
 
         // Process removed tuples
         for tuple in input.removed {
+            self.input_tuples.remove(&tuple);
             if self.current_tuples.remove(&tuple) {
                 result.removed.push(tuple);
             }
@@ -649,6 +853,9 @@ impl RowNode for PolicyFilterNode {
 
         // Process updated tuples
         for (old_tuple, new_tuple) in input.updated {
+            self.input_tuples.remove(&old_tuple);
+            self.input_tuples.insert(new_tuple.clone());
+
             let old_row = tuple_to_row(&old_tuple);
             let new_row = tuple_to_row(&new_tuple);
 

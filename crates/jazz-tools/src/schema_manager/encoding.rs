@@ -17,7 +17,7 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 2;
+const SCHEMA_VERSION: u8 = 3;
 const LENS_VERSION: u8 = 1;
 
 /// Encoding errors.
@@ -101,8 +101,10 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     match version {
         // v1 schemas did not encode policies.
         1 => decode_schema_v1(data),
-        // v2 schemas include policies.
-        SCHEMA_VERSION => decode_schema_v2(data),
+        // v2 schemas include policies, but no `inherit_policy` column flag.
+        2 => decode_schema_v2(data),
+        // v3 schemas include policies and `inherit_policy` column flag.
+        SCHEMA_VERSION => decode_schema_v3(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: SCHEMA_VERSION,
@@ -122,6 +124,23 @@ fn decode_table_entry(
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor(data, offset)?;
+    let policies = decode_table_policies(data, offset)?;
+
+    Ok((
+        TableName::new(name),
+        TableSchema {
+            descriptor,
+            policies,
+        },
+    ))
+}
+
+fn decode_table_entry_v2(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
+    let name = read_string(data, offset, "table_name")?;
+    let descriptor = decode_row_descriptor_v2(data, offset)?;
     let policies = decode_table_policies(data, offset)?;
 
     Ok((
@@ -168,6 +187,19 @@ fn decode_schema_v2(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
 
     let mut schema = HashMap::new();
     for _ in 0..table_count {
+        let (name, table_schema) = decode_table_entry_v2(data, &mut offset)?;
+        schema.insert(name, table_schema);
+    }
+
+    Ok(schema)
+}
+
+fn decode_schema_v3(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+    let mut offset = 1;
+    let table_count = read_u32(data, &mut offset)?;
+
+    let mut schema = HashMap::new();
+    for _ in 0..table_count {
         let (name, table_schema) = decode_table_entry(data, &mut offset)?;
         schema.insert(name, table_schema);
     }
@@ -200,6 +232,20 @@ fn decode_row_descriptor(
     Ok(RowDescriptor::new(columns))
 }
 
+fn decode_row_descriptor_v2(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<RowDescriptor, CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    let mut columns = Vec::with_capacity(count as usize);
+
+    for _ in 0..count {
+        columns.push(decode_column_descriptor_v2(data, offset)?);
+    }
+
+    Ok(RowDescriptor::new(columns))
+}
+
 fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
     write_string(buf, col.name.as_str());
     encode_column_type(buf, &col.column_type);
@@ -215,9 +261,35 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
             buf.push(0);
         }
     }
+    // Inherit policy flag (only meaningful when references is present).
+    buf.push(if col.inherit_policy { 1 } else { 0 });
 }
 
 fn decode_column_descriptor(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<ColumnDescriptor, CatalogueEncodingError> {
+    let name = read_string(data, offset, "column_name")?;
+    let column_type = decode_column_type(data, offset)?;
+    let nullable = read_u8(data, offset)? != 0;
+    let has_ref = read_u8(data, offset)? != 0;
+    let references = if has_ref {
+        Some(TableName::new(read_string(data, offset, "column_ref")?))
+    } else {
+        None
+    };
+    let inherit_policy = read_u8(data, offset)? != 0;
+
+    Ok(ColumnDescriptor {
+        name: ColumnName::new(name),
+        column_type,
+        nullable,
+        references,
+        inherit_policy,
+    })
+}
+
+fn decode_column_descriptor_v2(
     data: &[u8],
     offset: &mut usize,
 ) -> Result<ColumnDescriptor, CatalogueEncodingError> {
@@ -236,6 +308,7 @@ fn decode_column_descriptor(
         column_type,
         nullable,
         references,
+        inherit_policy: false,
     })
 }
 
@@ -1104,6 +1177,101 @@ mod tests {
         let posts = decoded.get(&TableName::new("posts")).unwrap();
         let tags_col = posts.descriptor.column("tags").unwrap();
         assert!(matches!(tags_col.column_type, ColumnType::Array(_)));
+    }
+
+    #[test]
+    fn schema_roundtrip_with_inherit_policy_flag() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("image", ColumnType::Uuid)
+                    .references("files")
+                    .inherit_policy(),
+            ])),
+        );
+        schema.insert(
+            TableName::new("files"),
+            TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "name",
+                ColumnType::Text,
+            )])),
+        );
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
+
+        let decoded = decode_schema(&encoded).unwrap();
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
+        assert!(image_col.inherit_policy);
+    }
+
+    #[test]
+    fn decode_v2_schema_sets_inherit_policy_false() {
+        fn encode_schema_v2_for_test(schema: &Schema) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(2);
+
+            let mut tables: Vec<_> = schema.iter().collect();
+            tables.sort_by_key(|(name, _)| name.as_str());
+            write_u32(&mut buf, tables.len() as u32);
+
+            for (name, table_schema) in tables {
+                write_string(&mut buf, name.as_str());
+
+                let mut columns: Vec<_> = table_schema.descriptor.columns.iter().collect();
+                columns.sort_by_key(|c| c.name.as_str());
+                write_u32(&mut buf, columns.len() as u32);
+                for col in columns {
+                    write_string(&mut buf, col.name.as_str());
+                    encode_column_type(&mut buf, &col.column_type);
+                    buf.push(if col.nullable { 1 } else { 0 });
+                    match &col.references {
+                        Some(table) => {
+                            buf.push(1);
+                            write_string(&mut buf, table.as_str());
+                        }
+                        None => buf.push(0),
+                    }
+                }
+
+                encode_table_policies(&mut buf, &table_schema.policies);
+            }
+
+            buf
+        }
+
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("image", ColumnType::Uuid).references("files"),
+            ])),
+        );
+        schema.insert(
+            TableName::new("files"),
+            TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "name",
+                ColumnType::Text,
+            )])),
+        );
+
+        let encoded_v2 = encode_schema_v2_for_test(&schema);
+        let decoded = decode_schema(&encoded_v2).unwrap();
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
+        assert!(!image_col.inherit_policy);
     }
 
     #[test]

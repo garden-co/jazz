@@ -130,6 +130,30 @@ describe("schemaToSql", () => {
     expect(sql).not.toContain("parent_id UUID REFERENCES todos NOT NULL");
   });
 
+  it("generates INHERIT POLICY for ref columns", () => {
+    resetCollectedState();
+    table("todos", {
+      image: col.ref("files").inheritPolicy(),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("image UUID REFERENCES files INHERIT POLICY NOT NULL");
+  });
+
+  it("generates INHERIT POLICY for array(ref(...)) columns", () => {
+    resetCollectedState();
+    table("files", {
+      parts: col.array(col.ref("file_parts").inheritPolicy()),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("parts UUID[] REFERENCES file_parts INHERIT POLICY NOT NULL");
+  });
+
   it("stores references in Column metadata", () => {
     resetCollectedState();
     table("todos", {
@@ -147,6 +171,23 @@ describe("schemaToSql", () => {
     expect(parent.sqlType).toBe("UUID");
     expect(parent.references).toBe("todos");
     expect(parent.nullable).toBe(true);
+  });
+
+  it("stores inheritPolicy in Column metadata", () => {
+    resetCollectedState();
+    table("todos", {
+      image: col.ref("files").inheritPolicy(),
+      parts: col.array(col.ref("file_parts").inheritPolicy()),
+    });
+    const schema = getCollectedSchema();
+
+    const image = schema.tables[0].columns.find((c) => c.name === "image")!;
+    expect(image.references).toBe("files");
+    expect(image.inheritPolicy).toBe(true);
+
+    const parts = schema.tables[0].columns.find((c) => c.name === "parts")!;
+    expect(parts.references).toBe("file_parts");
+    expect(parts.inheritPolicy).toBe(true);
   });
 
   it("stores references in array(ref(...)) metadata", () => {
