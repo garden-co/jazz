@@ -30,7 +30,15 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 use crate::sync_manager::PersistenceTier;
 
-use super::{LoadedBranch, Storage, StorageError, encode_value};
+use super::{
+    LoadedBranch, Storage, StorageError,
+    key_codec::increment_bytes,
+    storage_core::{
+        append_commit_core, create_object_core, delete_commit_core, index_insert_core,
+        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
+        load_branch_core, load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
+    },
+};
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -165,62 +173,6 @@ impl OpfsBTreeStorage {
         tracing::info!(obj_count, idx_count, ack_count, "OpfsBTreeStorage opened");
     }
 
-    fn obj_meta_key(id: ObjectId) -> String {
-        format!("obj:{}:meta", format_uuid(id))
-    }
-
-    fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
-        format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
-    }
-
-    fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
-        format!(
-            "obj:{}:br:{}:c:{}",
-            format_uuid(object_id),
-            branch,
-            hex::encode(commit_id.0)
-        )
-    }
-
-    fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-        format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
-    }
-
-    fn ack_key(commit_id: CommitId) -> String {
-        format!("ack:{}", hex::encode(commit_id.0))
-    }
-
-    fn index_entry_key(
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> String {
-        format!(
-            "idx:{}:{}:{}:{}:{}",
-            table,
-            column,
-            branch,
-            hex::encode(encode_value(value)),
-            format_uuid(row_id)
-        )
-    }
-
-    fn index_value_prefix(table: &str, column: &str, branch: &str, value: &Value) -> String {
-        format!(
-            "idx:{}:{}:{}:{}:",
-            table,
-            column,
-            branch,
-            hex::encode(encode_value(value))
-        )
-    }
-
-    fn index_prefix(table: &str, column: &str, branch: &str) -> String {
-        format!("idx:{}:{}:{}:", table, column, branch)
-    }
-
     fn tree_insert(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_tree_mut(|tree| tree.put(key.as_bytes(), value).map_err(map_storage_err))
     }
@@ -288,25 +240,14 @@ impl Storage for OpfsBTreeStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let key = Self::obj_meta_key(id);
-        let json = serde_json::to_vec(&metadata)
-            .map_err(|e| StorageError::IoError(format!("serialize metadata: {}", e)))?;
-        self.tree_insert(&key, &json)
+        create_object_core(id, metadata, |key, value| self.tree_insert(key, value))
     }
 
     fn load_object_metadata(
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let key = Self::obj_meta_key(id);
-        match self.tree_read(&key)? {
-            Some(data) => {
-                let meta: HashMap<String, String> = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize metadata: {}", e)))?;
-                Ok(Some(meta))
-            }
-            None => Ok(None),
-        }
+        load_object_metadata_core(id, |key| self.tree_read(key))
     }
 
     fn load_branch(
@@ -314,44 +255,12 @@ impl Storage for OpfsBTreeStorage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
-        let meta_key = Self::obj_meta_key(object_id);
-        if self.tree_read(&meta_key)?.is_none() {
-            return Ok(None);
-        }
-
-        let commit_prefix = Self::commit_prefix(object_id, branch);
-        let commit_entries = self.tree_scan_prefix(&commit_prefix)?;
-
-        if commit_entries.is_empty() {
-            let tips_key = Self::branch_tips_key(object_id, branch);
-            if self.tree_read(&tips_key)?.is_none() {
-                return Ok(None);
-            }
-        }
-
-        let mut commits = Vec::new();
-        for (_key, data) in &commit_entries {
-            let mut commit: Commit = serde_json::from_slice(data)
-                .map_err(|e| StorageError::IoError(format!("deserialize commit: {}", e)))?;
-
-            let ack_key = Self::ack_key(commit.id());
-            if let Some(ack_data) = self.tree_read(&ack_key)? {
-                let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&ack_data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?;
-                commit.ack_state.confirmed_tiers = tiers;
-            }
-
-            commits.push(commit);
-        }
-
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        let tails = match self.tree_read(&tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        Ok(Some(LoadedBranch { commits, tails }))
+        load_branch_core(
+            object_id,
+            branch,
+            |key| self.tree_read(key),
+            |prefix| self.tree_scan_prefix(prefix),
+        )
     }
 
     fn append_commit(
@@ -360,30 +269,13 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        let commit_id = commit.id();
-
-        let commit_key = Self::commit_key(object_id, branch, commit_id);
-        let commit_json = serde_json::to_vec(&commit)
-            .map_err(|e| StorageError::IoError(format!("serialize commit: {}", e)))?;
-        self.tree_insert(&commit_key, &commit_json)?;
-
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        let mut tips: HashSet<CommitId> = match self.tree_read(&tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        for parent in &commit.parents {
-            tips.remove(parent);
-        }
-        tips.insert(commit_id);
-
-        let tips_json = serde_json::to_vec(&tips)
-            .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-        self.tree_insert(&tips_key, &tips_json)?;
-
-        Ok(())
+        append_commit_core(
+            object_id,
+            branch,
+            commit,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
     }
 
     fn delete_commit(
@@ -392,20 +284,14 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        let commit_key = Self::commit_key(object_id, branch, commit_id);
-        self.tree_delete(&commit_key)?;
-
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        if let Some(data) = self.tree_read(&tips_key)? {
-            let mut tips: HashSet<CommitId> = serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?;
-            tips.remove(&commit_id);
-            let tips_json = serde_json::to_vec(&tips)
-                .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-            self.tree_insert(&tips_key, &tips_json)?;
-        }
-
-        Ok(())
+        delete_commit_core(
+            object_id,
+            branch,
+            commit_id,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+            |key| self.tree_delete(key),
+        )
     }
 
     fn set_branch_tails(
@@ -414,18 +300,13 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        match tails {
-            Some(t) => {
-                let json = serde_json::to_vec(&t)
-                    .map_err(|e| StorageError::IoError(format!("serialize tails: {}", e)))?;
-                self.tree_insert(&tips_key, &json)?;
-            }
-            None => {
-                self.tree_delete(&tips_key)?;
-            }
-        }
-        Ok(())
+        set_branch_tails_core(
+            object_id,
+            branch,
+            tails,
+            |key, value| self.tree_insert(key, value),
+            |key| self.tree_delete(key),
+        )
     }
 
     fn store_ack_tier(
@@ -433,16 +314,12 @@ impl Storage for OpfsBTreeStorage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError> {
-        let key = Self::ack_key(commit_id);
-        let mut tiers: HashSet<PersistenceTier> = match self.tree_read(&key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?,
-            None => HashSet::new(),
-        };
-        tiers.insert(tier);
-        let json = serde_json::to_vec(&tiers)
-            .map_err(|e| StorageError::IoError(format!("serialize ack: {}", e)))?;
-        self.tree_insert(&key, &json)
+        store_ack_tier_core(
+            commit_id,
+            tier,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
     }
 
     fn index_insert(
@@ -454,8 +331,9 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        let key = Self::index_entry_key(table, column, branch, value, row_id);
-        self.tree_insert(&key, &[0x01])
+        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
+            self.tree_insert(key, bytes)
+        })
     }
 
     fn index_remove(
@@ -467,8 +345,9 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        let key = Self::index_entry_key(table, column, branch, value, row_id);
-        self.tree_delete(&key)
+        index_remove_core(table, column, branch, value, row_id, |key| {
+            self.tree_delete(key)
+        })
     }
 
     fn index_lookup(
@@ -479,14 +358,9 @@ impl Storage for OpfsBTreeStorage {
         value: &Value,
     ) -> Vec<ObjectId> {
         tracing::trace!(table, column, branch, "index_lookup");
-        let prefix = Self::index_value_prefix(table, column, branch, value);
-        match self.tree_scan_keys(&prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_lookup_core(table, column, branch, value, |prefix| {
+            self.tree_scan_keys(prefix)
+        })
     }
 
     fn index_range(
@@ -497,60 +371,13 @@ impl Storage for OpfsBTreeStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let base_prefix = Self::index_prefix(table, column, branch);
-
-        let start_key = match start {
-            Bound::Included(v) => {
-                format!("{}{}", base_prefix, hex::encode(encode_value(v)))
-            }
-            Bound::Excluded(v) => {
-                let encoded = hex::encode(encode_value(v));
-                let mut key = format!("{}{}:", base_prefix, encoded);
-                increment_string(&mut key);
-                key
-            }
-            Bound::Unbounded => base_prefix.clone(),
-        };
-
-        let end_key = match end {
-            Bound::Included(v) => {
-                let encoded = hex::encode(encode_value(v));
-                let mut key = format!("{}{}:", base_prefix, encoded);
-                increment_string(&mut key);
-                key
-            }
-            Bound::Excluded(v) => {
-                format!("{}{}", base_prefix, hex::encode(encode_value(v)))
-            }
-            Bound::Unbounded => {
-                let mut end = base_prefix.clone();
-                increment_string(&mut end);
-                end
-            }
-        };
-
-        if start_key >= end_key {
-            return Vec::new();
-        }
-
-        match self.tree_scan_key_range(&start_key, &end_key) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_range_core(table, column, branch, start, end, |start_key, end_key| {
+            self.tree_scan_key_range(start_key, end_key)
+        })
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let prefix = Self::index_prefix(table, column, branch);
-        match self.tree_scan_keys(&prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
     }
 
     fn flush(&self) {
@@ -569,37 +396,6 @@ impl Storage for OpfsBTreeStorage {
 
 fn map_storage_err(error: BTreeError) -> StorageError {
     StorageError::IoError(format!("opfs-btree: {}", error))
-}
-
-fn format_uuid(id: ObjectId) -> String {
-    hex::encode(id.uuid().as_bytes())
-}
-
-fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
-    let uuid_hex = key.rsplit(':').next()?;
-    let bytes = hex::decode(uuid_hex).ok()?;
-    if bytes.len() != 16 {
-        return None;
-    }
-    let uuid = uuid::Uuid::from_bytes(bytes.try_into().ok()?);
-    Some(ObjectId(internment::Intern::new(uuid)))
-}
-
-fn increment_bytes(bytes: &mut Vec<u8>) {
-    for i in (0..bytes.len()).rev() {
-        if bytes[i] < 0xFF {
-            bytes[i] += 1;
-            bytes.truncate(i + 1);
-            return;
-        }
-    }
-    bytes.push(0x00);
-}
-
-fn increment_string(s: &mut String) {
-    let mut bytes = std::mem::take(s).into_bytes();
-    increment_bytes(&mut bytes);
-    *s = String::from_utf8(bytes).unwrap_or_default();
 }
 
 #[cfg(test)]
@@ -789,8 +585,8 @@ mod tests {
             .store_ack_tier(commit_id, PersistenceTier::EdgeServer)
             .unwrap();
 
-        let ack_key = OpfsBTreeStorage::ack_key(commit_id);
-        let data = storage.tree_read(&ack_key).unwrap().unwrap();
+        let key = super::super::key_codec::ack_key(commit_id);
+        let data = storage.tree_read(&key).unwrap().unwrap();
         let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&data).unwrap();
         assert!(tiers.contains(&PersistenceTier::Worker));
         assert!(tiers.contains(&PersistenceTier::EdgeServer));

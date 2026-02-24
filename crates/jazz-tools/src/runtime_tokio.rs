@@ -1,4 +1,4 @@
-//! Tokio runtime adapter for Groove.
+//! Tokio runtime adapter for Jazz.
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
 //! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
@@ -15,18 +15,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use groove::object::ObjectId;
-use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, Value};
-pub use groove::runtime_core::SubscriptionHandle;
-use groove::runtime_core::{
+use crate::object::ObjectId;
+use crate::query_manager::query::Query;
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{Schema, Value};
+pub use crate::runtime_core::SubscriptionHandle;
+use crate::runtime_core::{
     QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta,
     SyncSender,
 };
-use groove::schema_manager::{QuerySchemaContext, SchemaManager};
-use groove::storage::Storage;
-use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+use crate::schema_manager::{QuerySchemaContext, SchemaManager};
+use crate::storage::Storage;
+use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
 
 // ============================================================================
 // TokioScheduler
@@ -156,7 +156,7 @@ impl From<CoreRuntimeError> for RuntimeError {
 // TokioRuntime
 // ============================================================================
 
-/// Tokio runtime for Groove, generic over storage backend.
+/// Tokio runtime for Jazz, generic over storage backend.
 ///
 /// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
@@ -448,7 +448,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         query: Query,
         schema_context: &QuerySchemaContext,
         session: Option<Session>,
-    ) -> Result<groove::sync_manager::QueryId, RuntimeError> {
+    ) -> Result<crate::sync_manager::QueryId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core
             .subscribe_with_schema_context(query, schema_context, session)
@@ -460,10 +460,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
-    use groove::schema_manager::AppId;
-    use groove::storage::MemoryStorage;
-    use groove::sync_manager::SyncManager;
+    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::schema_manager::AppId;
+    use crate::storage::MemoryStorage;
+    use crate::sync_manager::SyncManager;
     use std::sync::atomic::AtomicUsize;
 
     fn test_schema() -> Schema {

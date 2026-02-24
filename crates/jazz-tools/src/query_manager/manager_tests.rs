@@ -6,14 +6,16 @@ use serde_json::json;
 use smallvec::smallvec;
 
 use crate::metadata::MetadataKey;
+use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::manager::{QueryError, QueryManager};
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::Session as PolicySession;
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
+    TableSchema, Value,
+};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::SyncManager;
-
-use super::{
-    ColumnDescriptor, ColumnType, PolicyExpr, QueryBuilder, QueryError, QueryManager,
-    RowDescriptor, Schema, Session as PolicySession, TableName, TablePolicies, TableSchema, Value,
-    decode_row,
-};
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -909,6 +911,128 @@ fn synced_update_updates_column_indices() {
         results.len(),
         1,
         "New score value should be in index after sync update"
+    );
+}
+
+#[test]
+#[should_panic(expected = "missing old_content for historical sync update")]
+fn synced_update_missing_old_content_panics_fail_fast() {
+    use crate::object::BranchName;
+    use crate::object_manager::AllObjectUpdate;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    // Simulate a historical sync update where ObjectManager couldn't provide
+    // old_content. We should fail-fast rather than accept index staleness.
+    qm.handle_object_update(
+        &mut storage,
+        AllObjectUpdate {
+            object_id: handle.row_id,
+            metadata,
+            branch_name: BranchName::new(&branch),
+            commit_ids: vec![],
+            is_new_object: false,
+            previous_commit_ids: vec![handle.row_commit_id],
+            old_content: None,
+        },
+    );
+}
+
+#[test]
+fn lens_transform_failure_drops_row_instead_of_fallback() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
+
+    // Build a live schema without registering a lens path to current.
+    // Rows from that branch should be dropped at materialization time.
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut live_schema = Schema::new();
+    live_schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+            ColumnDescriptor::new("email", ColumnType::Text),
+        ])
+        .into(),
+    );
+    let live_descriptor = live_schema
+        .get(&TableName::new("users"))
+        .expect("live schema table should exist")
+        .descriptor
+        .clone();
+    qm.add_live_schema(live_schema);
+
+    let current_branch = get_branch(&qm);
+    let live_branch = qm
+        .all_query_branches()
+        .into_iter()
+        .find(|b| b != &current_branch)
+        .expect("live schema branch should exist");
+
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let live_data = encode_row(
+        &live_descriptor,
+        &[
+            Value::Text("Alice".into()),
+            Value::Integer(100),
+            Value::Text("alice@example.com".into()),
+        ],
+    )
+    .unwrap();
+    let commit = Commit {
+        parents: smallvec![],
+        content: live_data,
+        timestamp: 1000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &live_branch, commit)
+        .unwrap();
+    qm.process(&mut storage);
+
+    assert!(
+        qm.row_is_indexed_on_branch(&storage, "users", &live_branch, row_id),
+        "row should be indexed on live branch before subscription settle"
+    );
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        0,
+        "row from branch with failed lens transform should be dropped"
     );
 }
 
@@ -5491,7 +5615,7 @@ fn server_builds_query_graph_on_subscription() {
         .iter()
         .filter_map(|e| {
             if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                Some(*object_id)
+                Some(object_id)
             } else {
                 None
             }
@@ -5500,6 +5624,46 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn local_stale_recompile_failure_drops_subscription_and_reports_failure() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    {
+        let sub = qm
+            .subscriptions
+            .get_mut(&sub_id)
+            .expect("subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    qm.process(&mut storage);
+
+    assert!(
+        !qm.subscriptions.contains_key(&sub_id),
+        "failed stale recompile should drop the local subscription"
+    );
+
+    let failures = qm.take_failed_subscriptions();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected exactly one reported local subscription failure"
+    );
+    assert_eq!(failures[0].subscription_id, sub_id);
+    assert!(
+        failures[0].reason.contains("no_such_table"),
+        "failure reason should include compile context: {}",
+        failures[0].reason
+    );
 }
 
 #[test]
@@ -5548,6 +5712,95 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     assert!(
         reason.contains("no_such_table"),
         "error reason should include compile error context: {reason}"
+    );
+}
+
+#[test]
+fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, ServerId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_server(upstream_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    let valid_query = server_qm.query("users").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(7),
+            query: Box::new(valid_query),
+            session: None,
+        },
+    });
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    {
+        let sub = server_qm
+            .server_subscriptions
+            .get_mut(&(client_id, QueryId(7)))
+            .expect("server subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    server_qm.process(&mut storage);
+
+    assert!(
+        !server_qm
+            .server_subscriptions
+            .contains_key(&(client_id, QueryId(7))),
+        "failed stale recompile should drop the server subscription"
+    );
+    assert!(
+        !server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .expect("client should still exist")
+            .queries
+            .contains_key(&QueryId(7)),
+        "client query scope should be cleared after fail-fast drop"
+    );
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let rejection_reason = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
+            ) if *id == client_id && *query_id == QueryId(7) => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("client should receive QuerySubscriptionRejected on stale recompile failure");
+    assert!(
+        rejection_reason.contains("query recompilation failed for query_id 7"),
+        "rejection should include query id context: {rejection_reason}"
+    );
+    assert!(
+        rejection_reason.contains("no_such_table"),
+        "rejection should include compile error context: {rejection_reason}"
+    );
+
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Server(id),
+                SyncPayload::QueryUnsubscription { query_id }
+            ) if *id == upstream_id && *query_id == QueryId(7)
+        )),
+        "stale recompile failure should forward QueryUnsubscription upstream"
     );
 }
 
@@ -5992,7 +6245,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // Now receive an update for the existing object from upstream
     // (simulating upstream sending fresh data)
     let table_schema = schema.get(&TableName::new("users")).unwrap();
-    let row_data = super::encode_row(
+    let row_data = encode_row(
         &table_schema.descriptor,
         &[Value::Text("Alice".into()), Value::Integer(80)],
     )

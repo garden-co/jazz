@@ -823,7 +823,7 @@ export class Db {
   }
 
   private static async spawnWorker(): Promise<Worker> {
-    const worker = new Worker(new URL("../worker/groove-worker.js", import.meta.url), {
+    const worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
       type: "module",
     });
 

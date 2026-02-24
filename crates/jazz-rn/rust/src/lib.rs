@@ -10,17 +10,17 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 
-use groove::object::ObjectId;
-use groove::query_manager::encoding::decode_row;
-use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, SchemaHash, Value};
-use groove::runtime_core::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::SurrealKvStorage;
-use groove::sync_manager::{
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
@@ -88,7 +88,7 @@ where
 }
 
 // ============================================================================
-// JSON boundary types (mirrors groove-napi + jazz-wasm)
+// JSON boundary types (mirrors jazz-napi + jazz-wasm)
 // ============================================================================
 
 /// Tagged value type for the JS boundary, serde-serialized as:
@@ -204,11 +204,11 @@ struct JsSchema {
     tables: HashMap<String, JsTableSchema>,
 }
 
-impl TryFrom<JsColumnType> for groove::query_manager::types::ColumnType {
+impl TryFrom<JsColumnType> for jazz_tools::query_manager::types::ColumnType {
     type Error = JazzRnError;
 
     fn try_from(ct: JsColumnType) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::{ColumnType, RowDescriptor};
+        use jazz_tools::query_manager::types::{ColumnType, RowDescriptor};
 
         match ct.type_name.as_str() {
             "Integer" => Ok(ColumnType::Integer),
@@ -231,7 +231,8 @@ impl TryFrom<JsColumnType> for groove::query_manager::types::ColumnType {
                 let descriptors = cols
                     .into_iter()
                     .map(TryInto::try_into)
-                    .collect::<Result<Vec<groove::query_manager::types::ColumnDescriptor>, _>>()?;
+                    .collect::<Result<Vec<jazz_tools::query_manager::types::ColumnDescriptor>, _>>(
+                    )?;
                 Ok(ColumnType::Row(Box::new(RowDescriptor::new(descriptors))))
             }
             other => Err(JazzRnError::Schema {
@@ -241,11 +242,11 @@ impl TryFrom<JsColumnType> for groove::query_manager::types::ColumnType {
     }
 }
 
-impl TryFrom<JsColumnDescriptor> for groove::query_manager::types::ColumnDescriptor {
+impl TryFrom<JsColumnDescriptor> for jazz_tools::query_manager::types::ColumnDescriptor {
     type Error = JazzRnError;
 
     fn try_from(c: JsColumnDescriptor) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::ColumnDescriptor;
+        use jazz_tools::query_manager::types::ColumnDescriptor;
 
         let mut cd = ColumnDescriptor::new(&c.name, c.column_type.try_into()?);
         if c.nullable {
@@ -258,17 +259,17 @@ impl TryFrom<JsColumnDescriptor> for groove::query_manager::types::ColumnDescrip
     }
 }
 
-impl TryFrom<JsTableSchema> for groove::query_manager::types::TableSchema {
+impl TryFrom<JsTableSchema> for jazz_tools::query_manager::types::TableSchema {
     type Error = JazzRnError;
 
     fn try_from(js: JsTableSchema) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::{RowDescriptor, TableSchema};
+        use jazz_tools::query_manager::types::{RowDescriptor, TableSchema};
 
         let columns = js
             .columns
             .into_iter()
             .map(TryInto::try_into)
-            .collect::<Result<Vec<groove::query_manager::types::ColumnDescriptor>, _>>()?;
+            .collect::<Result<Vec<jazz_tools::query_manager::types::ColumnDescriptor>, _>>()?;
         Ok(TableSchema::new(RowDescriptor::new(columns)))
     }
 }
@@ -277,7 +278,7 @@ impl TryFrom<JsSchema> for Schema {
     type Error = JazzRnError;
 
     fn try_from(js: JsSchema) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::TableName;
+        use jazz_tools::query_manager::types::TableName;
 
         let mut schema = Schema::new();
         for (table_name, table_schema) in js.tables {
@@ -321,7 +322,7 @@ struct IndexedRowState {
 
 fn index_row_delta(
     current_ids: &[ObjectId],
-    delta: &groove::query_manager::types::RowDelta,
+    delta: &jazz_tools::query_manager::types::RowDelta,
 ) -> IndexedRowState {
     let pre_index_by_id: HashMap<_, _> = current_ids
         .iter()
@@ -375,7 +376,7 @@ fn build_rn_delta_json<F>(
     mut row_to_json: F,
 ) -> serde_json::Value
 where
-    F: FnMut(&groove::query_manager::types::Row) -> serde_json::Value,
+    F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
 {
     let indexed = index_row_delta(current_ids, &delta.delta);
 
@@ -551,7 +552,7 @@ impl RnRuntime {
     pub fn new(
         schema_json: String,
         app_id: String,
-        groove_env: String,
+        jazz_env: String,
         user_branch: String,
         tier: Option<String>,
         data_path: Option<String>,
@@ -570,7 +571,7 @@ impl RnRuntime {
             let app_id_obj =
                 AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
             let schema_manager =
-                SchemaManager::new(sync_manager, schema, app_id_obj, &groove_env, &user_branch)
+                SchemaManager::new(sync_manager, schema, app_id_obj, &jazz_env, &user_branch)
                     .map_err(|e| JazzRnError::Schema {
                         message: format!("{:?}", e),
                     })?;
@@ -767,7 +768,7 @@ impl RnRuntime {
                         move |delta: SubscriptionDelta| {
                             let descriptor = &delta.descriptor;
                             let row_to_json =
-                                |row: &groove::query_manager::types::Row| -> serde_json::Value {
+                                |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
                                     let values = decode_row(descriptor, &row.data)
                                         .map(|vals| {
                                             vals.into_iter().map(RnValue::from).collect::<Vec<_>>()
@@ -917,7 +918,7 @@ impl RnRuntime {
 
     pub fn set_client_role(&self, client_id: String, role: String) -> Result<(), JazzRnError> {
         with_panic_boundary("set_client_role", || {
-            use groove::sync_manager::ClientRole;
+            use jazz_tools::sync_manager::ClientRole;
 
             let uuid = uuid::Uuid::parse_str(&client_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),

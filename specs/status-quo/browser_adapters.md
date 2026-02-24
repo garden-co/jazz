@@ -9,7 +9,7 @@ Primary code paths covered:
 - `packages/jazz-tools/src/runtime/db.ts`
 - `packages/jazz-tools/src/runtime/client.ts`
 - `packages/jazz-tools/src/runtime/worker-bridge.ts`
-- `packages/jazz-tools/src/worker/groove-worker.ts`
+- `packages/jazz-tools/src/worker/jazz-worker.ts`
 - `packages/jazz-tools/src/worker/worker-protocol.ts`
 - `packages/jazz-tools/src/runtime/sync-transport.ts`
 - `packages/jazz-tools/src/runtime/local-auth.ts`
@@ -33,7 +33,7 @@ React App
   -> Db (main thread facade)
      -> JazzClient (main thread in-memory WasmRuntime)
      -> WorkerBridge (postMessage)
-        -> groove-worker.ts (dedicated worker)
+        -> jazz-worker.ts (dedicated worker)
            -> persistent WasmRuntime.openPersistent(..., "worker")
            -> OPFS durability
            -> upstream /sync POST + /events binary stream
@@ -113,7 +113,7 @@ Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/
 - Main-thread bridge adapter between runtime outbox/inbox and worker `postMessage`.
 - Treats worker as the main runtime's "server" by calling `runtime.addServer()`.
 
-4. Worker runtime host (`worker/groove-worker.ts`)
+4. Worker runtime host (`worker/jazz-worker.ts`)
 
 - Bootstraps `jazz-wasm`.
 - Opens persistent runtime with `WasmRuntime.openPersistent(...)` and tier `"worker"`.
@@ -155,7 +155,7 @@ Payloads are JSON strings for sync messages (`payload: string`).
 ### 1. Browser Startup
 
 1. `createDb()` detects browser and calls `Db.createWithWorker()`.
-2. Main thread loads WASM module and spawns `groove-worker`.
+2. Main thread loads WASM module and spawns `jazz-worker`.
 3. Worker sends `ready` after loading WASM.
 4. On first schema use, `Db.getClient(schema)` creates main-thread `JazzClient`.
 5. `WorkerBridge.init(...)` sends `init` with schema/config/auth.

@@ -9,7 +9,9 @@
 //! Storage instance. Cross-thread communication uses the sync protocol over
 //! postMessage, not shared mutable state.
 
+mod key_codec;
 mod opfs_btree;
+mod storage_core;
 pub use opfs_btree::OpfsBTreeStorage;
 #[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
 mod surrealkv;
@@ -193,8 +195,8 @@ type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 ///
 /// Stores objects and indices in HashMaps/BTreeMaps. No persistence.
 /// This is sufficient for:
-/// - All groove unit tests
-/// - All groove integration tests
+/// - All jazz unit tests
+/// - All jazz integration tests
 /// - Main thread in browser (acts as cache of worker state)
 #[derive(Default)]
 pub struct MemoryStorage {

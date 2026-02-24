@@ -11,7 +11,7 @@ export declare class NapiRuntime {
   constructor(
     schemaJson: string,
     appId: string,
-    grooveEnv: string,
+    jazzEnv: string,
     userBranch: string,
     dataPath: string,
     tier?: string | undefined | null,
@@ -31,9 +31,9 @@ export declare class NapiRuntime {
     settledTier?: string | undefined | null,
   ): number;
   unsubscribe(handle: number): void;
-  insertPersisted(table: string, values: any, tier: string): Promise<string>;
-  updatePersisted(objectId: string, values: any, tier: string): Promise<void>;
-  deletePersisted(objectId: string, tier: string): Promise<void>;
+  insertWithAck(table: string, values: any, tier: string): Promise<string>;
+  updateWithAck(objectId: string, values: any, tier: string): Promise<void>;
+  deleteWithAck(objectId: string, tier: string): Promise<void>;
   onSyncMessageReceived(messageJson: string): void;
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;

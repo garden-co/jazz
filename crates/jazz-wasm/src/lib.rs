@@ -1,6 +1,6 @@
-//! jazz-wasm - WebAssembly bindings for the Groove database engine.
+//! jazz-wasm - WebAssembly bindings for the Jazz database engine.
 //!
-//! This crate provides JavaScript bindings for the Groove local-first database engine,
+//! This crate provides JavaScript bindings for the Jazz local-first database engine,
 //! enabling TypeScript/JavaScript applications to use Jazz with custom storage backends.
 //!
 //! # Architecture

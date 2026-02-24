@@ -19,18 +19,18 @@ use napi::Env;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
-use groove::object::ObjectId;
-use groove::query_manager::encoding::decode_row;
-use groove::query_manager::parse_query_json_compat;
-use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, SchemaHash, Value};
-use groove::runtime_core::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::parse_query_json;
+use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::{Storage, SurrealKvStorage};
-use groove::sync_manager::{
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::{Storage, SurrealKvStorage};
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
@@ -233,8 +233,8 @@ struct JsSchema {
     tables: HashMap<String, JsTableSchema>,
 }
 
-fn js_column_type_to_groove(ct: JsColumnType) -> groove::query_manager::types::ColumnType {
-    use groove::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor};
+fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::types::ColumnType {
+    use jazz_tools::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor};
 
     match ct.type_name.as_str() {
         "Integer" => ColumnType::Integer,
@@ -270,8 +270,8 @@ fn js_column_type_to_groove(ct: JsColumnType) -> groove::query_manager::types::C
 }
 
 fn js_schema_to_groove(js: JsSchema) -> Schema {
-    use groove::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-    use groove::query_manager::types::{
+    use jazz_tools::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
+    use jazz_tools::query_manager::types::{
         ColumnDescriptor, OperationPolicy, RowDescriptor, TableName, TablePolicies, TableSchema,
     };
 
@@ -402,7 +402,7 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
 }
 
 fn groove_schema_to_js(schema: &Schema) -> JsSchema {
-    use groove::query_manager::{
+    use jazz_tools::query_manager::{
         policy::{CmpOp, Operation, PolicyExpr, PolicyValue},
         types::{ColumnType, OperationPolicy, TablePolicies},
     };
@@ -595,7 +595,7 @@ fn parse_tier(tier: &str) -> napi::Result<PersistenceTier> {
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
-    parse_query_json_compat(json).map_err(napi::Error::from_reason)
+    parse_query_json(json).map_err(napi::Error::from_reason)
 }
 
 // ============================================================================
@@ -702,7 +702,7 @@ impl NapiRuntime {
         env: Env,
         schema_json: String,
         app_id: String,
-        groove_env: String,
+        jazz_env: String,
         user_branch: String,
         data_path: String,
         tier: Option<String>,
@@ -726,7 +726,7 @@ impl NapiRuntime {
             sync_manager,
             schema,
             AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
-            &groove_env,
+            &jazz_env,
             &user_branch,
         )
         .map_err(|e| {
@@ -966,8 +966,8 @@ impl NapiRuntime {
             })?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &groove::query_manager::types::Row,
-                               descriptor: &groove::query_manager::types::RowDescriptor|
+            let row_to_json = |row: &jazz_tools::query_manager::types::Row,
+                               descriptor: &jazz_tools::query_manager::types::RowDescriptor|
              -> serde_json::Value {
                 let values = decode_row(descriptor, &row.data)
                     .map(|vals| vals.into_iter().map(NapiValue::from).collect::<Vec<_>>())
@@ -1020,8 +1020,8 @@ impl NapiRuntime {
     // Persisted CRUD Operations
     // =========================================================================
 
-    #[napi(js_name = "insertPersisted", ts_return_type = "Promise<string>")]
-    pub fn insert_persisted(
+    #[napi(js_name = "insertWithAck", ts_return_type = "Promise<string>")]
+    pub fn insert_with_ack(
         &self,
         env: Env,
         table: String,
@@ -1053,8 +1053,8 @@ impl NapiRuntime {
         Ok(promise)
     }
 
-    #[napi(js_name = "updatePersisted", ts_return_type = "Promise<void>")]
-    pub fn update_persisted(
+    #[napi(js_name = "updateWithAck", ts_return_type = "Promise<void>")]
+    pub fn update_with_ack(
         &self,
         env: Env,
         object_id: String,
@@ -1089,8 +1089,8 @@ impl NapiRuntime {
         Ok(promise)
     }
 
-    #[napi(js_name = "deletePersisted", ts_return_type = "Promise<void>")]
-    pub fn delete_persisted(
+    #[napi(js_name = "deleteWithAck", ts_return_type = "Promise<void>")]
+    pub fn delete_with_ack(
         &self,
         env: Env,
         object_id: String,
@@ -1246,7 +1246,7 @@ impl NapiRuntime {
     /// Set a client's role ("user", "admin", or "peer").
     #[napi(js_name = "setClientRole")]
     pub fn set_client_role(&self, client_id: String, role: String) -> napi::Result<()> {
-        use groove::sync_manager::ClientRole;
+        use jazz_tools::sync_manager::ClientRole;
 
         let uuid = uuid::Uuid::parse_str(&client_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;

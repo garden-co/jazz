@@ -1,0 +1,251 @@
+use std::collections::{HashMap, HashSet};
+use std::ops::Bound;
+
+use serde::{Serialize, de::DeserializeOwned};
+
+use crate::commit::{Commit, CommitId};
+use crate::object::{BranchName, ObjectId};
+use crate::sync_manager::PersistenceTier;
+
+use crate::query_manager::types::Value;
+
+use super::key_codec::{
+    ack_key, branch_tips_key, commit_key, commit_prefix, index_entry_key, index_prefix,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+};
+use super::{LoadedBranch, StorageError};
+
+fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
+    serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
+}
+
+fn decode_json<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, StorageError> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| StorageError::IoError(format!("deserialize {label}: {e}")))
+}
+
+pub(super) fn create_object_core(
+    id: ObjectId,
+    metadata: HashMap<String, String>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = obj_meta_key(id);
+    let json = encode_json(&metadata, "metadata")?;
+    set(&key, &json)
+}
+
+pub(super) fn load_object_metadata_core(
+    id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<HashMap<String, String>>, StorageError> {
+    let key = obj_meta_key(id);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_json(&data, "metadata")?)),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn load_branch_core(
+    object_id: ObjectId,
+    branch: &BranchName,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Option<LoadedBranch>, StorageError> {
+    let meta_key = obj_meta_key(object_id);
+    if get(&meta_key)?.is_none() {
+        return Ok(None);
+    }
+
+    let commit_prefix = commit_prefix(object_id, branch);
+    let commit_entries = scan_prefix(&commit_prefix)?;
+
+    if commit_entries.is_empty() {
+        let tips_key = branch_tips_key(object_id, branch);
+        if get(&tips_key)?.is_none() {
+            return Ok(None);
+        }
+    }
+
+    let mut commits = Vec::new();
+    for (_key, data) in &commit_entries {
+        let mut commit: Commit = decode_json(data, "commit")?;
+
+        let ack_lookup_key = ack_key(commit.id());
+        if let Some(ack_data) = get(&ack_lookup_key)? {
+            let tiers: HashSet<PersistenceTier> = decode_json(&ack_data, "ack")?;
+            commit.ack_state.confirmed_tiers = tiers;
+        }
+
+        commits.push(commit);
+    }
+
+    let tips_key = branch_tips_key(object_id, branch);
+    let tails = match get(&tips_key)? {
+        Some(data) => decode_json(&data, "tips")?,
+        None => HashSet::new(),
+    };
+
+    Ok(Some(LoadedBranch { commits, tails }))
+}
+
+pub(super) fn append_commit_core(
+    object_id: ObjectId,
+    branch: &BranchName,
+    commit: Commit,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let commit_id = commit.id();
+
+    let commit_storage_key = commit_key(object_id, branch, commit_id);
+    let commit_json = encode_json(&commit, "commit")?;
+    set(&commit_storage_key, &commit_json)?;
+
+    let tips_key = branch_tips_key(object_id, branch);
+    let mut tips: HashSet<CommitId> = match get(&tips_key)? {
+        Some(data) => decode_json(&data, "tips")?,
+        None => HashSet::new(),
+    };
+
+    for parent in &commit.parents {
+        tips.remove(parent);
+    }
+    tips.insert(commit_id);
+
+    let tips_json = encode_json(&tips, "tips")?;
+    set(&tips_key, &tips_json)
+}
+
+pub(super) fn delete_commit_core(
+    object_id: ObjectId,
+    branch: &BranchName,
+    commit_id: CommitId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let commit_storage_key = commit_key(object_id, branch, commit_id);
+    delete(&commit_storage_key)?;
+
+    let tips_key = branch_tips_key(object_id, branch);
+    if let Some(data) = get(&tips_key)? {
+        let mut tips: HashSet<CommitId> = decode_json(&data, "tips")?;
+        tips.remove(&commit_id);
+        let tips_json = encode_json(&tips, "tips")?;
+        set(&tips_key, &tips_json)?;
+    }
+
+    Ok(())
+}
+
+pub(super) fn set_branch_tails_core(
+    object_id: ObjectId,
+    branch: &BranchName,
+    tails: Option<HashSet<CommitId>>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let tips_key = branch_tips_key(object_id, branch);
+    match tails {
+        Some(t) => {
+            let json = encode_json(&t, "tails")?;
+            set(&tips_key, &json)
+        }
+        None => delete(&tips_key),
+    }
+}
+
+pub(super) fn store_ack_tier_core(
+    commit_id: CommitId,
+    tier: PersistenceTier,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = ack_key(commit_id);
+    let mut tiers: HashSet<PersistenceTier> = match get(&key)? {
+        Some(data) => decode_json(&data, "ack")?,
+        None => HashSet::new(),
+    };
+    tiers.insert(tier);
+    let json = encode_json(&tiers, "ack")?;
+    set(&key, &json)
+}
+
+pub(super) fn index_insert_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+    row_id: ObjectId,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = index_entry_key(table, column, branch, value, row_id);
+    set(&key, &[0x01])
+}
+
+pub(super) fn index_remove_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+    row_id: ObjectId,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = index_entry_key(table, column, branch, value, row_id);
+    delete(&key)
+}
+
+pub(super) fn index_lookup_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let prefix = index_value_prefix(table, column, branch, value);
+    scan_prefix_keys(&prefix)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn index_scan_all_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let prefix = index_prefix(table, column, branch);
+    scan_prefix_keys(&prefix)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn index_range_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    start: Bound<&Value>,
+    end: Bound<&Value>,
+    mut scan_key_range: impl FnMut(&str, &str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let Some((start_key, end_key)) = index_range_scan_bounds(table, column, branch, start, end)
+    else {
+        return Vec::new();
+    };
+
+    scan_key_range(&start_key, &end_key)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
+}

@@ -7,7 +7,7 @@
 //! - Integrated QueryManager for query/insert/update/delete operations
 //! - Catalogue persistence for schema/lens discovery via sync
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
@@ -68,7 +68,8 @@ pub struct SchemaManager {
     /// Schemas known to this manager (for server mode).
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
-    known_schemas: HashMap<SchemaHash, Schema>,
+    known_schemas: Arc<HashMap<SchemaHash, Schema>>,
+    known_schemas_dirty: bool,
 }
 
 impl SchemaManager {
@@ -103,7 +104,8 @@ impl SchemaManager {
             context,
             query_manager,
             app_id,
-            known_schemas,
+            known_schemas: Arc::new(known_schemas),
+            known_schemas_dirty: true,
         })
     }
 
@@ -131,7 +133,8 @@ impl SchemaManager {
             context: SchemaContext::empty(),
             query_manager,
             app_id,
-            known_schemas: HashMap::new(),
+            known_schemas: Arc::new(HashMap::new()),
+            known_schemas_dirty: false,
         }
     }
 
@@ -156,7 +159,8 @@ impl SchemaManager {
             return;
         }
 
-        self.known_schemas.insert(hash, schema.clone());
+        Arc::make_mut(&mut self.known_schemas).insert(hash, schema.clone());
+        self.known_schemas_dirty = true;
 
         // If we have a current schema context, also try the lens-path activation
         if self.context.is_initialized() {
@@ -544,7 +548,10 @@ impl SchemaManager {
 
         // Always add to known_schemas (server or client)
         // This allows server-mode query execution even without lens paths
-        self.known_schemas.insert(hash, schema.clone());
+        if !self.known_schemas.contains_key(&hash) {
+            Arc::make_mut(&mut self.known_schemas).insert(hash, schema.clone());
+            self.known_schemas_dirty = true;
+        }
 
         // Skip if already live or is current
         if self.context.is_live(&hash) {
@@ -701,7 +708,7 @@ impl SchemaManager {
         }
 
         // Add other known schemas as potential live schemas
-        for (hash, schema) in &self.known_schemas {
+        for (hash, schema) in self.known_schemas.iter() {
             if *hash != ctx.schema_hash {
                 // Add to pending - will activate if lens path exists to target
                 temp_context.add_pending_schema(schema.clone());
@@ -810,8 +817,11 @@ impl SchemaManager {
 
         // Sync known schemas to QueryManager for server-mode lazy activation
         // This enables QueryManager to activate branches when rows arrive
-        self.query_manager
-            .set_known_schemas(self.known_schemas.clone());
+        if self.known_schemas_dirty {
+            self.query_manager
+                .set_known_schemas(Arc::clone(&self.known_schemas));
+            self.known_schemas_dirty = false;
+        }
 
         // Final attempt to activate any remaining pending schemas
         self.activate_pending_and_sync_to_query_manager();

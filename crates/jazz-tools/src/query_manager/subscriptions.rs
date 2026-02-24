@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
@@ -7,7 +10,10 @@ use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 #[cfg(test)]
 use super::encoding::decode_row;
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::manager::{CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QueryUpdate};
+use super::manager::{
+    CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QuerySubscriptionFailure,
+    QueryUpdate,
+};
 use super::query::{Query, QueryBuilder};
 use super::session::Session;
 #[cfg(test)]
@@ -249,6 +255,11 @@ impl QueryManager {
         std::mem::take(&mut self.update_outbox)
     }
 
+    /// Take terminal local subscription failures.
+    pub fn take_failed_subscriptions(&mut self) -> Vec<QuerySubscriptionFailure> {
+        std::mem::take(&mut self.failed_subscriptions)
+    }
+
     /// Take pending catalogue updates (schemas/lenses received via sync).
     ///
     /// SchemaManager should call this to process new schemas and lenses
@@ -283,7 +294,7 @@ impl QueryManager {
     ///
     /// Called by SchemaManager.process() to sync the known_schemas map.
     /// This enables lazy branch activation when rows arrive with unknown branches.
-    pub fn set_known_schemas(&mut self, schemas: HashMap<SchemaHash, Schema>) {
+    pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
     }
 

@@ -83,7 +83,7 @@ In browser mode, `createDb()` uses worker-backed mode:
 > [`runtime/db.ts:268`](../../packages/jazz-tools/src/runtime/db.ts#L268)
 > [`runtime/db.ts:315`](../../packages/jazz-tools/src/runtime/db.ts#L315)
 > [`runtime/worker-bridge.ts:44`](../../packages/jazz-tools/src/runtime/worker-bridge.ts#L44)
-> [`worker/groove-worker.ts:107`](../../packages/jazz-tools/src/worker/groove-worker.ts#L107)
+> [`worker/jazz-worker.ts:107`](../../packages/jazz-tools/src/worker/jazz-worker.ts#L107)
 
 Important bridge behavior: main runtime is given a logical upstream server (`runtime.addServer()`), and that upstream is implemented by the worker.
 
@@ -292,7 +292,7 @@ Worker startup opens persistent runtime:
 runtime = await wasmModule.WasmRuntime.openPersistent(..., dbName, "worker");
 ```
 
-> [`worker/groove-worker.ts:107`](../../packages/jazz-tools/src/worker/groove-worker.ts#L107)
+> [`worker/jazz-worker.ts:107`](../../packages/jazz-tools/src/worker/jazz-worker.ts#L107)
 
 Rust side creates `OpfsBTreeStorage::open_opfs(...)`:
 
@@ -322,9 +322,9 @@ And OPFS access is dedicated-worker-only:
 
 Worker emits client-destination sync payloads back to main:
 
-> [`worker/groove-worker.ts:127`](../../packages/jazz-tools/src/worker/groove-worker.ts#L127)
-> [`worker/groove-worker.ts:130`](../../packages/jazz-tools/src/worker/groove-worker.ts#L130)
-> [`worker/groove-worker.ts:56`](../../packages/jazz-tools/src/worker/groove-worker.ts#L56)
+> [`worker/jazz-worker.ts:127`](../../packages/jazz-tools/src/worker/jazz-worker.ts#L127)
+> [`worker/jazz-worker.ts:130`](../../packages/jazz-tools/src/worker/jazz-worker.ts#L130)
+> [`worker/jazz-worker.ts:56`](../../packages/jazz-tools/src/worker/jazz-worker.ts#L56)
 
 Main bridge feeds them into main runtime:
 
