@@ -1,6 +1,12 @@
 import * as React from "react";
-import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/react";
+import {
+  createJazzClient,
+  JazzProvider,
+  getActiveSyntheticAuth,
+  attachDevTools,
+} from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
+import { app } from "../schema/app.js";
 
 type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 
@@ -52,6 +58,7 @@ export function App({ config, fallback }: AppProps = {}) {
           return;
         }
         setClient(resolved);
+        attachDevTools(resolved, app.wasmSchema);
       },
       (reason) => {
         if (!active) return;

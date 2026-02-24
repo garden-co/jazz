@@ -58,6 +58,7 @@ vi.mock("../runtime/local-auth.js", () => ({
 }));
 
 vi.mock("../runtime/db.js", () => ({
+  Db: class {},
   createDb: mocks.createDb,
 }));
 
