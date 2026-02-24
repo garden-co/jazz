@@ -626,3 +626,58 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
         Ok(schema)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jazz_tools::query_manager::types::{
+        ColumnType, Schema, SchemaBuilder, TableName, TableSchema,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn wasm_column_type_enum_json_roundtrip() {
+        let enum_type = WasmColumnType::Enum {
+            variants: vec!["done".to_string(), "todo".to_string()],
+        };
+        let value = serde_json::to_value(&enum_type).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type": "Enum",
+                "variants": ["done", "todo"]
+            })
+        );
+
+        let decoded: WasmColumnType = serde_json::from_value(value).unwrap();
+        match decoded {
+            WasmColumnType::Enum { variants } => {
+                assert_eq!(variants, vec!["done".to_string(), "todo".to_string()]);
+            }
+            other => panic!("expected enum type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_schema_enum_roundtrip() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("todos").column(
+                "status",
+                ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+            ))
+            .build();
+
+        let wasm_schema = WasmSchema::from(&schema);
+        let decoded = Schema::try_from(wasm_schema).unwrap();
+        let status = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("status")
+            .unwrap();
+        assert_eq!(
+            status.column_type,
+            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
+        );
+    }
+}
