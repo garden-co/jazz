@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
@@ -291,7 +294,7 @@ impl QueryManager {
     ///
     /// Called by SchemaManager.process() to sync the known_schemas map.
     /// This enables lazy branch activation when rows arrive with unknown branches.
-    pub fn set_known_schemas(&mut self, schemas: HashMap<SchemaHash, Schema>) {
+    pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
     }
 
