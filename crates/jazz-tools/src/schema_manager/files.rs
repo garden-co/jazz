@@ -593,7 +593,7 @@ fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
         ColumnType::Boolean => "boolean",
         ColumnType::Integer | ColumnType::BigInt => "int",
         ColumnType::Timestamp => "int", // Timestamps are stored as integers
-        ColumnType::Bytea => "bytea",
+        ColumnType::Bytea => "bytes",
         _ => "string", // Fallback for unknown types
     }
 }

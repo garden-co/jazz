@@ -57,7 +57,7 @@ describe("schemaToSql", () => {
       integer_null: col.int().optional(),
       real: col.float(),
       real_null: col.float().optional(),
-      blob: col.bytea(),
+      blob: col.bytes(),
     });
     const schema = getCollectedSchema();
 
@@ -299,7 +299,7 @@ describe("lensToSql", () => {
   it("renders bytea defaults as hex literals", () => {
     resetCollectedState();
     migrate("files", {
-      payload: col.add().bytea({ default: new Uint8Array([0, 1, 255]) }),
+      payload: col.add().bytes({ default: new Uint8Array([0, 1, 255]) }),
     });
     const lens = getCollectedMigration()!;
 
