@@ -51,6 +51,29 @@ pub struct SurrealKvStorage {
     runtime: &'static TokioRuntime,
 }
 
+trait EventualTxnAdapter {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError>;
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError>;
+    fn delete(&self, key: &str) -> Result<(), StorageError>;
+}
+
+impl EventualTxnAdapter for std::cell::RefCell<SurrealTransaction> {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let txn = self.borrow();
+        SurrealKvStorage::txn_get(&txn, key)
+    }
+
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        let mut txn = self.borrow_mut();
+        SurrealKvStorage::txn_set(&mut txn, key, value)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        let mut txn = self.borrow_mut();
+        SurrealKvStorage::txn_delete(&mut txn, key)
+    }
+}
+
 impl SurrealKvStorage {
     /// Open a file-backed SurrealKvStorage at the given path.
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
@@ -119,6 +142,17 @@ impl SurrealKvStorage {
     fn txn_delete(txn: &mut SurrealTransaction, key: &str) -> Result<(), StorageError> {
         txn.delete(key.as_bytes())
             .map_err(|e| StorageError::IoError(format!("surrealkv delete: {}", e)))
+    }
+
+    fn with_eventual_write<R>(
+        &self,
+        op: impl FnOnce(&dyn EventualTxnAdapter) -> Result<R, StorageError>,
+    ) -> Result<R, StorageError> {
+        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
+        let output = op(&txn)?;
+        let mut txn = txn.into_inner();
+        self.commit_txn(&mut txn)?;
+        Ok(output)
     }
 
     fn scan_prefix(
@@ -215,11 +249,9 @@ impl Storage for SurrealKvStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        create_object_core(id, metadata, |key, value| {
-            Self::txn_set(&mut txn, key, value)
-        })?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            create_object_core(id, metadata, |key, value| txn.set(key, value))
+        })
     }
 
     fn load_object_metadata(
@@ -250,22 +282,15 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
-        append_commit_core(
-            object_id,
-            branch,
-            commit,
-            |key| {
-                let txn = txn.borrow();
-                Self::txn_get(&txn, key)
-            },
-            |key, value| {
-                let mut txn = txn.borrow_mut();
-                Self::txn_set(&mut txn, key, value)
-            },
-        )?;
-        let mut txn = txn.into_inner();
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            append_commit_core(
+                object_id,
+                branch,
+                commit,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+            )
+        })
     }
 
     fn delete_commit(
@@ -274,26 +299,16 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
-        delete_commit_core(
-            object_id,
-            branch,
-            commit_id,
-            |key| {
-                let txn = txn.borrow();
-                Self::txn_get(&txn, key)
-            },
-            |key, value| {
-                let mut txn = txn.borrow_mut();
-                Self::txn_set(&mut txn, key, value)
-            },
-            |key| {
-                let mut txn = txn.borrow_mut();
-                Self::txn_delete(&mut txn, key)
-            },
-        )?;
-        let mut txn = txn.into_inner();
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            delete_commit_core(
+                object_id,
+                branch,
+                commit_id,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+                |key| txn.delete(key),
+            )
+        })
     }
 
     fn set_branch_tails(
@@ -302,22 +317,15 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
-        set_branch_tails_core(
-            object_id,
-            branch,
-            tails,
-            |key, value| {
-                let mut txn = txn.borrow_mut();
-                Self::txn_set(&mut txn, key, value)
-            },
-            |key| {
-                let mut txn = txn.borrow_mut();
-                Self::txn_delete(&mut txn, key)
-            },
-        )?;
-        let mut txn = txn.into_inner();
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            set_branch_tails_core(
+                object_id,
+                branch,
+                tails,
+                |key, value| txn.set(key, value),
+                |key| txn.delete(key),
+            )
+        })
     }
 
     // ================================================================
@@ -329,21 +337,14 @@ impl Storage for SurrealKvStorage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError> {
-        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
-        store_ack_tier_core(
-            commit_id,
-            tier,
-            |key| {
-                let txn = txn.borrow();
-                Self::txn_get(&txn, key)
-            },
-            |key, value| {
-                let mut txn = txn.borrow_mut();
-                Self::txn_set(&mut txn, key, value)
-            },
-        )?;
-        let mut txn = txn.into_inner();
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            store_ack_tier_core(
+                commit_id,
+                tier,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+            )
+        })
     }
 
     // ================================================================
@@ -359,11 +360,11 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-            Self::txn_set(&mut txn, key, bytes)
-        })?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
+                txn.set(key, bytes)
+            })
+        })
     }
 
     fn index_remove(
@@ -375,11 +376,9 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        index_remove_core(table, column, branch, value, row_id, |key| {
-            Self::txn_delete(&mut txn, key)
-        })?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            index_remove_core(table, column, branch, value, row_id, |key| txn.delete(key))
+        })
     }
 
     fn index_lookup(
