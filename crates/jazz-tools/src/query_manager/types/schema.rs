@@ -205,8 +205,6 @@ pub struct ColumnDescriptor {
     pub nullable: bool,
     /// Optional foreign key reference to another table.
     pub references: Option<TableName>,
-    /// If true, rows in the referenced table can inherit this row's policy.
-    pub inherit_policy: bool,
 }
 
 impl ColumnDescriptor {
@@ -216,7 +214,6 @@ impl ColumnDescriptor {
             column_type,
             nullable: false,
             references: None,
-            inherit_policy: false,
         }
     }
 
@@ -232,11 +229,6 @@ impl ColumnDescriptor {
 
     pub fn references(mut self, table: impl Into<TableName>) -> Self {
         self.references = Some(table.into());
-        self
-    }
-
-    pub fn inherit_policy(mut self) -> Self {
-        self.inherit_policy = true;
         self
     }
 }
@@ -377,27 +369,6 @@ impl TableSchemaBuilder {
             ColumnDescriptor::new(name, ColumnType::Uuid)
                 .nullable()
                 .references(references),
-        );
-        self
-    }
-
-    /// Add a foreign key column with declarative inbound policy inheritance enabled.
-    pub fn fk_column_with_inherit_policy(mut self, name: &str, references: &str) -> Self {
-        self.columns.push(
-            ColumnDescriptor::new(name, ColumnType::Uuid)
-                .references(references)
-                .inherit_policy(),
-        );
-        self
-    }
-
-    /// Add a nullable foreign key column with declarative inbound policy inheritance enabled.
-    pub fn nullable_fk_column_with_inherit_policy(mut self, name: &str, references: &str) -> Self {
-        self.columns.push(
-            ColumnDescriptor::new(name, ColumnType::Uuid)
-                .nullable()
-                .references(references)
-                .inherit_policy(),
         );
         self
     }
@@ -608,6 +579,105 @@ pub fn validate_policy_no_cycles(
                     )?;
                     visited.remove(target_table);
                 }
+            }
+        }
+        PolicyExpr::InheritsReferencing {
+            source_table,
+            via_column,
+            operation,
+            max_depth,
+        } => {
+            if let Some(requested_depth) = max_depth
+                && crate::query_manager::policy::normalize_recursive_max_depth(Some(
+                    *requested_depth,
+                ))
+                .is_none()
+            {
+                return Err(format!(
+                    "INHERITS REFERENCING max_depth {} exceeds hard cap {} for table '{}'",
+                    requested_depth,
+                    crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
+                    current_table.0
+                ));
+            }
+
+            let source_table_name = TableName::new(source_table);
+            let source_schema = schema.get(&source_table_name).ok_or_else(|| {
+                format!(
+                    "INHERITS REFERENCING source table '{}' not found (from table '{}')",
+                    source_table, current_table.0
+                )
+            })?;
+
+            let source_col_idx = source_schema
+                .descriptor
+                .column_index(via_column)
+                .ok_or_else(|| {
+                    format!(
+                        "INHERITS REFERENCING via_column '{}' not found in source table '{}'",
+                        via_column, source_table
+                    )
+                })?;
+
+            let referenced_table = source_schema.descriptor.columns[source_col_idx]
+                .references
+                .as_ref()
+                .ok_or_else(|| {
+                    format!(
+                        "INHERITS REFERENCING via_column '{}' in source table '{}' has no FK reference",
+                        via_column, source_table
+                    )
+                })?;
+
+            if referenced_table != current_table {
+                return Err(format!(
+                    "INHERITS REFERENCING {}.{} must reference table '{}', found '{}'",
+                    source_table, via_column, current_table.0, referenced_table.0
+                ));
+            }
+
+            let bounded = max_depth.is_some();
+            if visited.contains(&source_table_name) {
+                if bounded {
+                    return Ok(());
+                }
+                let path: Vec<_> = visited.iter().map(|t| t.0.as_str()).collect();
+                return Err(format!(
+                    "INHERITS REFERENCING cycle detected: {} ← {} (path: {})",
+                    current_table.0,
+                    source_table,
+                    path.join(" → ")
+                ));
+            }
+
+            if bounded {
+                return Ok(());
+            }
+
+            let source_policy = match operation {
+                crate::query_manager::policy::Operation::Select => {
+                    source_schema.policies.select.using.as_ref()
+                }
+                crate::query_manager::policy::Operation::Update => {
+                    source_schema.policies.update.using.as_ref()
+                }
+                crate::query_manager::policy::Operation::Delete => {
+                    source_schema.policies.effective_delete_using()
+                }
+                crate::query_manager::policy::Operation::Insert => {
+                    source_schema.policies.insert.with_check.as_ref()
+                }
+            };
+            if let Some(p) = source_policy {
+                visited.insert(source_table_name);
+                validate_policy_no_cycles(
+                    &source_table_name,
+                    p,
+                    &source_schema.descriptor,
+                    schema,
+                    visited,
+                )?;
+                visited.remove(&source_table_name);
             }
         }
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {

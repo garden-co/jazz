@@ -29,36 +29,28 @@ describe("enum DSL invariants", () => {
   });
 });
 
-describe("inheritPolicy DSL", () => {
-  it("stores inheritPolicy on ref columns", () => {
+describe("ref DSL", () => {
+  it("stores references on ref columns", () => {
     resetCollectedState();
     table("todos", {
-      image: col.ref("files").inheritPolicy(),
+      image: col.ref("files"),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
       name: "image",
       references: "files",
-      inheritPolicy: true,
     });
   });
 
-  it("stores inheritPolicy on array(ref(...)) columns", () => {
+  it("stores references on array(ref(...)) columns", () => {
     resetCollectedState();
     table("files", {
-      parts: col.array(col.ref("file_parts").inheritPolicy()),
+      parts: col.array(col.ref("file_parts")),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
       name: "parts",
       references: "file_parts",
-      inheritPolicy: true,
     });
-  });
-
-  it("rejects inheritPolicy() for array(non-ref)", () => {
-    expect(() => col.array(col.string()).inheritPolicy()).toThrow(
-      "inheritPolicy() requires array(ref(...))",
-    );
   });
 });

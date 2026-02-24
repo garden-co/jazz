@@ -15,13 +15,9 @@ import type {
 import { sqlTypeToString } from "./schema.js";
 
 function columnToSql(column: Column): string {
-  if (column.inheritPolicy && !column.references) {
-    throw new Error(`Column ${column.name} cannot use inheritPolicy without references`);
-  }
   const ref = column.references ? ` REFERENCES ${column.references}` : "";
-  const inherit = column.inheritPolicy ? " INHERIT POLICY" : "";
   const nullability = column.nullable ? "" : " NOT NULL";
-  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${inherit}${nullability}`;
+  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
 }
 
 function tableToSql(table: Table): string {
@@ -65,6 +61,10 @@ function policyExprToSql(expr: PolicyExpr): string {
       return expr.max_depth === undefined
         ? `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`
         : `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column} MAX DEPTH ${expr.max_depth}`;
+    case "InheritsReferencing":
+      return expr.max_depth === undefined
+        ? `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${expr.source_table} VIA ${expr.via_column}`
+        : `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${expr.source_table} VIA ${expr.via_column} MAX DEPTH ${expr.max_depth}`;
     case "And":
       return expr.exprs.map((inner) => `(${policyExprToSql(inner)})`).join(" AND ");
     case "Or":
