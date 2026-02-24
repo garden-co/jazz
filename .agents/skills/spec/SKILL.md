@@ -1,6 +1,6 @@
 ---
 name: spec
-description: "Implement features using a Spec Driven Development workflow with approval gates before any coding. Use when a request should move through feature planning artifacts in order: `spec/<feature-name>/requirements.md` (optional), `design.md`, and `tasks.md`, with explicit user sign-off between phases."
+description: "Implement features using a Spec Driven Development workflow with approval gates before any coding. Use when a request should move through planning artifacts in order: requirements (optional), design, and tasks, stored in `specs/todo/{a_mvp,b_launch,c_later}` with explicit user sign-off between phases."
 ---
 
 # Spec Driven Development
@@ -11,19 +11,29 @@ Use this workflow when asked to implement a feature but planning and approvals m
 
 1. Follow the steps in order and do not skip steps.
 2. Ask for explicit approval before moving past each approval gate.
-3. Use kebab-case for feature directory names.
-4. Stop after task approval.
-5. Do not implement code in this workflow.
+3. Store files under `specs/todo/<track>/` where `<track>` is one of: `a_mvp`, `b_launch`, `c_later`.
+4. Use descriptive `snake_case` topic filenames.
+5. Never write planning artifacts under singular `spec/`.
+6. Stop after task approval.
+7. Do not implement code in this workflow.
 
-## Step 1: Create Feature Directory
+## Step 1: Choose Track and Topic Name
 
-Create `spec/<feature-name>` using kebab-case.
+Choose a track:
+
+- `a_mvp` for must-have MVP work
+- `b_launch` for launch readiness
+- `c_later` for post-launch follow-ups
+
+If user does not specify a track, default to `a_mvp`.
+
+Pick a descriptive `snake_case` topic name (e.g., `enum_column_type_end_to_end`).
 
 ## Step 2 (Optional): Create Requirements Document
 
 Only perform this step when the user explicitly requests requirements.
 
-Create `spec/<feature-name>/requirements.md` with:
+Create `specs/todo/<track>/<topic>_requirements.md` with:
 
 - `# Requirements`
 - `## Introduction`
@@ -49,7 +59,7 @@ If requirements are created, request approval before proceeding to design.
 
 ## Step 3: Create Design Document
 
-Create `spec/<feature-name>/design.md` with:
+Create `specs/todo/<track>/<topic>_design.md` with:
 
 - Overview
 - Architecture / Components
@@ -78,7 +88,7 @@ Wait for explicit approval.
 
 ## Step 5: Create Tasks Document
 
-After design approval, create `spec/<feature-name>/tasks.md` with:
+After design approval, create `specs/todo/<track>/<topic>_tasks.md` with:
 
 - A numbered checklist of coding tasks
 - Task references to specific design components
