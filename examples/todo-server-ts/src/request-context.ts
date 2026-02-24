@@ -1,5 +1,6 @@
 import type { Request } from "express";
-import { JazzClient, type Session } from "jazz-tools";
+import { JazzClient, translateQuery, type Session } from "jazz-tools";
+import { wasmSchema as schema } from "../schema/app.js";
 
 type RequesterIdentity = {
   userId: string;
@@ -12,39 +13,27 @@ function verifyJwtAndExtractIdentity(_jwt: string): RequesterIdentity {
 }
 
 function buildQuery(table: string): string {
-  return JSON.stringify({
-    table,
-    branches: [],
-    disjuncts: [{ conditions: [] }],
-    order_by: [],
-    offset: 0,
-    include_deleted: false,
-    array_subqueries: [],
-    joins: [],
-  });
+  return translateQuery(
+    JSON.stringify({
+      table,
+      conditions: [],
+      includes: {},
+      orderBy: [],
+    }),
+    schema,
+  );
 }
 
 function buildFolderScopedQuery(folderId: string): string {
-  return JSON.stringify({
-    table: "todos",
-    branches: [],
-    disjuncts: [
-      {
-        conditions: [
-          {
-            column: "folder_id",
-            op: "Eq",
-            value: { type: "Uuid", value: folderId },
-          },
-        ],
-      },
-    ],
-    order_by: [],
-    offset: 0,
-    include_deleted: false,
-    array_subqueries: [],
-    joins: [],
-  });
+  return translateQuery(
+    JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "folder_id", op: "eq", value: folderId }],
+      includes: {},
+      orderBy: [],
+    }),
+    schema,
+  );
 }
 
 export function sessionFromRequest(req: Request): Session {

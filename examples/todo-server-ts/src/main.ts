@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { JazzClient } from "jazz-tools";
+import { JazzClient, translateQuery } from "jazz-tools";
 import type { Value } from "jazz-tools";
 import { NapiRuntime } from "jazz-napi";
 import { wasmSchema as schema } from "../schema/app.js";
@@ -75,16 +75,15 @@ function rowToTodo(id: string, values: Value[]): Todo | null {
 }
 
 function buildQuery(table: string) {
-  return JSON.stringify({
-    table,
-    branches: [],
-    disjuncts: [{ conditions: [] }],
-    order_by: [],
-    offset: 0,
-    include_deleted: false,
-    array_subqueries: [],
-    joins: [],
-  });
+  return translateQuery(
+    JSON.stringify({
+      table,
+      conditions: [],
+      includes: {},
+      orderBy: [],
+    }),
+    schema,
+  );
 }
 
 // ============================================================================
