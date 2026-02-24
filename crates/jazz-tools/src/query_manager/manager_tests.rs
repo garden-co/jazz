@@ -14,7 +14,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
     TableSchema, Value,
 };
-use crate::storage::MemoryStorage;
+use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::SyncManager;
 
 fn test_schema() -> Schema {
@@ -3549,6 +3549,237 @@ fn deleting_parent_row_does_not_cascade_to_joined_rows() {
 // ========================================================================
 // Array subquery (correlated subquery) tests
 // ========================================================================
+
+fn file_storage_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("file_parts"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("files"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("parts", ColumnType::Array(Box::new(ColumnType::Uuid)))
+                .references("file_parts"),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn files_with_parts_descriptor() -> RowDescriptor {
+    let part_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]);
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("parts", ColumnType::Array(Box::new(ColumnType::Uuid))),
+        ColumnDescriptor::new(
+            "part_rows",
+            ColumnType::Array(Box::new(ColumnType::Row(Box::new(part_descriptor)))),
+        ),
+    ])
+}
+
+#[test]
+fn uuid_array_fk_insert_and_update_validation() {
+    let sync_manager = SyncManager::new();
+    let schema = file_storage_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let missing = ObjectId::new();
+    let insert_missing = qm.insert(
+        &mut storage,
+        "files",
+        &[Value::Array(vec![Value::Uuid(missing)])],
+    );
+    assert!(
+        matches!(
+            insert_missing,
+            Err(QueryError::UuidArrayForeignKeyViolation { ref column, .. }) if column == "parts"
+        ),
+        "insert with missing UUID[] reference should fail: {insert_missing:?}"
+    );
+
+    let part = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .unwrap();
+    let file = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Array(vec![
+                Value::Uuid(part.row_id),
+                Value::Uuid(part.row_id),
+            ])],
+        )
+        .unwrap();
+    qm.update(
+        &mut storage,
+        file.row_id,
+        &[Value::Array(vec![Value::Uuid(part.row_id)])],
+    )
+    .unwrap();
+
+    let update_missing = qm.update(
+        &mut storage,
+        file.row_id,
+        &[Value::Array(vec![Value::Uuid(ObjectId::new())])],
+    );
+    assert!(
+        matches!(
+            update_missing,
+            Err(QueryError::UuidArrayForeignKeyViolation { .. })
+        ),
+        "update with missing UUID[] reference should fail: {update_missing:?}"
+    );
+}
+
+#[test]
+fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
+    let sync_manager = SyncManager::new();
+    let schema = file_storage_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let part_a = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .unwrap();
+    let part_b = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("B".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "files",
+        &[Value::Array(vec![
+            Value::Uuid(part_b.row_id),
+            Value::Uuid(part_a.row_id),
+            Value::Uuid(part_b.row_id),
+        ])],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("files")
+        .with_array("part_rows", |sub| {
+            sub.from("file_parts").correlate("id", "files.parts")
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let update = qm
+        .take_updates()
+        .into_iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("files subscription should produce one update");
+    let row_values =
+        decode_row(&files_with_parts_descriptor(), &update.delta.added[0].data).unwrap();
+    let part_rows = row_values[1]
+        .as_array()
+        .expect("part_rows should be an array");
+    let labels: Vec<String> = part_rows
+        .iter()
+        .map(|row| {
+            let values = row.as_row().expect("part row");
+            match &values[0] {
+                Value::Text(label) => label.clone(),
+                other => panic!("expected text label, got {other:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(labels, vec!["B", "A", "B"]);
+}
+
+#[test]
+fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
+    let sync_manager = SyncManager::new();
+    let schema = file_storage_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let part_a = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .unwrap();
+    let part_b = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("B".into())])
+        .unwrap();
+    let file = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Array(vec![
+                Value::Uuid(part_a.row_id),
+                Value::Uuid(part_b.row_id),
+                Value::Uuid(part_b.row_id),
+            ])],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("file_parts")
+        .with_array("files", |sub| {
+            sub.from("files").correlate("parts", "file_parts.id")
+        })
+        .build();
+    let before = execute_query(&mut qm, &mut storage, query.clone()).unwrap();
+    let before_counts: std::collections::HashMap<String, usize> = before
+        .iter()
+        .map(|(_, values)| {
+            let label = match &values[0] {
+                Value::Text(label) => label.clone(),
+                other => panic!("expected label text, got {other:?}"),
+            };
+            let count = values[1]
+                .as_array()
+                .expect("files include should be array")
+                .len();
+            (label, count)
+        })
+        .collect();
+    assert_eq!(before_counts.get("A"), Some(&1));
+    assert_eq!(before_counts.get("B"), Some(&1));
+
+    let ids_for_a_before =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_a.row_id));
+    let ids_for_b_before =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_b.row_id));
+    assert!(ids_for_a_before.contains(&file.row_id));
+    assert!(ids_for_b_before.contains(&file.row_id));
+
+    qm.update(
+        &mut storage,
+        file.row_id,
+        &[Value::Array(vec![Value::Uuid(part_b.row_id)])],
+    )
+    .unwrap();
+
+    let after = execute_query(&mut qm, &mut storage, query).unwrap();
+    let after_counts: std::collections::HashMap<String, usize> = after
+        .iter()
+        .map(|(_, values)| {
+            let label = match &values[0] {
+                Value::Text(label) => label.clone(),
+                other => panic!("expected label text, got {other:?}"),
+            };
+            let count = values[1]
+                .as_array()
+                .expect("files include should be array")
+                .len();
+            (label, count)
+        })
+        .collect();
+    assert_eq!(after_counts.get("A"), Some(&0));
+    assert_eq!(after_counts.get("B"), Some(&1));
+
+    let ids_for_a_after =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_a.row_id));
+    let ids_for_b_after =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_b.row_id));
+    assert!(
+        !ids_for_a_after.contains(&file.row_id),
+        "removed array members should be removed from membership index"
+    );
+    assert!(ids_for_b_after.contains(&file.row_id));
+}
 
 fn users_posts_schema() -> Schema {
     let mut schema = Schema::new();
