@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `OpfsBTreeStorage` provides synchronous storage (from jazz_tools::storage)
+//! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -44,7 +44,9 @@ use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
+#[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
+use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -70,7 +72,7 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
 
 // ============================================================================
 // WasmScheduler
@@ -159,7 +161,7 @@ impl SyncSender for JsSyncSender {
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps `Rc<RefCell<RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>>>`.
+/// Wraps `Rc<RefCell<WasmCoreType>>`.
 /// All methods borrow the core, call RuntimeCore, and return.
 /// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
@@ -174,7 +176,7 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
-    /// Storage is synchronous (in-memory via OpfsBTreeStorage).
+    /// Storage is synchronous (in-memory via MemoryStorage).
     ///
     /// # Arguments
     /// * `schema_json` - JSON-encoded schema definition
@@ -239,9 +241,7 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
-        const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32MB
-        let storage = OpfsBTreeStorage::memory(DEFAULT_CACHE_SIZE)
-            .map_err(|e| JsError::new(&format!("Storage init: {:?}", e)))?;
+        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
 
@@ -820,9 +820,11 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
-        let storage = OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
-            .await
-            .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?;
+        let storage: Box<dyn Storage> = Box::new(
+            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
+                .await
+                .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
+        );
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
