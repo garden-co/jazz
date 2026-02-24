@@ -21,6 +21,17 @@ describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
 
+  async function clearTodos() {
+    const listRes = await fetch(`${baseUrl}/todos`);
+    expect(listRes.status).toBe(200);
+    const todos: Todo[] = await listRes.json();
+
+    for (const todo of todos) {
+      const deleteRes = await fetch(`${baseUrl}/todos/${todo.id}`, { method: "DELETE" });
+      expect(deleteRes.status).toBe(204);
+    }
+  }
+
   beforeAll(async () => {
     // Create server with SurrealKV-backed storage (temp directory)
     const todoServer = await createServer();
@@ -229,6 +240,9 @@ describe("Todo Server Integration", () => {
 
   describe("SSE Live Endpoint", () => {
     it("streams all todos and updates on changes", async () => {
+      // Ensure this test starts from a known clean state.
+      await clearTodos();
+
       // Connect to SSE endpoint
       const res = await fetch(`${baseUrl}/todos/live`);
       expect(res.status).toBe(200);
@@ -259,45 +273,46 @@ describe("Todo Server Integration", () => {
         }
       }
 
-      // 1. Initial event should be empty list
-      const initial = await readEvent();
-      expect(initial).toEqual([]);
+      try {
+        // 1. Initial event should be empty list
+        const initial = await readEvent();
+        expect(initial).toEqual([]);
 
-      // 2. Create a todo - should see it in next event
-      const createRes = await fetch(`${baseUrl}/todos`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "SSE Test Todo" }),
-      });
-      expect(createRes.status).toBe(201);
-      const createdTodo: Todo = await createRes.json();
+        // 2. Create a todo - should see it in next event
+        const createRes = await fetch(`${baseUrl}/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "SSE Test Todo" }),
+        });
+        expect(createRes.status).toBe(201);
+        const createdTodo: Todo = await createRes.json();
 
-      const afterCreate = await readEvent();
-      expect(afterCreate.length).toBe(1);
-      expect(afterCreate[0].id).toBe(createdTodo.id);
-      expect(afterCreate[0].title).toBe("SSE Test Todo");
+        const afterCreate = await readEvent();
+        expect(afterCreate.length).toBe(1);
+        expect(afterCreate[0].id).toBe(createdTodo.id);
+        expect(afterCreate[0].title).toBe("SSE Test Todo");
 
-      // 3. Update the todo - should see updated state
-      await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ done: true }),
-      });
+        // 3. Update the todo - should see updated state
+        await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ done: true }),
+        });
 
-      const afterUpdate = await readEvent();
-      expect(afterUpdate.length).toBe(1);
-      expect(afterUpdate[0].done).toBe(true);
+        const afterUpdate = await readEvent();
+        expect(afterUpdate.length).toBe(1);
+        expect(afterUpdate[0].done).toBe(true);
 
-      // 4. Delete the todo - should see empty list again
-      await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
-        method: "DELETE",
-      });
+        // 4. Delete the todo - should see empty list again
+        await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
+          method: "DELETE",
+        });
 
-      const afterDelete = await readEvent();
-      expect(afterDelete).toEqual([]);
-
-      // Clean up
-      reader.cancel();
+        const afterDelete = await readEvent();
+        expect(afterDelete).toEqual([]);
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
     });
   });
 });
