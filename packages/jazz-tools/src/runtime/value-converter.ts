@@ -29,6 +29,22 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       return { type: "Timestamp", value: Number(value) };
     case "Uuid":
       return { type: "Uuid", value: String(value) };
+    case "Bytea": {
+      if (value instanceof Uint8Array) {
+        return { type: "Bytea", value: [...value] };
+      }
+      if (Array.isArray(value)) {
+        const bytes = value.map((entry) => {
+          const n = Number(entry);
+          if (!Number.isInteger(n) || n < 0 || n > 255) {
+            throw new Error("Bytea arrays must contain integers in range 0..255");
+          }
+          return n;
+        });
+        return { type: "Bytea", value: bytes };
+      }
+      throw new Error("Expected Uint8Array or byte array for Bytea column type");
+    }
     case "Enum": {
       const enumValue = String(value);
       if (!columnType.variants.includes(enumValue)) {

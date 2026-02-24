@@ -176,6 +176,10 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "REAL", default: opts.default };
   }
 
+  bytea(opts: { default: MaybeOptional<Uint8Array, Optional> }): AddOp {
+    return { _type: "add", sqlType: "BYTEA", default: opts.default };
+  }
+
   enum<const Variants extends readonly [string, ...string[]]>(
     ...args: [...variants: Variants, opts: { default: MaybeOptional<Variants[number], Optional> }]
   ): AddOp {
@@ -225,6 +229,10 @@ class DropBuilder {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
   }
 
+  bytea(opts: { backwardsDefault: Uint8Array }): DropOp {
+    return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
+  }
+
   enum<const Variants extends readonly [string, ...string[]]>(
     ...args: [...variants: Variants, opts: { backwardsDefault: Variants[number] }]
   ): DropOp {
@@ -256,6 +264,7 @@ export const col = {
   boolean: () => new ScalarBuilder("BOOLEAN"),
   int: () => new ScalarBuilder("INTEGER"),
   float: () => new ScalarBuilder("REAL"),
+  bytea: () => new ScalarBuilder("BYTEA"),
   enum: (...variants: string[]) => new EnumBuilder(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
   array: (element: ColumnBuilder) => new ArrayBuilder(element),

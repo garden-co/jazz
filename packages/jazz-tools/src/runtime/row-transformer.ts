@@ -16,6 +16,7 @@ export type WasmValue =
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: number }
   | { type: "Timestamp"; value: number }
+  | { type: "Bytea"; value: number[] | Uint8Array }
   | { type: "Null" }
   | { type: "Array"; value: WasmValue[] }
   | { type: "Row"; value: WasmValue[] };
@@ -120,6 +121,8 @@ export function unwrapValue(v: WasmValue): unknown {
     case "BigInt":
     case "Timestamp":
       return v.value;
+    case "Bytea":
+      return v.value instanceof Uint8Array ? v.value : new Uint8Array(v.value);
     case "Null":
       return undefined;
     case "Array":

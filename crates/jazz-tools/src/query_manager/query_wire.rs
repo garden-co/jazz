@@ -39,6 +39,7 @@ const VALUE_VARIANTS: &[&str] = &[
     "Text",
     "Timestamp",
     "Uuid",
+    "Bytea",
     "Array",
     "Row",
     "Null",

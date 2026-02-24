@@ -4,6 +4,9 @@ use crate::object::ObjectId;
 
 use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
+/// Maximum payload size allowed for a single BYTEA value (1 MiB).
+pub const BYTEA_MAX_BYTES: usize = 1_048_576;
+
 /// Encoding error types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodingError {
@@ -19,6 +22,18 @@ pub enum EncodingError {
     NullNotAllowed { column: String },
     /// Binary data is malformed or too short.
     MalformedData { message: String },
+    /// BYTEA payload exceeds the configured per-cell limit.
+    ByteaTooLarge {
+        column: String,
+        actual: usize,
+        max: usize,
+    },
+    /// Requested comparison is unsupported for this column type.
+    UnsupportedComparison {
+        column: String,
+        column_type: ColumnType,
+        operation: String,
+    },
     /// Column index out of bounds.
     ColumnIndexOutOfBounds { index: usize, max: usize },
 }
@@ -47,6 +62,26 @@ impl std::fmt::Display for EncodingError {
             }
             EncodingError::MalformedData { message } => {
                 write!(f, "malformed data: {message}")
+            }
+            EncodingError::ByteaTooLarge {
+                column,
+                actual,
+                max,
+            } => {
+                write!(
+                    f,
+                    "bytea payload too large for column '{column}': {actual} bytes exceeds limit {max}"
+                )
+            }
+            EncodingError::UnsupportedComparison {
+                column,
+                column_type,
+                operation,
+            } => {
+                write!(
+                    f,
+                    "unsupported {operation} comparison for column '{column}' with type {column_type:?}"
+                )
             }
             EncodingError::ColumnIndexOutOfBounds { index, max } => {
                 write!(f, "column index {index} out of bounds (max {max})")
@@ -101,6 +136,11 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
             });
         }
 
+        // Enforce BYTEA payload limits (including nested bytea in arrays/rows).
+        if !val.is_null() {
+            validate_value_size(val, &col.column_type, col.name_str())?;
+        }
+
         if col.column_type.is_variable() {
             var_columns.push((i, col, val));
         } else {
@@ -136,6 +176,7 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Timestamp => matches!(value, Value::Timestamp(_)),
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
         ColumnType::Text => matches!(value, Value::Text(_)),
+        ColumnType::Bytea => matches!(value, Value::Bytea(_)),
         ColumnType::Enum(variants) => match value {
             Value::Text(s) => variants.contains(s),
             _ => false,
@@ -159,6 +200,44 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
                 }),
             _ => false,
         },
+    }
+}
+
+fn validate_bytea_size(column: &str, bytes: &[u8]) -> Result<(), EncodingError> {
+    if bytes.len() > BYTEA_MAX_BYTES {
+        return Err(EncodingError::ByteaTooLarge {
+            column: column.to_string(),
+            actual: bytes.len(),
+            max: BYTEA_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_value_size(
+    value: &Value,
+    column_type: &ColumnType,
+    column: &str,
+) -> Result<(), EncodingError> {
+    match (value, column_type) {
+        (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
+        (Value::Array(values), ColumnType::Array(element_type)) => {
+            for element in values {
+                validate_value_size(element, element_type, column)?;
+            }
+            Ok(())
+        }
+        (Value::Row(values), ColumnType::Row(row_descriptor)) => {
+            for (inner_value, inner_column) in values.iter().zip(row_descriptor.columns.iter()) {
+                validate_value_size(
+                    inner_value,
+                    &inner_column.column_type,
+                    inner_column.name_str(),
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -188,6 +267,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
             buf.extend(std::iter::repeat_n(0, size));
         }
         Value::Text(_) => unreachable!("Text is not fixed-size"),
+        Value::Bytea(_) => unreachable!("Bytea is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
         Value::Row(_) => unreachable!("Row is not fixed-size"),
     }
@@ -206,6 +286,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
 
     match val {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
+        Value::Bytea(bytes) => buf.extend_from_slice(bytes),
         Value::Array(elements) => buf.extend(encode_array(elements, &col.column_type)),
         Value::Row(values) => {
             // Encode row using its descriptor from the column type
@@ -215,7 +296,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
             }
         }
         Value::Null => {} // Already handled above for nullable
-        _ => unreachable!("Non-text/array/row types are fixed-size"),
+        _ => unreachable!("Non-text/bytea/array/row types are fixed-size"),
     }
 }
 
@@ -301,6 +382,7 @@ pub fn decode_column(
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
+        ColumnType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         ColumnType::Text => {
             let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
@@ -532,6 +614,11 @@ pub fn compare_column(
             // Compare as bytes (UUIDs have natural byte ordering)
             Ok(bytes1.cmp(bytes2))
         }
+        ColumnType::Bytea => Err(EncodingError::UnsupportedComparison {
+            column: col.name_str().to_string(),
+            column_type: col.column_type.clone(),
+            operation: "ordering".to_string(),
+        }),
         ColumnType::Text | ColumnType::Enum(_) | ColumnType::Array(_) | ColumnType::Row(_) => {
             // Lexicographic comparison of bytes
             Ok(bytes1.cmp(bytes2))
@@ -576,6 +663,11 @@ pub fn compare_column_to_value(
             let t2 = u64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(t1.cmp(&t2))
         }
+        ColumnType::Bytea => Err(EncodingError::UnsupportedComparison {
+            column: col.name_str().to_string(),
+            column_type: col.column_type.clone(),
+            operation: "ordering".to_string(),
+        }),
         ColumnType::Uuid
         | ColumnType::Text
         | ColumnType::Enum(_)
@@ -620,6 +712,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
         Value::Timestamp(t) => t.to_le_bytes().to_vec(),
         Value::Uuid(id) => id.uuid().as_bytes().to_vec(),
         Value::Text(s) => s.as_bytes().to_vec(),
+        Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
         Value::Row(_) => panic!("Row values require a descriptor - use encode_value_with_type"),
         Value::Null => vec![],
@@ -858,6 +951,7 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
+        ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
         ColumnType::Text => {
             let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
@@ -1883,6 +1977,42 @@ mod tests {
 
         let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
         assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn encode_decode_bytea_roundtrip_with_nul_bytes() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("payload", ColumnType::Bytea),
+        ]);
+        let values = vec![
+            Value::Integer(1),
+            Value::Bytea(vec![0x00, 0x11, 0x00, 0x22, 0xFF]),
+        ];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn encode_row_rejects_oversized_bytea() {
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("payload", ColumnType::Bytea)]);
+        let over_limit = vec![7u8; BYTEA_MAX_BYTES + 1];
+
+        let err = encode_row(&descriptor, &[Value::Bytea(over_limit)]).unwrap_err();
+        assert!(matches!(err, EncodingError::ByteaTooLarge { .. }));
+    }
+
+    #[test]
+    fn compare_column_to_value_rejects_ordering_on_bytea() {
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("payload", ColumnType::Bytea)]);
+        let encoded = encode_row(&descriptor, &[Value::Bytea(vec![1, 2, 3])]).unwrap();
+
+        let err = compare_column_to_value(&descriptor, &encoded, 0, &[1, 2, 4]).unwrap_err();
+        assert!(matches!(err, EncodingError::UnsupportedComparison { .. }));
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub enum Value {
     Text(String),
     Timestamp(u64),
     Uuid(ObjectId),
+    Bytea(Vec<u8>),
     /// Homogeneous array of values.
     Array(Vec<Value>),
     /// Heterogeneous row/tuple of values (for nested rows in arrays).
@@ -33,6 +34,7 @@ impl Value {
             Value::Text(_) => Some(ColumnType::Text),
             Value::Timestamp(_) => Some(ColumnType::Timestamp),
             Value::Uuid(_) => Some(ColumnType::Uuid),
+            Value::Bytea(_) => Some(ColumnType::Bytea),
             Value::Array(elements) => {
                 // Infer element type from first element; empty arrays have no inferable type
                 elements

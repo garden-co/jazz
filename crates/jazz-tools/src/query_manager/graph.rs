@@ -44,7 +44,7 @@ use super::types::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryCompileError {
     UnknownTable(TableName),
-    InvalidPlan(&'static str),
+    InvalidPlan(String),
 }
 
 impl fmt::Display for QueryCompileError {
@@ -295,6 +295,7 @@ impl QueryGraph {
             features.array_subqueries,
             features.select_columns,
         )?;
+        validate_execution_plan(&plan, schema).ok()?;
         Self::compile_execution_plan_with_session(&plan, schema, session)
     }
 
@@ -331,6 +332,7 @@ impl QueryGraph {
             features.array_subqueries,
             features.select_columns,
         )?;
+        validate_execution_plan(&plan, schema).ok()?;
         Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
     }
 
@@ -828,20 +830,27 @@ impl QueryGraph {
             &query.branches
         };
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
-        Self::compile_relation_ir_with_features(
+
+        let plan = lower_relation_to_execution_plan(
             &query.relation_ir,
-            schema,
             branches,
-            session,
-            RelationCompileFeatures {
-                include_deleted: query.include_deleted,
-                array_subqueries: query.array_subqueries.clone(),
-                select_columns: query.select_columns.clone(),
-            },
+            query.include_deleted,
+            query.array_subqueries.clone(),
+            query.select_columns.clone(),
         )
-        .ok_or(QueryCompileError::InvalidPlan(
-            "unsupported relation_ir shape for query graph compilation",
-        ))
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for query graph compilation".to_string(),
+            )
+        })?;
+
+        validate_execution_plan(&plan, schema)?;
+
+        Self::compile_execution_plan_with_session(&plan, schema, session).ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for query graph compilation".to_string(),
+            )
+        })
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -878,21 +887,29 @@ impl QueryGraph {
             query.branches.clone()
         };
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
-        Self::compile_relation_ir_with_schema_context_and_features(
+
+        let plan = lower_relation_to_execution_plan(
             &query.relation_ir,
-            schema,
             &branches,
-            session,
-            schema_context,
-            RelationCompileFeatures {
-                include_deleted: query.include_deleted,
-                array_subqueries: query.array_subqueries.clone(),
-                select_columns: query.select_columns.clone(),
-            },
+            query.include_deleted,
+            query.array_subqueries.clone(),
+            query.select_columns.clone(),
         )
-        .ok_or(QueryCompileError::InvalidPlan(
-            "unsupported relation_ir shape for schema-context query compilation",
-        ))
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for schema-context query compilation".to_string(),
+            )
+        })?;
+
+        validate_execution_plan(&plan, schema)?;
+
+        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+            .ok_or_else(|| {
+                QueryCompileError::InvalidPlan(
+                    "unsupported relation_ir shape for schema-context query compilation"
+                        .to_string(),
+                )
+            })
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -2230,6 +2247,144 @@ fn ensure_relation_tables_exist(
     }
 }
 
+fn unqualify_column_name(column: &str) -> &str {
+    column.split('.').next_back().unwrap_or(column)
+}
+
+fn validate_condition_for_descriptor(
+    descriptor: &RowDescriptor,
+    condition: &Condition,
+) -> Result<(), QueryCompileError> {
+    let column_name = unqualify_column_name(condition.column());
+    let Some(column) = descriptor.column(column_name) else {
+        return Ok(());
+    };
+
+    let is_bytea = matches!(column.column_type, ColumnType::Bytea);
+    let is_ordering_cmp = matches!(
+        condition,
+        Condition::Lt { .. }
+            | Condition::Le { .. }
+            | Condition::Gt { .. }
+            | Condition::Ge { .. }
+            | Condition::Between { .. }
+    );
+
+    if is_bytea && is_ordering_cmp {
+        return Err(QueryCompileError::InvalidPlan(format!(
+            "bytea column '{}' only supports '=' and '!=' comparisons",
+            column_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_disjuncts_for_descriptor(
+    disjuncts: &[Conjunction],
+    descriptor: &RowDescriptor,
+) -> Result<(), QueryCompileError> {
+    for disjunct in disjuncts {
+        for condition in &disjunct.conditions {
+            validate_condition_for_descriptor(descriptor, condition)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_order_by_for_descriptor(
+    order_by: &[(String, SortDirection)],
+    descriptor: &RowDescriptor,
+) -> Result<(), QueryCompileError> {
+    for (column, _direction) in order_by {
+        let column_name = unqualify_column_name(column);
+        if descriptor
+            .column(column_name)
+            .is_some_and(|c| matches!(c.column_type, ColumnType::Bytea))
+        {
+            return Err(QueryCompileError::InvalidPlan(format!(
+                "bytea column '{}' cannot be used in ORDER BY",
+                column_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn descriptor_for_execution_plan(
+    plan: &ExecutionQueryPlan,
+    schema: &Schema,
+) -> Result<RowDescriptor, QueryCompileError> {
+    descriptor_for_table_with_joins(plan.table, &plan.joins, schema)
+}
+
+fn descriptor_for_table_with_joins(
+    table: TableName,
+    joins: &[crate::query_manager::query::JoinSpec],
+    schema: &Schema,
+) -> Result<RowDescriptor, QueryCompileError> {
+    let base = schema
+        .get(&table)
+        .ok_or(QueryCompileError::UnknownTable(table))?
+        .descriptor
+        .clone();
+    if joins.is_empty() {
+        return Ok(base);
+    }
+
+    let mut descriptors = vec![base];
+    for join in joins {
+        let joined = schema
+            .get(&join.table)
+            .ok_or(QueryCompileError::UnknownTable(join.table))?
+            .descriptor
+            .clone();
+        descriptors.push(joined);
+    }
+
+    Ok(RowDescriptor::combine(&descriptors))
+}
+
+fn validate_array_subquery_spec(
+    spec: &ArraySubquerySpec,
+    schema: &Schema,
+) -> Result<(), QueryCompileError> {
+    let descriptor = descriptor_for_table_with_joins(spec.table, &spec.joins, schema)?;
+    for condition in &spec.filters {
+        validate_condition_for_descriptor(&descriptor, condition)?;
+    }
+    validate_order_by_for_descriptor(&spec.order_by, &descriptor)?;
+
+    for nested in &spec.nested_arrays {
+        validate_array_subquery_spec(nested, schema)?;
+    }
+
+    Ok(())
+}
+
+fn validate_execution_plan(
+    plan: &ExecutionQueryPlan,
+    schema: &Schema,
+) -> Result<(), QueryCompileError> {
+    let descriptor = descriptor_for_execution_plan(plan, schema)?;
+    validate_disjuncts_for_descriptor(&plan.disjuncts, &descriptor)?;
+    validate_order_by_for_descriptor(&plan.order_by, &descriptor)?;
+
+    if let Some(recursive) = &plan.recursive {
+        let recursive_descriptor =
+            descriptor_for_table_with_joins(recursive.table, &recursive.joins, schema)?;
+        for condition in &recursive.filters {
+            validate_condition_for_descriptor(&recursive_descriptor, condition)?;
+        }
+    }
+
+    for subquery in &plan.array_subqueries {
+        validate_array_subquery_spec(subquery, schema)?;
+    }
+
+    Ok(())
+}
+
 fn descriptors_compatible_by_shape(left: &RowDescriptor, right: &RowDescriptor) -> bool {
     if left.columns.len() != right.columns.len() {
         return false;
@@ -2383,6 +2538,19 @@ mod tests {
         schema
     }
 
+    fn bytea_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("files"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("payload", ColumnType::Bytea),
+            ])
+            .into(),
+        );
+        schema
+    }
+
     #[test]
     fn compile_simple_query() {
         let schema = test_schema();
@@ -2438,6 +2606,44 @@ mod tests {
 
         // Should have: IndexScan -> Materialize -> Output
         assert_eq!(graph.nodes.len(), 3);
+    }
+
+    #[test]
+    fn compile_query_allows_bytea_eq_and_ne() {
+        let schema = bytea_schema();
+
+        let eq_query = QueryBuilder::new("files")
+            .filter_eq("payload", Value::Bytea(vec![1, 2, 3]))
+            .build();
+        assert!(QueryGraph::try_compile(&eq_query, &schema).is_ok());
+
+        let ne_query = QueryBuilder::new("files")
+            .filter_ne("payload", Value::Bytea(vec![4, 5, 6]))
+            .build();
+        assert!(QueryGraph::try_compile(&ne_query, &schema).is_ok());
+    }
+
+    #[test]
+    fn compile_query_rejects_bytea_range_comparisons() {
+        let schema = bytea_schema();
+        let query = QueryBuilder::new("files")
+            .filter_lt("payload", Value::Bytea(vec![1, 2, 3]))
+            .build();
+
+        let err = QueryGraph::try_compile(&query, &schema).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only supports '=' and '!=' comparisons")
+        );
+    }
+
+    #[test]
+    fn compile_query_rejects_order_by_on_bytea() {
+        let schema = bytea_schema();
+        let query = QueryBuilder::new("files").order_by("payload").build();
+
+        let err = QueryGraph::try_compile(&query, &schema).unwrap_err();
+        assert!(err.to_string().contains("cannot be used in ORDER BY"));
     }
 
     // ========================================================================
@@ -2783,10 +2989,8 @@ mod tests {
             .build();
 
         let graph = QueryGraph::compile(&query, &schema);
-        // Should succeed but with no ArraySubqueryNode (graceful degradation)
-        // Or should fail entirely - depends on design choice
-        // Current implementation silently skips invalid array subqueries
-        assert!(graph.is_some());
+        // Execution-plan validation rejects array subqueries that reference missing tables.
+        assert!(graph.is_none());
     }
 
     fn recursive_schema() -> Schema {

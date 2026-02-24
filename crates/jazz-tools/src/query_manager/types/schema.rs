@@ -87,6 +87,8 @@ pub enum ColumnType {
     Timestamp,
     /// 16-byte UUID (ObjectId).
     Uuid,
+    /// Variable-length binary payload.
+    Bytea,
     /// Homogeneous array of values.
     Array(Box<ColumnType>),
     /// Heterogeneous row/tuple of values with a known schema.
@@ -104,6 +106,7 @@ impl ColumnType {
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
             ColumnType::Text => None,
+            ColumnType::Bytea => None,
             ColumnType::Enum(_) => None,
             ColumnType::Array(_) => None, // Arrays are variable-length
             ColumnType::Row(_) => None,   // Rows are variable-length
