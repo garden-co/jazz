@@ -156,7 +156,8 @@ export class JazzRnRuntimeAdapter implements Runtime {
       {
         onUpdate: (deltaJson: string) => {
           try {
-            on_update(deltaJson);
+            const parsed = JSON.parse(deltaJson) as unknown;
+            on_update(parsed);
           } catch (error) {
             swallowCallbackError("subscription", error);
           }

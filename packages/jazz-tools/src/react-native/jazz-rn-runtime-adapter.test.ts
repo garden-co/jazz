@@ -110,6 +110,42 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
+  it("passes canonical subscription tuple updates through unchanged", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    const onUpdate = vi.fn();
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+
+    subscriptionCallback.onUpdate(
+      JSON.stringify({
+        added: [],
+        removed: [],
+        updated: [
+          [
+            { id: "row-u", values: [{ type: "Text", value: "before" }] },
+            { id: "row-u", values: [{ type: "Text", value: "after" }] },
+          ],
+        ],
+        pending: false,
+      }),
+    );
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [
+        [
+          { id: "row-u", values: [{ type: "Text", value: "before" }] },
+          { id: "row-u", values: [{ type: "Text", value: "after" }] },
+        ],
+      ],
+      pending: false,
+    });
+  });
+
   it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });

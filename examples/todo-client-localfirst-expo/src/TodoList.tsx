@@ -9,18 +9,32 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb } from "jazz-tools/react-native";
+import { useAll, useDb, useSession } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema/app";
 
 export function TodoList() {
-  const db = useDb();
-  const todos = useAll(app.todos);
+  const [filterTitle, setFilterTitle] = useState("");
+  const [showDoneOnly, setShowDoneOnly] = useState(false);
   const [title, setTitle] = useState("");
+
+  const trimmedFilterTitle = filterTitle.trim();
+  let todosQuery = app.todos;
+  if (trimmedFilterTitle) {
+    todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
+  }
+  if (showDoneOnly) {
+    todosQuery = todosQuery.where({ done: true });
+  }
+
+  const db = useDb();
+  const todos = useAll(todosQuery) ?? [];
+  const session = useSession();
+  const sessionUserId = session?.user_id ?? null;
 
   const addTodo = () => {
     const trimmed = title.trim();
-    if (!trimmed) return;
-    db.insert(app.todos, { title: trimmed, done: false });
+    if (!trimmed || !sessionUserId) return;
+    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
@@ -53,9 +67,26 @@ export function TodoList() {
           returnKeyType="done"
           onSubmitEditing={addTodo}
         />
-        <Pressable onPress={addTodo} style={styles.addButton}>
+        <Pressable
+          onPress={addTodo}
+          style={[styles.addButton, !sessionUserId && styles.addButtonDisabled]}
+          disabled={!sessionUserId}
+        >
           <Text style={styles.addButtonText}>Add</Text>
         </Pressable>
+      </View>
+
+      <View style={styles.filters}>
+        <TextInput
+          value={filterTitle}
+          onChangeText={setFilterTitle}
+          placeholder="Filter by title (contains)"
+          style={styles.filterInput}
+        />
+        <View style={styles.doneOnlyRow}>
+          <Text style={styles.doneOnlyLabel}>Done only</Text>
+          <Switch value={showDoneOnly} onValueChange={setShowDoneOnly} />
+        </View>
       </View>
 
       <FlatList
@@ -94,9 +125,32 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: "#111827",
   },
+  addButtonDisabled: {
+    opacity: 0.5,
+  },
   addButtonText: {
     color: "#fff",
     fontWeight: "600",
+  },
+  filters: {
+    gap: 8,
+  },
+  filterInput: {
+    borderWidth: 1,
+    borderColor: "#d1d5db",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  doneOnlyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  doneOnlyLabel: {
+    color: "#374151",
+    fontSize: 14,
   },
   separator: {
     height: 8,

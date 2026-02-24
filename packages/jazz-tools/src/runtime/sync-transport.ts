@@ -314,6 +314,28 @@ export function generateClientId(): string {
 }
 
 const fallbackClientId = generateClientId();
+const SYNC_FETCH_TIMEOUT_MS = 10_000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  if (typeof AbortController !== "function") {
+    return fetch(url, init);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
@@ -380,7 +402,8 @@ export function isCataloguePayload(payload: any): boolean {
 /**
  * POST a sync payload to the server.
  *
- * Catalogue payloads get the admin-secret header; everything else gets JWT.
+ * User auth headers are always applied first (JWT or local auth).
+ * Catalogue payloads additionally include the admin-secret header when available.
  */
 export async function sendSyncPayload(
   serverUrl: string,
@@ -412,12 +435,21 @@ export async function sendSyncPayload(
 
   let response: Response;
   try {
-    response = await fetch(buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix), {
-      method: "POST",
-      headers,
-      body,
-    });
+    response = await fetchWithTimeout(
+      buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
+      {
+        method: "POST",
+        headers,
+        body,
+      },
+      SYNC_FETCH_TIMEOUT_MS,
+    );
   } catch (e) {
+    if ((e as { name?: string })?.name === "AbortError") {
+      console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+      throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+    }
+    console.error(`${logPrefix}Sync POST fetch error:`, e);
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
   }
@@ -448,11 +480,20 @@ export async function linkExternalIdentity(
 
   let response: Response;
   try {
-    response = await fetch(buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix), {
-      method: "POST",
-      headers,
-    });
+    response = await fetchWithTimeout(
+      buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix),
+      {
+        method: "POST",
+        headers,
+      },
+      SYNC_FETCH_TIMEOUT_MS,
+    );
   } catch (e) {
+    if ((e as { name?: string })?.name === "AbortError") {
+      console.error(`${logPrefix}Link external timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+      throw new Error(`${logPrefix}Link external failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+    }
+    console.error(`${logPrefix}Link external fetch error:`, e);
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`${logPrefix}Link external failed: ${msg}`);
   }

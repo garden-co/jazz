@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 
+use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::query::Query;
@@ -297,7 +298,8 @@ impl TryFrom<JsSchema> for Schema {
 }
 
 fn parse_query(query_json: &str) -> Result<Query, JazzRnError> {
-    serde_json::from_str(query_json).map_err(json_err)
+    parse_query_json(query_json)
+        .map_err(|message| JazzRnError::InvalidJson { message })
 }
 
 fn parse_session(session_json: Option<String>) -> Result<Option<Session>, JazzRnError> {
