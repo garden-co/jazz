@@ -1994,14 +1994,34 @@ fn rebac_inherits_bounded_self_reference_passes_validation() {
 fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let mut schema = Schema::new();
 
+    let source_fk_column = if array_edge { "images" } else { "image" };
+    let inherited_read = PolicyExpr::InheritsReferencing {
+        operation: Operation::Select,
+        source_table: "todos".into(),
+        via_column: source_fk_column.into(),
+        max_depth: None,
+    };
+    let inherited_update = PolicyExpr::InheritsReferencing {
+        operation: Operation::Update,
+        source_table: "todos".into(),
+        via_column: source_fk_column.into(),
+        max_depth: None,
+    };
+
     let files_descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("owner_id", ColumnType::Text),
         ColumnDescriptor::new("name", ColumnType::Text),
     ]);
     let files_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+        .with_select(PolicyExpr::or(vec![
+            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+            inherited_read,
+        ]))
         .with_update(
-            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            Some(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                inherited_update,
+            ])),
             PolicyExpr::True,
         );
     schema.insert(
@@ -2012,12 +2032,10 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let image_column = if array_edge {
         ColumnDescriptor::new("images", ColumnType::Array(Box::new(ColumnType::Uuid)))
             .references("files")
-            .inherit_policy()
     } else {
         ColumnDescriptor::new("image", ColumnType::Uuid)
             .nullable()
             .references("files")
-            .inherit_policy()
     };
     let todos_descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("owner_id", ColumnType::Text),
@@ -2087,7 +2105,7 @@ fn rebac_declared_fk_inheritance_grants_select_access() {
         .collect();
     assert!(
         visible_ids.contains(&file_id),
-        "alice should see file via todos.image -> files INHERIT POLICY"
+        "alice should see file via allowedTo.readReferencing(policy.todos, \"image\")"
     );
 }
 
@@ -2196,20 +2214,32 @@ fn rebac_declared_fk_inheritance_cycle_fails_closed() {
         ColumnDescriptor::new("owner_id", ColumnType::Text),
         ColumnDescriptor::new("b_id", ColumnType::Uuid)
             .nullable()
-            .references("table_b")
-            .inherit_policy(),
+            .references("table_b"),
     ]);
     let b_descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("owner_id", ColumnType::Text),
         ColumnDescriptor::new("a_id", ColumnType::Uuid)
             .nullable()
-            .references("table_a")
-            .inherit_policy(),
+            .references("table_a"),
     ]);
-    let a_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
-    let b_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    let a_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Select,
+            source_table: "table_b".into(),
+            via_column: "a_id".into(),
+            max_depth: None,
+        },
+    ]));
+    let b_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Select,
+            source_table: "table_a".into(),
+            via_column: "b_id".into(),
+            max_depth: None,
+        },
+    ]));
     schema.insert(
         TableName::new("table_a"),
         TableSchema::with_policies(a_descriptor.clone(), a_policies),

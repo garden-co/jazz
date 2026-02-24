@@ -101,9 +101,9 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     match version {
         // v1 schemas did not encode policies.
         1 => decode_schema_v1(data),
-        // v2 schemas include policies, but no `inherit_policy` column flag.
+        // v2 schemas include policies, but no legacy inherit-policy byte.
         2 => decode_schema_v2(data),
-        // v3 schemas include policies and `inherit_policy` column flag.
+        // v3 schemas include policies and a legacy inherit-policy byte.
         SCHEMA_VERSION => decode_schema_v3(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
@@ -261,8 +261,8 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
             buf.push(0);
         }
     }
-    // Inherit policy flag (only meaningful when references is present).
-    buf.push(if col.inherit_policy { 1 } else { 0 });
+    // Legacy reserved byte kept for backward compatibility with v3 encoding.
+    buf.push(0);
 }
 
 fn decode_column_descriptor(
@@ -278,14 +278,13 @@ fn decode_column_descriptor(
     } else {
         None
     };
-    let inherit_policy = read_u8(data, offset)? != 0;
+    let _legacy_inherit_policy = read_u8(data, offset)? != 0;
 
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
         column_type,
         nullable,
         references,
-        inherit_policy,
     })
 }
 
@@ -308,7 +307,6 @@ fn decode_column_descriptor_v2(
         column_type,
         nullable,
         references,
-        inherit_policy: false,
     })
 }
 
@@ -593,6 +591,7 @@ const POLICY_EXPR_TRUE: u8 = 10;
 const POLICY_EXPR_FALSE: u8 = 11;
 const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
 const POLICY_EXPR_EXISTS_REL: u8 = 13;
+const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -713,6 +712,21 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
                 write_u32(buf, *depth as u32);
             }
         }
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => {
+            buf.push(POLICY_EXPR_INHERITS_REFERENCING);
+            encode_policy_operation(buf, *operation);
+            write_string(buf, source_table);
+            write_string(buf, via_column);
+            buf.push(if max_depth.is_some() { 1 } else { 0 });
+            if let Some(depth) = max_depth {
+                write_u32(buf, *depth as u32);
+            }
+        }
         PolicyExpr::And(exprs) => {
             buf.push(POLICY_EXPR_AND);
             write_u32(buf, exprs.len() as u32);
@@ -803,6 +817,23 @@ fn decode_policy_expr(
                 operation,
                 via_column,
                 max_depth: Some(max_depth),
+            })
+        }
+        POLICY_EXPR_INHERITS_REFERENCING => {
+            let operation = decode_policy_operation(data, offset)?;
+            let source_table = read_string(data, offset, "policy_inherits_referencing_source")?;
+            let via_column = read_string(data, offset, "policy_inherits_referencing_via_column")?;
+            let has_max_depth = read_u8(data, offset)? != 0;
+            let max_depth = if has_max_depth {
+                Some(read_u32(data, offset)? as usize)
+            } else {
+                None
+            };
+            Ok(PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
             })
         }
         POLICY_EXPR_AND => {
@@ -1180,14 +1211,12 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip_with_inherit_policy_flag() {
+    fn schema_roundtrip_with_fk_reference() {
         let mut schema = Schema::new();
         schema.insert(
             TableName::new("todos"),
             TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("image", ColumnType::Uuid)
-                    .references("files")
-                    .inherit_policy(),
+                ColumnDescriptor::new("image", ColumnType::Uuid).references("files"),
             ])),
         );
         schema.insert(
@@ -1209,11 +1238,10 @@ mod tests {
             .column("image")
             .unwrap();
         assert_eq!(image_col.references, Some(TableName::new("files")));
-        assert!(image_col.inherit_policy);
     }
 
     #[test]
-    fn decode_v2_schema_sets_inherit_policy_false() {
+    fn decode_v2_schema_preserves_fk_references() {
         fn encode_schema_v2_for_test(schema: &Schema) -> Vec<u8> {
             let mut buf = Vec::new();
             buf.push(2);
@@ -1271,7 +1299,6 @@ mod tests {
             .column("image")
             .unwrap();
         assert_eq!(image_col.references, Some(TableName::new("files")));
-        assert!(!image_col.inherit_policy);
     }
 
     #[test]

@@ -48,7 +48,6 @@ export interface Column {
   sqlType: SqlType;
   nullable: boolean;
   references?: string; // Target table name for foreign key
-  inheritPolicy?: boolean; // Opt-in policy inheritance from rows that reference this FK.
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
@@ -96,6 +95,13 @@ export type PolicyExpr =
   | {
       type: "Inherits";
       operation: PolicyOperation;
+      via_column: string;
+      max_depth?: number;
+    }
+  | {
+      type: "InheritsReferencing";
+      operation: PolicyOperation;
+      source_table: string;
       via_column: string;
       max_depth?: number;
     }

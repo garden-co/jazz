@@ -391,6 +391,43 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("supports allowedTo.readReferencing helper", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+    ]);
+
+    expect(compiled.projects.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "todos",
+      via_column: "projectId",
+    });
+  });
+
+  it("supports bounded recursive referencing inherits depth override", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.projects.allowRead.where(
+        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 3 }),
+      ),
+    ]);
+
+    expect(compiled.projects.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "todos",
+      via_column: "projectId",
+      max_depth: 3,
+    });
+  });
+
+  it("rejects referencing inherits when source FK does not target current table", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todoId")),
+      ]),
+    ).toThrow(/references "todos" but this rule is for "projects"/i);
+  });
+
   it("supports bounded recursive inherits depth override", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),

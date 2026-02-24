@@ -125,8 +125,6 @@ pub struct WasmColumnDescriptor {
     pub nullable: bool,
     #[tsify(optional)]
     pub references: Option<String>,
-    #[tsify(optional)]
-    pub inherit_policy: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
@@ -186,6 +184,13 @@ pub enum WasmPolicyExpr {
     },
     Inherits {
         operation: WasmPolicyOperation,
+        via_column: String,
+        #[tsify(optional)]
+        max_depth: Option<u32>,
+    },
+    InheritsReferencing {
+        operation: WasmPolicyOperation,
+        source_table: String,
         via_column: String,
         #[tsify(optional)]
         max_depth: Option<u32>,
@@ -266,7 +271,6 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
                         column_type: c.column_type.into(),
                         nullable: c.nullable,
                         references: c.references.map(|r| r.as_str().to_string()),
-                        inherit_policy: c.inherit_policy.then_some(true),
                     })
                     .collect(),
             },
@@ -397,6 +401,17 @@ impl From<jazz_tools::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
                 via_column,
                 max_depth: max_depth.map(|v| v as u32),
             },
+            jazz_tools::query_manager::policy::PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => WasmPolicyExpr::InheritsReferencing {
+                operation: operation.into(),
+                source_table,
+                via_column,
+                max_depth: max_depth.map(|v| v as u32),
+            },
             jazz_tools::query_manager::policy::PolicyExpr::And(exprs) => WasmPolicyExpr::And {
                 exprs: exprs.into_iter().map(Into::into).collect(),
             },
@@ -455,6 +470,17 @@ impl TryFrom<WasmPolicyExpr> for jazz_tools::query_manager::policy::PolicyExpr {
                 max_depth,
             } => jazz_tools::query_manager::policy::PolicyExpr::Inherits {
                 operation: operation.into(),
+                via_column,
+                max_depth: max_depth.map(|v| v as usize),
+            },
+            WasmPolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => jazz_tools::query_manager::policy::PolicyExpr::InheritsReferencing {
+                operation: operation.into(),
+                source_table,
                 via_column,
                 max_depth: max_depth.map(|v| v as usize),
             },
@@ -524,7 +550,6 @@ impl From<&jazz_tools::query_manager::types::Schema> for WasmSchema {
                         column_type: c.column_type.clone().into(),
                         nullable: c.nullable,
                         references: c.references.map(|r| r.as_str().to_string()),
-                        inherit_policy: c.inherit_policy.then_some(true),
                     })
                     .collect();
                 let policies =
@@ -597,9 +622,6 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                             if let Some(ref_table) = c.references {
                                 cd = cd.references(&ref_table);
                             }
-                            if c.inherit_policy.unwrap_or(false) {
-                                cd = cd.inherit_policy();
-                            }
                             cd
                         })
                         .collect();
@@ -620,9 +642,6 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                     }
                     if let Some(ref_table) = c.references {
                         cd = cd.references(&ref_table);
-                    }
-                    if c.inherit_policy.unwrap_or(false) {
-                        cd = cd.inherit_policy();
                     }
                     cd
                 })
@@ -692,20 +711,19 @@ mod tests {
     }
 
     #[test]
-    fn wasm_schema_inherit_policy_roundtrip() {
+    fn wasm_schema_fk_reference_roundtrip() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("files").column("name", ColumnType::Text))
             .table(
                 TableSchema::builder("todos")
                     .column("title", ColumnType::Text)
-                    .fk_column_with_inherit_policy("image", "files"),
+                    .fk_column("image", "files"),
             )
             .build();
 
         let wasm_schema = WasmSchema::from(&schema);
         let wasm_col = &wasm_schema.tables["todos"].columns[1];
         assert_eq!(wasm_col.references.as_deref(), Some("files"));
-        assert_eq!(wasm_col.inherit_policy, Some(true));
 
         let decoded = Schema::try_from(wasm_schema).unwrap();
         let image = decoded
@@ -715,6 +733,5 @@ mod tests {
             .column("image")
             .unwrap();
         assert_eq!(image.references, Some(TableName::new("files")));
-        assert!(image.inherit_policy);
     }
 }

@@ -47,7 +47,7 @@ pub struct PolicyFilterNode {
     dirty: bool,
     /// Whether the policy contains clauses that need graph-backed context evaluation.
     has_inherits: bool,
-    /// Tables referenced by INHERITS / EXISTS and declared inbound inheritance edges.
+    /// Tables referenced by INHERITS / INHERITS REFERENCING / EXISTS clauses.
     inherits_tables: HashSet<String>,
     /// Whether any dependency table has changed.
     inherits_dirty: bool,
@@ -88,8 +88,7 @@ impl PolicyFilterNode {
         initial_depth: usize,
     ) -> Self {
         let table_name = table_name.into();
-        let mut inherits_tables = collect_inherits_tables(&policy, &descriptor);
-        inherits_tables.extend(collect_declared_inbound_tables(&schema, &table_name));
+        let inherits_tables = collect_inherits_tables(&policy, &descriptor);
         let has_inherits = !inherits_tables.is_empty();
         Self {
             descriptor,
@@ -247,8 +246,8 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
-        let mut visited_declared = HashSet::new();
-        self.evaluate_row_access_with_declared(
+        let mut visited_referencing = HashSet::new();
+        self.evaluate_row_access_with_referencing(
             Operation::Select,
             row,
             &self.descriptor,
@@ -257,15 +256,14 @@ impl PolicyFilterNode {
             io,
             row_loader,
             self.initial_depth,
-            &mut visited_declared,
+            &mut visited_referencing,
         )
     }
 
-    /// Evaluate row access for an operation with declarative inbound inheritance.
-    ///
-    /// Final decision is `local_policy_allow OR declared_inbound_allow`.
+    /// Evaluate row access for an operation, tracking visited rows for
+    /// INHERITS REFERENCING cycle detection.
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_row_access_with_declared(
+    fn evaluate_row_access_with_referencing(
         &self,
         operation: Operation,
         row: &Row,
@@ -275,7 +273,7 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
-        visited_declared: &mut HashSet<(TableName, ObjectId, Operation)>,
+        visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
@@ -283,7 +281,7 @@ impl PolicyFilterNode {
 
         let table = TableName::new(table_name);
         let key = (table, row.id, operation);
-        if !visited_declared.insert(key) {
+        if !visited_referencing.insert(key) {
             // Cycle detected for this recursion branch: fail closed.
             return false;
         }
@@ -301,27 +299,13 @@ impl PolicyFilterNode {
                     row_loader,
                     depth,
                     &mut visited_inherits,
+                    visited_referencing,
                 )
             })
             .unwrap_or(true);
 
-        if local_allow {
-            visited_declared.remove(&(table, row.id, operation));
-            return true;
-        }
-
-        let inherited_allow = self.evaluate_declared_inbound_access(
-            operation,
-            table,
-            row.id,
-            io,
-            row_loader,
-            depth + 1,
-            visited_declared,
-        );
-
-        visited_declared.remove(&(table, row.id, operation));
-        inherited_allow
+        visited_referencing.remove(&(table, row.id, operation));
+        local_allow
     }
 
     fn policy_for_operation(
@@ -339,71 +323,76 @@ impl PolicyFilterNode {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_declared_inbound_access(
+    fn evaluate_inherits_referencing_with_context(
         &self,
         operation: Operation,
-        target_table: TableName,
-        target_row_id: ObjectId,
+        source_table: &str,
+        via_column: &str,
+        max_depth: Option<usize>,
+        row: &Row,
+        target_table_name: &str,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
-        visited_declared: &mut HashSet<(TableName, ObjectId, Operation)>,
+        visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
-        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+        let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
+            return false;
+        };
+        if depth >= effective_max_depth {
             return false;
         }
 
-        for (source_table, source_schema) in &self.schema {
-            for (col_idx, col) in source_schema.descriptor.columns.iter().enumerate() {
-                if !col.inherit_policy {
-                    continue;
-                }
-                if col.references != Some(target_table) {
-                    continue;
-                }
+        let source_table_name = TableName::new(source_table);
+        let Some(source_schema) = self.schema.get(&source_table_name) else {
+            return false;
+        };
+        let source_descriptor = &source_schema.descriptor;
 
-                let candidate_ids = match &col.column_type {
-                    ColumnType::Uuid => io.index_lookup(
-                        source_table.as_str(),
-                        col.name.as_str(),
-                        &self.branch,
-                        &Value::Uuid(target_row_id),
-                    ),
-                    ColumnType::Array(element) if **element == ColumnType::Uuid => {
-                        io.index_scan_all(source_table.as_str(), col.name.as_str(), &self.branch)
-                    }
-                    _ => continue,
-                };
+        let Some(col_idx) = source_descriptor.column_index(via_column) else {
+            return false;
+        };
+        let col = &source_descriptor.columns[col_idx];
+        if col.references != Some(TableName::new(target_table_name)) {
+            return false;
+        }
 
-                for source_row_id in candidate_ids {
-                    let Some((source_content, source_commit_id)) = row_loader(source_row_id) else {
-                        continue;
-                    };
+        let candidate_ids = match &col.column_type {
+            ColumnType::Uuid => io.index_lookup(
+                source_table_name.as_str(),
+                col.name.as_str(),
+                &self.branch,
+                &Value::Uuid(row.id),
+            ),
+            ColumnType::Array(element) if **element == ColumnType::Uuid => {
+                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), &self.branch)
+            }
+            _ => return false,
+        };
 
-                    if !declared_edge_matches_target(
-                        &source_schema.descriptor,
-                        &source_content,
-                        col_idx,
-                        target_row_id,
-                    ) {
-                        continue;
-                    }
+        for source_row_id in candidate_ids {
+            let Some((source_content, source_commit_id)) = row_loader(source_row_id) else {
+                continue;
+            };
 
-                    let source_row = Row::new(source_row_id, source_content, source_commit_id);
-                    if self.evaluate_row_access_with_declared(
-                        operation,
-                        &source_row,
-                        &source_schema.descriptor,
-                        source_table.as_str(),
-                        None,
-                        io,
-                        row_loader,
-                        depth,
-                        visited_declared,
-                    ) {
-                        return true;
-                    }
-                }
+            if !referencing_edge_matches_target(source_descriptor, &source_content, col_idx, row.id)
+            {
+                continue;
+            }
+
+            let source_row = Row::new(source_row_id, source_content, source_commit_id);
+            if self.evaluate_row_access_with_referencing(
+                operation,
+                &source_row,
+                source_descriptor,
+                source_table_name.as_str(),
+                None,
+                io,
+                row_loader,
+                depth + 1,
+                visited_referencing,
+            ) {
+                return true;
             }
         }
 
@@ -423,6 +412,7 @@ impl PolicyFilterNode {
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
+        visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
@@ -434,8 +424,34 @@ impl PolicyFilterNode {
                 via_column,
                 max_depth,
             } => self.evaluate_inherits_with_context(
-                *operation, via_column, *max_depth, row, descriptor, table_name, io, row_loader,
-                depth, visited,
+                *operation,
+                via_column,
+                *max_depth,
+                row,
+                descriptor,
+                table_name,
+                io,
+                row_loader,
+                depth,
+                visited,
+                visited_referencing,
+            ),
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => self.evaluate_inherits_referencing_with_context(
+                *operation,
+                source_table,
+                via_column,
+                *max_depth,
+                row,
+                table_name,
+                io,
+                row_loader,
+                depth,
+                visited_referencing,
             ),
             PolicyExpr::Exists { table, condition } => {
                 self.evaluate_exists_with_context(table, condition, row, io, row_loader, depth)
@@ -445,16 +461,40 @@ impl PolicyFilterNode {
             }
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
-                    e, row, descriptor, table_name, io, row_loader, depth, visited,
+                    e,
+                    row,
+                    descriptor,
+                    table_name,
+                    io,
+                    row_loader,
+                    depth,
+                    visited,
+                    visited_referencing,
                 )
             }),
             PolicyExpr::Or(exprs) => exprs.iter().any(|e| {
                 self.evaluate_expr_with_context(
-                    e, row, descriptor, table_name, io, row_loader, depth, visited,
+                    e,
+                    row,
+                    descriptor,
+                    table_name,
+                    io,
+                    row_loader,
+                    depth,
+                    visited,
+                    visited_referencing,
                 )
             }),
             PolicyExpr::Not(inner) => !self.evaluate_expr_with_context(
-                inner, row, descriptor, table_name, io, row_loader, depth, visited,
+                inner,
+                row,
+                descriptor,
+                table_name,
+                io,
+                row_loader,
+                depth,
+                visited,
+                visited_referencing,
             ),
             // All other expressions delegate to shared evaluation
             _ => evaluate_expr_recursive(expr, &row.data, descriptor, &self.session, depth),
@@ -475,6 +515,7 @@ impl PolicyFilterNode {
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
+        visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
         let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
             return false;
@@ -549,6 +590,7 @@ impl PolicyFilterNode {
             row_loader,
             depth + 1,
             visited,
+            visited_referencing,
         )
     }
 
@@ -654,8 +696,9 @@ impl PolicyFilterNode {
                 via_column,
                 max_depth,
             } => self.evaluate_inherits(*operation, via_column, *max_depth, row, depth),
-            PolicyExpr::Exists { .. } => false, // Without context, fail closed.
-            PolicyExpr::ExistsRel { .. } => false, // Without context, fail closed.
+            PolicyExpr::InheritsReferencing { .. } => false, // Without context, fail closed.
+            PolicyExpr::Exists { .. } => false,              // Without context, fail closed.
+            PolicyExpr::ExistsRel { .. } => false,           // Without context, fail closed.
 
             // And/Or/Not need to recurse through this method for INHERITS support
             PolicyExpr::And(exprs) => exprs.iter().all(|e| self.evaluate_expr(e, row, depth)),
@@ -709,7 +752,7 @@ impl PolicyFilterNode {
     }
 }
 
-fn declared_edge_matches_target(
+fn referencing_edge_matches_target(
     descriptor: &RowDescriptor,
     row_content: &[u8],
     column_index: usize,
@@ -728,29 +771,11 @@ fn declared_edge_matches_target(
 ///
 /// Includes:
 /// - INHERITS target tables (resolved from FK metadata)
+/// - INHERITS REFERENCING source tables
 /// - EXISTS target tables (explicit in the expression)
 fn collect_inherits_tables(policy: &PolicyExpr, descriptor: &RowDescriptor) -> HashSet<String> {
     let mut tables = HashSet::new();
     collect_inherits_tables_recursive(policy, descriptor, &mut tables);
-    tables
-}
-
-/// Collect tables that can grant access to `target_table` via `INHERIT POLICY` FK declarations.
-fn collect_declared_inbound_tables(schema: &Schema, target_table: &str) -> HashSet<String> {
-    let target = TableName::new(target_table);
-    let mut tables = HashSet::new();
-
-    for (source_table, source_schema) in schema {
-        if source_schema
-            .descriptor
-            .columns
-            .iter()
-            .any(|col| col.inherit_policy && col.references == Some(target))
-        {
-            tables.insert(source_table.as_str().to_string());
-        }
-    }
-
     tables
 }
 
@@ -768,6 +793,9 @@ fn collect_inherits_tables_recursive(
             if let Some(ref references) = descriptor.columns[col_index].references {
                 tables.insert(references.as_str().to_string());
             }
+        }
+        PolicyExpr::InheritsReferencing { source_table, .. } => {
+            tables.insert(source_table.clone());
         }
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
             for expr in exprs {

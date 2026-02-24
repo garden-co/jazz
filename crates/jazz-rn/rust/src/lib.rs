@@ -192,8 +192,6 @@ struct JsColumnDescriptor {
     nullable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     references: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inherit_policy: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -256,9 +254,6 @@ impl TryFrom<JsColumnDescriptor> for jazz_tools::query_manager::types::ColumnDes
         }
         if let Some(ref_table) = c.references {
             cd = cd.references(&ref_table);
-        }
-        if c.inherit_policy.unwrap_or(false) {
-            cd = cd.inherit_policy();
         }
         Ok(cd)
     }

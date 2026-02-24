@@ -71,20 +71,6 @@ describe("schemaToWasm", () => {
     });
   });
 
-  it("maps inheritPolicy to inherit_policy for refs", () => {
-    table("items", { image: col.ref("files").inheritPolicy() });
-    const schema = getCollectedSchema();
-    const wasm = schemaToWasm(schema);
-
-    expect(wasm.tables.items.columns[0]).toEqual({
-      name: "image",
-      column_type: { type: "Uuid" },
-      nullable: false,
-      references: "files",
-      inherit_policy: true,
-    });
-  });
-
   it("handles nullable columns", () => {
     table("items", { description: col.string().optional() });
     const schema = getCollectedSchema();
@@ -147,20 +133,6 @@ describe("schemaToWasm", () => {
       column_type: { type: "Array", element: { type: "Uuid" } },
       nullable: false,
       references: "users",
-    });
-  });
-
-  it("maps inheritPolicy to inherit_policy for array(ref)", () => {
-    table("items", { part_ids: col.array(col.ref("parts").inheritPolicy()) });
-    const schema = getCollectedSchema();
-    const wasm = schemaToWasm(schema);
-
-    expect(wasm.tables.items.columns[0]).toEqual({
-      name: "part_ids",
-      column_type: { type: "Array", element: { type: "Uuid" } },
-      nullable: false,
-      references: "parts",
-      inherit_policy: true,
     });
   });
 
@@ -243,6 +215,33 @@ describe("schemaToWasm", () => {
           column: "owner_id",
           op: "Eq",
           value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+    });
+  });
+
+  it("carries InheritsReferencing policies into wasm schema", () => {
+    table("files", { owner_id: col.string() });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
+        },
+      },
+    };
+
+    const wasm = schemaToWasm(schema);
+    expect(wasm.tables.files.policies).toEqual({
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
         },
       },
     });

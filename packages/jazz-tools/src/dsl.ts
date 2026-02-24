@@ -42,7 +42,6 @@ interface ColumnBuilder {
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
-  _inheritPolicy: boolean | undefined;
 }
 
 class ScalarBuilder implements ColumnBuilder {
@@ -64,10 +63,6 @@ class ScalarBuilder implements ColumnBuilder {
   }
 
   get _references(): string | undefined {
-    return undefined;
-  }
-
-  get _inheritPolicy(): boolean | undefined {
     return undefined;
   }
 }
@@ -96,10 +91,6 @@ class EnumBuilder implements ColumnBuilder {
   get _references(): string | undefined {
     return undefined;
   }
-
-  get _inheritPolicy(): boolean | undefined {
-    return undefined;
-  }
 }
 
 // ============================================================================
@@ -108,17 +99,11 @@ class EnumBuilder implements ColumnBuilder {
 
 class RefBuilder implements ColumnBuilder {
   private _nullable = false;
-  private _inheritPolicyEnabled = false;
 
   constructor(private _targetTable: string) {}
 
   optional(): this {
     this._nullable = true;
-    return this;
-  }
-
-  inheritPolicy(): this {
-    this._inheritPolicyEnabled = true;
     return this;
   }
 
@@ -128,7 +113,6 @@ class RefBuilder implements ColumnBuilder {
       sqlType: this._sqlType,
       nullable: this._nullable,
       references: this._references,
-      inheritPolicy: this._inheritPolicy,
     };
   }
 
@@ -139,28 +123,15 @@ class RefBuilder implements ColumnBuilder {
   get _references(): string | undefined {
     return this._targetTable;
   }
-
-  get _inheritPolicy(): boolean | undefined {
-    return this._inheritPolicyEnabled ? true : undefined;
-  }
 }
 
 class ArrayBuilder implements ColumnBuilder {
   private _nullable = false;
-  private _inheritPolicyEnabled = false;
 
   constructor(private _element: ColumnBuilder) {}
 
   optional(): this {
     this._nullable = true;
-    return this;
-  }
-
-  inheritPolicy(): this {
-    if (!this._references) {
-      throw new Error("inheritPolicy() requires array(ref(...))");
-    }
-    this._inheritPolicyEnabled = true;
     return this;
   }
 
@@ -170,7 +141,6 @@ class ArrayBuilder implements ColumnBuilder {
       sqlType: this._sqlType,
       nullable: this._nullable,
       references: this._references,
-      inheritPolicy: this._inheritPolicy,
     };
   }
 
@@ -180,10 +150,6 @@ class ArrayBuilder implements ColumnBuilder {
 
   get _references(): string | undefined {
     return this._element._references;
-  }
-
-  get _inheritPolicy(): boolean | undefined {
-    return this._inheritPolicyEnabled || this._element._inheritPolicy ? true : undefined;
   }
 }
 

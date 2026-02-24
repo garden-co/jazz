@@ -69,18 +69,18 @@ Binary column for storing raw bytes inline. Max size: 1MB (enforced; aligns with
 
 Ordered 1:N relationships as an array column with FK semantics. Each element is a FK to a `file_parts` row. Ordering preserved.
 
-### 3. Policy Inheritance via FK Declarations
+### 3. Policy Inheritance via permissions.ts Referencing Rules
 
-Policies declared at the pointing side:
+Policies declared on the target table:
 
+```ts
+policy.files.allowRead.where(allowedTo.readReferencing(policy.todos, "image"));
+policy.file_parts.allowRead.where(allowedTo.readReferencing(policy.files, "parts"));
 ```
--- "files referenced from todos inherit todo's policies"
-todos.image -> files : INHERIT POLICY
-```
 
-At access time for a `files` row: collect all FK declarations across all tables that point at `files` and declare policy inheritance. For each, find rows that reference this file. OR the policies together — if _any_ referencing row grants access, the file is accessible.
+At access time for a `files` row: evaluate referencing rows from `todos` where `todos.image` points at the file. OR the composed policy branches together — if _any_ referencing row grants access, the file is accessible.
 
-For `file_parts`, the chain is two hops: `todos.image → files` (inherit) + `files.parts → file_parts` (inherit). In most cases only a single table points at any given file, so the OR is trivial.
+For `file_parts`, the chain is two hops: `todos.image → files` plus `files.parts → file_parts`. In most cases only a single table points at any given file, so the OR is trivial.
 
 ### 4. Built-in `files` + `file_parts` Schema with Helpers
 

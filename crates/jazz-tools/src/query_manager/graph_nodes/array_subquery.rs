@@ -101,7 +101,6 @@ impl ArraySubqueryNode {
             column_type: element_type,
             nullable: false,
             references: None,
-            inherit_policy: false,
         });
 
         let output_descriptor = RowDescriptor::new(output_columns);
