@@ -29,6 +29,15 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       return { type: "Timestamp", value: Number(value) };
     case "Uuid":
       return { type: "Uuid", value: String(value) };
+    case "Enum": {
+      const enumValue = String(value);
+      if (!columnType.variants.includes(enumValue)) {
+        throw new Error(
+          `Invalid enum value "${enumValue}". Expected one of: ${columnType.variants.join(", ")}`,
+        );
+      }
+      return { type: "Text", value: enumValue };
+    }
     case "Array": {
       if (!Array.isArray(value)) {
         throw new Error(`Expected array for Array column type, got ${typeof value}`);

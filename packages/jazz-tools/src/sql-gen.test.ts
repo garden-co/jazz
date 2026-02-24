@@ -72,6 +72,19 @@ describe("schemaToSql", () => {
     expect(sql).toContain("real_null REAL");
   });
 
+  it("handles enum column types", () => {
+    resetCollectedState();
+    table("tasks", {
+      status: col.enum("in_progress", "todo", "done"),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    // Variants are normalized in DSL.
+    expect(sql).toContain("status ENUM('done','in_progress','todo') NOT NULL");
+  });
+
   it("handles array column types", () => {
     resetCollectedState();
     table("arrays", {
@@ -351,6 +364,34 @@ describe("lensToSql", () => {
 `);
     expect(lensToSql(lens, "bwd")).toBe(
       `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY[];
+`,
+    );
+  });
+
+  it("supports adding enum columns in lenses", () => {
+    resetCollectedState();
+    migrate("tasks", {
+      status: col.add().enum("todo", "done", { default: "todo" }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE tasks ADD COLUMN status ENUM('done','todo') DEFAULT 'todo';
+`,
+    );
+  });
+
+  it("supports dropping enum columns with backward re-add", () => {
+    resetCollectedState();
+    migrate("tasks", {
+      status: col.drop().enum("todo", "done", { backwardsDefault: "done" }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE tasks DROP COLUMN status;
+`);
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE tasks ADD COLUMN status ENUM('done','todo') DEFAULT 'done';
 `,
     );
   });

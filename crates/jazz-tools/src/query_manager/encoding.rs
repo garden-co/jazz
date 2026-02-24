@@ -86,7 +86,7 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
 
     for (i, (col, val)) in descriptor.columns.iter().zip(values.iter()).enumerate() {
         // Validate type match
-        if !val.is_null() && val.column_type().is_some_and(|t| t != col.column_type) {
+        if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
             return Err(EncodingError::TypeMismatch {
                 column: col.name.to_string(),
                 expected: col.column_type.clone(),
@@ -126,6 +126,40 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
     result.extend(var_data);
 
     Ok(result)
+}
+
+fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
+    match column_type {
+        ColumnType::Integer => matches!(value, Value::Integer(_)),
+        ColumnType::BigInt => matches!(value, Value::BigInt(_)),
+        ColumnType::Boolean => matches!(value, Value::Boolean(_)),
+        ColumnType::Timestamp => matches!(value, Value::Timestamp(_)),
+        ColumnType::Uuid => matches!(value, Value::Uuid(_)),
+        ColumnType::Text => matches!(value, Value::Text(_)),
+        ColumnType::Enum(variants) => match value {
+            Value::Text(s) => variants.contains(s),
+            _ => false,
+        },
+        ColumnType::Array(element_type) => match value {
+            Value::Array(elements) => elements.iter().all(|element| {
+                !element.is_null() && value_matches_column_type(element, element_type)
+            }),
+            _ => false,
+        },
+        ColumnType::Row(row_descriptor) => match value {
+            Value::Row(values) if values.len() == row_descriptor.columns.len() => values
+                .iter()
+                .zip(row_descriptor.columns.iter())
+                .all(|(inner_value, inner_column)| {
+                    if inner_value.is_null() {
+                        inner_column.nullable
+                    } else {
+                        value_matches_column_type(inner_value, &inner_column.column_type)
+                    }
+                }),
+            _ => false,
+        },
+    }
 }
 
 /// Encode a fixed-size value to the buffer.
@@ -271,6 +305,17 @@ pub fn decode_column(
             let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
             })?;
+            Ok(Value::Text(s.to_string()))
+        }
+        ColumnType::Enum(variants) => {
+            let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
+                message: format!("invalid utf8: {e}"),
+            })?;
+            if !variants.iter().any(|variant| variant == s) {
+                return Err(EncodingError::MalformedData {
+                    message: format!("invalid enum variant: {s}"),
+                });
+            }
             Ok(Value::Text(s.to_string()))
         }
         ColumnType::Array(element_type) => {
@@ -487,7 +532,7 @@ pub fn compare_column(
             // Compare as bytes (UUIDs have natural byte ordering)
             Ok(bytes1.cmp(bytes2))
         }
-        ColumnType::Text | ColumnType::Array(_) | ColumnType::Row(_) => {
+        ColumnType::Text | ColumnType::Enum(_) | ColumnType::Array(_) | ColumnType::Row(_) => {
             // Lexicographic comparison of bytes
             Ok(bytes1.cmp(bytes2))
         }
@@ -531,9 +576,11 @@ pub fn compare_column_to_value(
             let t2 = u64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(t1.cmp(&t2))
         }
-        ColumnType::Uuid | ColumnType::Text | ColumnType::Array(_) | ColumnType::Row(_) => {
-            Ok(bytes.cmp(value))
-        }
+        ColumnType::Uuid
+        | ColumnType::Text
+        | ColumnType::Enum(_)
+        | ColumnType::Array(_)
+        | ColumnType::Row(_) => Ok(bytes.cmp(value)),
     }
 }
 
@@ -815,6 +862,17 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
             let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
             })?;
+            Ok(Value::Text(s.to_string()))
+        }
+        ColumnType::Enum(variants) => {
+            let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
+                message: format!("invalid utf8: {e}"),
+            })?;
+            if !variants.iter().any(|variant| variant == s) {
+                return Err(EncodingError::MalformedData {
+                    message: format!("invalid enum variant: {s}"),
+                });
+            }
             Ok(Value::Text(s.to_string()))
         }
         ColumnType::Array(inner_type) => {
@@ -1825,5 +1883,30 @@ mod tests {
 
         let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
         assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn encode_row_rejects_invalid_enum_variant() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "status",
+            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+        )]);
+
+        let err = encode_row(&descriptor, &[Value::Text("invalid".to_string())]).unwrap_err();
+        assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn decode_row_rejects_invalid_enum_variant() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "status",
+            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+        )]);
+
+        let mut encoded = encode_row(&descriptor, &[Value::Text("todo".to_string())]).unwrap();
+        encoded.as_mut_slice().clone_from_slice(b"nope");
+
+        let err = decode_row(&descriptor, &encoded).unwrap_err();
+        assert!(matches!(err, EncodingError::MalformedData { .. }));
     }
 }

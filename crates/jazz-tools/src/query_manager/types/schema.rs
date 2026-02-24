@@ -81,6 +81,8 @@ pub enum ColumnType {
     Boolean,
     /// Variable-length UTF-8 text.
     Text,
+    /// Enumerated text constrained to a closed set of variants.
+    Enum(Vec<String>),
     /// 8-byte unsigned timestamp (microseconds since Unix epoch).
     Timestamp,
     /// 16-byte UUID (ObjectId).
@@ -102,6 +104,7 @@ impl ColumnType {
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
             ColumnType::Text => None,
+            ColumnType::Enum(_) => None,
             ColumnType::Array(_) => None, // Arrays are variable-length
             ColumnType::Row(_) => None,   // Rows are variable-length
         }

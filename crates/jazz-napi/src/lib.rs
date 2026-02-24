@@ -120,6 +120,8 @@ struct JsColumnType {
     #[serde(skip_serializing_if = "Option::is_none")]
     element: Option<Box<JsColumnType>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    variants: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     columns: Option<Vec<JsColumnDescriptor>>,
 }
 
@@ -241,6 +243,10 @@ fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::type
         "BigInt" => ColumnType::BigInt,
         "Boolean" => ColumnType::Boolean,
         "Text" => ColumnType::Text,
+        "Enum" => {
+            let variants = ct.variants.expect("Enum type requires variants");
+            ColumnType::Enum(variants)
+        }
         "Timestamp" => ColumnType::Timestamp,
         "Uuid" => ColumnType::Uuid,
         "Array" => {
@@ -412,41 +418,55 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             ColumnType::Integer => JsColumnType {
                 type_name: "Integer".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::BigInt => JsColumnType {
                 type_name: "BigInt".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Boolean => JsColumnType {
                 type_name: "Boolean".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Text => JsColumnType {
                 type_name: "Text".into(),
                 element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Enum(variants) => JsColumnType {
+                type_name: "Enum".into(),
+                element: None,
+                variants: Some(variants.clone()),
                 columns: None,
             },
             ColumnType::Timestamp => JsColumnType {
                 type_name: "Timestamp".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Uuid => JsColumnType {
                 type_name: "Uuid".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Array(elem) => JsColumnType {
                 type_name: "Array".into(),
                 element: Some(Box::new(ct_to_js(elem))),
+                variants: None,
                 columns: None,
             },
             ColumnType::Row(desc) => JsColumnType {
                 type_name: "Row".into(),
                 element: None,
+                variants: None,
                 columns: Some(
                     desc.columns
                         .iter()

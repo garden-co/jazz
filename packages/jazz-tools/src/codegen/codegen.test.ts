@@ -136,6 +136,18 @@ describe("schemaToWasm", () => {
     });
   });
 
+  it("converts enum to Enum with normalized variants", () => {
+    table("tasks", { status: col.enum("in_progress", "todo", "done") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.tasks.columns[0]).toEqual({
+      name: "status",
+      column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
+      nullable: false,
+    });
+  });
+
   it("converts multiple tables", () => {
     table("users", { name: col.string() });
     table("todos", { title: col.string(), user_id: col.ref("users") });
@@ -331,6 +343,15 @@ describe("generateTypes", () => {
 
     expect(output).toContain("  tags: string[];");
     expect(output).toContain("  matrix: number[][];");
+  });
+
+  it("maps enum columns to string literal unions", () => {
+    table("tasks", { status: col.enum("in_progress", "todo", "done") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain('  status: "done" | "in_progress" | "todo";');
   });
 
   it("exports wasmSchema constant", () => {
@@ -690,6 +711,17 @@ describe("generateWhereInputTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("tags?: string[] | { eq?: string[]; contains?: string };");
+  });
+
+  it("generates enum filters with eq/ne/in", () => {
+    table("tasks", { status: col.enum("in_progress", "todo", "done") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      'status?: "done" | "in_progress" | "todo" | { eq?: "done" | "in_progress" | "todo"; ne?: "done" | "in_progress" | "todo"; in?: ("done" | "in_progress" | "todo")[] };',
+    );
   });
 });
 

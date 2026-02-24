@@ -2,15 +2,23 @@
 import type { RelExpr } from "./ir.js";
 
 export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export interface EnumSqlType {
+  kind: "ENUM";
+  variants: string[];
+}
 export interface ArraySqlType {
   kind: "ARRAY";
   element: SqlType;
 }
-export type SqlType = ScalarSqlType | ArraySqlType;
+export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType;
 
 export function sqlTypeToString(sqlType: SqlType): string {
   if (typeof sqlType === "string") {
     return sqlType;
+  }
+  if (sqlType.kind === "ENUM") {
+    const variants = sqlType.variants.map((variant) => `'${variant.replace(/'/g, "''")}'`);
+    return `ENUM(${variants.join(",")})`;
   }
   return `${sqlTypeToString(sqlType.element)}[]`;
 }
@@ -31,7 +39,9 @@ export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
   ? TSTypeFromScalarSqlType<T>
   : T extends ArraySqlType
     ? TSTypeFromSqlType<T["element"]>[]
-    : never;
+    : T extends EnumSqlType
+      ? T["variants"][number]
+      : never;
 
 export interface Column {
   name: string;

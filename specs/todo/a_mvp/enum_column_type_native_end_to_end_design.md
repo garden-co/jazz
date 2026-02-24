@@ -34,12 +34,12 @@ Changes:
 - Add enum sql type shape in TS schema model, e.g.:
   - `type EnumSqlType = { kind: "ENUM"; variants: string[] }`
   - include in `SqlType` union.
-- Add `col.enum(...variants)` in schema DSL and migration DSL (`col.add().enum(...)` / `col.drop().enum(...)` if we want parity with existing `add/drop` builders).
+- Add `col.enum(...variants)` in schema DSL and migration DSL (`col.add().enum(...)` / `col.drop().enum(...)`) with parity across schema and lens workflows.
 - Add validation in DSL:
   - at least one variant
   - unique variants
   - no empty-string variants
-- SQL generation path emits enum type syntax (see open question below).
+- SQL generation path emits enum type syntax: `ENUM('a','b',...)`.
 
 Core TS model sketch:
 
@@ -84,7 +84,7 @@ Files to touch:
 Changes:
 
 - Add `ColumnType::Enum(Vec<String>)`.
-- Preserve enum metadata in schema hash (variant list and order).
+- Preserve enum metadata in schema hash with normalized variant ordering (order-insensitive hash behavior).
 - Keep storage representation text-compatible (encode/decode as string bytes), but enforce type compatibility:
   - `Value::Text("draft")` is accepted for `ColumnType::Enum(["draft", ...])`.
   - reject text not present in variant list.
@@ -143,7 +143,7 @@ Proposed schema-level enum model:
 
 - schema type owns canonical list of variants.
 - value-level representation remains string (`Text`) for row payloads.
-- enum constraints are enforced by schema-aware validation layers (TS runtime and Rust encoding checks).
+- enum constraints are enforced by schema-aware validation layers in both TS runtime and native Rust runtime.
 
 This keeps wire/value formats stable while adding stricter type semantics.
 
@@ -179,28 +179,11 @@ This keeps wire/value formats stable while adding stricter type semantics.
 
 ## Missing Coverage Check
 
-Coverage appears complete for request scope (TS DSL to native runtime), but depends on one policy decision:
+Coverage appears complete for request scope (TS DSL to native runtime) with all policy questions resolved.
 
-- SQL representation of enum columns (custom `ENUM(...)` syntax vs text + check constraints).
+## Decisions
 
-## Ambiguities / Questions
-
-### SQL representation
-
-1. Should generated schema SQL use `ENUM('a','b')` as a first-class type syntax, or emit `TEXT` plus a `CHECK` constraint?
-   Impact: parser/emitter complexity and backward compatibility with existing SQL parser assumptions.
-
-### Migration API parity
-
-2. Do you want `col.add().enum(...)` and `col.drop().enum(...)` now, or only schema-time `col.enum(...)` in `table(...)` definitions?
-   Impact: whether migration-generation (`files.rs`) and lens SQL paths must support enum defaults immediately.
-
-### Variant ordering semantics
-
-3. Should variant order be semantically significant for schema hashes/diffs, or should variants be normalized/sorted?
-   Impact: whether reordering variants causes schema version bumps and migration generation.
-
-### Runtime enforcement location
-
-4. Should invalid enum values fail fast in TypeScript runtime only, native runtime only, or both?
-   Impact: consistency and error source clarity (client-side UX vs defense-in-depth).
+1. Use first-class `ENUM('a','b',...)` SQL syntax.
+2. Support `col.add().enum(...)` and `col.drop().enum(...)` now.
+3. Normalize variant ordering for schema hashing.
+4. Fail fast in both TypeScript and native runtime validation paths.
