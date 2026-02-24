@@ -10,12 +10,6 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## Remaining Weak Assertions
 
-## 2. Shape-Only Assertions (high priority)
-
-- `crates/groove/src/sync_manager/tests.rs:local_commit_syncs_to_server`
-  - Current: validates commit count/id only.
-  - Needed: also assert destination server, object id, and branch.
-
 ## 3. Test Stub / Non-Behavioral Case (high priority)
 
 - `crates/groove/src/schema_manager/integration_tests.rs:query_manager_queues_catalogue_updates`
