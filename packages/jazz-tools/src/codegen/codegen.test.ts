@@ -46,14 +46,14 @@ describe("schemaToWasm", () => {
     });
   });
 
-  it("converts REAL to Real", () => {
+  it("converts REAL to Double", () => {
     table("items", { price: col.float() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
     expect(wasm.tables.items.columns[0]).toEqual({
       name: "price",
-      column_type: { type: "Real" },
+      column_type: { type: "Double" },
       nullable: false,
     });
   });

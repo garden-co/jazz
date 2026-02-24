@@ -22,7 +22,7 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
-    case "Real":
+    case "Double":
     case "Timestamp":
       return "number";
     case "Uuid":

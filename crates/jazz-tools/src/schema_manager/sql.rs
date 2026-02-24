@@ -451,7 +451,7 @@ impl Parser {
                 "TEXT" | "VARCHAR" | "CHAR" | "STRING" => ColumnType::Text,
                 "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => ColumnType::Integer,
                 "BIGINT" => ColumnType::BigInt,
-                "REAL" | "FLOAT" | "DOUBLE" => ColumnType::Real,
+                "REAL" | "FLOAT" | "DOUBLE" => ColumnType::Double,
                 "BOOLEAN" | "BOOL" => ColumnType::Boolean,
                 "TIMESTAMP" => ColumnType::Timestamp,
                 "UUID" => ColumnType::Uuid,
@@ -683,7 +683,7 @@ impl Parser {
             Some(Token::Number(n)) => {
                 if n.contains('.') {
                     if let Ok(f) = n.parse::<f64>() {
-                        Ok(Value::Real(f))
+                        Ok(Value::Double(f))
                     } else {
                         Err(SqlParseError::InvalidDefaultValue(format!(
                             "Cannot parse float: {}",
@@ -1288,7 +1288,7 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
     match ct {
         ColumnType::Integer => "INTEGER".to_string(),
         ColumnType::BigInt => "BIGINT".to_string(),
-        ColumnType::Real => "REAL".to_string(),
+        ColumnType::Double => "REAL".to_string(),
         ColumnType::Boolean => "BOOLEAN".to_string(),
         ColumnType::Text => "TEXT".to_string(),
         ColumnType::Enum(variants) => {
@@ -1312,7 +1312,7 @@ fn value_to_sql(val: &Value) -> String {
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
-        Value::Real(f) => {
+        Value::Double(f) => {
             assert!(f.is_finite(), "non-finite float in value_to_sql: {f}");
             format!("{f:?}")
         }
@@ -2014,12 +2014,12 @@ mod tests {
 
         let temp = &table.descriptor.columns[0];
         assert_eq!(temp.name.as_str(), "temperature");
-        assert_eq!(temp.column_type, ColumnType::Real);
+        assert_eq!(temp.column_type, ColumnType::Double);
         assert!(!temp.nullable);
 
         let humidity = &table.descriptor.columns[1];
         assert_eq!(humidity.name.as_str(), "humidity");
-        assert_eq!(humidity.column_type, ColumnType::Real);
+        assert_eq!(humidity.column_type, ColumnType::Double);
         assert!(humidity.nullable);
     }
 
@@ -2035,8 +2035,8 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("sensors")).unwrap();
 
-        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Real);
-        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Real);
+        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Double);
+        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Double);
     }
 
     #[test]
@@ -2087,8 +2087,8 @@ mod tests {
             } => {
                 assert_eq!(table, "sensors");
                 assert_eq!(column, "calibration");
-                assert_eq!(*column_type, ColumnType::Real);
-                assert_eq!(*default, Value::Real(0.0));
+                assert_eq!(*column_type, ColumnType::Double);
+                assert_eq!(*default, Value::Double(0.0));
             }
             _ => panic!("Expected AddColumn"),
         }
@@ -2107,13 +2107,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "non-finite float")]
     fn value_to_sql_rejects_infinity() {
-        value_to_sql(&Value::Real(f64::INFINITY));
+        value_to_sql(&Value::Double(f64::INFINITY));
     }
 
     #[test]
     #[should_panic(expected = "non-finite float")]
     fn value_to_sql_rejects_nan() {
-        value_to_sql(&Value::Real(f64::NAN));
+        value_to_sql(&Value::Double(f64::NAN));
     }
 
     #[test]
@@ -2129,7 +2129,7 @@ mod tests {
 
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Real))
+            ColumnType::Array(Box::new(ColumnType::Double))
         );
         assert!(!col.nullable);
     }

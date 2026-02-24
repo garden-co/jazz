@@ -25,7 +25,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
-  REAL: { type: "Real" },
+  REAL: { type: "Double" },
   UUID: { type: "Uuid" },
 };
 

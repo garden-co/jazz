@@ -551,7 +551,7 @@ fn value_to_ts_literal(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
-        Value::Real(f) => {
+        Value::Double(f) => {
             assert!(
                 f.is_finite(),
                 "non-finite float in value_to_ts_literal: {f}"
@@ -1084,12 +1084,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "non-finite float")]
     fn value_to_ts_literal_rejects_infinity() {
-        value_to_ts_literal(&crate::query_manager::types::Value::Real(f64::INFINITY));
+        value_to_ts_literal(&crate::query_manager::types::Value::Double(f64::INFINITY));
     }
 
     #[test]
     #[should_panic(expected = "non-finite float")]
     fn value_to_ts_literal_rejects_nan() {
-        value_to_ts_literal(&crate::query_manager::types::Value::Real(f64::NAN));
+        value_to_ts_literal(&crate::query_manager::types::Value::Double(f64::NAN));
     }
 }

@@ -245,7 +245,7 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             hasher.update(&[2]);
             hasher.update(&v.to_le_bytes());
         }
-        Value::Real(v) => {
+        Value::Double(v) => {
             hasher.update(&[10]);
             hasher.update(&v.to_le_bytes());
         }
@@ -352,7 +352,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::BigInt => {
             hasher.update(&[2]);
         }
-        ColumnType::Real => {
+        ColumnType::Double => {
             hasher.update(&[10]);
         }
         ColumnType::Boolean => {

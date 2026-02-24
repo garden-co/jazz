@@ -249,13 +249,13 @@ const TYPE_UUID: u8 = 6;
 const TYPE_ARRAY: u8 = 7;
 const TYPE_ROW: u8 = 8;
 const TYPE_ENUM: u8 = 9;
-const TYPE_REAL: u8 = 10;
+const TYPE_DOUBLE: u8 = 10;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
         ColumnType::Integer => buf.push(TYPE_INTEGER),
         ColumnType::BigInt => buf.push(TYPE_BIGINT),
-        ColumnType::Real => buf.push(TYPE_REAL),
+        ColumnType::Double => buf.push(TYPE_DOUBLE),
         ColumnType::Boolean => buf.push(TYPE_BOOLEAN),
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
@@ -286,7 +286,7 @@ fn decode_column_type(
     match tag {
         TYPE_INTEGER => Ok(ColumnType::Integer),
         TYPE_BIGINT => Ok(ColumnType::BigInt),
-        TYPE_REAL => Ok(ColumnType::Real),
+        TYPE_DOUBLE => Ok(ColumnType::Double),
         TYPE_BOOLEAN => Ok(ColumnType::Boolean),
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
@@ -872,8 +872,8 @@ const VALUE_UUID: u8 = 6;
 const VALUE_ARRAY: u8 = 7;
 const VALUE_ROW: u8 = 8;
 // 9 intentionally skipped: TYPE_ENUM is 9, and Values have no Enum tag
-// (enum values are stored as Text). Keeping Real at 10 aligns with TYPE_REAL.
-const VALUE_REAL: u8 = 10;
+// (enum values are stored as Text). Keeping Double at 10 aligns with TYPE_DOUBLE.
+const VALUE_DOUBLE: u8 = 10;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -886,8 +886,8 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             buf.push(VALUE_BIGINT);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::Real(f) => {
-            buf.push(VALUE_REAL);
+        Value::Double(f) => {
+            buf.push(VALUE_DOUBLE);
             buf.extend_from_slice(&f.to_le_bytes());
         }
         Value::Boolean(b) => {
@@ -937,9 +937,9 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
             let bytes = read_bytes(data, offset, 8)?;
             Ok(Value::BigInt(i64::from_le_bytes(bytes.try_into().unwrap())))
         }
-        VALUE_REAL => {
+        VALUE_DOUBLE => {
             let bytes = read_bytes(data, offset, 8)?;
-            Ok(Value::Real(f64::from_le_bytes(bytes.try_into().unwrap())))
+            Ok(Value::Double(f64::from_le_bytes(bytes.try_into().unwrap())))
         }
         VALUE_BOOLEAN => {
             let b = read_u8(data, offset)?;
