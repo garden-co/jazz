@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildEndpointUrl,
   buildEventsUrl,
+  createRuntimeSyncStreamController,
+  createSyncOutboxRouter,
   generateClientId,
   linkExternalIdentity,
   normalizePathPrefix,
@@ -244,5 +246,71 @@ describe("sync-transport", () => {
     expect(clientId).toBe("server-client-2");
 
     controller.stop();
+  });
+
+  it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      streamResponse([
+        { type: "Connected", client_id: "server-client-3" },
+        { type: "SyncUpdate", payload: { Ping: {} } },
+      ]),
+    );
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const runtime = {
+      addServer: vi.fn(),
+      removeServer: vi.fn(),
+      onSyncMessageReceived: vi.fn(),
+    };
+    let clientId = "initial-client-id";
+
+    const controller = createRuntimeSyncStreamController({
+      getRuntime: () => runtime,
+      getAuth: () => ({}),
+      getClientId: () => clientId,
+      setClientId: (nextClientId) => {
+        clientId = nextClientId;
+      },
+    });
+
+    controller.start("http://localhost:3000");
+
+    await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
+    );
+    expect(clientId).toBe("server-client-3");
+    await vi.waitFor(() => expect(runtime.removeServer).toHaveBeenCalledTimes(1));
+
+    controller.stop();
+  });
+
+  it("sync outbox router routes server and client destinations", async () => {
+    const onServerPayload = vi.fn().mockResolvedValue(undefined);
+    const onClientPayload = vi.fn();
+    const router = createSyncOutboxRouter({
+      onServerPayload,
+      onClientPayload,
+    });
+
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
+    router(JSON.stringify({ destination: { Client: "client-1" }, payload: { Pong: {} } }));
+
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledWith({ Ping: {} }));
+    expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
+  });
+
+  it("sync outbox router surfaces server-send failures", async () => {
+    const error = new Error("network down");
+    const onServerPayload = vi.fn().mockRejectedValue(error);
+    const onServerPayloadError = vi.fn();
+    const router = createSyncOutboxRouter({
+      onServerPayload,
+      onServerPayloadError,
+    });
+
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
+
+    await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
   });
 });

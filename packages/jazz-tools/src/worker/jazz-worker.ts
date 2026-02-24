@@ -8,9 +8,10 @@
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
 import {
+  createRuntimeSyncStreamController,
+  createSyncOutboxRouter,
   sendSyncPayload,
   generateClientId,
-  SyncStreamController,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -33,16 +34,14 @@ let pendingSyncPayloadsForMain: string[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
 
-const streamController = new SyncStreamController({
+const streamController = createRuntimeSyncStreamController({
   logPrefix: "[worker] ",
+  getRuntime: () => runtime,
   getAuth: () => ({ jwtToken, localAuthMode, localAuthToken }),
   getClientId: () => serverClientId,
   setClientId: (clientId) => {
     serverClientId = clientId;
   },
-  onConnected: () => runtime?.addServer(),
-  onDisconnected: () => runtime?.removeServer(),
-  onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
 });
 
 function enqueueSyncMessageForMain(payload: string): void {
@@ -113,22 +112,17 @@ async function handleInit(msg: InitMessage): Promise<void> {
     runtime.setClientRole(mainClientId, "peer");
 
     // Set up outbox routing
-    runtime.onSyncMessageToSend((envelope: string) => {
-      const parsed = JSON.parse(envelope);
-
-      if (parsed.destination && "Client" in parsed.destination) {
-        // Client-bound → send payload to main thread
-        enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
-      } else if (parsed.destination && "Server" in parsed.destination) {
-        // Server-bound → HTTP POST to upstream
-        if (streamController.getServerUrl()) {
-          void sendToServer(parsed.payload).catch((error) => {
-            console.error("[worker] Sync POST error:", error);
-            streamController.notifyTransportFailure();
-          });
-        }
-      }
-    });
+    runtime.onSyncMessageToSend(
+      createSyncOutboxRouter({
+        logPrefix: "[worker] ",
+        onClientPayload: enqueueSyncMessageForMain,
+        onServerPayload: (payload) => sendToServer(payload),
+        onServerPayloadError: (error) => {
+          console.error("[worker] Sync POST error:", error);
+          streamController.notifyTransportFailure();
+        },
+      }),
+    );
 
     // Runtime is now fully ready to ingest client sync traffic.
     const bufferedSyncMessages = pendingSyncMessages;
@@ -156,7 +150,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
 // ============================================================================
 
 /** POST a sync payload to the upstream server. */
-async function sendToServer(payload: any): Promise<void> {
+async function sendToServer(payload: unknown): Promise<void> {
   const serverUrl = streamController.getServerUrl();
   if (!serverUrl) return;
 
