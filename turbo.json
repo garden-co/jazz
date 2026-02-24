@@ -17,6 +17,10 @@
     "jazz-napi#build": {
       "outputs": ["jazz-napi.node", "index.d.ts"]
     },
+    "jazz-wasm#build": {
+      "dependsOn": ["@jazz/rust#build:crates"],
+      "outputs": ["pkg/**"]
+    },
     "build:crates": {
       "dependsOn": ["^build:crates"],
       "outputs": ["../target/debug/jazz*"]
