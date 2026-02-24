@@ -35,10 +35,4 @@ describe("bytes DSL API", () => {
     expect(col.add().bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
     expect(col.drop().bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
   });
-
-  it("keeps bytea as a compatibility alias", () => {
-    expect(col.bytea()._sqlType).toBe("BYTEA");
-    expect(col.add().bytea({ default: new Uint8Array([1]) }).sqlType).toBe("BYTEA");
-    expect(col.drop().bytea({ backwardsDefault: new Uint8Array([1]) }).sqlType).toBe("BYTEA");
-  });
 });
