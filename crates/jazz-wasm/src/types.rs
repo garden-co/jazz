@@ -1,6 +1,6 @@
 //! Type bridges for WASM boundary.
 //!
-//! Serializable versions of key Groove types for crossing the WASM/JS boundary.
+//! Serializable versions of key Jazz types for crossing the WASM/JS boundary.
 //! Types with `Tsify` derive automatically generate TypeScript definitions.
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use tsify::Tsify;
 // Value Serialization
 // ============================================================================
 
-/// Value type for WASM boundary (mirrors groove::query_manager::types::Value).
+/// Value type for WASM boundary (mirrors jazz::query_manager::types::Value).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(tag = "type", content = "value")]
@@ -27,9 +27,9 @@ pub enum WasmValue {
     Null,
 }
 
-impl From<groove::query_manager::types::Value> for WasmValue {
-    fn from(v: groove::query_manager::types::Value) -> Self {
-        use groove::query_manager::types::Value;
+impl From<jazz::query_manager::types::Value> for WasmValue {
+    fn from(v: jazz::query_manager::types::Value) -> Self {
+        use jazz::query_manager::types::Value;
         match v {
             Value::Integer(i) => WasmValue::Integer(i),
             Value::BigInt(i) => WasmValue::BigInt(i),
@@ -44,12 +44,12 @@ impl From<groove::query_manager::types::Value> for WasmValue {
     }
 }
 
-impl TryFrom<WasmValue> for groove::query_manager::types::Value {
+impl TryFrom<WasmValue> for jazz::query_manager::types::Value {
     type Error = String;
 
     fn try_from(v: WasmValue) -> Result<Self, Self::Error> {
-        use groove::object::ObjectId;
-        use groove::query_manager::types::Value;
+        use jazz::object::ObjectId;
+        use jazz::query_manager::types::Value;
 
         Ok(match v {
             WasmValue::Integer(i) => Value::Integer(i),
@@ -86,7 +86,7 @@ pub struct WasmRow {
     pub values: Vec<WasmValue>,
 }
 
-/// Delta for row-level changes (mirrors groove::query_manager::types::RowDelta).
+/// Delta for row-level changes (mirrors jazz::query_manager::types::RowDelta).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmRowDelta {
@@ -240,9 +240,9 @@ pub struct WasmSchema {
     pub tables: HashMap<String, WasmTableSchema>,
 }
 
-impl From<groove::query_manager::types::ColumnType> for WasmColumnType {
-    fn from(ct: groove::query_manager::types::ColumnType) -> Self {
-        use groove::query_manager::types::ColumnType;
+impl From<jazz::query_manager::types::ColumnType> for WasmColumnType {
+    fn from(ct: jazz::query_manager::types::ColumnType) -> Self {
+        use jazz::query_manager::types::ColumnType;
         match ct {
             ColumnType::Integer => WasmColumnType::Integer,
             ColumnType::BigInt => WasmColumnType::BigInt,
@@ -269,119 +269,119 @@ impl From<groove::query_manager::types::ColumnType> for WasmColumnType {
     }
 }
 
-impl From<groove::query_manager::policy::PolicyValue> for WasmPolicyValue {
-    fn from(value: groove::query_manager::policy::PolicyValue) -> Self {
+impl From<jazz::query_manager::policy::PolicyValue> for WasmPolicyValue {
+    fn from(value: jazz::query_manager::policy::PolicyValue) -> Self {
         match value {
-            groove::query_manager::policy::PolicyValue::Literal(v) => WasmPolicyValue::Literal {
+            jazz::query_manager::policy::PolicyValue::Literal(v) => WasmPolicyValue::Literal {
                 value: WasmValue::from(v),
             },
-            groove::query_manager::policy::PolicyValue::SessionRef(path) => {
+            jazz::query_manager::policy::PolicyValue::SessionRef(path) => {
                 WasmPolicyValue::SessionRef { path }
             }
         }
     }
 }
 
-impl TryFrom<WasmPolicyValue> for groove::query_manager::policy::PolicyValue {
+impl TryFrom<WasmPolicyValue> for jazz::query_manager::policy::PolicyValue {
     type Error = String;
 
     fn try_from(value: WasmPolicyValue) -> Result<Self, Self::Error> {
         match value {
             WasmPolicyValue::Literal { value } => {
-                Ok(groove::query_manager::policy::PolicyValue::Literal(
-                    groove::query_manager::types::Value::try_from(value)?,
+                Ok(jazz::query_manager::policy::PolicyValue::Literal(
+                    jazz::query_manager::types::Value::try_from(value)?,
                 ))
             }
             WasmPolicyValue::SessionRef { path } => {
-                Ok(groove::query_manager::policy::PolicyValue::SessionRef(path))
+                Ok(jazz::query_manager::policy::PolicyValue::SessionRef(path))
             }
         }
     }
 }
 
-impl From<groove::query_manager::policy::CmpOp> for WasmCmpOp {
-    fn from(op: groove::query_manager::policy::CmpOp) -> Self {
+impl From<jazz::query_manager::policy::CmpOp> for WasmCmpOp {
+    fn from(op: jazz::query_manager::policy::CmpOp) -> Self {
         match op {
-            groove::query_manager::policy::CmpOp::Eq => WasmCmpOp::Eq,
-            groove::query_manager::policy::CmpOp::Ne => WasmCmpOp::Ne,
-            groove::query_manager::policy::CmpOp::Lt => WasmCmpOp::Lt,
-            groove::query_manager::policy::CmpOp::Le => WasmCmpOp::Le,
-            groove::query_manager::policy::CmpOp::Gt => WasmCmpOp::Gt,
-            groove::query_manager::policy::CmpOp::Ge => WasmCmpOp::Ge,
+            jazz::query_manager::policy::CmpOp::Eq => WasmCmpOp::Eq,
+            jazz::query_manager::policy::CmpOp::Ne => WasmCmpOp::Ne,
+            jazz::query_manager::policy::CmpOp::Lt => WasmCmpOp::Lt,
+            jazz::query_manager::policy::CmpOp::Le => WasmCmpOp::Le,
+            jazz::query_manager::policy::CmpOp::Gt => WasmCmpOp::Gt,
+            jazz::query_manager::policy::CmpOp::Ge => WasmCmpOp::Ge,
         }
     }
 }
 
-impl From<WasmCmpOp> for groove::query_manager::policy::CmpOp {
+impl From<WasmCmpOp> for jazz::query_manager::policy::CmpOp {
     fn from(op: WasmCmpOp) -> Self {
         match op {
-            WasmCmpOp::Eq => groove::query_manager::policy::CmpOp::Eq,
-            WasmCmpOp::Ne => groove::query_manager::policy::CmpOp::Ne,
-            WasmCmpOp::Lt => groove::query_manager::policy::CmpOp::Lt,
-            WasmCmpOp::Le => groove::query_manager::policy::CmpOp::Le,
-            WasmCmpOp::Gt => groove::query_manager::policy::CmpOp::Gt,
-            WasmCmpOp::Ge => groove::query_manager::policy::CmpOp::Ge,
+            WasmCmpOp::Eq => jazz::query_manager::policy::CmpOp::Eq,
+            WasmCmpOp::Ne => jazz::query_manager::policy::CmpOp::Ne,
+            WasmCmpOp::Lt => jazz::query_manager::policy::CmpOp::Lt,
+            WasmCmpOp::Le => jazz::query_manager::policy::CmpOp::Le,
+            WasmCmpOp::Gt => jazz::query_manager::policy::CmpOp::Gt,
+            WasmCmpOp::Ge => jazz::query_manager::policy::CmpOp::Ge,
         }
     }
 }
 
-impl From<groove::query_manager::policy::Operation> for WasmPolicyOperation {
-    fn from(op: groove::query_manager::policy::Operation) -> Self {
+impl From<jazz::query_manager::policy::Operation> for WasmPolicyOperation {
+    fn from(op: jazz::query_manager::policy::Operation) -> Self {
         match op {
-            groove::query_manager::policy::Operation::Select => WasmPolicyOperation::Select,
-            groove::query_manager::policy::Operation::Insert => WasmPolicyOperation::Insert,
-            groove::query_manager::policy::Operation::Update => WasmPolicyOperation::Update,
-            groove::query_manager::policy::Operation::Delete => WasmPolicyOperation::Delete,
+            jazz::query_manager::policy::Operation::Select => WasmPolicyOperation::Select,
+            jazz::query_manager::policy::Operation::Insert => WasmPolicyOperation::Insert,
+            jazz::query_manager::policy::Operation::Update => WasmPolicyOperation::Update,
+            jazz::query_manager::policy::Operation::Delete => WasmPolicyOperation::Delete,
         }
     }
 }
 
-impl From<WasmPolicyOperation> for groove::query_manager::policy::Operation {
+impl From<WasmPolicyOperation> for jazz::query_manager::policy::Operation {
     fn from(op: WasmPolicyOperation) -> Self {
         match op {
-            WasmPolicyOperation::Select => groove::query_manager::policy::Operation::Select,
-            WasmPolicyOperation::Insert => groove::query_manager::policy::Operation::Insert,
-            WasmPolicyOperation::Update => groove::query_manager::policy::Operation::Update,
-            WasmPolicyOperation::Delete => groove::query_manager::policy::Operation::Delete,
+            WasmPolicyOperation::Select => jazz::query_manager::policy::Operation::Select,
+            WasmPolicyOperation::Insert => jazz::query_manager::policy::Operation::Insert,
+            WasmPolicyOperation::Update => jazz::query_manager::policy::Operation::Update,
+            WasmPolicyOperation::Delete => jazz::query_manager::policy::Operation::Delete,
         }
     }
 }
 
-impl From<groove::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
-    fn from(expr: groove::query_manager::policy::PolicyExpr) -> Self {
+impl From<jazz::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
+    fn from(expr: jazz::query_manager::policy::PolicyExpr) -> Self {
         match expr {
-            groove::query_manager::policy::PolicyExpr::Cmp { column, op, value } => {
+            jazz::query_manager::policy::PolicyExpr::Cmp { column, op, value } => {
                 WasmPolicyExpr::Cmp {
                     column,
                     op: op.into(),
                     value: value.into(),
                 }
             }
-            groove::query_manager::policy::PolicyExpr::IsNull { column } => {
+            jazz::query_manager::policy::PolicyExpr::IsNull { column } => {
                 WasmPolicyExpr::IsNull { column }
             }
-            groove::query_manager::policy::PolicyExpr::IsNotNull { column } => {
+            jazz::query_manager::policy::PolicyExpr::IsNotNull { column } => {
                 WasmPolicyExpr::IsNotNull { column }
             }
-            groove::query_manager::policy::PolicyExpr::In {
+            jazz::query_manager::policy::PolicyExpr::In {
                 column,
                 session_path,
             } => WasmPolicyExpr::In {
                 column,
                 session_path,
             },
-            groove::query_manager::policy::PolicyExpr::Exists { table, condition } => {
+            jazz::query_manager::policy::PolicyExpr::Exists { table, condition } => {
                 WasmPolicyExpr::Exists {
                     table,
                     condition: Box::new((*condition).into()),
                 }
             }
-            groove::query_manager::policy::PolicyExpr::ExistsRel { rel } => {
+            jazz::query_manager::policy::PolicyExpr::ExistsRel { rel } => {
                 WasmPolicyExpr::ExistsRel {
                     rel: serde_json::to_value(rel).unwrap_or(serde_json::Value::Null),
                 }
             }
-            groove::query_manager::policy::PolicyExpr::Inherits {
+            jazz::query_manager::policy::PolicyExpr::Inherits {
                 operation,
                 via_column,
                 max_depth,
@@ -390,54 +390,54 @@ impl From<groove::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
                 via_column,
                 max_depth: max_depth.map(|v| v as u32),
             },
-            groove::query_manager::policy::PolicyExpr::And(exprs) => WasmPolicyExpr::And {
+            jazz::query_manager::policy::PolicyExpr::And(exprs) => WasmPolicyExpr::And {
                 exprs: exprs.into_iter().map(Into::into).collect(),
             },
-            groove::query_manager::policy::PolicyExpr::Or(exprs) => WasmPolicyExpr::Or {
+            jazz::query_manager::policy::PolicyExpr::Or(exprs) => WasmPolicyExpr::Or {
                 exprs: exprs.into_iter().map(Into::into).collect(),
             },
-            groove::query_manager::policy::PolicyExpr::Not(expr) => WasmPolicyExpr::Not {
+            jazz::query_manager::policy::PolicyExpr::Not(expr) => WasmPolicyExpr::Not {
                 expr: Box::new((*expr).into()),
             },
-            groove::query_manager::policy::PolicyExpr::True => WasmPolicyExpr::True,
-            groove::query_manager::policy::PolicyExpr::False => WasmPolicyExpr::False,
+            jazz::query_manager::policy::PolicyExpr::True => WasmPolicyExpr::True,
+            jazz::query_manager::policy::PolicyExpr::False => WasmPolicyExpr::False,
         }
     }
 }
 
-impl TryFrom<WasmPolicyExpr> for groove::query_manager::policy::PolicyExpr {
+impl TryFrom<WasmPolicyExpr> for jazz::query_manager::policy::PolicyExpr {
     type Error = String;
 
     fn try_from(expr: WasmPolicyExpr) -> Result<Self, Self::Error> {
         Ok(match expr {
             WasmPolicyExpr::Cmp { column, op, value } => {
-                groove::query_manager::policy::PolicyExpr::Cmp {
+                jazz::query_manager::policy::PolicyExpr::Cmp {
                     column,
                     op: op.into(),
                     value: value.try_into()?,
                 }
             }
             WasmPolicyExpr::IsNull { column } => {
-                groove::query_manager::policy::PolicyExpr::IsNull { column }
+                jazz::query_manager::policy::PolicyExpr::IsNull { column }
             }
             WasmPolicyExpr::IsNotNull { column } => {
-                groove::query_manager::policy::PolicyExpr::IsNotNull { column }
+                jazz::query_manager::policy::PolicyExpr::IsNotNull { column }
             }
             WasmPolicyExpr::In {
                 column,
                 session_path,
-            } => groove::query_manager::policy::PolicyExpr::In {
+            } => jazz::query_manager::policy::PolicyExpr::In {
                 column,
                 session_path,
             },
             WasmPolicyExpr::Exists { table, condition } => {
-                groove::query_manager::policy::PolicyExpr::Exists {
+                jazz::query_manager::policy::PolicyExpr::Exists {
                     table,
                     condition: Box::new((*condition).try_into()?),
                 }
             }
             WasmPolicyExpr::ExistsRel { rel } => {
-                groove::query_manager::policy::PolicyExpr::ExistsRel {
+                jazz::query_manager::policy::PolicyExpr::ExistsRel {
                     rel: serde_json::from_value(rel)
                         .map_err(|err| format!("Invalid relation IR in ExistsRel: {err}"))?,
                 }
@@ -446,34 +446,34 @@ impl TryFrom<WasmPolicyExpr> for groove::query_manager::policy::PolicyExpr {
                 operation,
                 via_column,
                 max_depth,
-            } => groove::query_manager::policy::PolicyExpr::Inherits {
+            } => jazz::query_manager::policy::PolicyExpr::Inherits {
                 operation: operation.into(),
                 via_column,
                 max_depth: max_depth.map(|v| v as usize),
             },
-            WasmPolicyExpr::And { exprs } => groove::query_manager::policy::PolicyExpr::And(
+            WasmPolicyExpr::And { exprs } => jazz::query_manager::policy::PolicyExpr::And(
                 exprs
                     .into_iter()
                     .map(TryInto::try_into)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            WasmPolicyExpr::Or { exprs } => groove::query_manager::policy::PolicyExpr::Or(
+            WasmPolicyExpr::Or { exprs } => jazz::query_manager::policy::PolicyExpr::Or(
                 exprs
                     .into_iter()
                     .map(TryInto::try_into)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             WasmPolicyExpr::Not { expr } => {
-                groove::query_manager::policy::PolicyExpr::Not(Box::new((*expr).try_into()?))
+                jazz::query_manager::policy::PolicyExpr::Not(Box::new((*expr).try_into()?))
             }
-            WasmPolicyExpr::True => groove::query_manager::policy::PolicyExpr::True,
-            WasmPolicyExpr::False => groove::query_manager::policy::PolicyExpr::False,
+            WasmPolicyExpr::True => jazz::query_manager::policy::PolicyExpr::True,
+            WasmPolicyExpr::False => jazz::query_manager::policy::PolicyExpr::False,
         })
     }
 }
 
-impl From<groove::query_manager::types::OperationPolicy> for WasmOperationPolicy {
-    fn from(policy: groove::query_manager::types::OperationPolicy) -> Self {
+impl From<jazz::query_manager::types::OperationPolicy> for WasmOperationPolicy {
+    fn from(policy: jazz::query_manager::types::OperationPolicy) -> Self {
         Self {
             using: policy.using.map(Into::into),
             with_check: policy.with_check.map(Into::into),
@@ -481,19 +481,19 @@ impl From<groove::query_manager::types::OperationPolicy> for WasmOperationPolicy
     }
 }
 
-impl TryFrom<WasmOperationPolicy> for groove::query_manager::types::OperationPolicy {
+impl TryFrom<WasmOperationPolicy> for jazz::query_manager::types::OperationPolicy {
     type Error = String;
 
     fn try_from(policy: WasmOperationPolicy) -> Result<Self, Self::Error> {
-        Ok(groove::query_manager::types::OperationPolicy {
+        Ok(jazz::query_manager::types::OperationPolicy {
             using: policy.using.map(TryInto::try_into).transpose()?,
             with_check: policy.with_check.map(TryInto::try_into).transpose()?,
         })
     }
 }
 
-impl From<groove::query_manager::types::TablePolicies> for WasmTablePolicies {
-    fn from(policies: groove::query_manager::types::TablePolicies) -> Self {
+impl From<jazz::query_manager::types::TablePolicies> for WasmTablePolicies {
+    fn from(policies: jazz::query_manager::types::TablePolicies) -> Self {
         Self {
             select: Some(policies.select.into()),
             insert: Some(policies.insert.into()),
@@ -503,8 +503,8 @@ impl From<groove::query_manager::types::TablePolicies> for WasmTablePolicies {
     }
 }
 
-impl From<&groove::query_manager::types::Schema> for WasmSchema {
-    fn from(schema: &groove::query_manager::types::Schema) -> Self {
+impl From<&jazz::query_manager::types::Schema> for WasmSchema {
+    fn from(schema: &jazz::query_manager::types::Schema) -> Self {
         let tables = schema
             .iter()
             .map(|(name, ts)| {
@@ -520,7 +520,7 @@ impl From<&groove::query_manager::types::Schema> for WasmSchema {
                     })
                     .collect();
                 let policies =
-                    if ts.policies == groove::query_manager::types::TablePolicies::default() {
+                    if ts.policies == jazz::query_manager::types::TablePolicies::default() {
                         None
                     } else {
                         Some(ts.policies.clone().into())
@@ -535,12 +535,12 @@ impl From<&groove::query_manager::types::Schema> for WasmSchema {
     }
 }
 
-/// Convert WasmSchema back to Groove Schema.
-impl TryFrom<WasmSchema> for groove::query_manager::types::Schema {
+/// Convert WasmSchema back to Jazz Schema.
+impl TryFrom<WasmSchema> for jazz::query_manager::types::Schema {
     type Error = String;
 
     fn try_from(ws: WasmSchema) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::{
+        use jazz::query_manager::types::{
             ColumnDescriptor, ColumnType, OperationPolicy, RowDescriptor, TableName, TablePolicies,
             TableSchema,
         };
@@ -596,7 +596,7 @@ impl TryFrom<WasmSchema> for groove::query_manager::types::Schema {
             }
         }
 
-        let mut schema = groove::query_manager::types::Schema::new();
+        let mut schema = jazz::query_manager::types::Schema::new();
         for (table_name, table_schema) in ws.tables {
             let columns = table_schema
                 .columns

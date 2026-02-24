@@ -1,4 +1,4 @@
-extern crate self as groove;
+extern crate self as jazz;
 
 pub mod commit;
 pub mod metadata;
@@ -13,7 +13,7 @@ pub mod sync_manager;
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
-pub use runtime_tokio as groove_tokio;
+pub use runtime_tokio as jazz_tokio;
 
 #[cfg(feature = "transport")]
 pub mod transport_protocol;

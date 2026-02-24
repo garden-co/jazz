@@ -703,7 +703,7 @@ export class RnRuntime
   constructor(
     schemaJson: string,
     appId: string,
-    grooveEnv: string,
+    jazzEnv: string,
     userBranch: string,
     tier: string | undefined,
     dataPath: string | undefined
@@ -717,7 +717,7 @@ export class RnRuntime
         return nativeModule().ubrn_uniffi_jazz_rn_fn_constructor_rnruntime_new(
           FfiConverterString.lower(schemaJson),
           FfiConverterString.lower(appId),
-          FfiConverterString.lower(grooveEnv),
+          FfiConverterString.lower(jazzEnv),
           FfiConverterString.lower(userBranch),
           FfiConverterOptionalString.lower(tier),
           FfiConverterOptionalString.lower(dataPath),

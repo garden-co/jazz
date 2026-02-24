@@ -46,8 +46,8 @@
 
 use std::fs;
 
-use groove::query_manager::types::SchemaHash;
-use groove::schema_manager::{
+use jazz::query_manager::types::SchemaHash;
+use jazz::schema_manager::{
     Direction, SchemaDirectory, SchemaFileInfo, diff_schemas, parse_schema, schema_filename,
 };
 
@@ -295,7 +295,7 @@ fn generate_migration_if_needed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::schema_manager::Direction;
+    use jazz::schema_manager::Direction;
     use std::fs;
     use tempfile::TempDir;
 
@@ -510,7 +510,7 @@ CREATE TABLE todos (
         // (In real merge, this would come from the other branch's schema_v2_*.sql file)
         let v2b_sql = "CREATE TABLE todos (title TEXT NOT NULL, priority INTEGER);";
         let v2b_schema = parse_schema(v2b_sql).unwrap();
-        let v2b_hash = groove::query_manager::types::SchemaHash::compute(&v2b_schema);
+        let v2b_hash = jazz::query_manager::types::SchemaHash::compute(&v2b_schema);
         dir.write_schema(&v2b_schema, 2, Some("feature_b"), &v2b_hash.short())
             .unwrap();
 

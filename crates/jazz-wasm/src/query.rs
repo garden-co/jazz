@@ -1,19 +1,19 @@
 //! QueryBuilder wrapper for WASM.
 //!
-//! Provides a JavaScript-friendly interface to the Groove QueryBuilder.
+//! Provides a JavaScript-friendly interface to the Jazz QueryBuilder.
 
 use wasm_bindgen::prelude::*;
 
-use groove::query_manager::query::{Query, QueryBuilder as GrooveQueryBuilder};
-use groove::query_manager::types::Value;
-use groove::query_manager::{parse_query_json, parse_query_value};
+use jazz::query_manager::query::{Query, QueryBuilder as JazzQueryBuilder};
+use jazz::query_manager::types::Value;
+use jazz::query_manager::{parse_query_json, parse_query_value};
 
 use crate::types::WasmValue;
 
 /// WASM-exposed QueryBuilder with camelCase methods.
 #[wasm_bindgen]
 pub struct WasmQueryBuilder {
-    inner: GrooveQueryBuilder,
+    inner: JazzQueryBuilder,
 }
 
 #[wasm_bindgen]
@@ -22,7 +22,7 @@ impl WasmQueryBuilder {
     #[wasm_bindgen(constructor)]
     pub fn new(table: &str) -> Self {
         Self {
-            inner: GrooveQueryBuilder::new(table),
+            inner: JazzQueryBuilder::new(table),
         }
     }
 

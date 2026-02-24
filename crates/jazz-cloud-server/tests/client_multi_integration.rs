@@ -4,10 +4,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use groove::object::BranchName;
-use groove::query_manager::types::{ComposedBranchName, SchemaHash};
-use groove::storage::{Storage, SurrealKvStorage};
-use groove::{
+use jazz::object::BranchName;
+use jazz::query_manager::types::{ComposedBranchName, SchemaHash};
+use jazz::storage::{Storage, SurrealKvStorage};
+use jazz::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
 };
@@ -231,7 +231,7 @@ fn make_jwt(sub: &str) -> String {
     .expect("encode jwt")
 }
 
-fn test_schema() -> groove::Schema {
+fn test_schema() -> jazz::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -264,7 +264,7 @@ async fn wait_for_todos_count(
     expected_count: usize,
     timeout: Duration,
     settled_tier: Option<PersistenceTier>,
-) -> Vec<(groove::ObjectId, Vec<Value>)> {
+) -> Vec<(jazz::ObjectId, Vec<Value>)> {
     let query = QueryBuilder::new("todos").build();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();
@@ -318,7 +318,7 @@ async fn wait_for_todos_count_on_disk(
     let db_path = data_root
         .join("apps")
         .join(app_id.to_string())
-        .join("groove.surrealkv");
+        .join("jazz.surrealkv");
     let schema_hash = SchemaHash::compute(&test_schema());
     let branch = ComposedBranchName::new("client", schema_hash, "main")
         .to_branch_name()

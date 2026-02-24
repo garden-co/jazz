@@ -15,10 +15,10 @@ use axum::response::sse::{Event, Sse};
 use base64::Engine;
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
-use groove::{
+use http_body_util::BodyExt;
+use jazz::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
 };
-use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -57,7 +57,7 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
-fn test_schema() -> groove::Schema {
+fn test_schema() -> jazz::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
@@ -107,7 +107,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use groove::{ObjectId, QueryBuilder, Value};
+use jazz::{ObjectId, QueryBuilder, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {
@@ -727,7 +727,7 @@ async fn jwks_handler(
 /// settled, not that we've received all server data. See specs/sync_manager.md
 /// Future Work section.
 ///
-/// NOTE: The core lazy schema activation is tested in groove's
+/// NOTE: The core lazy schema activation is tested in jazz's
 /// `e2e_two_clients_server_schema_sync`. This integration test verifies
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]

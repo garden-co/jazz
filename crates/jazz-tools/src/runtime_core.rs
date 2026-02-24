@@ -1,6 +1,6 @@
 //! RuntimeCore - Unified synchronous runtime logic for both native and WASM.
 //!
-//! This module provides the shared core logic that both groove-tokio
+//! This module provides the shared core logic that both jazz-tokio
 //! and jazz-wasm wrap. RuntimeCore is generic over `Storage`, `Scheduler`,
 //! and `SyncSender` which provide platform-specific behavior.
 //!

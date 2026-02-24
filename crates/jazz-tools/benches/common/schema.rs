@@ -4,17 +4,17 @@
 //! - Simple session comparisons (`owner_id = @session.user_id`)
 //! - INHERITS chains (documents → folders → teams)
 
-use groove::object::ObjectId;
-use groove::query_manager::policy::{Operation, PolicyExpr};
-use groove::query_manager::session::Session;
-use groove::query_manager::types::TablePolicies;
-use groove::query_manager::types::{
+use jazz::object::ObjectId;
+use jazz::query_manager::policy::{Operation, PolicyExpr};
+use jazz::query_manager::session::Session;
+use jazz::query_manager::types::TablePolicies;
+use jazz::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
-use groove::runtime_core::RuntimeCore;
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::MemoryStorage;
-use groove::sync_manager::SyncManager;
+use jazz::runtime_core::RuntimeCore;
+use jazz::schema_manager::{AppId, SchemaManager};
+use jazz::storage::MemoryStorage;
+use jazz::sync_manager::SyncManager;
 
 /// Create the benchmark schema with teams, folders, and documents.
 ///

@@ -9,8 +9,8 @@ mod common;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use groove::query_manager::query::{Query, QueryBuilder};
-use groove::query_manager::types::Value;
+use jazz::query_manager::query::{Query, QueryBuilder};
+use jazz::query_manager::types::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
