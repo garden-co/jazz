@@ -13,7 +13,7 @@ use crate::schema_manager::{SchemaContext, translate_column_for_index};
 use crate::storage::Storage;
 
 use super::graph_nodes::alias::AliasNode;
-use super::graph_nodes::array_subquery::ArraySubqueryNode;
+use super::graph_nodes::array_subquery::{ArraySubqueryNode, Correlate};
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::IndexScanNode;
@@ -914,9 +914,9 @@ impl QueryGraph {
             .split('.')
             .next_back()
             .unwrap_or(&spec.outer_column);
-        let outer_correlation_col = match outer_descriptor.column_index(outer_col_name) {
-            Some(index) => Some(index),
-            None if outer_col_name == "id" || outer_col_name == "_id" => None,
+        let outer_correlation = match outer_descriptor.column_index(outer_col_name) {
+            Some(index) => Correlate::Col(index),
+            None if outer_col_name == "id" || outer_col_name == "_id" => Correlate::Id,
             None => return None,
         };
 
@@ -1007,7 +1007,7 @@ impl QueryGraph {
         let node = ArraySubqueryNode::new(
             outer_tuple_descriptor,
             subgraph_template,
-            outer_correlation_col,
+            outer_correlation,
             spec.column_name.clone(),
             schema.clone(),
         );

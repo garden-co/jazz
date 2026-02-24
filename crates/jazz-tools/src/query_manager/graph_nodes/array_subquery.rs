@@ -41,6 +41,14 @@ use super::subgraph::SubgraphTemplate;
 /// - Memory overhead per instance
 /// - Update cost distribution (how many instances need re-settling on inner change?)
 /// - Common subgraph patterns that could benefit from memoization
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Correlate {
+    /// Correlate using a column value from the outer row.
+    Col(usize),
+    /// Correlate using the outer tuple's object id.
+    Id,
+}
+
 #[derive(Debug)]
 pub struct ArraySubqueryNode {
     /// Descriptor for outer tuples.
@@ -55,9 +63,8 @@ pub struct ArraySubqueryNode {
     /// Schema for compiling subgraphs.
     schema: Schema,
 
-    /// Column index in outer row that provides correlation value.
-    /// `None` means correlate on the outer tuple's object id.
-    outer_correlation_col: Option<usize>,
+    /// Source of the correlation value from the outer tuple.
+    outer_correlation: Correlate,
 
     /// Per-outer-row state: outer_id → (correlation_value, array_result).
     /// We store the array result directly rather than SubgraphInstances
@@ -78,14 +85,13 @@ impl ArraySubqueryNode {
     /// # Arguments
     /// * `outer_descriptor` - Descriptor for incoming outer tuples
     /// * `subgraph_template` - Template for creating inner subgraph instances
-    /// * `outer_correlation_col` - Column index in outer row to use as correlation value.
-    ///   Use `None` to correlate on the outer tuple's object id.
+    /// * `outer_correlation` - Source for correlation value from outer tuple.
     /// * `array_column_name` - Name for the output array column
     /// * `schema` - Schema for compiling subgraphs
     pub fn new(
         outer_descriptor: TupleDescriptor,
         subgraph_template: SubgraphTemplate,
-        outer_correlation_col: Option<usize>,
+        outer_correlation: Correlate,
         array_column_name: String,
         schema: Schema,
     ) -> Self {
@@ -115,7 +121,7 @@ impl ArraySubqueryNode {
             output_tuple_descriptor,
             subgraph_template,
             schema,
-            outer_correlation_col,
+            outer_correlation,
             instances: AHashMap::new(),
             current_tuples: AHashSet::new(),
             dirty: true,
@@ -231,15 +237,16 @@ impl ArraySubqueryNode {
 
     /// Extract correlation value from an outer tuple.
     fn extract_correlation_value(&self, tuple: &Tuple) -> Option<Value> {
-        if self.outer_correlation_col.is_none() {
-            return tuple.first_id().map(Value::Uuid);
+        match self.outer_correlation {
+            Correlate::Id => tuple.first_id().map(Value::Uuid),
+            Correlate::Col(col_idx) => {
+                let element = tuple.get(0)?;
+                let content = element.content()?;
+                let outer_row_desc = self.outer_descriptor.combined_descriptor();
+                let values = decode_row(&outer_row_desc, content).ok()?;
+                values.get(col_idx).cloned()
+            }
         }
-
-        let element = tuple.get(0)?;
-        let content = element.content()?;
-        let outer_row_desc = self.outer_descriptor.combined_descriptor();
-        let values = decode_row(&outer_row_desc, content).ok()?;
-        values.get(self.outer_correlation_col?).cloned()
     }
 
     /// Evaluate the subgraph for a given correlation value.
@@ -478,7 +485,7 @@ mod tests {
         let node = ArraySubqueryNode::new(
             outer_descriptor,
             template,
-            Some(0),
+            Correlate::Col(0),
             "posts".to_string(),
             schema,
         );
@@ -512,7 +519,7 @@ mod tests {
         let node = ArraySubqueryNode::new(
             outer_descriptor,
             template,
-            Some(0),
+            Correlate::Col(0),
             "posts".to_string(),
             schema.clone(),
         );
@@ -553,7 +560,7 @@ mod tests {
         let node = ArraySubqueryNode::new(
             outer_descriptor,
             template,
-            None,
+            Correlate::Id,
             "posts".to_string(),
             schema.clone(),
         );
