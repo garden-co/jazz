@@ -132,6 +132,8 @@ struct JsColumnDescriptor {
     nullable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     references: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inherit_policy: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -266,6 +268,9 @@ fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::type
                     if let Some(ref_table) = c.references {
                         cd = cd.references(&ref_table);
                     }
+                    if c.inherit_policy.unwrap_or(false) {
+                        cd = cd.inherit_policy();
+                    }
                     cd
                 })
                 .collect();
@@ -395,6 +400,9 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                 if let Some(ref_table) = c.references {
                     cd = cd.references(&ref_table);
                 }
+                if c.inherit_policy.unwrap_or(false) {
+                    cd = cd.inherit_policy();
+                }
                 cd
             })
             .collect();
@@ -475,6 +483,7 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                             column_type: ct_to_js(&c.column_type),
                             nullable: c.nullable,
                             references: c.references.map(|r| r.as_str().to_string()),
+                            inherit_policy: c.inherit_policy.then_some(true),
                         })
                         .collect(),
                 ),
@@ -588,6 +597,7 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     column_type: ct_to_js(&c.column_type),
                     nullable: c.nullable,
                     references: c.references.map(|r| r.as_str().to_string()),
+                    inherit_policy: c.inherit_policy.then_some(true),
                 })
                 .collect();
             (
@@ -1390,6 +1400,7 @@ mod tests {
                         },
                         nullable: false,
                         references: None,
+                        inherit_policy: None,
                     }],
                     policies: None,
                 },
@@ -1427,5 +1438,32 @@ mod tests {
         );
         assert!(status.column_type.element.is_none());
         assert!(status.column_type.columns.is_none());
+    }
+
+    #[test]
+    fn js_schema_roundtrip_preserves_inherit_policy() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("name", ColumnType::Text))
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .fk_column_with_inherit_policy("image", "files"),
+            )
+            .build();
+
+        let js_schema = groove_schema_to_js(&schema);
+        let image = &js_schema.tables["todos"].columns[1];
+        assert_eq!(image.references.as_deref(), Some("files"));
+        assert_eq!(image.inherit_policy, Some(true));
+
+        let decoded = js_schema_to_groove(js_schema);
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
+        assert!(image_col.inherit_policy);
     }
 }

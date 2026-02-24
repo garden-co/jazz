@@ -125,6 +125,8 @@ pub struct WasmColumnDescriptor {
     pub nullable: bool,
     #[tsify(optional)]
     pub references: Option<String>,
+    #[tsify(optional)]
+    pub inherit_policy: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
@@ -264,6 +266,7 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
                         column_type: c.column_type.into(),
                         nullable: c.nullable,
                         references: c.references.map(|r| r.as_str().to_string()),
+                        inherit_policy: c.inherit_policy.then_some(true),
                     })
                     .collect(),
             },
@@ -521,6 +524,7 @@ impl From<&jazz_tools::query_manager::types::Schema> for WasmSchema {
                         column_type: c.column_type.clone().into(),
                         nullable: c.nullable,
                         references: c.references.map(|r| r.as_str().to_string()),
+                        inherit_policy: c.inherit_policy.then_some(true),
                     })
                     .collect();
                 let policies =
@@ -593,6 +597,9 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                             if let Some(ref_table) = c.references {
                                 cd = cd.references(&ref_table);
                             }
+                            if c.inherit_policy.unwrap_or(false) {
+                                cd = cd.inherit_policy();
+                            }
                             cd
                         })
                         .collect();
@@ -613,6 +620,9 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                     }
                     if let Some(ref_table) = c.references {
                         cd = cd.references(&ref_table);
+                    }
+                    if c.inherit_policy.unwrap_or(false) {
+                        cd = cd.inherit_policy();
                     }
                     cd
                 })
@@ -679,5 +689,32 @@ mod tests {
             status.column_type,
             ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
         );
+    }
+
+    #[test]
+    fn wasm_schema_inherit_policy_roundtrip() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("name", ColumnType::Text))
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .fk_column_with_inherit_policy("image", "files"),
+            )
+            .build();
+
+        let wasm_schema = WasmSchema::from(&schema);
+        let wasm_col = &wasm_schema.tables["todos"].columns[1];
+        assert_eq!(wasm_col.references.as_deref(), Some("files"));
+        assert_eq!(wasm_col.inherit_policy, Some(true));
+
+        let decoded = Schema::try_from(wasm_schema).unwrap();
+        let image = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image.references, Some(TableName::new("files")));
+        assert!(image.inherit_policy);
     }
 }

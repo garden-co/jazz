@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, hard_delete_metadata, soft_delete_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 
-use super::encoding::{decode_row, encode_row};
+use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
 use super::policy::{Operation, evaluate_simple_parts};
 use super::session::Session;
@@ -66,6 +66,7 @@ impl QueryManager {
                 &descriptor,
                 session,
                 table,
+                self.current_branch().as_str(),
             )
         {
             return Err(QueryError::PolicyDenied {
@@ -170,6 +171,7 @@ impl QueryManager {
                 &descriptor,
                 session,
                 table,
+                branch,
             )
         {
             return Err(QueryError::PolicyDenied {
@@ -231,6 +233,7 @@ impl QueryManager {
     /// This uses the same simple/complex split as server-side permission checks:
     /// - Evaluate simple predicates directly from row bytes.
     /// - Materialize and settle policy graphs for complex clauses.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_policy_for_content_with_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -239,6 +242,7 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         session: &Session,
         table: &str,
+        branch: &str,
     ) -> bool {
         let simple_result = evaluate_simple_parts(policy, content, descriptor, session);
         if !simple_result.passed {
@@ -260,15 +264,14 @@ impl QueryManager {
             return true;
         }
 
-        let current_branch = self.current_branch();
-        let branches = vec![current_branch.clone()];
+        let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
         let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
             let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch = obj.branches.get(&BranchName::new(&current_branch))?;
-            let tip_id = branch.tips.iter().next()?;
-            let commit = branch.commits.get(tip_id)?;
+            let branch_state = obj.branches.get(&BranchName::new(branch))?;
+            let tip_id = branch_state.tips.iter().next()?;
+            let commit = branch_state.commits.get(tip_id)?;
             if commit.content.is_empty() {
                 return None;
             }
@@ -287,6 +290,225 @@ impl QueryManager {
         }
 
         true
+    }
+
+    /// Check whether this row can be accessed via declared inbound `INHERIT POLICY` edges.
+    pub(super) fn evaluate_declared_inherited_access<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        target_table: TableName,
+        target_row_id: ObjectId,
+        operation: Operation,
+        session: &Session,
+        branch: &str,
+    ) -> bool {
+        let mut visited = HashSet::new();
+        self.evaluate_declared_inherited_access_recursive(
+            storage,
+            target_table,
+            target_row_id,
+            operation,
+            session,
+            branch,
+            0,
+            &mut visited,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_declared_inherited_access_recursive<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        target_table: TableName,
+        target_row_id: ObjectId,
+        operation: Operation,
+        session: &Session,
+        branch: &str,
+        depth: usize,
+        visited: &mut HashSet<(TableName, ObjectId, Operation)>,
+    ) -> bool {
+        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+            return false;
+        }
+
+        let source_tables: Vec<(TableName, RowDescriptor)> = self
+            .schema
+            .iter()
+            .map(|(table_name, table_schema)| (*table_name, table_schema.descriptor.clone()))
+            .collect();
+
+        for (source_table, source_descriptor) in source_tables {
+            for (col_idx, col) in source_descriptor.columns.iter().enumerate() {
+                if !col.inherit_policy || col.references != Some(target_table) {
+                    continue;
+                }
+
+                match &col.column_type {
+                    crate::query_manager::types::ColumnType::Uuid => {
+                        let candidate_ids = storage.index_lookup(
+                            source_table.as_str(),
+                            col.name.as_str(),
+                            branch,
+                            &Value::Uuid(target_row_id),
+                        );
+                        for source_row_id in candidate_ids {
+                            if self.evaluate_source_row_access_for_operation(
+                                storage,
+                                source_table,
+                                source_row_id,
+                                operation,
+                                session,
+                                branch,
+                                depth + 1,
+                                visited,
+                                None,
+                            ) {
+                                return true;
+                            }
+                        }
+                    }
+                    crate::query_manager::types::ColumnType::Array(element)
+                        if **element == crate::query_manager::types::ColumnType::Uuid =>
+                    {
+                        let candidate_ids = storage.index_scan_all(
+                            source_table.as_str(),
+                            col.name.as_str(),
+                            branch,
+                        );
+                        for source_row_id in candidate_ids {
+                            let Some(source_content) =
+                                self.load_row_content_on_branch(storage, source_row_id, branch)
+                            else {
+                                continue;
+                            };
+
+                            if !declared_edge_references_target(
+                                &source_descriptor,
+                                &source_content,
+                                col_idx,
+                                target_row_id,
+                            ) {
+                                continue;
+                            }
+
+                            if self.evaluate_source_row_access_for_operation(
+                                storage,
+                                source_table,
+                                source_row_id,
+                                operation,
+                                session,
+                                branch,
+                                depth + 1,
+                                visited,
+                                Some(source_content),
+                            ) {
+                                return true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_source_row_access_for_operation<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table_name: TableName,
+        row_id: ObjectId,
+        operation: Operation,
+        session: &Session,
+        branch: &str,
+        depth: usize,
+        visited: &mut HashSet<(TableName, ObjectId, Operation)>,
+        preloaded_content: Option<Vec<u8>>,
+    ) -> bool {
+        if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
+            return false;
+        }
+
+        let key = (table_name, row_id, operation);
+        if !visited.insert(key) {
+            // Cycle detected for this recursion branch.
+            return false;
+        }
+
+        let Some(content) =
+            preloaded_content.or_else(|| self.load_row_content_on_branch(storage, row_id, branch))
+        else {
+            visited.remove(&(table_name, row_id, operation));
+            return false;
+        };
+
+        let Some(table_schema) = self.schema.get(&table_name).cloned() else {
+            visited.remove(&(table_name, row_id, operation));
+            return false;
+        };
+
+        let local_policy = match operation {
+            Operation::Select => table_schema.policies.select.using.clone(),
+            Operation::Insert => table_schema.policies.insert.with_check.clone(),
+            Operation::Update => table_schema.policies.update.using.clone(),
+            Operation::Delete => table_schema.policies.effective_delete_using().cloned(),
+        };
+
+        let local_allow = local_policy
+            .as_ref()
+            .map(|policy| {
+                self.evaluate_policy_for_content_with_context(
+                    storage,
+                    policy,
+                    &content,
+                    &table_schema.descriptor,
+                    session,
+                    table_name.as_str(),
+                    branch,
+                )
+            })
+            .unwrap_or(true);
+
+        if local_allow {
+            visited.remove(&(table_name, row_id, operation));
+            return true;
+        }
+
+        let inherited_allow = self.evaluate_declared_inherited_access_recursive(
+            storage,
+            table_name,
+            row_id,
+            operation,
+            session,
+            branch,
+            depth + 1,
+            visited,
+        );
+
+        visited.remove(&(table_name, row_id, operation));
+        inherited_allow
+    }
+
+    fn load_row_content_on_branch<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        row_id: ObjectId,
+        branch: &str,
+    ) -> Option<Vec<u8>> {
+        let branches = vec![branch.to_string()];
+        let obj = self
+            .sync_manager
+            .object_manager
+            .get_or_load(row_id, storage, &branches)?;
+        let branch_state = obj.branches.get(&BranchName::new(branch))?;
+        let tip_id = branch_state.tips.iter().next()?;
+        let commit = branch_state.commits.get(tip_id)?;
+        if commit.content.is_empty() {
+            return None;
+        }
+        Some(commit.content.clone())
     }
 
     /// Update a row.
@@ -327,13 +549,17 @@ impl QueryManager {
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
-        let using_policy = table_schema.policies.update.using.clone();
-        let check_policy = table_schema.policies.update.with_check.clone();
+        let (descriptor, using_policy, check_policy) = {
+            let table_schema = self
+                .schema
+                .get(&table_name)
+                .ok_or(QueryError::TableNotFound(table_name))?;
+            (
+                table_schema.descriptor.clone(),
+                table_schema.policies.update.using.clone(),
+                table_schema.policies.update.with_check.clone(),
+            )
+        };
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -346,38 +572,55 @@ impl QueryManager {
         let new_data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
-        // Check UPDATE USING policy against old row
-        if let (Some(session), Some(policy)) = (session, &using_policy)
-            && !self.evaluate_policy_for_content_with_context(
-                storage,
-                policy,
-                &old_data,
-                &descriptor,
-                session,
-                &table,
-            )
-        {
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: Operation::Update,
-            });
-        }
+        let inherited_allow = session
+            .map(|s| {
+                self.evaluate_declared_inherited_access(
+                    storage,
+                    table_name,
+                    id,
+                    Operation::Update,
+                    s,
+                    self.current_branch().as_str(),
+                )
+            })
+            .unwrap_or(false);
 
-        // Check UPDATE WITH CHECK policy against new values
-        if let (Some(session), Some(policy)) = (session, check_policy)
-            && !self.evaluate_policy_for_content_with_context(
-                storage,
-                &policy,
-                &new_data,
-                &descriptor,
-                session,
-                &table,
-            )
-        {
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: Operation::Update,
-            });
+        if !inherited_allow {
+            // Check UPDATE USING policy against old row
+            if let (Some(session), Some(policy)) = (session, &using_policy)
+                && !self.evaluate_policy_for_content_with_context(
+                    storage,
+                    policy,
+                    &old_data,
+                    &descriptor,
+                    session,
+                    &table,
+                    self.current_branch().as_str(),
+                )
+            {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Update,
+                });
+            }
+
+            // Check UPDATE WITH CHECK policy against new values
+            if let (Some(session), Some(policy)) = (session, check_policy)
+                && !self.evaluate_policy_for_content_with_context(
+                    storage,
+                    &policy,
+                    &new_data,
+                    &descriptor,
+                    session,
+                    &table,
+                    self.current_branch().as_str(),
+                )
+            {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Update,
+                });
+            }
         }
 
         // Get parent commit
@@ -480,28 +723,48 @@ impl QueryManager {
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
-
-        // Check DELETE USING policy (falls back to UPDATE's USING)
-        let using_policy = table_schema.policies.effective_delete_using().cloned();
-        if let (Some(session), Some(policy)) = (session, using_policy)
-            && !self.evaluate_policy_for_content_with_context(
-                storage,
-                &policy,
-                &old_data,
-                &descriptor,
-                session,
-                &table,
+        let (descriptor, using_policy) = {
+            let table_schema = self
+                .schema
+                .get(&table_name)
+                .ok_or(QueryError::TableNotFound(table_name))?;
+            (
+                table_schema.descriptor.clone(),
+                table_schema.policies.effective_delete_using().cloned(),
             )
-        {
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: Operation::Delete,
-            });
+        };
+
+        let inherited_allow = session
+            .map(|s| {
+                self.evaluate_declared_inherited_access(
+                    storage,
+                    table_name,
+                    id,
+                    Operation::Delete,
+                    s,
+                    self.current_branch().as_str(),
+                )
+            })
+            .unwrap_or(false);
+
+        if !inherited_allow {
+            // Check DELETE USING policy (falls back to UPDATE's USING)
+            if let (Some(session), Some(policy)) = (session, using_policy)
+                && !self.evaluate_policy_for_content_with_context(
+                    storage,
+                    &policy,
+                    &old_data,
+                    &descriptor,
+                    session,
+                    &table,
+                    self.current_branch().as_str(),
+                )
+            {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Delete,
+                });
+            }
         }
 
         // Get parent commit
@@ -989,5 +1252,20 @@ impl QueryManager {
             }
         }
         false
+    }
+}
+
+fn declared_edge_references_target(
+    descriptor: &RowDescriptor,
+    content: &[u8],
+    column_index: usize,
+    target_row_id: ObjectId,
+) -> bool {
+    match decode_column(descriptor, content, column_index) {
+        Ok(Value::Uuid(id)) => id == target_row_id,
+        Ok(Value::Array(values)) => values
+            .iter()
+            .any(|value| matches!(value, Value::Uuid(id) if *id == target_row_id)),
+        _ => false,
     }
 }

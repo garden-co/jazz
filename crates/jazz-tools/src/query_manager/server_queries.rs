@@ -5,7 +5,7 @@ use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId};
+use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
 
 use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
@@ -410,6 +410,24 @@ impl QueryManager {
                 return;
             }
         };
+
+        if let SyncPayload::ObjectUpdated {
+            object_id,
+            branch_name,
+            ..
+        } = &check.payload
+            && self.evaluate_declared_inherited_access(
+                storage,
+                table_name,
+                *object_id,
+                check.operation,
+                &check.session,
+                branch_name.as_str(),
+            )
+        {
+            self.sync_manager.approve_permission_check(storage, check);
+            return;
+        }
 
         // Handle UPDATE specially - needs both USING and WITH CHECK
         if check.operation == Operation::Update {

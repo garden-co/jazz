@@ -15,9 +15,13 @@ import type {
 import { sqlTypeToString } from "./schema.js";
 
 function columnToSql(column: Column): string {
+  if (column.inheritPolicy && !column.references) {
+    throw new Error(`Column ${column.name} cannot use inheritPolicy without references`);
+  }
   const ref = column.references ? ` REFERENCES ${column.references}` : "";
+  const inherit = column.inheritPolicy ? " INHERIT POLICY" : "";
   const nullability = column.nullable ? "" : " NOT NULL";
-  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
+  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${inherit}${nullability}`;
 }
 
 function tableToSql(table: Table): string {

@@ -304,7 +304,7 @@ impl<'a> Tokenizer<'a> {
                     "WITH" => Token::With,
                     "CHECK" => Token::Check,
                     "SESSION" => Token::Session,
-                    "INHERITS" => Token::Inherits,
+                    "INHERITS" | "INHERIT" => Token::Inherits,
                     "VIA" => Token::Via,
                     "SELECT" => Token::Select,
                     "INSERT" => Token::Insert,
@@ -703,6 +703,7 @@ impl Parser {
 
         let mut nullable = true;
         let mut references = None;
+        let mut inherit_policy = false;
 
         // Parse optional modifiers: REFERENCES, NOT NULL, DEFAULT (in any order)
         loop {
@@ -721,6 +722,11 @@ impl Parser {
                     let ref_table = self.expect_ident()?;
                     references = Some(TableName::new(ref_table));
                 }
+                Some(Token::Inherits) => {
+                    self.advance();
+                    self.expect(&Token::Policy)?;
+                    inherit_policy = true;
+                }
                 Some(Token::Default) => {
                     // Skip DEFAULT in schema (we don't store defaults in schema, only in lenses)
                     self.advance();
@@ -734,8 +740,17 @@ impl Parser {
         if nullable {
             desc = desc.nullable();
         }
+        if inherit_policy && references.is_none() {
+            return Err(SqlParseError::SyntaxError(
+                "INHERIT POLICY requires REFERENCES <table>".to_string(),
+            ));
+        }
+
         if let Some(ref_table) = references {
             desc = desc.references(ref_table);
+        }
+        if inherit_policy {
+            desc = desc.inherit_policy();
         }
         Ok(desc)
     }
@@ -1210,13 +1225,19 @@ fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
         Some(table) => format!(" REFERENCES {}", table.as_str()),
         None => String::new(),
     };
+    let inherit_str = if col.inherit_policy && col.references.is_some() {
+        " INHERIT POLICY"
+    } else {
+        ""
+    };
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
 
     format!(
-        "{} {}{}{}",
+        "{} {}{}{}{}",
         col.name.as_str(),
         type_str,
         ref_str,
+        inherit_str,
         nullable_str
     )
 }
@@ -1663,6 +1684,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_column_with_inherit_policy() {
+        let sql = "CREATE TABLE todos (image UUID REFERENCES files INHERIT POLICY NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(col.name.as_str(), "image");
+        assert_eq!(col.column_type, ColumnType::Uuid);
+        assert_eq!(col.references, Some(TableName::new("files")));
+        assert!(col.inherit_policy);
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn parse_array_column_with_inherit_policy() {
+        let sql =
+            "CREATE TABLE files (parts UUID[] REFERENCES file_parts INHERIT POLICY NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("files"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Uuid))
+        );
+        assert_eq!(col.references, Some(TableName::new("file_parts")));
+        assert!(col.inherit_policy);
+    }
+
+    #[test]
+    fn reject_inherit_policy_without_references() {
+        let sql = "CREATE TABLE t (fk UUID INHERIT POLICY NOT NULL);";
+        let result = parse_schema(sql);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn parse_nested_array_column_type() {
         let sql = "CREATE TABLE t (matrix INTEGER[][] NOT NULL);";
         let schema = parse_schema(sql).unwrap();
@@ -1828,6 +1892,22 @@ mod tests {
     }
 
     #[test]
+    fn schema_to_sql_includes_inherit_policy() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new(ColumnName::new("image"), ColumnType::Uuid)
+                    .references(TableName::new("files"))
+                    .inherit_policy(),
+            ])),
+        );
+        let sql = schema_to_sql(&schema);
+
+        assert!(sql.contains("image UUID REFERENCES files INHERIT POLICY NOT NULL"));
+    }
+
+    #[test]
     fn schema_to_sql_includes_policies() {
         let mut schema = HashMap::new();
         schema.insert(
@@ -1913,6 +1993,24 @@ mod tests {
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
+    }
+
+    #[test]
+    fn sql_round_trip_with_inherit_policy() {
+        let sql = "CREATE TABLE todos (image UUID REFERENCES files INHERIT POLICY NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+
+        assert!(regenerated.contains("image UUID REFERENCES files INHERIT POLICY NOT NULL"));
+
+        let reparsed = parse_schema(&regenerated).unwrap();
+        let col = &reparsed
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+        assert_eq!(col.references, Some(TableName::new("files")));
+        assert!(col.inherit_policy);
     }
 
     #[test]

@@ -71,6 +71,20 @@ describe("schemaToWasm", () => {
     });
   });
 
+  it("maps inheritPolicy to inherit_policy for refs", () => {
+    table("items", { image: col.ref("files").inheritPolicy() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "image",
+      column_type: { type: "Uuid" },
+      nullable: false,
+      references: "files",
+      inherit_policy: true,
+    });
+  });
+
   it("handles nullable columns", () => {
     table("items", { description: col.string().optional() });
     const schema = getCollectedSchema();
@@ -133,6 +147,20 @@ describe("schemaToWasm", () => {
       column_type: { type: "Array", element: { type: "Uuid" } },
       nullable: false,
       references: "users",
+    });
+  });
+
+  it("maps inheritPolicy to inherit_policy for array(ref)", () => {
+    table("items", { part_ids: col.array(col.ref("parts").inheritPolicy()) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "part_ids",
+      column_type: { type: "Array", element: { type: "Uuid" } },
+      nullable: false,
+      references: "parts",
+      inherit_policy: true,
     });
   });
 

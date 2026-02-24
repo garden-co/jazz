@@ -336,6 +336,7 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     } else {
         hasher.update(&[0]);
     }
+    hasher.update(&[col.inherit_policy as u8]);
     hasher.update(&[0]); // delimiter
 }
 

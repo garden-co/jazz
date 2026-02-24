@@ -205,6 +205,8 @@ pub struct ColumnDescriptor {
     pub nullable: bool,
     /// Optional foreign key reference to another table.
     pub references: Option<TableName>,
+    /// If true, rows in the referenced table can inherit this row's policy.
+    pub inherit_policy: bool,
 }
 
 impl ColumnDescriptor {
@@ -214,6 +216,7 @@ impl ColumnDescriptor {
             column_type,
             nullable: false,
             references: None,
+            inherit_policy: false,
         }
     }
 
@@ -229,6 +232,11 @@ impl ColumnDescriptor {
 
     pub fn references(mut self, table: impl Into<TableName>) -> Self {
         self.references = Some(table.into());
+        self
+    }
+
+    pub fn inherit_policy(mut self) -> Self {
+        self.inherit_policy = true;
         self
     }
 }
@@ -369,6 +377,27 @@ impl TableSchemaBuilder {
             ColumnDescriptor::new(name, ColumnType::Uuid)
                 .nullable()
                 .references(references),
+        );
+        self
+    }
+
+    /// Add a foreign key column with declarative inbound policy inheritance enabled.
+    pub fn fk_column_with_inherit_policy(mut self, name: &str, references: &str) -> Self {
+        self.columns.push(
+            ColumnDescriptor::new(name, ColumnType::Uuid)
+                .references(references)
+                .inherit_policy(),
+        );
+        self
+    }
+
+    /// Add a nullable foreign key column with declarative inbound policy inheritance enabled.
+    pub fn nullable_fk_column_with_inherit_policy(mut self, name: &str, references: &str) -> Self {
+        self.columns.push(
+            ColumnDescriptor::new(name, ColumnType::Uuid)
+                .nullable()
+                .references(references)
+                .inherit_policy(),
         );
         self
     }

@@ -49,6 +49,7 @@ impl ProjectNode {
                     column_type: col.column_type.clone(),
                     nullable: col.nullable,
                     references: col.references,
+                    inherit_policy: col.inherit_policy,
                 });
                 column_mapping.push((src_idx, dst_idx));
             }
@@ -88,6 +89,7 @@ impl ProjectNode {
                     column_type: col.column_type.clone(),
                     nullable: col.nullable,
                     references: col.references,
+                    inherit_policy: col.inherit_policy,
                 });
                 column_mapping.push((src_idx, dst_idx));
             }
