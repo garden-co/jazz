@@ -32,12 +32,10 @@ use crate::sync_manager::PersistenceTier;
 
 use super::{
     LoadedBranch, Storage, StorageError,
-    key_codec::{
-        increment_bytes, index_entry_key, index_prefix, index_range_scan_bounds,
-        index_value_prefix, parse_uuid_from_index_key,
-    },
+    key_codec::{increment_bytes, index_range_scan_bounds, parse_uuid_from_index_key},
     storage_core::{
-        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
+        append_commit_core, create_object_core, delete_commit_core, index_insert_core,
+        index_lookup_core, index_remove_core, index_scan_all_core, load_branch_core,
         load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
@@ -361,10 +359,10 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        let key = index_entry_key(table, column, branch, value, row_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        // Sentinel byte — existence is the signal.
-        Self::txn_set(&mut txn, &key, &[0x01])?;
+        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
+            Self::txn_set(&mut txn, key, bytes)
+        })?;
         self.commit_txn(&mut txn)
     }
 
@@ -377,9 +375,10 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        let key = index_entry_key(table, column, branch, value, row_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        Self::txn_delete(&mut txn, &key)?;
+        index_remove_core(table, column, branch, value, row_id, |key| {
+            Self::txn_delete(&mut txn, key)
+        })?;
         self.commit_txn(&mut txn)
     }
 
@@ -391,17 +390,12 @@ impl Storage for SurrealKvStorage {
         value: &Value,
     ) -> Vec<ObjectId> {
         tracing::trace!(table, column, branch, "index_lookup");
-        let prefix = index_value_prefix(table, column, branch, value);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        match Self::scan_prefix_keys(&txn, &prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_lookup_core(table, column, branch, value, |prefix| {
+            Self::scan_prefix_keys(&txn, prefix)
+        })
     }
 
     fn index_range(
@@ -430,17 +424,12 @@ impl Storage for SurrealKvStorage {
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let prefix = index_prefix(table, column, branch);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        match Self::scan_prefix_keys(&txn, &prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_scan_all_core(table, column, branch, |prefix| {
+            Self::scan_prefix_keys(&txn, prefix)
+        })
     }
 
     fn flush(&self) {

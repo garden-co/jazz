@@ -32,12 +32,10 @@ use crate::sync_manager::PersistenceTier;
 
 use super::{
     LoadedBranch, Storage, StorageError,
-    key_codec::{
-        increment_bytes, index_entry_key, index_prefix, index_range_scan_bounds,
-        index_value_prefix, parse_uuid_from_index_key,
-    },
+    key_codec::{increment_bytes, index_range_scan_bounds, parse_uuid_from_index_key},
     storage_core::{
-        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
+        append_commit_core, create_object_core, delete_commit_core, index_insert_core,
+        index_lookup_core, index_remove_core, index_scan_all_core, load_branch_core,
         load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
@@ -333,8 +331,9 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        let key = index_entry_key(table, column, branch, value, row_id);
-        self.tree_insert(&key, &[0x01])
+        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
+            self.tree_insert(key, bytes)
+        })
     }
 
     fn index_remove(
@@ -346,8 +345,9 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        let key = index_entry_key(table, column, branch, value, row_id);
-        self.tree_delete(&key)
+        index_remove_core(table, column, branch, value, row_id, |key| {
+            self.tree_delete(key)
+        })
     }
 
     fn index_lookup(
@@ -358,14 +358,9 @@ impl Storage for OpfsBTreeStorage {
         value: &Value,
     ) -> Vec<ObjectId> {
         tracing::trace!(table, column, branch, "index_lookup");
-        let prefix = index_value_prefix(table, column, branch, value);
-        match self.tree_scan_keys(&prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_lookup_core(table, column, branch, value, |prefix| {
+            self.tree_scan_keys(prefix)
+        })
     }
 
     fn index_range(
@@ -391,14 +386,7 @@ impl Storage for OpfsBTreeStorage {
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let prefix = index_prefix(table, column, branch);
-        match self.tree_scan_keys(&prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
     }
 
     fn flush(&self) {

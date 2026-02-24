@@ -6,7 +6,12 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::sync_manager::PersistenceTier;
 
-use super::key_codec::{ack_key, branch_tips_key, commit_key, commit_prefix, obj_meta_key};
+use crate::query_manager::types::Value;
+
+use super::key_codec::{
+    ack_key, branch_tips_key, commit_key, commit_prefix, index_entry_key, index_prefix,
+    index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+};
 use super::{LoadedBranch, StorageError};
 
 fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
@@ -163,4 +168,61 @@ pub(super) fn store_ack_tier_core(
     tiers.insert(tier);
     let json = encode_json(&tiers, "ack")?;
     set(&key, &json)
+}
+
+pub(super) fn index_insert_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+    row_id: ObjectId,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = index_entry_key(table, column, branch, value, row_id);
+    set(&key, &[0x01])
+}
+
+pub(super) fn index_remove_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+    row_id: ObjectId,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = index_entry_key(table, column, branch, value, row_id);
+    delete(&key)
+}
+
+pub(super) fn index_lookup_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let prefix = index_value_prefix(table, column, branch, value);
+    scan_prefix_keys(&prefix)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn index_scan_all_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let prefix = index_prefix(table, column, branch);
+    scan_prefix_keys(&prefix)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
 }
