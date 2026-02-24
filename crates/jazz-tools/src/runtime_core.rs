@@ -340,9 +340,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         // 3. Collect subscription updates
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
+        let subscription_failures = self
+            .schema_manager
+            .query_manager_mut()
+            .take_failed_subscriptions();
 
         // Track one-shot queries that completed this tick
         let mut completed_one_shots: Vec<SubscriptionHandle> = Vec::new();
+        let mut failed_one_shots: Vec<SubscriptionHandle> = Vec::new();
         let mut callbacks_fired: u64 = 0;
 
         // 3. Call subscription callbacks AND handle one-shot queries
@@ -381,6 +386,34 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
         tracing::debug!(callbacks_fired, "subscription callbacks fired this tick");
 
+        for failure in &subscription_failures {
+            if let Some(&handle) = self.subscription_reverse.get(&failure.subscription_id) {
+                if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
+                    if let Some(sender) = pending.sender.take() {
+                        let _ = sender.send(Err(RuntimeError::QueryError(format!(
+                            "query subscription {} failed during schema recompile: {}",
+                            failure.subscription_id.0, failure.reason
+                        ))));
+                    }
+                    failed_one_shots.push(handle);
+                } else if self.subscriptions.remove(&handle).is_some() {
+                    self.subscription_reverse.remove(&failure.subscription_id);
+                    tracing::error!(
+                        handle = handle.0,
+                        sub_id = failure.subscription_id.0,
+                        error = %failure.reason,
+                        "subscription failed during schema recompile and was dropped"
+                    );
+                }
+            } else {
+                tracing::error!(
+                    sub_id = failure.subscription_id.0,
+                    error = %failure.reason,
+                    "subscription failed during schema recompile and was dropped"
+                );
+            }
+        }
+
         // 2b. Cleanup completed one-shot queries
         for handle in completed_one_shots {
             if let Some(pending) = self.pending_one_shot_queries.remove(&handle) {
@@ -388,6 +421,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 self.schema_manager
                     .query_manager_mut()
                     .unsubscribe_with_sync(pending.subscription_id);
+                self.subscription_reverse.remove(&pending.subscription_id);
+            }
+        }
+
+        // 2c. Cleanup failed one-shot queries.
+        // The underlying subscriptions were already removed by QueryManager.
+        for handle in failed_one_shots {
+            if let Some(pending) = self.pending_one_shot_queries.remove(&handle) {
                 self.subscription_reverse.remove(&pending.subscription_id);
             }
         }

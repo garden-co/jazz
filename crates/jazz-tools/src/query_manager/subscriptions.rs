@@ -7,7 +7,10 @@ use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 #[cfg(test)]
 use super::encoding::decode_row;
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::manager::{CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QueryUpdate};
+use super::manager::{
+    CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QuerySubscriptionFailure,
+    QueryUpdate,
+};
 use super::query::{Query, QueryBuilder};
 use super::session::Session;
 #[cfg(test)]
@@ -247,6 +250,11 @@ impl QueryManager {
     /// Take pending query updates.
     pub fn take_updates(&mut self) -> Vec<QueryUpdate> {
         std::mem::take(&mut self.update_outbox)
+    }
+
+    /// Take terminal local subscription failures.
+    pub fn take_failed_subscriptions(&mut self) -> Vec<QuerySubscriptionFailure> {
+        std::mem::take(&mut self.failed_subscriptions)
     }
 
     /// Take pending catalogue updates (schemas/lenses received via sync).

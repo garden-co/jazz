@@ -158,6 +158,13 @@ pub struct QueryUpdate {
     pub descriptor: RowDescriptor,
 }
 
+/// Terminal failure for a local query subscription.
+#[derive(Debug, Clone)]
+pub struct QuerySubscriptionFailure {
+    pub subscription_id: QuerySubscriptionId,
+    pub reason: String,
+}
+
 /// State for an active policy check (graphs and associated data).
 #[derive(Debug)]
 pub(super) struct PolicyCheckState {
@@ -227,6 +234,9 @@ pub struct QueryManager {
     /// Pending query updates
     pub(super) update_outbox: Vec<QueryUpdate>,
 
+    /// Terminal local subscription failures.
+    pub(super) failed_subscriptions: Vec<QuerySubscriptionFailure>,
+
     /// Active policy checks being evaluated.
     pub(super) active_policy_checks: HashMap<PendingUpdateId, PolicyCheckState>,
 
@@ -273,6 +283,7 @@ impl QueryManager {
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
+            failed_subscriptions: Vec::new(),
             active_policy_checks: HashMap::new(),
             server_subscriptions: HashMap::new(),
             schema_context: SchemaContext::empty(),
@@ -384,11 +395,13 @@ impl QueryManager {
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self) {
+        let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
+
         // Recompile local subscriptions
-        for sub in self.subscriptions.values_mut() {
+        for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
-                // Update branches from current schema context
-                sub.branches = self
+                // Resolve next branches from current schema context.
+                let next_branches: Vec<String> = self
                     .schema_context
                     .all_branch_names()
                     .into_iter()
@@ -396,34 +409,86 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                let new_graph = Self::compile_graph(
+                match Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                );
-                if let Ok(new_graph) = new_graph {
-                    sub.graph = new_graph;
+                ) {
+                    Ok(new_graph) => {
+                        sub.graph = new_graph;
+                        sub.branches = next_branches;
+                        sub.needs_recompile = false;
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        tracing::error!(
+                            sub_id = sub_id.0,
+                            table = %sub.graph.table,
+                            error = %reason,
+                            "subscription stale recompile failed; dropping subscription"
+                        );
+                        failed_local.push((*sub_id, reason));
+                    }
                 }
-                sub.needs_recompile = false;
             }
         }
 
+        for (sub_id, reason) in failed_local {
+            self.subscriptions.remove(&sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                reason: reason.clone(),
+            });
+            // Keep upstream state in sync for subscriptions created via subscribe_with_sync.
+            self.sync_manager
+                .send_query_unsubscription_to_servers(QueryId(sub_id.0));
+        }
+
+        let mut failed_server: Vec<(ClientId, QueryId, String)> = Vec::new();
+
         // Recompile server-side subscriptions
-        for sub in self.server_subscriptions.values_mut() {
+        for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
                 // Recompile the graph
-                let new_graph = Self::compile_graph(
+                match Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                );
-                if let Ok(new_graph) = new_graph {
-                    sub.graph = new_graph;
+                ) {
+                    Ok(new_graph) => {
+                        sub.graph = new_graph;
+                        sub.needs_recompile = false;
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        tracing::error!(
+                            %client_id,
+                            query_id = query_id.0,
+                            error = %reason,
+                            "server subscription stale recompile failed; dropping subscription"
+                        );
+                        failed_server.push((*client_id, *query_id, reason));
+                    }
                 }
-                sub.needs_recompile = false;
             }
+        }
+
+        for (client_id, query_id, reason) in failed_server {
+            self.server_subscriptions.remove(&(client_id, query_id));
+            self.sync_manager
+                .drop_client_query_subscription(client_id, query_id);
+            self.sync_manager
+                .send_query_unsubscription_to_servers(query_id);
+            self.sync_manager.emit_query_subscription_rejected(
+                client_id,
+                query_id,
+                format!(
+                    "query recompilation failed for query_id {}: {}",
+                    query_id.0, reason
+                ),
+            );
         }
     }
 
