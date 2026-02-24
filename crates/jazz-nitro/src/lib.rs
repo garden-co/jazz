@@ -1426,7 +1426,7 @@ mod tests {
         let id = rt.insert("todos".into(), values_json);
         assert!(!id.is_empty());
 
-        let query_json = serde_json::json!({ "table": "todos" }).to_string();
+        let query_json = serde_json::json!({ "table": "todos", "relation_ir": { "TableScan": { "table": "todos" } } }).to_string();
         let result = rt.query(query_json, None, None);
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1442,7 +1442,7 @@ mod tests {
 
         let deltas = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        let query_json = serde_json::json!({ "table": "todos" }).to_string();
+        let query_json = serde_json::json!({ "table": "todos", "relation_ir": { "TableScan": { "table": "todos" } } }).to_string();
 
         let deltas_clone = Arc::clone(&deltas);
         let callback: Box<dyn Fn(String)> = Box::new(move |delta_json: String| {
@@ -1539,7 +1539,12 @@ mod tests {
     #[test]
     fn query_before_open_returns_error() {
         let mut rt = JazzRuntimeImpl::new();
-        let result = rt.query(serde_json::json!({"table":"todos"}).to_string(), None, None);
+        let result = rt.query(
+            serde_json::json!({"table":"todos","relation_ir":{"TableScan":{"table":"todos"}}})
+                .to_string(),
+            None,
+            None,
+        );
         assert_error_json(&result, "not initialized");
     }
 
@@ -1585,7 +1590,8 @@ mod tests {
         let mut rt = create_runtime(dir.path());
         let cb: Box<dyn Fn(String)> = Box::new(|_| {});
         let handle = rt.subscribe(
-            serde_json::json!({"table":"todos"}).to_string(),
+            serde_json::json!({"table":"todos","relation_ir":{"TableScan":{"table":"todos"}}})
+                .to_string(),
             cb,
             None,
             Some("invalid_tier".into()),
@@ -1672,7 +1678,7 @@ mod tests {
         alice.update(id.clone(), updates);
 
         // Query: should show updated value
-        let query = serde_json::json!({ "table": "todos" }).to_string();
+        let query = serde_json::json!({ "table": "todos", "relation_ir": { "TableScan": { "table": "todos" } } }).to_string();
         let result = alice.query(query.clone(), None, None);
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1);

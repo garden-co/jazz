@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import type { JazzRuntime } from "./jazz-runtime";
-import { todoValues, todoUpdate, parseDelta, type Todo } from "./schema";
+import { todoValues, todoUpdate, parseDelta, tableQuery, type Todo } from "./schema";
 
 interface Props {
   runtime: JazzRuntime;
@@ -14,7 +14,7 @@ export function TodoTab({ runtime }: Props) {
 
   // Subscribe to all todos on mount
   useEffect(() => {
-    const queryJson = JSON.stringify({ table: "todos" });
+    const queryJson = tableQuery("todos");
 
     const handle = runtime.subscribe(
       queryJson,
