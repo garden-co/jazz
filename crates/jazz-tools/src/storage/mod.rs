@@ -181,6 +181,122 @@ pub trait Storage {
     fn flush_wal(&self) {}
 }
 
+// Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
+impl<T: Storage + ?Sized> Storage for Box<T> {
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        (**self).create_object(id, metadata)
+    }
+
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        (**self).load_object_metadata(id)
+    }
+
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        (**self).load_branch(object_id, branch)
+    }
+
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit: Commit,
+    ) -> Result<(), StorageError> {
+        (**self).append_commit(object_id, branch, commit)
+    }
+
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit_id: CommitId,
+    ) -> Result<(), StorageError> {
+        (**self).delete_commit(object_id, branch, commit_id)
+    }
+
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        tails: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        (**self).set_branch_tails(object_id, branch, tails)
+    }
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: CommitId,
+        tier: PersistenceTier,
+    ) -> Result<(), StorageError> {
+        (**self).store_ack_tier(commit_id, tier)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        (**self).index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        (**self).index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        (**self).index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        (**self).index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        (**self).index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        (**self).flush();
+    }
+
+    fn flush_wal(&self) {
+        (**self).flush_wal();
+    }
+}
+
 // ============================================================================
 // MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
