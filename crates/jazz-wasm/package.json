@@ -15,7 +15,6 @@
   },
   "files": [
     "pkg/jazz_wasm_bg.wasm",
-    "pkg/jazz_wasm_bg.js",
     "pkg/jazz_wasm.js",
     "pkg/jazz_wasm.d.ts"
   ],
