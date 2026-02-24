@@ -15,6 +15,7 @@ export type WasmValue =
   | { type: "Boolean"; value: boolean }
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: number }
+  | { type: "Real"; value: number }
   | { type: "Timestamp"; value: number }
   | { type: "Null" }
   | { type: "Array"; value: WasmValue[] }
@@ -118,6 +119,7 @@ export function unwrapValue(v: WasmValue): unknown {
       return v.value;
     case "Integer":
     case "BigInt":
+    case "Real":
     case "Timestamp":
       return v.value;
     case "Null":

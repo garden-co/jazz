@@ -255,6 +255,7 @@ fn default_for_type(ct: &ColumnType) -> Value {
     match ct {
         ColumnType::Integer => Value::Integer(0),
         ColumnType::BigInt => Value::BigInt(0),
+        ColumnType::Real => Value::Real(0.0),
         ColumnType::Boolean => Value::Boolean(false),
         ColumnType::Text => Value::Text(String::new()),
         ColumnType::Enum(variants) => variants

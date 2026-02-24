@@ -18,6 +18,7 @@ use tsify::Tsify;
 pub enum WasmValue {
     Integer(i32),
     BigInt(i64),
+    Real(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
@@ -33,6 +34,7 @@ impl From<jazz_tools::query_manager::types::Value> for WasmValue {
         match v {
             Value::Integer(i) => WasmValue::Integer(i),
             Value::BigInt(i) => WasmValue::BigInt(i),
+            Value::Real(f) => WasmValue::Real(f),
             Value::Boolean(b) => WasmValue::Boolean(b),
             Value::Text(s) => WasmValue::Text(s),
             Value::Timestamp(t) => WasmValue::Timestamp(t),
@@ -54,6 +56,7 @@ impl TryFrom<WasmValue> for jazz_tools::query_manager::types::Value {
         Ok(match v {
             WasmValue::Integer(i) => Value::Integer(i),
             WasmValue::BigInt(i) => Value::BigInt(i),
+            WasmValue::Real(f) => Value::Real(f),
             WasmValue::Boolean(b) => Value::Boolean(b),
             WasmValue::Text(s) => Value::Text(s),
             WasmValue::Timestamp(t) => Value::Timestamp(t),
@@ -107,6 +110,7 @@ pub struct WasmRowDelta {
 pub enum WasmColumnType {
     Integer,
     BigInt,
+    Real,
     Boolean,
     Text,
     Enum { variants: Vec<String> },
@@ -247,6 +251,7 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
         match ct {
             ColumnType::Integer => WasmColumnType::Integer,
             ColumnType::BigInt => WasmColumnType::BigInt,
+            ColumnType::Real => WasmColumnType::Real,
             ColumnType::Boolean => WasmColumnType::Boolean,
             ColumnType::Text => WasmColumnType::Text,
             ColumnType::Enum(variants) => WasmColumnType::Enum { variants },
@@ -573,6 +578,7 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
             match wt {
                 WasmColumnType::Integer => ColumnType::Integer,
                 WasmColumnType::BigInt => ColumnType::BigInt,
+                WasmColumnType::Real => ColumnType::Real,
                 WasmColumnType::Boolean => ColumnType::Boolean,
                 WasmColumnType::Text => ColumnType::Text,
                 WasmColumnType::Enum { variants } => ColumnType::Enum(variants),
