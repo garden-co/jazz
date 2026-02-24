@@ -34,6 +34,19 @@ export interface SubscriptionDelta<T> {
  */
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
+  private orderedIds: string[] = [];
+
+  private removeId(id: string): void {
+    const index = this.orderedIds.indexOf(id);
+    if (index !== -1) {
+      this.orderedIds.splice(index, 1);
+    }
+  }
+
+  private insertIdAt(id: string, index: number): void {
+    const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
+    this.orderedIds.splice(clamped, 0, id);
+  }
 
   /**
    * Process a row delta and return typed object delta.
@@ -47,31 +60,45 @@ export class SubscriptionManager<T extends { id: string }> {
     const updated: T[] = [];
     const removed: T[] = [];
 
-    // Process removals
+    // Process removals first (indices refer to pre-window).
     for (const row of delta.removed) {
       const item = this.currentResults.get(row.id);
       if (item) {
         this.currentResults.delete(row.id);
+        this.removeId(row.id);
         removed.push(item);
       }
     }
 
-    // Process updates - delta.updated is array of [oldRow, newRow] tuples
-    for (const [_oldRow, newRow] of delta.updated) {
-      const newItem = transform(newRow);
-      this.currentResults.set(newItem.id, newItem);
-      updated.push(newItem);
+    // Apply updates and moves.
+    for (const change of delta.updated) {
+      this.removeId(change.id);
+
+      if (change.row) {
+        const item = transform(change.row);
+        this.currentResults.set(change.id, item);
+      }
+
+      const existing = this.currentResults.get(change.id);
+      if (!existing) continue;
+
+      this.insertIdAt(change.id, change.newIndex);
+      updated.push(existing);
     }
 
-    // Process additions
-    for (const row of delta.added) {
-      const item = transform(row);
-      this.currentResults.set(item.id, item);
+    // Process additions last (indices refer to post-window).
+    for (const change of delta.added) {
+      const item = transform(change.row);
+      this.currentResults.set(change.id, item);
+      this.removeId(change.id);
+      this.insertIdAt(change.id, change.index);
       added.push(item);
     }
 
     return {
-      all: Array.from(this.currentResults.values()),
+      all: this.orderedIds
+        .map((id) => this.currentResults.get(id))
+        .filter((item): item is T => item !== undefined),
       added,
       updated,
       removed,
@@ -85,6 +112,7 @@ export class SubscriptionManager<T extends { id: string }> {
    */
   clear(): void {
     this.currentResults.clear();
+    this.orderedIds = [];
   }
 
   /**

@@ -17,7 +17,30 @@ import type {
 
 export type Value = JazzWasmValue;
 export type WasmRow = JazzWasmRow;
-export type RowDelta = JazzWasmRowDelta;
+export interface RowDeltaAdded {
+  id: string;
+  index: number;
+  row: JazzWasmRow;
+}
+
+export interface RowDeltaRemoved {
+  id: string;
+  index: number;
+}
+
+export interface RowDeltaUpdated {
+  id: string;
+  oldIndex: number;
+  newIndex: number;
+  row?: JazzWasmRow | null;
+}
+
+export type RowDelta = Omit<JazzWasmRowDelta, "added" | "removed" | "updated"> & {
+  protocolVersion: number;
+  added: RowDeltaAdded[];
+  removed: RowDeltaRemoved[];
+  updated: RowDeltaUpdated[];
+};
 export type ColumnType = JazzWasmColumnType;
 export type ColumnDescriptor = JazzWasmColumnDescriptor;
 

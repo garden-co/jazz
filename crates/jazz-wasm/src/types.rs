@@ -90,10 +90,40 @@ pub struct WasmRow {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmRowDelta {
-    pub added: Vec<WasmRow>,
-    pub removed: Vec<WasmRow>,
-    pub updated: Vec<(WasmRow, WasmRow)>,
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: u8,
+    pub added: Vec<WasmAdded>,
+    pub removed: Vec<WasmRemoved>,
+    pub updated: Vec<WasmUpdated>,
     pub pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmAdded {
+    pub id: String,
+    pub index: usize,
+    pub row: WasmRow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmRemoved {
+    pub id: String,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmUpdated {
+    pub id: String,
+    #[serde(rename = "oldIndex")]
+    pub old_index: usize,
+    #[serde(rename = "newIndex")]
+    pub new_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[tsify(optional)]
+    pub row: Option<WasmRow>,
 }
 
 // ============================================================================
