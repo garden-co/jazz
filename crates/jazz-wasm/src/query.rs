@@ -4,9 +4,9 @@
 
 use wasm_bindgen::prelude::*;
 
-use jazz::query_manager::query::{Query, QueryBuilder as JazzQueryBuilder};
-use jazz::query_manager::types::Value;
-use jazz::query_manager::{parse_query_json, parse_query_value};
+use jazz_tools::query_manager::query::{Query, QueryBuilder as JazzQueryBuilder};
+use jazz_tools::query_manager::types::Value;
+use jazz_tools::query_manager::{parse_query_json, parse_query_value};
 
 use crate::types::WasmValue;
 

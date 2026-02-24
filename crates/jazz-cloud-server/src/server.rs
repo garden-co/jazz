@@ -16,17 +16,17 @@ use axum::{
 use base64::Engine;
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
-use jazz::jazz_transport::{
+use jazz_tools::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
-use jazz::object::ObjectId;
-use jazz::query_manager::query::QueryBuilder;
-use jazz::query_manager::session::Session;
-use jazz::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
-use jazz::runtime_tokio::TokioRuntime;
-use jazz::schema_manager::{AppId, SchemaManager};
-use jazz::storage::SurrealKvStorage;
-use jazz::sync_manager::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::query::QueryBuilder;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz_tools::runtime_tokio::TokioRuntime;
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};

@@ -13,10 +13,10 @@ use common::{
     create_session, current_timestamp, document_plaintext_size, format_bytes, get_stats,
     reset_stats, setup_data,
 };
-use jazz::query_manager::query::Query;
-use jazz::query_manager::types::Value;
-use jazz::runtime_core::RuntimeCore;
-use jazz::storage::MemoryStorage;
+use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::types::Value;
+use jazz_tools::runtime_core::RuntimeCore;
+use jazz_tools::storage::MemoryStorage;
 
 // Install tracking allocator globally
 #[global_allocator]

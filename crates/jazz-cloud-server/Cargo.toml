@@ -8,7 +8,7 @@ name = "jazz-cloud-server"
 path = "src/main.rs"
 
 [dependencies]
-jazz = { package = "jazz-tools", path = "../jazz-tools", features = [
+jazz_tools = { package = "jazz-tools", path = "../jazz-tools", features = [
   "surrealkv",
   "runtime-tokio",
   "transport",
