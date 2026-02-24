@@ -75,5 +75,6 @@ jobs:
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
       - run: pnpm test
+      - run: pnpm --filter jazz-tools test:browser
       - name: Show sccache stats (after tests)
         run: sccache --show-stats || true
