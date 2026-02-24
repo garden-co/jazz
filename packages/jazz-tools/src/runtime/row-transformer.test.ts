@@ -37,6 +37,13 @@ describe("unwrapValue", () => {
     expect(unwrapValue(v)).toBe(1704067200000);
   });
 
+  it("unwraps Bytea to Uint8Array", () => {
+    const v: WasmValue = { type: "Bytea", value: [0, 1, 255] };
+    const unwrapped = unwrapValue(v);
+    expect(unwrapped).toBeInstanceOf(Uint8Array);
+    expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);
+  });
+
   it("unwraps Null to undefined", () => {
     const v: WasmValue = { type: "Null" };
     expect(unwrapValue(v)).toBeUndefined();

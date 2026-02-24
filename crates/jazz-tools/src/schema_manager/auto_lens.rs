@@ -196,6 +196,7 @@ fn default_for_type(column_type: &ColumnType, nullable: bool) -> Value {
             .unwrap_or(Value::Null),
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
+        ColumnType::Bytea => Value::Bytea(Vec::new()),
         ColumnType::Array(_) => Value::Array(Vec::new()),
         ColumnType::Row(_) => Value::Null, // Can't generate without schema
     }

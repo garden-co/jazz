@@ -554,6 +554,14 @@ fn value_to_ts_literal(value: &Value) -> String {
         Value::Text(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Timestamp(t) => t.to_string(),
         Value::Uuid(u) => format!("\"{}\"", u.uuid()),
+        Value::Bytea(bytes) => {
+            let elements = bytes
+                .iter()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("new Uint8Array([{}])", elements)
+        }
         Value::Array(arr) => {
             let elements: Vec<String> = arr.iter().map(value_to_ts_literal).collect();
             format!("[{}]", elements.join(", "))
@@ -585,7 +593,8 @@ fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
         ColumnType::Boolean => "boolean",
         ColumnType::Integer | ColumnType::BigInt => "int",
         ColumnType::Timestamp => "int", // Timestamps are stored as integers
-        _ => "string",                  // Fallback for unknown types
+        ColumnType::Bytea => "bytea",
+        _ => "string", // Fallback for unknown types
     }
 }
 

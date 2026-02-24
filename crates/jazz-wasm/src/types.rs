@@ -22,6 +22,7 @@ pub enum WasmValue {
     Text(String),
     Timestamp(u64),
     Uuid(String), // UUID as string for JS compatibility
+    Bytea(Vec<u8>),
     Array(Vec<WasmValue>),
     Row(Vec<WasmValue>),
     Null,
@@ -37,6 +38,7 @@ impl From<jazz_tools::query_manager::types::Value> for WasmValue {
             Value::Text(s) => WasmValue::Text(s),
             Value::Timestamp(t) => WasmValue::Timestamp(t),
             Value::Uuid(id) => WasmValue::Uuid(id.uuid().to_string()),
+            Value::Bytea(bytes) => WasmValue::Bytea(bytes),
             Value::Array(arr) => WasmValue::Array(arr.into_iter().map(Into::into).collect()),
             Value::Row(row) => WasmValue::Row(row.into_iter().map(Into::into).collect()),
             Value::Null => WasmValue::Null,
@@ -61,6 +63,7 @@ impl TryFrom<WasmValue> for jazz_tools::query_manager::types::Value {
                 let uuid = uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {}", e))?;
                 Value::Uuid(ObjectId::from_uuid(uuid))
             }
+            WasmValue::Bytea(bytes) => Value::Bytea(bytes),
             WasmValue::Array(arr) => {
                 let converted: Result<Vec<_>, _> = arr.into_iter().map(TryInto::try_into).collect();
                 Value::Array(converted?)
@@ -112,6 +115,7 @@ pub enum WasmColumnType {
     Enum { variants: Vec<String> },
     Timestamp,
     Uuid,
+    Bytea,
     Array { element: Box<WasmColumnType> },
     Row { columns: Vec<WasmColumnDescriptor> },
 }
@@ -252,6 +256,7 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
             ColumnType::Enum(variants) => WasmColumnType::Enum { variants },
             ColumnType::Timestamp => WasmColumnType::Timestamp,
             ColumnType::Uuid => WasmColumnType::Uuid,
+            ColumnType::Bytea => WasmColumnType::Bytea,
             ColumnType::Array(elem) => WasmColumnType::Array {
                 element: Box::new((*elem).into()),
             },
@@ -578,6 +583,7 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                 WasmColumnType::Enum { variants } => ColumnType::Enum(variants),
                 WasmColumnType::Timestamp => ColumnType::Timestamp,
                 WasmColumnType::Uuid => ColumnType::Uuid,
+                WasmColumnType::Bytea => ColumnType::Bytea,
                 WasmColumnType::Array { element } => {
                     ColumnType::Array(Box::new(wasm_type_to_groove(*element)))
                 }
@@ -679,5 +685,13 @@ mod tests {
             status.column_type,
             ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
         );
+    }
+
+    #[test]
+    fn wasm_value_bytea_roundtrip() {
+        let value = WasmValue::Bytea(vec![0, 1, 2, 255]);
+        let json = serde_json::to_value(&value).unwrap();
+        let decoded: WasmValue = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, value);
     }
 }
