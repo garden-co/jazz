@@ -132,7 +132,7 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
     match column_type {
         ColumnType::Integer => matches!(value, Value::Integer(_)),
         ColumnType::BigInt => matches!(value, Value::BigInt(_)),
-        ColumnType::Real => matches!(value, Value::Real(_)),
+        ColumnType::Double => matches!(value, Value::Double(_)),
         ColumnType::Boolean => matches!(value, Value::Boolean(_)),
         ColumnType::Timestamp => matches!(value, Value::Timestamp(_)),
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
@@ -180,7 +180,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
     match val {
         Value::Integer(n) => buf.extend_from_slice(&n.to_le_bytes()),
         Value::BigInt(n) => buf.extend_from_slice(&n.to_le_bytes()),
-        Value::Real(f) => buf.extend_from_slice(&f.to_le_bytes()),
+        Value::Double(f) => buf.extend_from_slice(&f.to_le_bytes()),
         Value::Boolean(b) => buf.push(if *b { 1 } else { 0 }),
         Value::Timestamp(t) => buf.extend_from_slice(&t.to_le_bytes()),
         Value::Uuid(id) => buf.extend_from_slice(id.uuid().as_bytes()),
@@ -274,14 +274,14 @@ pub fn decode_column(
             let n = i64::from_le_bytes(bytes[..8].try_into().unwrap());
             Ok(Value::BigInt(n))
         }
-        ColumnType::Real => {
+        ColumnType::Double => {
             if bytes.len() < 8 {
                 return Err(EncodingError::MalformedData {
-                    message: "real too short".into(),
+                    message: "double too short".into(),
                 });
             }
             let f = f64::from_le_bytes(bytes[..8].try_into().unwrap());
-            Ok(Value::Real(f))
+            Ok(Value::Double(f))
         }
         ColumnType::Boolean => {
             if bytes.is_empty() {
@@ -529,7 +529,7 @@ pub fn compare_column(
             let n2 = i64::from_le_bytes(bytes2[..8].try_into().unwrap());
             Ok(n1.cmp(&n2))
         }
-        ColumnType::Real => {
+        ColumnType::Double => {
             let f1 = f64::from_le_bytes(bytes1[..8].try_into().unwrap());
             let f2 = f64::from_le_bytes(bytes2[..8].try_into().unwrap());
             Ok(f1.total_cmp(&f2))
@@ -582,7 +582,7 @@ pub fn compare_column_to_value(
             let n2 = i64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(n1.cmp(&n2))
         }
-        ColumnType::Real => {
+        ColumnType::Double => {
             let f1 = f64::from_le_bytes(bytes[..8].try_into().unwrap());
             let f2 = f64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(f1.total_cmp(&f2))
@@ -637,7 +637,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
     match value {
         Value::Integer(n) => n.to_le_bytes().to_vec(),
         Value::BigInt(n) => n.to_le_bytes().to_vec(),
-        Value::Real(f) => f.to_le_bytes().to_vec(),
+        Value::Double(f) => f.to_le_bytes().to_vec(),
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
         Value::Timestamp(t) => t.to_le_bytes().to_vec(),
         Value::Uuid(id) => id.uuid().as_bytes().to_vec(),
@@ -850,13 +850,13 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
                 data[..8].try_into().unwrap(),
             )))
         }
-        ColumnType::Real => {
+        ColumnType::Double => {
             if data.len() < 8 {
                 return Err(EncodingError::MalformedData {
-                    message: "real element too short".into(),
+                    message: "double element too short".into(),
                 });
             }
-            Ok(Value::Real(f64::from_le_bytes(
+            Ok(Value::Double(f64::from_le_bytes(
                 data[..8].try_into().unwrap(),
             )))
         }
@@ -1946,14 +1946,14 @@ mod tests {
     fn real_encode_decode_roundtrip() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("name", ColumnType::Text),
-            ColumnDescriptor::new("temperature", ColumnType::Real),
-            ColumnDescriptor::new("pressure", ColumnType::Real),
+            ColumnDescriptor::new("temperature", ColumnType::Double),
+            ColumnDescriptor::new("pressure", ColumnType::Double),
         ]);
 
         let values = vec![
             Value::Text("sensor-1".into()),
-            Value::Real(23.456),
-            Value::Real(-101.325),
+            Value::Double(23.456),
+            Value::Double(-101.325),
         ];
 
         let encoded = encode_row(&descriptor, &values).unwrap();
@@ -1965,7 +1965,7 @@ mod tests {
     #[test]
     fn real_encode_decode_special_values() {
         // Exercise: zero, negative zero, infinity, negative infinity, NaN, subnormal
-        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("val", ColumnType::Real)]);
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("val", ColumnType::Double)]);
 
         let cases: Vec<f64> = vec![
             0.0,
@@ -1981,12 +1981,12 @@ mod tests {
         ];
 
         for val in cases {
-            let values = vec![Value::Real(val)];
+            let values = vec![Value::Double(val)];
             let encoded = encode_row(&descriptor, &values).unwrap();
             let decoded = decode_row(&descriptor, &encoded).unwrap();
 
             match &decoded[0] {
-                Value::Real(decoded_val) => {
+                Value::Double(decoded_val) => {
                     // Bitwise comparison handles NaN and negative zero
                     assert_eq!(
                         val.to_bits(),
@@ -1994,7 +1994,7 @@ mod tests {
                         "round-trip failed for {val}"
                     );
                 }
-                other => panic!("expected Value::Real, got {other:?}"),
+                other => panic!("expected Value::Double, got {other:?}"),
             }
         }
     }
@@ -2002,11 +2002,11 @@ mod tests {
     #[test]
     fn real_nullable_encode_decode() {
         let descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("score", ColumnType::Real).nullable(),
+            ColumnDescriptor::new("score", ColumnType::Double).nullable(),
         ]);
 
         // With value
-        let values = vec![Value::Real(99.5)];
+        let values = vec![Value::Double(99.5)];
         let encoded = encode_row(&descriptor, &values).unwrap();
         let decoded = decode_row(&descriptor, &encoded).unwrap();
         assert_eq!(values, decoded);
@@ -2020,8 +2020,10 @@ mod tests {
 
     #[test]
     fn real_type_mismatch_rejected() {
-        let descriptor =
-            RowDescriptor::new(vec![ColumnDescriptor::new("temperature", ColumnType::Real)]);
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "temperature",
+            ColumnType::Double,
+        )]);
 
         let err = encode_row(&descriptor, &[Value::Integer(42)]).unwrap_err();
         assert!(matches!(err, EncodingError::TypeMismatch { .. }));

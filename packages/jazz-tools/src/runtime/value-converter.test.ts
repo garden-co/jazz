@@ -94,11 +94,11 @@ describe("toValue", () => {
     });
   });
 
-  it("converts Real values", () => {
-    const colType: ColumnType = { type: "Real" };
-    expect(toValue(23.456, colType)).toEqual({ type: "Real", value: 23.456 });
-    expect(toValue(-0.001, colType)).toEqual({ type: "Real", value: -0.001 });
-    expect(toValue(0, colType)).toEqual({ type: "Real", value: 0 });
+  it("converts Double values", () => {
+    const colType: ColumnType = { type: "Double" };
+    expect(toValue(23.456, colType)).toEqual({ type: "Double", value: 23.456 });
+    expect(toValue(-0.001, colType)).toEqual({ type: "Double", value: -0.001 });
+    expect(toValue(0, colType)).toEqual({ type: "Double", value: 0 });
   });
 
   it("throws for unsupported column type", () => {

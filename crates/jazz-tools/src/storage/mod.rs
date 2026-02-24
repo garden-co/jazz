@@ -238,12 +238,12 @@ impl MemoryStorage {
 // Values must be encoded so lexicographic byte ordering equals semantic ordering.
 // This enables range queries via BTreeMap::range().
 
-/// Returns true if the value is Real(0.0) or Real(-0.0).
+/// Returns true if the value is Double(0.0) or Double(-0.0).
 ///
 /// IEEE 754 defines -0.0 == 0.0, but they have distinct bit patterns and
 /// therefore distinct index encodings. Query operations must check both.
-pub(crate) fn is_real_zero(value: &Value) -> bool {
-    matches!(value, Value::Real(f) if *f == 0.0)
+pub(crate) fn is_double_zero(value: &Value) -> bool {
+    matches!(value, Value::Double(f) if *f == 0.0)
 }
 
 /// Encode a Value into bytes that sort correctly for range queries.
@@ -270,7 +270,7 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             bytes
         }
 
-        Value::Real(f) => {
+        Value::Double(f) => {
             let mut bytes = vec![0x09];
             let bits = f.to_bits();
             // Flip for lexicographic ordering: if sign bit set, flip all bits;
@@ -496,9 +496,9 @@ impl Storage for MemoryStorage {
         };
 
         // IEEE 754: -0.0 == 0.0, so look up both encodings and merge.
-        if is_real_zero(value) {
+        if is_double_zero(value) {
             let mut result = HashSet::new();
-            for zero in &[Value::Real(0.0), Value::Real(-0.0)] {
+            for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
                 if let Some(ids) = index.get(&encode_value(zero)) {
                     result.extend(ids.iter().copied());
                 }
@@ -534,22 +534,22 @@ impl Storage for MemoryStorage {
         //   End Included(zero)   → use +0.0 (widen to include the greater encoding)
         //   End Excluded(zero)   → use -0.0 (stop before both encodings)
         let start_bound = match start {
-            Bound::Included(v) if is_real_zero(v) => {
-                Bound::Included(encode_value(&Value::Real(-0.0)))
+            Bound::Included(v) if is_double_zero(v) => {
+                Bound::Included(encode_value(&Value::Double(-0.0)))
             }
-            Bound::Excluded(v) if is_real_zero(v) => {
-                Bound::Excluded(encode_value(&Value::Real(0.0)))
+            Bound::Excluded(v) if is_double_zero(v) => {
+                Bound::Excluded(encode_value(&Value::Double(0.0)))
             }
             Bound::Included(v) => Bound::Included(encode_value(v)),
             Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match end {
-            Bound::Included(v) if is_real_zero(v) => {
-                Bound::Included(encode_value(&Value::Real(0.0)))
+            Bound::Included(v) if is_double_zero(v) => {
+                Bound::Included(encode_value(&Value::Double(0.0)))
             }
-            Bound::Excluded(v) if is_real_zero(v) => {
-                Bound::Excluded(encode_value(&Value::Real(-0.0)))
+            Bound::Excluded(v) if is_double_zero(v) => {
+                Bound::Excluded(encode_value(&Value::Double(-0.0)))
             }
             Bound::Included(v) => Bound::Included(encode_value(v)),
             Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
@@ -817,14 +817,14 @@ mod tests {
 
     #[test]
     fn real_encode_value_ordering() {
-        let neg_inf = encode_value(&Value::Real(f64::NEG_INFINITY));
-        let neg_big = encode_value(&Value::Real(-1000.0));
-        let neg_small = encode_value(&Value::Real(-0.001));
-        let neg_zero = encode_value(&Value::Real(-0.0));
-        let pos_zero = encode_value(&Value::Real(0.0));
-        let pos_small = encode_value(&Value::Real(0.001));
-        let pos_big = encode_value(&Value::Real(1000.0));
-        let pos_inf = encode_value(&Value::Real(f64::INFINITY));
+        let neg_inf = encode_value(&Value::Double(f64::NEG_INFINITY));
+        let neg_big = encode_value(&Value::Double(-1000.0));
+        let neg_small = encode_value(&Value::Double(-0.001));
+        let neg_zero = encode_value(&Value::Double(-0.0));
+        let pos_zero = encode_value(&Value::Double(0.0));
+        let pos_small = encode_value(&Value::Double(0.001));
+        let pos_big = encode_value(&Value::Double(1000.0));
+        let pos_inf = encode_value(&Value::Double(f64::INFINITY));
 
         assert!(neg_inf < neg_big);
         assert!(neg_big < neg_small);
@@ -837,11 +837,11 @@ mod tests {
 
     #[test]
     fn real_cross_type_ordering() {
-        // Real should sort after all existing types (tag 0x09 > 0x08)
+        // Double should sort after all existing types (tag 0x09 > 0x08)
         let row = encode_value(&Value::Row(vec![]));
-        let real = encode_value(&Value::Real(0.0));
+        let double = encode_value(&Value::Double(0.0));
 
-        assert!(row < real);
+        assert!(row < double);
     }
 
     // ----------------------------------------------------------------
@@ -859,20 +859,20 @@ mod tests {
         let row_pos = ObjectId::new();
 
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(-0.0), row_neg)
+            .index_insert("prices", "amount", "main", &Value::Double(-0.0), row_neg)
             .unwrap();
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(0.0), row_pos)
+            .index_insert("prices", "amount", "main", &Value::Double(0.0), row_pos)
             .unwrap();
 
         // Looking up 0.0 should find both (IEEE 754: -0.0 == 0.0)
-        let results = storage.index_lookup("prices", "amount", "main", &Value::Real(0.0));
+        let results = storage.index_lookup("prices", "amount", "main", &Value::Double(0.0));
         assert_eq!(results.len(), 2, "lookup 0.0 should match both zeros");
         assert!(results.contains(&row_neg));
         assert!(results.contains(&row_pos));
 
         // Looking up -0.0 should also find both
-        let results = storage.index_lookup("prices", "amount", "main", &Value::Real(-0.0));
+        let results = storage.index_lookup("prices", "amount", "main", &Value::Double(-0.0));
         assert_eq!(results.len(), 2, "lookup -0.0 should match both zeros");
         assert!(results.contains(&row_neg));
         assert!(results.contains(&row_pos));
@@ -888,13 +888,31 @@ mod tests {
         let row_negative = ObjectId::new();
 
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(-0.0), row_neg_zero)
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(-0.0),
+                row_neg_zero,
+            )
             .unwrap();
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(0.0), row_pos_zero)
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(0.0),
+                row_pos_zero,
+            )
             .unwrap();
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(-1.0), row_negative)
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(-1.0),
+                row_negative,
+            )
             .unwrap();
 
         // >= 0.0 should include -0.0 and 0.0, but not -1.0
@@ -902,7 +920,7 @@ mod tests {
             "prices",
             "amount",
             "main",
-            Bound::Included(&Value::Real(0.0)),
+            Bound::Included(&Value::Double(0.0)),
             Bound::Unbounded,
         );
         assert!(
@@ -925,10 +943,22 @@ mod tests {
         let row_negative = ObjectId::new();
 
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(-0.0), row_neg_zero)
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(-0.0),
+                row_neg_zero,
+            )
             .unwrap();
         storage
-            .index_insert("prices", "amount", "main", &Value::Real(-1.0), row_negative)
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(-1.0),
+                row_negative,
+            )
             .unwrap();
 
         // < 0.0 should exclude -0.0 but include -1.0
@@ -937,7 +967,7 @@ mod tests {
             "amount",
             "main",
             Bound::Unbounded,
-            Bound::Excluded(&Value::Real(0.0)),
+            Bound::Excluded(&Value::Double(0.0)),
         );
         assert!(
             !results.contains(&row_neg_zero),

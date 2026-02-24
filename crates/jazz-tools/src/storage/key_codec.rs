@@ -79,14 +79,14 @@ pub(super) fn index_range_scan_bounds(
 
     // IEEE 754: -0.0 == 0.0 but they encode differently. Adjust bounds
     // so both zeros are treated as the same point.
-    let neg_zero = Value::Real(-0.0);
-    let pos_zero = Value::Real(0.0);
+    let neg_zero = Value::Double(-0.0);
+    let pos_zero = Value::Double(0.0);
 
     let start_key = match start {
-        Bound::Included(v) if super::is_real_zero(v) => {
+        Bound::Included(v) if super::is_double_zero(v) => {
             format!("{}{}", base_prefix, hex::encode(encode_value(&neg_zero)))
         }
-        Bound::Excluded(v) if super::is_real_zero(v) => {
+        Bound::Excluded(v) if super::is_double_zero(v) => {
             let encoded = hex::encode(encode_value(&pos_zero));
             let mut key = format!("{}{}:", base_prefix, encoded);
             increment_string(&mut key);
@@ -103,13 +103,13 @@ pub(super) fn index_range_scan_bounds(
     };
 
     let end_key = match end {
-        Bound::Included(v) if super::is_real_zero(v) => {
+        Bound::Included(v) if super::is_double_zero(v) => {
             let encoded = hex::encode(encode_value(&pos_zero));
             let mut key = format!("{}{}:", base_prefix, encoded);
             increment_string(&mut key);
             key
         }
-        Bound::Excluded(v) if super::is_real_zero(v) => {
+        Bound::Excluded(v) if super::is_double_zero(v) => {
             format!("{}{}", base_prefix, hex::encode(encode_value(&neg_zero)))
         }
         Bound::Included(v) => {
