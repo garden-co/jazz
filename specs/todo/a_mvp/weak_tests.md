@@ -12,10 +12,6 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## 2. Shape-Only Assertions (high priority)
 
-- `crates/groove/src/query_manager/manager_tests.rs:insert_and_query`
-  - Current: mostly count checks (`len()`).
-  - Needed: verify row identities and key values for both unfiltered and filtered results.
-
 - `crates/groove/src/sync_manager/tests.rs:local_commit_syncs_to_server`
   - Current: validates commit count/id only.
   - Needed: also assert destination server, object id, and branch.
@@ -54,3 +50,14 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 - Deleted those test-only accessors from QueryManager.
 - Replaced manual `create_with_id + add_commit + index_insert` setup in schema integration tests with ingest/public flows.
 - Added runtime-core concurrency coverage, join invalid/circular/no-ON coverage, and non-cascading delete coverage.
+
+## Done in this pass
+
+- Hardened `crates/jazz-tools/src/query_manager/manager_tests.rs:update_passes_filter_emits_addition`:
+  - Replaced ambiguous initial assertion with deterministic expectation of one empty initial delta.
+  - Added explicit assertion that the later add delta contains the expected row id and no removed/updated rows.
+- Hardened `crates/jazz-tools/src/query_manager/manager_tests.rs:update_to_untracked_row_is_silent`:
+  - Replaced ambiguous initial assertion with deterministic expectation of one empty initial delta.
+  - Replaced ambiguous final assertion with deterministic expectation of no updates after non-matching update.
+- Hardened `crates/jazz-tools/src/query_manager/manager_tests.rs:insert_and_query`:
+  - Replaced `len()`-only checks with identity/content assertions for inserted rows in both unfiltered and filtered queries.
