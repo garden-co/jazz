@@ -30,7 +30,13 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 use crate::sync_manager::PersistenceTier;
 
-use super::{LoadedBranch, Storage, StorageError, encode_value};
+use super::{
+    LoadedBranch, Storage, StorageError, encode_value,
+    key_codec::{
+        ack_key, branch_tips_key, commit_key, commit_prefix, increment_bytes, increment_string,
+        index_entry_key, index_prefix, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+    },
+};
 
 /// Minimum memtable size for SurrealKV.
 const MIN_MEMTABLE_SIZE: usize = 4 * 1024 * 1024;
@@ -171,69 +177,6 @@ impl SurrealKvStorage {
             .map(|(k, _)| k)
             .collect())
     }
-
-    // ========================================================================
-    // Key encoding helpers
-    // ========================================================================
-
-    fn obj_meta_key(id: ObjectId) -> String {
-        format!("obj:{}:meta", format_uuid(id))
-    }
-
-    fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
-        format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
-    }
-
-    fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
-        format!(
-            "obj:{}:br:{}:c:{}",
-            format_uuid(object_id),
-            branch,
-            hex::encode(commit_id.0)
-        )
-    }
-
-    /// Prefix for scanning all commits of a branch.
-    fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-        format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
-    }
-
-    fn ack_key(commit_id: CommitId) -> String {
-        format!("ack:{}", hex::encode(commit_id.0))
-    }
-
-    fn index_entry_key(
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> String {
-        format!(
-            "idx:{}:{}:{}:{}:{}",
-            table,
-            column,
-            branch,
-            hex::encode(encode_value(value)),
-            format_uuid(row_id)
-        )
-    }
-
-    /// Prefix for scanning all entries with a specific index value.
-    fn index_value_prefix(table: &str, column: &str, branch: &str, value: &Value) -> String {
-        format!(
-            "idx:{}:{}:{}:{}:",
-            table,
-            column,
-            branch,
-            hex::encode(encode_value(value))
-        )
-    }
-
-    /// Prefix for scanning all entries in an index (table/col/branch).
-    fn index_prefix(table: &str, column: &str, branch: &str) -> String {
-        format!("idx:{}:{}:{}:", table, column, branch)
-    }
 }
 
 impl Drop for SurrealKvStorage {
@@ -270,7 +213,7 @@ impl Storage for SurrealKvStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let key = Self::obj_meta_key(id);
+        let key = obj_meta_key(id);
         let json = serde_json::to_vec(&metadata)
             .map_err(|e| StorageError::IoError(format!("serialize metadata: {}", e)))?;
 
@@ -283,7 +226,7 @@ impl Storage for SurrealKvStorage {
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let key = Self::obj_meta_key(id);
+        let key = obj_meta_key(id);
         let txn = self.begin_read_txn()?;
         match Self::txn_get(&txn, &key)? {
             Some(data) => {
@@ -303,18 +246,18 @@ impl Storage for SurrealKvStorage {
         let txn = self.begin_read_txn()?;
 
         // Check if object exists
-        let meta_key = Self::obj_meta_key(object_id);
+        let meta_key = obj_meta_key(object_id);
         if Self::txn_get(&txn, &meta_key)?.is_none() {
             return Ok(None);
         }
 
         // Load commits via prefix scan
-        let commit_prefix = Self::commit_prefix(object_id, branch);
+        let commit_prefix = commit_prefix(object_id, branch);
         let commit_entries = Self::scan_prefix(&txn, &commit_prefix)?;
 
         if commit_entries.is_empty() {
             // Check if tips exist (branch could exist with only tips set)
-            let tips_key = Self::branch_tips_key(object_id, branch);
+            let tips_key = branch_tips_key(object_id, branch);
             if Self::txn_get(&txn, &tips_key)?.is_none() {
                 return Ok(None);
             }
@@ -326,7 +269,7 @@ impl Storage for SurrealKvStorage {
                 .map_err(|e| StorageError::IoError(format!("deserialize commit: {}", e)))?;
 
             // Load ack state for this commit
-            let ack_key = Self::ack_key(commit.id());
+            let ack_key = ack_key(commit.id());
             if let Some(ack_data) = Self::txn_get(&txn, &ack_key)? {
                 let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&ack_data)
                     .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?;
@@ -337,7 +280,7 @@ impl Storage for SurrealKvStorage {
         }
 
         // Load tips
-        let tips_key = Self::branch_tips_key(object_id, branch);
+        let tips_key = branch_tips_key(object_id, branch);
         let tails = match Self::txn_get(&txn, &tips_key)? {
             Some(data) => serde_json::from_slice(&data)
                 .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
@@ -357,13 +300,13 @@ impl Storage for SurrealKvStorage {
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
 
         // Store the commit
-        let commit_key = Self::commit_key(object_id, branch, commit_id);
+        let commit_key = commit_key(object_id, branch, commit_id);
         let commit_json = serde_json::to_vec(&commit)
             .map_err(|e| StorageError::IoError(format!("serialize commit: {}", e)))?;
         Self::txn_set(&mut txn, &commit_key, &commit_json)?;
 
         // Read-modify-write tips
-        let tips_key = Self::branch_tips_key(object_id, branch);
+        let tips_key = branch_tips_key(object_id, branch);
         let mut tips: HashSet<CommitId> = match Self::txn_get(&txn, &tips_key)? {
             Some(data) => serde_json::from_slice(&data)
                 .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
@@ -393,11 +336,11 @@ impl Storage for SurrealKvStorage {
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
 
         // Delete the commit
-        let commit_key = Self::commit_key(object_id, branch, commit_id);
+        let commit_key = commit_key(object_id, branch, commit_id);
         Self::txn_delete(&mut txn, &commit_key)?;
 
         // Remove from tips
-        let tips_key = Self::branch_tips_key(object_id, branch);
+        let tips_key = branch_tips_key(object_id, branch);
         if let Some(data) = Self::txn_get(&txn, &tips_key)? {
             let mut tips: HashSet<CommitId> = serde_json::from_slice(&data)
                 .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?;
@@ -416,7 +359,7 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let tips_key = Self::branch_tips_key(object_id, branch);
+        let tips_key = branch_tips_key(object_id, branch);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
         match tails {
             Some(t) => {
@@ -440,7 +383,7 @@ impl Storage for SurrealKvStorage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError> {
-        let key = Self::ack_key(commit_id);
+        let key = ack_key(commit_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
         let mut tiers: HashSet<PersistenceTier> = match Self::txn_get(&txn, &key)? {
             Some(data) => serde_json::from_slice(&data)
@@ -467,7 +410,7 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        let key = Self::index_entry_key(table, column, branch, value, row_id);
+        let key = index_entry_key(table, column, branch, value, row_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
         // Sentinel byte — existence is the signal.
         Self::txn_set(&mut txn, &key, &[0x01])?;
@@ -483,7 +426,7 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        let key = Self::index_entry_key(table, column, branch, value, row_id);
+        let key = index_entry_key(table, column, branch, value, row_id);
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
         Self::txn_delete(&mut txn, &key)?;
         self.commit_txn(&mut txn)
@@ -497,7 +440,7 @@ impl Storage for SurrealKvStorage {
         value: &Value,
     ) -> Vec<ObjectId> {
         tracing::trace!(table, column, branch, "index_lookup");
-        let prefix = Self::index_value_prefix(table, column, branch, value);
+        let prefix = index_value_prefix(table, column, branch, value);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
@@ -518,7 +461,7 @@ impl Storage for SurrealKvStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let base_prefix = Self::index_prefix(table, column, branch);
+        let base_prefix = index_prefix(table, column, branch);
 
         // Compute start key
         let start_key = match start {
@@ -571,7 +514,7 @@ impl Storage for SurrealKvStorage {
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let prefix = Self::index_prefix(table, column, branch);
+        let prefix = index_prefix(table, column, branch);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
@@ -598,48 +541,6 @@ impl Storage for SurrealKvStorage {
         let _span = tracing::debug_span!("SurrealKvStorage::flush_wal").entered();
         self.flush();
     }
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Format an ObjectId as a compact hex string (no dashes).
-fn format_uuid(id: ObjectId) -> String {
-    hex::encode(id.uuid().as_bytes())
-}
-
-/// Parse a UUID from the last segment of an index key.
-/// Key format: `idx:{table}:{col}:{branch}:{hex_value}:{uuid_hex}`
-fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
-    let uuid_hex = key.rsplit(':').next()?;
-    let bytes = hex::decode(uuid_hex).ok()?;
-    if bytes.len() != 16 {
-        return None;
-    }
-    let uuid = uuid::Uuid::from_bytes(bytes.try_into().ok()?);
-    Some(ObjectId(internment::Intern::new(uuid)))
-}
-
-/// Increment the last byte of a byte slice to create an exclusive upper bound.
-/// For prefix scans: scanning [prefix, incremented_prefix) captures all keys with that prefix.
-fn increment_bytes(bytes: &mut Vec<u8>) {
-    for i in (0..bytes.len()).rev() {
-        if bytes[i] < 0xFF {
-            bytes[i] += 1;
-            bytes.truncate(i + 1);
-            return;
-        }
-    }
-    // All 0xFF — push a byte
-    bytes.push(0x00);
-}
-
-/// Increment the last character of a string for exclusive upper bound.
-fn increment_string(s: &mut String) {
-    let mut bytes = std::mem::take(s).into_bytes();
-    increment_bytes(&mut bytes);
-    *s = String::from_utf8(bytes).unwrap_or_default();
 }
 
 #[cfg(test)]
