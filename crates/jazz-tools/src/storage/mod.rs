@@ -761,4 +761,129 @@ mod tests {
         assert!(int_neg < int_zero);
         assert!(int_zero < int_pos);
     }
+
+    #[test]
+    fn real_encode_value_ordering() {
+        let neg_inf = encode_value(&Value::Real(f64::NEG_INFINITY));
+        let neg_big = encode_value(&Value::Real(-1000.0));
+        let neg_small = encode_value(&Value::Real(-0.001));
+        let neg_zero = encode_value(&Value::Real(-0.0));
+        let pos_zero = encode_value(&Value::Real(0.0));
+        let pos_small = encode_value(&Value::Real(0.001));
+        let pos_big = encode_value(&Value::Real(1000.0));
+        let pos_inf = encode_value(&Value::Real(f64::INFINITY));
+
+        assert!(neg_inf < neg_big);
+        assert!(neg_big < neg_small);
+        assert!(neg_small < neg_zero);
+        assert!(neg_zero < pos_zero);
+        assert!(pos_zero < pos_small);
+        assert!(pos_small < pos_big);
+        assert!(pos_big < pos_inf);
+    }
+
+    #[test]
+    fn real_cross_type_ordering() {
+        // Real should sort after all existing types (tag 0x09 > 0x08)
+        let row = encode_value(&Value::Row(vec![]));
+        let real = encode_value(&Value::Real(0.0));
+
+        assert!(row < real);
+    }
+
+    // ----------------------------------------------------------------
+    // Negative zero IEEE 754 semantics: -0.0 and 0.0 are equal per the
+    // standard, so index lookups and range queries must treat them as
+    // the same value even though they have distinct bit patterns.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn real_negative_zero_exact_lookup() {
+        // Store a value as -0.0, look it up with 0.0 (and vice versa).
+        let mut storage = MemoryStorage::new();
+
+        let row_neg = ObjectId::new();
+        let row_pos = ObjectId::new();
+
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(-0.0), row_neg)
+            .unwrap();
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(0.0), row_pos)
+            .unwrap();
+
+        // Looking up 0.0 should find both (IEEE 754: -0.0 == 0.0)
+        let results = storage.index_lookup("prices", "amount", "main", &Value::Real(0.0));
+        assert_eq!(results.len(), 2, "lookup 0.0 should match both zeros");
+        assert!(results.contains(&row_neg));
+        assert!(results.contains(&row_pos));
+
+        // Looking up -0.0 should also find both
+        let results = storage.index_lookup("prices", "amount", "main", &Value::Real(-0.0));
+        assert_eq!(results.len(), 2, "lookup -0.0 should match both zeros");
+        assert!(results.contains(&row_neg));
+        assert!(results.contains(&row_pos));
+    }
+
+    #[test]
+    fn real_negative_zero_range_gte() {
+        // WHERE amount >= 0.0 should include -0.0 (equal per IEEE 754)
+        let mut storage = MemoryStorage::new();
+
+        let row_neg_zero = ObjectId::new();
+        let row_pos_zero = ObjectId::new();
+        let row_negative = ObjectId::new();
+
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(-0.0), row_neg_zero)
+            .unwrap();
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(0.0), row_pos_zero)
+            .unwrap();
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(-1.0), row_negative)
+            .unwrap();
+
+        // >= 0.0 should include -0.0 and 0.0, but not -1.0
+        let results = storage.index_range(
+            "prices",
+            "amount",
+            "main",
+            Bound::Included(&Value::Real(0.0)),
+            Bound::Unbounded,
+        );
+        assert!(results.contains(&row_neg_zero), ">= 0.0 should include -0.0");
+        assert!(results.contains(&row_pos_zero), ">= 0.0 should include 0.0");
+        assert!(!results.contains(&row_negative), ">= 0.0 should exclude -1.0");
+    }
+
+    #[test]
+    fn real_negative_zero_range_lt() {
+        // WHERE amount < 0.0 should exclude -0.0 (equal per IEEE 754, not strictly less)
+        let mut storage = MemoryStorage::new();
+
+        let row_neg_zero = ObjectId::new();
+        let row_negative = ObjectId::new();
+
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(-0.0), row_neg_zero)
+            .unwrap();
+        storage
+            .index_insert("prices", "amount", "main", &Value::Real(-1.0), row_negative)
+            .unwrap();
+
+        // < 0.0 should exclude -0.0 but include -1.0
+        let results = storage.index_range(
+            "prices",
+            "amount",
+            "main",
+            Bound::Unbounded,
+            Bound::Excluded(&Value::Real(0.0)),
+        );
+        assert!(
+            !results.contains(&row_neg_zero),
+            "< 0.0 should exclude -0.0"
+        );
+        assert!(results.contains(&row_negative), "< 0.0 should include -1.0");
+    }
 }

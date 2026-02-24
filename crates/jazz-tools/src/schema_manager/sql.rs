@@ -1982,4 +1982,118 @@ mod tests {
         assert_eq!(owner.references, Some(TableName::new("users")));
         assert!(!owner.nullable);
     }
+
+    #[test]
+    fn parse_real_column_type() {
+        let sql = r#"
+            CREATE TABLE measurements (
+                temperature REAL NOT NULL,
+                humidity REAL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("measurements")).unwrap();
+
+        assert_eq!(table.descriptor.columns.len(), 2);
+
+        let temp = &table.descriptor.columns[0];
+        assert_eq!(temp.name.as_str(), "temperature");
+        assert_eq!(temp.column_type, ColumnType::Real);
+        assert!(!temp.nullable);
+
+        let humidity = &table.descriptor.columns[1];
+        assert_eq!(humidity.name.as_str(), "humidity");
+        assert_eq!(humidity.column_type, ColumnType::Real);
+        assert!(humidity.nullable);
+    }
+
+    #[test]
+    fn parse_float_and_double_as_real_aliases() {
+        let sql = r#"
+            CREATE TABLE sensors (
+                pressure FLOAT NOT NULL,
+                altitude DOUBLE NOT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("sensors")).unwrap();
+
+        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Real);
+        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Real);
+    }
+
+    #[test]
+    fn sql_round_trip_with_real() {
+        let sql = r#"CREATE TABLE measurements (
+    temperature REAL NOT NULL,
+    humidity REAL
+);"#;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let orig = schema.get(&TableName::new("measurements")).unwrap();
+        let round = reparsed.get(&TableName::new("measurements")).unwrap();
+
+        assert_eq!(
+            orig.descriptor.columns.len(),
+            round.descriptor.columns.len()
+        );
+        assert_eq!(
+            orig.descriptor.columns[0].column_type,
+            round.descriptor.columns[0].column_type
+        );
+        assert_eq!(
+            orig.descriptor.columns[1].column_type,
+            round.descriptor.columns[1].column_type
+        );
+        assert_eq!(
+            orig.descriptor.columns[1].nullable,
+            round.descriptor.columns[1].nullable
+        );
+    }
+
+    #[test]
+    fn parse_lens_add_real_column_with_default() {
+        let sql = "ALTER TABLE sensors ADD COLUMN calibration REAL DEFAULT 0.0;";
+
+        let transform = parse_lens(sql).unwrap();
+        assert_eq!(transform.ops.len(), 1);
+
+        match &transform.ops[0] {
+            LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            } => {
+                assert_eq!(table, "sensors");
+                assert_eq!(column, "calibration");
+                assert_eq!(*column_type, ColumnType::Real);
+                assert_eq!(*default, Value::Real(0.0));
+            }
+            _ => panic!("Expected AddColumn"),
+        }
+    }
+
+    #[test]
+    fn parse_real_array_column() {
+        let sql = "CREATE TABLE timeseries (samples REAL[] NOT NULL);";
+
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("timeseries"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Real))
+        );
+        assert!(!col.nullable);
+    }
 }

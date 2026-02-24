@@ -46,14 +46,14 @@ describe("schemaToWasm", () => {
     });
   });
 
-  it("converts REAL to Integer (no Float in WASM)", () => {
+  it("converts REAL to Real", () => {
     table("items", { price: col.float() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
     expect(wasm.tables.items.columns[0]).toEqual({
       name: "price",
-      column_type: { type: "Integer" },
+      column_type: { type: "Real" },
       nullable: false,
     });
   });
