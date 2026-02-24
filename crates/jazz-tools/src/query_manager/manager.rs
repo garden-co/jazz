@@ -261,7 +261,7 @@ pub struct QueryManager {
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
-    pub(super) known_schemas: HashMap<SchemaHash, Schema>,
+    pub(super) known_schemas: Arc<HashMap<SchemaHash, Schema>>,
 }
 
 impl QueryManager {
@@ -289,7 +289,7 @@ impl QueryManager {
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
-            known_schemas: HashMap::new(),
+            known_schemas: Arc::new(HashMap::new()),
         }
     }
 
