@@ -204,7 +204,6 @@ jobs:
       - name: Verify jazz-wasm publish artifacts
         run: |
           test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
-          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
@@ -264,7 +263,6 @@ jobs:
           pnpm --filter jazz-wasm pack --pack-destination "${TMP_DIR}"
           TARBALL=$(ls "${TMP_DIR}"/jazz-wasm-*.tgz | head -n 1)
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.wasm"
-          tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.js"
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.js"
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.d.ts"
 
