@@ -7,16 +7,16 @@ use std::time::Duration;
 
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
-use bytes::BytesMut;
-use futures::StreamExt;
-use jazz::query_manager::query::Query;
-use jazz::query_manager::session::Session;
-use jazz::query_manager::types::{RowDelta, Value};
-use jazz::schema_manager::SchemaManager;
-use jazz::storage::{Storage, StorageError, SurrealKvStorage};
-use jazz::sync_manager::{
+use crate::query_manager::query::Query;
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{RowDelta, Value};
+use crate::schema_manager::SchemaManager;
+use crate::storage::{Storage, StorageError, SurrealKvStorage};
+use crate::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
+use bytes::BytesMut;
+use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::transport::{AuthConfig, ServerConnection};
@@ -404,7 +404,7 @@ impl JazzClient {
     }
 
     /// Get the current schema.
-    pub async fn schema(&self) -> Result<jazz::query_manager::types::Schema> {
+    pub async fn schema(&self) -> Result<crate::query_manager::types::Schema> {
         self.runtime
             .current_schema()
             .map_err(|e| JazzError::Query(e.to_string()))

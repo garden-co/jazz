@@ -12,7 +12,7 @@ mod test_server;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use jazz::query_manager::session::Session;
+use jazz_tools::query_manager::session::Session;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};

@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `OpfsBTreeStorage` provides synchronous storage (from jazz::storage)
+//! - `OpfsBTreeStorage` provides synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -33,19 +33,19 @@ fn init_tracing() {
     });
 }
 
-use jazz::object::ObjectId;
+use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
-use jazz::query_manager::encoding::decode_row;
-use jazz::query_manager::session::Session;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
-use jazz::query_manager::types::{Row, RowDescriptor};
-use jazz::query_manager::types::{Schema, SchemaHash, Value};
-use jazz::runtime_core::{RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::query_manager::types::{Row, RowDescriptor};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
-use jazz::runtime_core::{SubscriptionDelta, SubscriptionHandle};
-use jazz::schema_manager::{AppId, SchemaManager};
-use jazz::storage::OpfsBTreeStorage;
-use jazz::sync_manager::{
+use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::OpfsBTreeStorage;
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
@@ -698,7 +698,7 @@ impl WasmRuntime {
     /// * `role` - One of "user", "admin", "peer"
     #[wasm_bindgen(js_name = setClientRole)]
     pub fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
-        use jazz::sync_manager::ClientRole;
+        use jazz_tools::sync_manager::ClientRole;
 
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;

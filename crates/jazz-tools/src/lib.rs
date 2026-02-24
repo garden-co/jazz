@@ -1,5 +1,3 @@
-extern crate self as jazz;
-
 pub mod commit;
 pub mod metadata;
 pub mod object;

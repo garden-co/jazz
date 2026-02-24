@@ -1,6 +1,6 @@
 //! Create command implementations.
 
-use jazz::schema_manager::AppId;
+use crate::schema_manager::AppId;
 
 /// Create a new application.
 ///

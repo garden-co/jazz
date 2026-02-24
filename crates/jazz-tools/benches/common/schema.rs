@@ -4,17 +4,17 @@
 //! - Simple session comparisons (`owner_id = @session.user_id`)
 //! - INHERITS chains (documents → folders → teams)
 
-use jazz::object::ObjectId;
-use jazz::query_manager::policy::{Operation, PolicyExpr};
-use jazz::query_manager::session::Session;
-use jazz::query_manager::types::TablePolicies;
-use jazz::query_manager::types::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
-use jazz::runtime_core::RuntimeCore;
-use jazz::schema_manager::{AppId, SchemaManager};
-use jazz::storage::MemoryStorage;
-use jazz::sync_manager::SyncManager;
+use jazz_tools::runtime_core::RuntimeCore;
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::MemoryStorage;
+use jazz_tools::sync_manager::SyncManager;
 
 /// Create the benchmark schema with teams, folders, and documents.
 ///

@@ -20,14 +20,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::query_manager::session::Session;
+use crate::schema_manager::AppId;
 use axum::{
     async_trait,
     extract::FromRequestParts,
     http::{HeaderMap, StatusCode, header::AUTHORIZATION, request::Parts},
 };
 use base64::Engine;
-use jazz::query_manager::session::Session;
-use jazz::schema_manager::AppId;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{Jwk, JwkSet, KeyAlgorithm},

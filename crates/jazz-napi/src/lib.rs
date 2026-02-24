@@ -19,18 +19,18 @@ use napi::Env;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
-use jazz::object::ObjectId;
-use jazz::query_manager::encoding::decode_row;
-use jazz::query_manager::parse_query_json;
-use jazz::query_manager::query::Query;
-use jazz::query_manager::session::Session;
-use jazz::query_manager::types::{Schema, SchemaHash, Value};
-use jazz::runtime_core::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::parse_query_json;
+use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
-use jazz::schema_manager::{AppId, SchemaManager};
-use jazz::storage::{Storage, SurrealKvStorage};
-use jazz::sync_manager::{
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::{Storage, SurrealKvStorage};
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
@@ -233,8 +233,8 @@ struct JsSchema {
     tables: HashMap<String, JsTableSchema>,
 }
 
-fn js_column_type_to_groove(ct: JsColumnType) -> jazz::query_manager::types::ColumnType {
-    use jazz::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor};
+fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::types::ColumnType {
+    use jazz_tools::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor};
 
     match ct.type_name.as_str() {
         "Integer" => ColumnType::Integer,
@@ -270,8 +270,8 @@ fn js_column_type_to_groove(ct: JsColumnType) -> jazz::query_manager::types::Col
 }
 
 fn js_schema_to_groove(js: JsSchema) -> Schema {
-    use jazz::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-    use jazz::query_manager::types::{
+    use jazz_tools::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
+    use jazz_tools::query_manager::types::{
         ColumnDescriptor, OperationPolicy, RowDescriptor, TableName, TablePolicies, TableSchema,
     };
 
@@ -402,7 +402,7 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
 }
 
 fn groove_schema_to_js(schema: &Schema) -> JsSchema {
-    use jazz::query_manager::{
+    use jazz_tools::query_manager::{
         policy::{CmpOp, Operation, PolicyExpr, PolicyValue},
         types::{ColumnType, OperationPolicy, TablePolicies},
     };
@@ -966,8 +966,8 @@ impl NapiRuntime {
             })?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &jazz::query_manager::types::Row,
-                               descriptor: &jazz::query_manager::types::RowDescriptor|
+            let row_to_json = |row: &jazz_tools::query_manager::types::Row,
+                               descriptor: &jazz_tools::query_manager::types::RowDescriptor|
              -> serde_json::Value {
                 let values = decode_row(descriptor, &row.data)
                     .map(|vals| vals.into_iter().map(NapiValue::from).collect::<Vec<_>>())
@@ -1246,7 +1246,7 @@ impl NapiRuntime {
     /// Set a client's role ("user", "admin", or "peer").
     #[napi(js_name = "setClientRole")]
     pub fn set_client_role(&self, client_id: String, role: String) -> napi::Result<()> {
-        use jazz::sync_manager::ClientRole;
+        use jazz_tools::sync_manager::ClientRole;
 
         let uuid = uuid::Uuid::parse_str(&client_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;

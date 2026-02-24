@@ -15,18 +15,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use jazz::object::ObjectId;
-use jazz::query_manager::query::Query;
-use jazz::query_manager::session::Session;
-use jazz::query_manager::types::{Schema, Value};
-pub use jazz::runtime_core::SubscriptionHandle;
-use jazz::runtime_core::{
+use crate::object::ObjectId;
+use crate::query_manager::query::Query;
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{Schema, Value};
+pub use crate::runtime_core::SubscriptionHandle;
+use crate::runtime_core::{
     QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta,
     SyncSender,
 };
-use jazz::schema_manager::{QuerySchemaContext, SchemaManager};
-use jazz::storage::Storage;
-use jazz::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+use crate::schema_manager::{QuerySchemaContext, SchemaManager};
+use crate::storage::Storage;
+use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
 
 // ============================================================================
 // TokioScheduler
@@ -448,7 +448,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         query: Query,
         schema_context: &QuerySchemaContext,
         session: Option<Session>,
-    ) -> Result<jazz::sync_manager::QueryId, RuntimeError> {
+    ) -> Result<crate::sync_manager::QueryId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core
             .subscribe_with_schema_context(query, schema_context, session)
@@ -460,10 +460,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
-    use jazz::schema_manager::AppId;
-    use jazz::storage::MemoryStorage;
-    use jazz::sync_manager::SyncManager;
+    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::schema_manager::AppId;
+    use crate::storage::MemoryStorage;
+    use crate::sync_manager::SyncManager;
     use std::sync::atomic::AtomicUsize;
 
     fn test_schema() -> Schema {

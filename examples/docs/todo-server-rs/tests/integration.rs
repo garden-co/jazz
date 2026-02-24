@@ -16,7 +16,7 @@ use base64::Engine;
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
-use jazz::{
+use jazz_tools::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
 };
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
-fn test_schema() -> jazz::Schema {
+fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
@@ -107,7 +107,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use jazz::{ObjectId, QueryBuilder, Value};
+use jazz_tools::{ObjectId, QueryBuilder, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {

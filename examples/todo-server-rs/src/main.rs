@@ -31,8 +31,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz::schema_manager::SchemaDirectory;
-use jazz::{AppContext, AppId, JazzClient};
+use jazz_tools::schema_manager::SchemaDirectory;
+use jazz_tools::{AppContext, AppId, JazzClient};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
