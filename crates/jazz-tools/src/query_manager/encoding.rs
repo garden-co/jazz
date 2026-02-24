@@ -1909,4 +1909,92 @@ mod tests {
         let err = decode_row(&descriptor, &encoded).unwrap_err();
         assert!(matches!(err, EncodingError::MalformedData { .. }));
     }
+
+    #[test]
+    fn real_encode_decode_roundtrip() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("temperature", ColumnType::Real),
+            ColumnDescriptor::new("pressure", ColumnType::Real),
+        ]);
+
+        let values = vec![
+            Value::Text("sensor-1".into()),
+            Value::Real(23.456),
+            Value::Real(-101.325),
+        ];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+
+        assert_eq!(values, decoded);
+    }
+
+    #[test]
+    fn real_encode_decode_special_values() {
+        // Exercise: zero, negative zero, infinity, negative infinity, NaN, subnormal
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("val", ColumnType::Real),
+        ]);
+
+        let cases: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE,  // smallest normal
+            5e-324,             // smallest subnormal
+            -5e-324,            // negative subnormal
+            f64::MAX,
+            f64::MIN,
+        ];
+
+        for val in cases {
+            let values = vec![Value::Real(val)];
+            let encoded = encode_row(&descriptor, &values).unwrap();
+            let decoded = decode_row(&descriptor, &encoded).unwrap();
+
+            match &decoded[0] {
+                Value::Real(decoded_val) => {
+                    // Bitwise comparison handles NaN and negative zero
+                    assert_eq!(
+                        val.to_bits(),
+                        decoded_val.to_bits(),
+                        "round-trip failed for {val}"
+                    );
+                }
+                other => panic!("expected Value::Real, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn real_nullable_encode_decode() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("score", ColumnType::Real).nullable(),
+        ]);
+
+        // With value
+        let values = vec![Value::Real(99.5)];
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(values, decoded);
+
+        // With null
+        let nulls = vec![Value::Null];
+        let encoded = encode_row(&descriptor, &nulls).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(nulls, decoded);
+    }
+
+    #[test]
+    fn real_type_mismatch_rejected() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("temperature", ColumnType::Real),
+        ]);
+
+        let err = encode_row(&descriptor, &[Value::Integer(42)]).unwrap_err();
+        assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
 }
