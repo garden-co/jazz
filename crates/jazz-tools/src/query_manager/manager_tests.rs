@@ -6,14 +6,16 @@ use serde_json::json;
 use smallvec::smallvec;
 
 use crate::metadata::MetadataKey;
+use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::manager::{QueryError, QueryManager};
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::Session as PolicySession;
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
+    TableSchema, Value,
+};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::SyncManager;
-
-use super::{
-    ColumnDescriptor, ColumnType, PolicyExpr, QueryBuilder, QueryError, QueryManager,
-    RowDescriptor, Schema, Session as PolicySession, TableName, TablePolicies, TableSchema, Value,
-    decode_row,
-};
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -5613,7 +5615,7 @@ fn server_builds_query_graph_on_subscription() {
         .iter()
         .filter_map(|e| {
             if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                Some(*object_id)
+                Some(object_id)
             } else {
                 None
             }
@@ -6243,7 +6245,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // Now receive an update for the existing object from upstream
     // (simulating upstream sending fresh data)
     let table_schema = schema.get(&TableName::new("users")).unwrap();
-    let row_data = super::encode_row(
+    let row_data = encode_row(
         &table_schema.descriptor,
         &[Value::Text("Alice".into()), Value::Integer(80)],
     )

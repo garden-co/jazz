@@ -118,17 +118,6 @@ Large modules and broad re-exports reduce boundary clarity.
 - Direction:
   - Narrow exports and split oversized modules by responsibility.
 
-## 11) High example/docs duplication
-
-Docs examples and runnable examples contain many byte-identical files.
-
-- Evidence:
-  - `examples/docs/*` mirrors `examples/*` in many places.
-- Why it smells:
-  - Drift risk and maintenance cost.
-- Direction:
-  - Generate docs examples from canonical sources.
-
 ---
 
 ## Immediate Priority

@@ -15,14 +15,16 @@ use crate::sync_manager::{
     SyncPayload,
 };
 
-use super::QueryManager;
-use super::encoding::encode_row;
-use super::manager::QueryError;
-use super::policy::Operation;
-use super::policy::PolicyExpr;
-use super::relation_ir::{ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
-use super::session::Session;
-use super::types::{
+use crate::query_manager::encoding::encode_row;
+use crate::query_manager::manager::QueryError;
+use crate::query_manager::manager::QueryManager;
+use crate::query_manager::policy::Operation;
+use crate::query_manager::policy::PolicyExpr;
+use crate::query_manager::relation_ir::{
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+};
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TablePolicies, TableSchema,
     Value,
 };
@@ -91,7 +93,7 @@ fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     let select_policy = PolicyExpr::Or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::Inherits {
-            operation: super::policy::Operation::Select,
+            operation: Operation::Select,
             via_column: "parent_id".into(),
             max_depth,
         },
@@ -100,7 +102,7 @@ fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     let update_using = PolicyExpr::Or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::Inherits {
-            operation: super::policy::Operation::Update,
+            operation: Operation::Update,
             via_column: "parent_id".into(),
             max_depth,
         },
@@ -972,7 +974,7 @@ fn rebac_update_denied_by_using_policy() {
 /// FIXED: PolicyFilterNode now properly evaluates INHERITS using PolicyGraph.
 #[test]
 fn rebac_inherits_filters_select_query_results() {
-    use super::query::QueryBuilder;
+    use crate::query_manager::query::QueryBuilder;
 
     // Schema with INHERITS policy
     let mut schema = Schema::new();
@@ -1002,7 +1004,7 @@ fn rebac_inherits_filters_select_query_results() {
     let docs_policies = TablePolicies::new().with_select(PolicyExpr::Or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::Inherits {
-            operation: super::policy::Operation::Select,
+            operation: Operation::Select,
             via_column: "folder_id".into(),
             max_depth: None,
         },
@@ -1107,7 +1109,7 @@ fn rebac_inherits_filters_select_query_results() {
 
 #[test]
 fn rebac_recursive_inherits_allows_ancestor_access() {
-    use super::query::QueryBuilder;
+    use crate::query_manager::query::QueryBuilder;
 
     let schema = recursive_folders_schema(None);
     let sync_manager = SyncManager::new();
@@ -1182,7 +1184,7 @@ fn rebac_recursive_inherits_allows_ancestor_access() {
 
 #[test]
 fn rebac_recursive_inherits_respects_depth_override() {
-    use super::query::QueryBuilder;
+    use crate::query_manager::query::QueryBuilder;
 
     let schema = recursive_folders_schema(Some(1));
     let sync_manager = SyncManager::new();
@@ -1277,7 +1279,7 @@ fn rebac_recursive_inherits_write_checks_allow_and_deny() {
 
 #[test]
 fn rebac_recursive_inherits_cycle_does_not_overgrant() {
-    use super::query::QueryBuilder;
+    use crate::query_manager::query::QueryBuilder;
 
     let schema = recursive_folders_schema(Some(10));
     let sync_manager = SyncManager::new();
@@ -1813,7 +1815,7 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
 /// Cycle: A → B → A (direct cycle between two tables)
 #[test]
 fn rebac_inherits_cycle_detection() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1824,7 +1826,7 @@ fn rebac_inherits_cycle_detection() {
             .references("table_b"),
     ]);
     let a_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "b_id".into(),
         max_depth: None,
     });
@@ -1840,7 +1842,7 @@ fn rebac_inherits_cycle_detection() {
             .references("table_a"),
     ]);
     let b_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "a_id".into(),
         max_depth: None,
     });
@@ -1864,7 +1866,7 @@ fn rebac_inherits_cycle_detection() {
 /// Cycle: Folder → Folder (self-reference via parent_id)
 #[test]
 fn rebac_inherits_self_reference_detection() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1876,7 +1878,7 @@ fn rebac_inherits_self_reference_detection() {
             .references("folders"),
     ]);
     let folder_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "parent_id".into(),
         max_depth: None,
     });
@@ -1902,7 +1904,7 @@ fn rebac_inherits_self_reference_detection() {
 /// Test that valid INHERITS chains (no cycles) pass validation.
 #[test]
 fn rebac_inherits_no_cycle_passes() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1923,7 +1925,7 @@ fn rebac_inherits_no_cycle_passes() {
             .references("orgs"),
     ]);
     let team_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "org_id".into(),
         max_depth: None,
     });
@@ -1940,7 +1942,7 @@ fn rebac_inherits_no_cycle_passes() {
             .references("teams"),
     ]);
     let project_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "team_id".into(),
         max_depth: None,
     });
@@ -1961,7 +1963,7 @@ fn rebac_inherits_no_cycle_passes() {
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
 #[test]
 fn rebac_inherits_bounded_self_reference_passes_validation() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1972,7 +1974,7 @@ fn rebac_inherits_bounded_self_reference_passes_validation() {
             .references("folders"),
     ]);
     let folder_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "parent_id".into(),
         max_depth: Some(10),
     });
