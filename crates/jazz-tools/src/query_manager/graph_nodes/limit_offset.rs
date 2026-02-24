@@ -87,6 +87,20 @@ impl LimitOffsetNode {
 
         delta
     }
+
+    /// Rebuild state from a full ordered input (e.g. upstream SortNode output).
+    pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
+        let old_tuples = self.windowed_tuples.clone();
+        self.all_tuples = ordered_tuples.to_vec();
+        self.recompute_tuple_window();
+        self.dirty = false;
+        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples)
+    }
+
+    /// Ordered tuples currently visible after applying offset/limit.
+    pub fn windowed_tuples(&self) -> &[Tuple] {
+        &self.windowed_tuples
+    }
 }
 
 /// Check if tuple content changed (for tuples with same IDs).

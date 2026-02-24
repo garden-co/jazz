@@ -27,7 +27,7 @@ use super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
 };
 use super::graph_nodes::select_element::SelectElementNode;
-use super::graph_nodes::sort::{SortDirection, SortKey, SortNode};
+use super::graph_nodes::sort::{SortDirection, SortKey, SortNode, SortTarget};
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
@@ -484,20 +484,15 @@ impl QueryGraph {
             phase2_input = filter_id;
         }
 
-        // Sort node (if order_by specified)
-        if !plan.order_by.is_empty() {
-            let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
-            if !sort_keys.is_empty() {
-                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
-                    "",
-                    current_descriptor.clone(),
-                    true,
-                );
-                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
-                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-                graph.add_edge(sort_id, phase2_input);
-                phase2_input = sort_id;
-            }
+        // Sort node (default: id ASC when order_by is omitted)
+        let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase2_input);
+            phase2_input = sort_id;
         }
 
         // LimitOffset node (if limit or offset specified)
@@ -736,20 +731,15 @@ impl QueryGraph {
             phase2_input = filter_id;
         }
 
-        // Sort node (if order_by specified)
-        if !plan.order_by.is_empty() {
-            let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
-            if !sort_keys.is_empty() {
-                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
-                    "",
-                    current_descriptor.clone(),
-                    true,
-                );
-                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
-                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-                graph.add_edge(sort_id, phase2_input);
-                phase2_input = sort_id;
-            }
+        // Sort node (default: id ASC when order_by is omitted)
+        let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase2_input);
+            phase2_input = sort_id;
         }
 
         // LimitOffset node (if limit or offset specified)
@@ -1423,16 +1413,13 @@ impl QueryGraph {
             phase2_input = filter_id;
         }
 
-        // Sort node (if order_by specified)
-        if !plan.order_by.is_empty() {
-            let sort_keys = sort_keys_from_order_by(&plan.order_by, &combined_descriptor);
-            if !sort_keys.is_empty() {
-                let sort_node =
-                    SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
-                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-                graph.add_edge(sort_id, phase2_input);
-                phase2_input = sort_id;
-            }
+        // Sort node (default: id ASC when order_by is omitted)
+        let sort_keys = sort_keys_from_order_by(&plan.order_by, &combined_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_node = SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase2_input);
+            phase2_input = sort_id;
         }
 
         // LimitOffset node (if limit or offset specified)
@@ -1983,14 +1970,23 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::LimitOffset(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                    let input_node = self.get_inputs(node_id).first().copied();
+                    let input_delta = input_node
+                        .and_then(|dep| tuple_deltas.get(&dep).cloned())
                         .unwrap_or_default();
+                    let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
+                        Some(GraphNode::Sort(sort_node)) => {
+                            Some(sort_node.sorted_tuples().to_vec())
+                        }
+                        _ => None,
+                    });
 
                     if let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(lo_node, input_delta);
+                        let delta = if let Some(ordered) = ordered_input {
+                            lo_node.process_with_ordered_input(&ordered)
+                        } else {
+                            RowNode::process(lo_node, input_delta)
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2038,14 +2034,26 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Output(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                    let input_node = self.get_inputs(node_id).first().copied();
+                    let input_delta = input_node
+                        .and_then(|dep| tuple_deltas.get(&dep).cloned())
                         .unwrap_or_default();
+                    let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
+                        Some(GraphNode::LimitOffset(lo_node)) => {
+                            Some(lo_node.windowed_tuples().to_vec())
+                        }
+                        Some(GraphNode::Sort(sort_node)) => {
+                            Some(sort_node.sorted_tuples().to_vec())
+                        }
+                        _ => None,
+                    });
 
                     if let Some(GraphNode::Output(output_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(output_node, input_delta);
+                        let delta = if let Some(ordered) = ordered_input {
+                            output_node.process_with_ordered_input(&ordered)
+                        } else {
+                            RowNode::process(output_node, input_delta)
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2125,7 +2133,7 @@ impl QueryGraph {
             .get_node(self.output_node)
             .and_then(|node| {
                 if let GraphNode::Output(output) = node {
-                    Some(output.current_tuples().iter().cloned().collect())
+                    Some(output.ordered_tuples().to_vec())
                 } else {
                     None
                 }
@@ -2269,13 +2277,27 @@ fn sort_keys_from_order_by(
     order_by: &[(String, SortDirection)],
     descriptor: &RowDescriptor,
 ) -> Vec<SortKey> {
+    if order_by.is_empty() {
+        return vec![SortKey {
+            target: SortTarget::RowId,
+            direction: SortDirection::Ascending,
+        }];
+    }
+
     order_by
         .iter()
         .filter_map(|(col, dir)| {
-            descriptor.column_index(col).map(|idx| SortKey {
-                col_index: idx,
-                direction: *dir,
-            })
+            if col == "id" || col == "_id" {
+                Some(SortKey {
+                    target: SortTarget::RowId,
+                    direction: *dir,
+                })
+            } else {
+                descriptor.column_index(col).map(|idx| SortKey {
+                    target: SortTarget::Column(idx),
+                    direction: *dir,
+                })
+            }
         })
         .collect()
 }

@@ -422,6 +422,82 @@ fn query_with_sort_and_limit() {
 }
 
 #[test]
+fn query_order_by_id_is_deterministic() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let h1 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let h2 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let h3 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+    let query = qm.query("users").order_by("id").build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 3);
+
+    let actual: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    let mut expected = vec![h1.row_id, h2.row_id, h3.row_id];
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn query_without_order_by_defaults_to_id_ascending() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let h1 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let h2 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let h3 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+    let query = qm.query("users").build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 3);
+
+    let actual: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    let mut expected = vec![h1.row_id, h2.row_id, h3.row_id];
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn update_row() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -643,6 +719,60 @@ fn subscription_updates_after_insert_and_process() {
         updates[0].delta.added[0].id, handle.row_id,
         "Delta should identify the inserted row"
     );
+}
+
+#[test]
+fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm.query("users").order_by_desc("score").limit(2).build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Charlie".into()), Value::Integer(75)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+    let _initial_updates = qm.take_updates();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Diana".into()), Value::Integer(125)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("sorted/limited subscription should emit update for new top row");
+
+    assert_eq!(delta.added.len(), 2);
+    assert_eq!(delta.removed.len(), 2);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].1[0], Value::Text("Diana".into())); // 125
+    assert_eq!(results[1].1[0], Value::Text("Alice".into())); // 100
 }
 
 #[test]

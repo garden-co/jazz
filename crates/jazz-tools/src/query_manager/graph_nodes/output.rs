@@ -93,6 +93,67 @@ impl OutputNode {
             .collect()
     }
 
+    /// Ordered tuples as received from upstream nodes.
+    pub fn ordered_tuples(&self) -> &[Tuple] {
+        &self.ordered_tuples
+    }
+
+    fn compute_tuple_delta(&self, old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
+        // If tuple sequence changed, emit full replacement so downstream clients
+        // can rebuild deterministic ordering.
+        let order_changed = old_tuples.len() != new_tuples.len()
+            || old_tuples
+                .iter()
+                .zip(new_tuples.iter())
+                .any(|(old, new)| old.ids() != new.ids());
+        if order_changed {
+            return TupleDelta {
+                added: new_tuples.to_vec(),
+                removed: old_tuples.to_vec(),
+                updated: vec![],
+            };
+        }
+
+        let mut delta = TupleDelta::new();
+
+        for old in old_tuples {
+            if !new_tuples.iter().any(|t| t == old) {
+                delta.removed.push(old.clone());
+            }
+        }
+
+        for new in new_tuples {
+            if !old_tuples.iter().any(|t| t == new) {
+                delta.added.push(new.clone());
+            }
+        }
+
+        for new in new_tuples {
+            if let Some(old) = old_tuples.iter().find(|t| *t == new)
+                && has_tuple_content_changed(old, new)
+            {
+                delta.updated.push((old.clone(), new.clone()));
+            }
+        }
+
+        delta
+    }
+
+    /// Rebuild ordered output from a full ordered upstream input.
+    pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
+        let old_tuples = self.ordered_tuples.clone();
+        self.ordered_tuples = ordered_tuples.to_vec();
+        self.current_tuples = self.ordered_tuples.iter().cloned().collect();
+        self.dirty = false;
+        self.subscriber_initialized = true;
+
+        let delta = self.compute_tuple_delta(&old_tuples, &self.ordered_tuples);
+        if !delta.is_empty() {
+            self.pending_tuple_deltas.push(delta.clone());
+        }
+        delta
+    }
+
     /// Decode a delta to Values.
     pub fn decode_delta(&self, delta: &RowDelta) -> DecodedDelta {
         DecodedDelta {
@@ -125,6 +186,15 @@ impl OutputNode {
                 .collect(),
         }
     }
+}
+
+fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
+    old.iter()
+        .zip(new.iter())
+        .any(|(o, n)| match (o.content(), n.content()) {
+            (Some(oc), Some(nc)) => oc != nc,
+            _ => false,
+        })
 }
 
 /// Decoded delta with Values instead of binary.
