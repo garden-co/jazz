@@ -26,6 +26,11 @@ describe("translateQuery", () => {
           { name: "title", column_type: { type: "Text" }, nullable: false },
           { name: "done", column_type: { type: "Boolean" }, nullable: false },
           { name: "priority", column_type: { type: "Integer" }, nullable: true },
+          {
+            name: "status",
+            column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
+            nullable: false,
+          },
           { name: "project", column_type: { type: "Uuid" }, nullable: true },
           {
             name: "tags",
@@ -101,6 +106,23 @@ describe("translateQuery", () => {
         left: { scope: "todos", column: "title" },
         op: "Eq",
         right: { type: "Literal", value: { Text: "Buy milk" } },
+      });
+    });
+
+    it("translates eq condition with enum value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "status", op: "eq", value: "todo" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "status" },
+        op: "Eq",
+        right: { type: "Literal", value: { Text: "todo" } },
       });
     });
 
@@ -404,6 +426,17 @@ describe("translateQuery", () => {
       });
 
       expect(() => translateQuery(builderJson, basicSchema)).toThrow("Unknown operator: unknown");
+    });
+
+    it("throws for invalid enum value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "status", op: "eq", value: "invalid" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow("Invalid enum value");
     });
   });
 

@@ -34,6 +34,9 @@ const map: Record<ScalarSqlType, ColumnType> = {
  */
 function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
+    if (sqlType.kind === "ENUM") {
+      return { type: "Enum", variants: [...sqlType.variants] };
+    }
     return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
   }
   return map[sqlType];

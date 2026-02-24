@@ -11,6 +11,10 @@ import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { tableNameToInterface } from "./type-generator.js";
 import type { Relation } from "./relation-analyzer.js";
 
+function arrayType(elementTs: string): string {
+  return elementTs.includes("|") ? `(${elementTs})[]` : `${elementTs}[]`;
+}
+
 function columnTypeToTs(type: ColumnType): string {
   switch (type.type) {
     case "Text":
@@ -23,8 +27,10 @@ function columnTypeToTs(type: ColumnType): string {
       return "number";
     case "Uuid":
       return "string";
+    case "Enum":
+      return type.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
-      return `${columnTypeToTs(type.element)}[]`;
+      return arrayType(columnTypeToTs(type.element));
     default:
       return "unknown";
   }
@@ -59,9 +65,15 @@ function columnToWhereInputType(col: {
           : "string | { eq?: string; ne?: string }";
       }
       return "string | { eq?: string; ne?: string; in?: string[] }";
+    case "Enum": {
+      const variants = col.column_type.variants
+        .map((variant: string) => JSON.stringify(variant))
+        .join(" | ");
+      return `${variants} | { eq?: ${variants}; ne?: ${variants}; in?: (${variants})[] }`;
+    }
     case "Array": {
       const elementTs = columnTypeToTs(col.column_type.element);
-      const arrayTs = `${elementTs}[]`;
+      const arrayTs = arrayType(elementTs);
       return `${arrayTs} | { eq?: ${arrayTs}; contains?: ${elementTs} }`;
     }
     default:

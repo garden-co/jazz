@@ -26,12 +26,14 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "number";
     case "Uuid":
       return "string";
+    case "Enum":
+      return colType.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
       return `${wasmTypeToTs(colType.element)}[]`;
     case "Row":
       // Nested row - generate inline type
       const fields = colType.columns
-        .map((c) => {
+        .map((c: { name: string; nullable: boolean; column_type: ColumnType }) => {
           const opt = c.nullable ? "?" : "";
           return `${c.name}${opt}: ${wasmTypeToTs(c.column_type)}`;
         })

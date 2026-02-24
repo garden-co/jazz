@@ -248,6 +248,7 @@ const TYPE_TIMESTAMP: u8 = 5;
 const TYPE_UUID: u8 = 6;
 const TYPE_ARRAY: u8 = 7;
 const TYPE_ROW: u8 = 8;
+const TYPE_ENUM: u8 = 9;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
@@ -257,6 +258,13 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
+        ColumnType::Enum(variants) => {
+            buf.push(TYPE_ENUM);
+            write_u32(buf, variants.len() as u32);
+            for variant in variants {
+                write_string(buf, variant);
+            }
+        }
         ColumnType::Array(elem) => {
             buf.push(TYPE_ARRAY);
             encode_column_type(buf, elem);
@@ -280,6 +288,14 @@ fn decode_column_type(
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
         TYPE_UUID => Ok(ColumnType::Uuid),
+        TYPE_ENUM => {
+            let variant_count = read_u32(data, offset)? as usize;
+            let mut variants = Vec::with_capacity(variant_count);
+            for _ in 0..variant_count {
+                variants.push(read_string(data, offset, "enum_variant")?);
+            }
+            Ok(ColumnType::Enum(variants))
+        }
         TYPE_ARRAY => {
             let elem = decode_column_type(data, offset)?;
             Ok(ColumnType::Array(Box::new(elem)))
@@ -1088,6 +1104,34 @@ mod tests {
         let posts = decoded.get(&TableName::new("posts")).unwrap();
         let tags_col = posts.descriptor.column("tags").unwrap();
         assert!(matches!(tags_col.column_type, ColumnType::Array(_)));
+    }
+
+    #[test]
+    fn schema_roundtrip_with_enum() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("todos").column(
+                "status",
+                ColumnType::Enum(vec![
+                    "done".to_string(),
+                    "in_progress".to_string(),
+                    "todo".to_string(),
+                ]),
+            ))
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+
+        let todos = decoded.get(&TableName::new("todos")).unwrap();
+        let status_col = todos.descriptor.column("status").unwrap();
+        assert_eq!(
+            status_col.column_type,
+            ColumnType::Enum(vec![
+                "done".to_string(),
+                "in_progress".to_string(),
+                "todo".to_string(),
+            ])
+        );
     }
 
     #[test]
