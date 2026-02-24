@@ -100,12 +100,24 @@ fn local_commit_syncs_to_server() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { commits, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 1);
             assert_eq!(commits[0].id(), commit_id);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to server"),
     }
 }
 

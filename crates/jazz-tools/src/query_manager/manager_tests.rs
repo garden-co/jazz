@@ -124,29 +124,41 @@ fn insert_and_query() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Bob".into()), Value::Integer(50)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Charlie".into()), Value::Integer(75)],
-    )
-    .unwrap();
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let bob = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let charlie = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
 
     // Query all
     let query = qm.query("users").build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 3);
+    assert!(results.iter().any(|(id, values)| {
+        *id == alice.row_id && values == &vec![Value::Text("Alice".into()), Value::Integer(100)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == bob.row_id && values == &vec![Value::Text("Bob".into()), Value::Integer(50)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == charlie.row_id && values == &vec![Value::Text("Charlie".into()), Value::Integer(75)]
+    }));
 
     // Query with filter
     let query = qm
@@ -155,6 +167,16 @@ fn insert_and_query() {
         .build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|(id, values)| {
+        *id == alice.row_id && values == &vec![Value::Text("Alice".into()), Value::Integer(100)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == charlie.row_id && values == &vec![Value::Text("Charlie".into()), Value::Integer(75)]
+    }));
+    assert!(
+        results.iter().all(|(id, _)| *id != bob.row_id),
+        "Bob should not match score >= 75 filter"
+    );
 }
 
 #[test]
@@ -1636,8 +1658,12 @@ fn update_passes_filter_emits_addition() {
 
     qm.process(&mut storage);
     let updates = qm.take_updates();
-    // Row doesn't match filter, so no delta or empty delta
-    assert!(updates.is_empty() || updates[0].delta.added.is_empty());
+    // Row doesn't match filter, so no addition/removals, but we should still get an update for the subscription
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 
     // Update score to 100 (passes filter)
     qm.update(
@@ -1657,6 +1683,9 @@ fn update_passes_filter_emits_addition() {
         1,
         "Row should be added when it now passes filter"
     );
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 }
 
 #[test]
@@ -1731,7 +1760,11 @@ fn update_to_untracked_row_is_silent() {
     let _sub_id = qm.subscribe(query).unwrap();
 
     qm.process(&mut storage);
-    let _updates = qm.take_updates();
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 
     // Update score to 40 (still fails filter)
     qm.update(
@@ -1744,13 +1777,10 @@ fn update_to_untracked_row_is_silent() {
     qm.process(&mut storage);
 
     let updates = qm.take_updates();
-    // Should be no updates (or empty delta)
+    // No updates should be emitted since the row doesn't match the filter before or after the update
     assert!(
-        updates.is_empty()
-            || (updates[0].delta.added.is_empty()
-                && updates[0].delta.removed.is_empty()
-                && updates[0].delta.updated.is_empty()),
-        "No delta for row that doesn't match filter before or after update"
+        updates.is_empty(),
+        "No updates for row that doesn't match filter before or after update"
     );
 }
 
