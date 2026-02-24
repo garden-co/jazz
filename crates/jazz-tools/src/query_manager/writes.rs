@@ -9,7 +9,7 @@ use super::encoding::{decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
 use super::policy::{Operation, evaluate_simple_parts};
 use super::session::Session;
-use super::types::{RowDescriptor, TableName, Value};
+use super::types::{ColumnType, RowDescriptor, TableName, Value};
 
 impl QueryManager {
     /// Insert a new row into a table.
@@ -52,6 +52,14 @@ impl QueryManager {
                 actual: values.len(),
             });
         }
+
+        self.validate_uuid_array_foreign_keys_for_values(
+            storage,
+            &table_name,
+            &descriptor,
+            values,
+            &self.current_branch(),
+        )?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -157,6 +165,14 @@ impl QueryManager {
             });
         }
 
+        self.validate_uuid_array_foreign_keys_for_values(
+            storage,
+            &table_name,
+            &descriptor,
+            values,
+            branch,
+        )?;
+
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
@@ -224,6 +240,66 @@ impl QueryManager {
             row_id: object_id,
             row_commit_id,
         })
+    }
+
+    fn validate_uuid_array_foreign_keys_for_values(
+        &self,
+        storage: &dyn Storage,
+        table_name: &TableName,
+        descriptor: &RowDescriptor,
+        values: &[Value],
+        branch: &str,
+    ) -> Result<(), QueryError> {
+        for (column, value) in descriptor.columns.iter().zip(values.iter()) {
+            let Some(referenced_table) = column.references else {
+                continue;
+            };
+            let ColumnType::Array(element_type) = &column.column_type else {
+                continue;
+            };
+            if !matches!(element_type.as_ref(), ColumnType::Uuid) {
+                continue;
+            }
+            let Value::Array(elements) = value else {
+                continue;
+            };
+
+            for element in elements {
+                let Value::Uuid(target_id) = element else {
+                    continue;
+                };
+                if self.row_is_indexed_on_branch(
+                    storage,
+                    referenced_table.as_str(),
+                    branch,
+                    *target_id,
+                ) {
+                    continue;
+                }
+                return Err(QueryError::UuidArrayForeignKeyViolation {
+                    table: *table_name,
+                    column: column.name.as_str().to_string(),
+                    referenced_table,
+                    missing_id: *target_id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_uuid_array_foreign_keys_for_content(
+        &self,
+        storage: &dyn Storage,
+        table_name: &TableName,
+        descriptor: &RowDescriptor,
+        content: &[u8],
+        branch: &str,
+    ) -> Result<(), QueryError> {
+        let values = decode_row(descriptor, content)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        self.validate_uuid_array_foreign_keys_for_values(
+            storage, table_name, descriptor, &values, branch,
+        )
     }
 
     /// Evaluate a policy expression against encoded row content using full policy context.
@@ -341,6 +417,14 @@ impl QueryManager {
                 actual: values.len(),
             });
         }
+
+        self.validate_uuid_array_foreign_keys_for_values(
+            storage,
+            &table_name,
+            &descriptor,
+            values,
+            &self.current_branch(),
+        )?;
 
         // Encode new data (used by WITH CHECK and commit write).
         let new_data = encode_row(&descriptor, values)
@@ -681,6 +765,14 @@ impl QueryManager {
                 actual: values.len(),
             });
         }
+
+        self.validate_uuid_array_foreign_keys_for_values(
+            storage,
+            &table_name,
+            &descriptor,
+            values,
+            &self.current_branch(),
+        )?;
 
         // Encode new row data
         let new_data = encode_row(&descriptor, values)

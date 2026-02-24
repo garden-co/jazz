@@ -936,6 +936,37 @@ impl Parser {
 // Public API
 // ============================================================================
 
+fn is_valid_reference_column_type(column_type: &ColumnType) -> bool {
+    match column_type {
+        ColumnType::Uuid => true,
+        ColumnType::Array(element_type) => matches!(element_type.as_ref(), ColumnType::Uuid),
+        _ => false,
+    }
+}
+
+fn validate_schema_references(schema: &Schema) -> Result<(), SqlParseError> {
+    for (table_name, table_schema) in schema {
+        for column in &table_schema.descriptor.columns {
+            let Some(referenced_table) = column.references else {
+                continue;
+            };
+
+            if !is_valid_reference_column_type(&column.column_type) {
+                return Err(SqlParseError::SyntaxError(format!(
+                    "column '{}.{}' declares REFERENCES but has type {:?}; only UUID and UUID[] support REFERENCES",
+                    table_name.as_str(),
+                    column.name.as_str(),
+                    column.column_type
+                )));
+            }
+
+            let _ = referenced_table;
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse a schema SQL file into a Schema.
 pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
     let tokens = Tokenizer::new(sql).tokenize()?;
@@ -997,6 +1028,8 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
             None => break,
         }
     }
+
+    validate_schema_references(&schema)?;
 
     Ok(schema)
 }
@@ -1660,6 +1693,32 @@ mod tests {
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
+    }
+
+    #[test]
+    fn reject_non_uuid_array_references() {
+        let sql = "CREATE TABLE files (parts TEXT[] REFERENCES file_parts NOT NULL);";
+        let error = parse_schema(sql).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only UUID and UUID[] support REFERENCES"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn reject_non_uuid_scalar_references() {
+        let sql = "CREATE TABLE files (part TEXT REFERENCES file_parts NOT NULL);";
+        let error = parse_schema(sql).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only UUID and UUID[] support REFERENCES"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -914,7 +914,11 @@ impl QueryGraph {
             .split('.')
             .next_back()
             .unwrap_or(&spec.outer_column);
-        let outer_correlation_col = outer_descriptor.column_index(outer_col_name)?;
+        let outer_correlation_col = match outer_descriptor.column_index(outer_col_name) {
+            Some(index) => Some(index),
+            None if outer_col_name == "id" || outer_col_name == "_id" => None,
+            None => return None,
+        };
 
         // Build base query for subgraph, inheriting branches from outer query.
         let mut base_builder = QueryBuilder::new(spec.table);
