@@ -1,0 +1,38 @@
+{
+  "name": "inspector",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && pnpm run build:web && pnpm run build:extension",
+    "build:web": "vite build --mode web",
+    "build:extension": "vite build --mode extension",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.ts",
+    "test:browser": "playwright test --config playwright.config.ts"
+  },
+  "dependencies": {
+    "@tanstack/react-table": "^8.21.3",
+    "jazz-tools": "workspace:*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router": "^7.13.0",
+    "swr": "^2.4.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react-swc": "^4.2.2",
+    "@vitest/ui": "4.0.18",
+    "jsdom": "^28.1.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "catalog:"
+  }
+}

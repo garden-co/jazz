@@ -61,6 +61,7 @@ export * from "./runtime/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
+export * from "./dev-tools/index.js";
 
 // Local synthetic users and vanilla switcher UI
 export {

@@ -1,0 +1,146 @@
+.container {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 12px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  text-transform: capitalize;
+  color: #e4e9f3;
+}
+
+.stats {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #8f9db3;
+}
+
+.secondaryButton {
+  border: 1px solid #344357;
+  background: #202b3b;
+  color: #d3dceb;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.secondaryButton:hover {
+  background: #273346;
+}
+
+.secondaryButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.gridFrame {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #2f3a4b;
+  border-radius: 8px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font-size: 13px;
+}
+
+.table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.headerCell {
+  background: #1b2433;
+  color: #aab8cd;
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid #2f3a4b;
+  font-weight: 600;
+}
+
+.sortableHeader {
+  composes: headerCell;
+  cursor: pointer;
+}
+
+.sortableHeader:hover {
+  background: #222d3f;
+}
+
+.table td {
+  border-bottom: 1px solid #293445;
+  padding: 8px 12px;
+  color: #d7deea;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table tbody tr:hover td {
+  background: #1c2534;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid #273344;
+  padding-top: 10px;
+}
+
+.paginationInfo {
+  color: #8d9cb2;
+  font-size: 12px;
+}
+
+.paginationControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pageSizeLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #9aabc2;
+  font-size: 12px;
+}
+
+.pageSizeSelect {
+  border: 1px solid #33445d;
+  border-radius: 6px;
+  background: #1d2735;
+  color: #d9e2f0;
+  padding: 4px 6px;
+}
+
+.pageIndicator {
+  font-size: 12px;
+  color: #a3b1c6;
+  min-width: 72px;
+  text-align: center;
+}
+
