@@ -33,9 +33,12 @@ use crate::sync_manager::PersistenceTier;
 use super::{
     LoadedBranch, Storage, StorageError,
     key_codec::{
-        ack_key, branch_tips_key, commit_key, commit_prefix, increment_bytes, index_entry_key,
-        index_prefix, index_range_scan_bounds, index_value_prefix, obj_meta_key,
-        parse_uuid_from_index_key,
+        increment_bytes, index_entry_key, index_prefix, index_range_scan_bounds,
+        index_value_prefix, parse_uuid_from_index_key,
+    },
+    storage_core::{
+        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
+        load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -214,12 +217,10 @@ impl Storage for SurrealKvStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let key = obj_meta_key(id);
-        let json = serde_json::to_vec(&metadata)
-            .map_err(|e| StorageError::IoError(format!("serialize metadata: {}", e)))?;
-
         let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        Self::txn_set(&mut txn, &key, &json)?;
+        create_object_core(id, metadata, |key, value| {
+            Self::txn_set(&mut txn, key, value)
+        })?;
         self.commit_txn(&mut txn)
     }
 
@@ -227,16 +228,8 @@ impl Storage for SurrealKvStorage {
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let key = obj_meta_key(id);
         let txn = self.begin_read_txn()?;
-        match Self::txn_get(&txn, &key)? {
-            Some(data) => {
-                let meta: HashMap<String, String> = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize metadata: {}", e)))?;
-                Ok(Some(meta))
-            }
-            None => Ok(None),
-        }
+        load_object_metadata_core(id, |key| Self::txn_get(&txn, key))
     }
 
     fn load_branch(
@@ -245,50 +238,12 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         let txn = self.begin_read_txn()?;
-
-        // Check if object exists
-        let meta_key = obj_meta_key(object_id);
-        if Self::txn_get(&txn, &meta_key)?.is_none() {
-            return Ok(None);
-        }
-
-        // Load commits via prefix scan
-        let commit_prefix = commit_prefix(object_id, branch);
-        let commit_entries = Self::scan_prefix(&txn, &commit_prefix)?;
-
-        if commit_entries.is_empty() {
-            // Check if tips exist (branch could exist with only tips set)
-            let tips_key = branch_tips_key(object_id, branch);
-            if Self::txn_get(&txn, &tips_key)?.is_none() {
-                return Ok(None);
-            }
-        }
-
-        let mut commits = Vec::new();
-        for (_key, data) in &commit_entries {
-            let mut commit: Commit = serde_json::from_slice(data)
-                .map_err(|e| StorageError::IoError(format!("deserialize commit: {}", e)))?;
-
-            // Load ack state for this commit
-            let ack_key = ack_key(commit.id());
-            if let Some(ack_data) = Self::txn_get(&txn, &ack_key)? {
-                let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&ack_data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?;
-                commit.ack_state.confirmed_tiers = tiers;
-            }
-
-            commits.push(commit);
-        }
-
-        // Load tips
-        let tips_key = branch_tips_key(object_id, branch);
-        let tails = match Self::txn_get(&txn, &tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        Ok(Some(LoadedBranch { commits, tails }))
+        load_branch_core(
+            object_id,
+            branch,
+            |key| Self::txn_get(&txn, key),
+            |prefix| Self::scan_prefix(&txn, prefix),
+        )
     }
 
     fn append_commit(
@@ -297,34 +252,21 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        let commit_id = commit.id();
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-
-        // Store the commit
-        let commit_key = commit_key(object_id, branch, commit_id);
-        let commit_json = serde_json::to_vec(&commit)
-            .map_err(|e| StorageError::IoError(format!("serialize commit: {}", e)))?;
-        Self::txn_set(&mut txn, &commit_key, &commit_json)?;
-
-        // Read-modify-write tips
-        let tips_key = branch_tips_key(object_id, branch);
-        let mut tips: HashSet<CommitId> = match Self::txn_get(&txn, &tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        // Remove parents from tips
-        for parent in &commit.parents {
-            tips.remove(parent);
-        }
-        // Add this commit as a tip
-        tips.insert(commit_id);
-
-        let tips_json = serde_json::to_vec(&tips)
-            .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-        Self::txn_set(&mut txn, &tips_key, &tips_json)?;
-
+        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
+        append_commit_core(
+            object_id,
+            branch,
+            commit,
+            |key| {
+                let txn = txn.borrow();
+                Self::txn_get(&txn, key)
+            },
+            |key, value| {
+                let mut txn = txn.borrow_mut();
+                Self::txn_set(&mut txn, key, value)
+            },
+        )?;
+        let mut txn = txn.into_inner();
         self.commit_txn(&mut txn)
     }
 
@@ -334,23 +276,25 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-
-        // Delete the commit
-        let commit_key = commit_key(object_id, branch, commit_id);
-        Self::txn_delete(&mut txn, &commit_key)?;
-
-        // Remove from tips
-        let tips_key = branch_tips_key(object_id, branch);
-        if let Some(data) = Self::txn_get(&txn, &tips_key)? {
-            let mut tips: HashSet<CommitId> = serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?;
-            tips.remove(&commit_id);
-            let tips_json = serde_json::to_vec(&tips)
-                .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-            Self::txn_set(&mut txn, &tips_key, &tips_json)?;
-        }
-
+        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
+        delete_commit_core(
+            object_id,
+            branch,
+            commit_id,
+            |key| {
+                let txn = txn.borrow();
+                Self::txn_get(&txn, key)
+            },
+            |key, value| {
+                let mut txn = txn.borrow_mut();
+                Self::txn_set(&mut txn, key, value)
+            },
+            |key| {
+                let mut txn = txn.borrow_mut();
+                Self::txn_delete(&mut txn, key)
+            },
+        )?;
+        let mut txn = txn.into_inner();
         self.commit_txn(&mut txn)
     }
 
@@ -360,18 +304,21 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let tips_key = branch_tips_key(object_id, branch);
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        match tails {
-            Some(t) => {
-                let json = serde_json::to_vec(&t)
-                    .map_err(|e| StorageError::IoError(format!("serialize tails: {}", e)))?;
-                Self::txn_set(&mut txn, &tips_key, &json)?;
-            }
-            None => {
-                Self::txn_delete(&mut txn, &tips_key)?;
-            }
-        }
+        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
+        set_branch_tails_core(
+            object_id,
+            branch,
+            tails,
+            |key, value| {
+                let mut txn = txn.borrow_mut();
+                Self::txn_set(&mut txn, key, value)
+            },
+            |key| {
+                let mut txn = txn.borrow_mut();
+                Self::txn_delete(&mut txn, key)
+            },
+        )?;
+        let mut txn = txn.into_inner();
         self.commit_txn(&mut txn)
     }
 
@@ -384,17 +331,20 @@ impl Storage for SurrealKvStorage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError> {
-        let key = ack_key(commit_id);
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        let mut tiers: HashSet<PersistenceTier> = match Self::txn_get(&txn, &key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?,
-            None => HashSet::new(),
-        };
-        tiers.insert(tier);
-        let json = serde_json::to_vec(&tiers)
-            .map_err(|e| StorageError::IoError(format!("serialize ack: {}", e)))?;
-        Self::txn_set(&mut txn, &key, &json)?;
+        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
+        store_ack_tier_core(
+            commit_id,
+            tier,
+            |key| {
+                let txn = txn.borrow();
+                Self::txn_get(&txn, key)
+            },
+            |key, value| {
+                let mut txn = txn.borrow_mut();
+                Self::txn_set(&mut txn, key, value)
+            },
+        )?;
+        let mut txn = txn.into_inner();
         self.commit_txn(&mut txn)
     }
 

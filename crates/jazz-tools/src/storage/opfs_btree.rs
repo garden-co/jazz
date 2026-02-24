@@ -33,9 +33,12 @@ use crate::sync_manager::PersistenceTier;
 use super::{
     LoadedBranch, Storage, StorageError,
     key_codec::{
-        ack_key, branch_tips_key, commit_key, commit_prefix, increment_bytes, index_entry_key,
-        index_prefix, index_range_scan_bounds, index_value_prefix, obj_meta_key,
-        parse_uuid_from_index_key,
+        increment_bytes, index_entry_key, index_prefix, index_range_scan_bounds,
+        index_value_prefix, parse_uuid_from_index_key,
+    },
+    storage_core::{
+        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
+        load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -239,25 +242,14 @@ impl Storage for OpfsBTreeStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let key = obj_meta_key(id);
-        let json = serde_json::to_vec(&metadata)
-            .map_err(|e| StorageError::IoError(format!("serialize metadata: {}", e)))?;
-        self.tree_insert(&key, &json)
+        create_object_core(id, metadata, |key, value| self.tree_insert(key, value))
     }
 
     fn load_object_metadata(
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let key = obj_meta_key(id);
-        match self.tree_read(&key)? {
-            Some(data) => {
-                let meta: HashMap<String, String> = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize metadata: {}", e)))?;
-                Ok(Some(meta))
-            }
-            None => Ok(None),
-        }
+        load_object_metadata_core(id, |key| self.tree_read(key))
     }
 
     fn load_branch(
@@ -265,44 +257,12 @@ impl Storage for OpfsBTreeStorage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
-        let meta_key = obj_meta_key(object_id);
-        if self.tree_read(&meta_key)?.is_none() {
-            return Ok(None);
-        }
-
-        let commit_prefix = commit_prefix(object_id, branch);
-        let commit_entries = self.tree_scan_prefix(&commit_prefix)?;
-
-        if commit_entries.is_empty() {
-            let tips_key = branch_tips_key(object_id, branch);
-            if self.tree_read(&tips_key)?.is_none() {
-                return Ok(None);
-            }
-        }
-
-        let mut commits = Vec::new();
-        for (_key, data) in &commit_entries {
-            let mut commit: Commit = serde_json::from_slice(data)
-                .map_err(|e| StorageError::IoError(format!("deserialize commit: {}", e)))?;
-
-            let ack_key = ack_key(commit.id());
-            if let Some(ack_data) = self.tree_read(&ack_key)? {
-                let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&ack_data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?;
-                commit.ack_state.confirmed_tiers = tiers;
-            }
-
-            commits.push(commit);
-        }
-
-        let tips_key = branch_tips_key(object_id, branch);
-        let tails = match self.tree_read(&tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        Ok(Some(LoadedBranch { commits, tails }))
+        load_branch_core(
+            object_id,
+            branch,
+            |key| self.tree_read(key),
+            |prefix| self.tree_scan_prefix(prefix),
+        )
     }
 
     fn append_commit(
@@ -311,30 +271,13 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        let commit_id = commit.id();
-
-        let commit_key = commit_key(object_id, branch, commit_id);
-        let commit_json = serde_json::to_vec(&commit)
-            .map_err(|e| StorageError::IoError(format!("serialize commit: {}", e)))?;
-        self.tree_insert(&commit_key, &commit_json)?;
-
-        let tips_key = branch_tips_key(object_id, branch);
-        let mut tips: HashSet<CommitId> = match self.tree_read(&tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        for parent in &commit.parents {
-            tips.remove(parent);
-        }
-        tips.insert(commit_id);
-
-        let tips_json = serde_json::to_vec(&tips)
-            .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-        self.tree_insert(&tips_key, &tips_json)?;
-
-        Ok(())
+        append_commit_core(
+            object_id,
+            branch,
+            commit,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
     }
 
     fn delete_commit(
@@ -343,20 +286,14 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        let commit_key = commit_key(object_id, branch, commit_id);
-        self.tree_delete(&commit_key)?;
-
-        let tips_key = branch_tips_key(object_id, branch);
-        if let Some(data) = self.tree_read(&tips_key)? {
-            let mut tips: HashSet<CommitId> = serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?;
-            tips.remove(&commit_id);
-            let tips_json = serde_json::to_vec(&tips)
-                .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-            self.tree_insert(&tips_key, &tips_json)?;
-        }
-
-        Ok(())
+        delete_commit_core(
+            object_id,
+            branch,
+            commit_id,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+            |key| self.tree_delete(key),
+        )
     }
 
     fn set_branch_tails(
@@ -365,18 +302,13 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let tips_key = branch_tips_key(object_id, branch);
-        match tails {
-            Some(t) => {
-                let json = serde_json::to_vec(&t)
-                    .map_err(|e| StorageError::IoError(format!("serialize tails: {}", e)))?;
-                self.tree_insert(&tips_key, &json)?;
-            }
-            None => {
-                self.tree_delete(&tips_key)?;
-            }
-        }
-        Ok(())
+        set_branch_tails_core(
+            object_id,
+            branch,
+            tails,
+            |key, value| self.tree_insert(key, value),
+            |key| self.tree_delete(key),
+        )
     }
 
     fn store_ack_tier(
@@ -384,16 +316,12 @@ impl Storage for OpfsBTreeStorage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError> {
-        let key = ack_key(commit_id);
-        let mut tiers: HashSet<PersistenceTier> = match self.tree_read(&key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?,
-            None => HashSet::new(),
-        };
-        tiers.insert(tier);
-        let json = serde_json::to_vec(&tiers)
-            .map_err(|e| StorageError::IoError(format!("serialize ack: {}", e)))?;
-        self.tree_insert(&key, &json)
+        store_ack_tier_core(
+            commit_id,
+            tier,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
     }
 
     fn index_insert(
@@ -678,7 +606,7 @@ mod tests {
             .store_ack_tier(commit_id, PersistenceTier::EdgeServer)
             .unwrap();
 
-        let key = ack_key(commit_id);
+        let key = super::super::key_codec::ack_key(commit_id);
         let data = storage.tree_read(&key).unwrap().unwrap();
         let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&data).unwrap();
         assert!(tiers.contains(&PersistenceTier::Worker));

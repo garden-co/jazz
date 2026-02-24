@@ -11,6 +11,7 @@
 
 mod key_codec;
 mod opfs_btree;
+mod storage_core;
 pub use opfs_btree::OpfsBTreeStorage;
 #[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
 mod surrealkv;
