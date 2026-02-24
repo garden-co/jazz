@@ -31,10 +31,11 @@ use crate::query_manager::types::Value;
 use crate::sync_manager::PersistenceTier;
 
 use super::{
-    LoadedBranch, Storage, StorageError, encode_value,
+    LoadedBranch, Storage, StorageError,
     key_codec::{
-        ack_key, branch_tips_key, commit_key, commit_prefix, increment_bytes, increment_string,
-        index_entry_key, index_prefix, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+        ack_key, branch_tips_key, commit_key, commit_prefix, increment_bytes, index_entry_key,
+        index_prefix, index_range_scan_bounds, index_value_prefix, obj_meta_key,
+        parse_uuid_from_index_key,
     },
 };
 
@@ -447,41 +448,10 @@ impl Storage for OpfsBTreeStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let base_prefix = index_prefix(table, column, branch);
-
-        let start_key = match start {
-            Bound::Included(v) => {
-                format!("{}{}", base_prefix, hex::encode(encode_value(v)))
-            }
-            Bound::Excluded(v) => {
-                let encoded = hex::encode(encode_value(v));
-                let mut key = format!("{}{}:", base_prefix, encoded);
-                increment_string(&mut key);
-                key
-            }
-            Bound::Unbounded => base_prefix.clone(),
-        };
-
-        let end_key = match end {
-            Bound::Included(v) => {
-                let encoded = hex::encode(encode_value(v));
-                let mut key = format!("{}{}:", base_prefix, encoded);
-                increment_string(&mut key);
-                key
-            }
-            Bound::Excluded(v) => {
-                format!("{}{}", base_prefix, hex::encode(encode_value(v)))
-            }
-            Bound::Unbounded => {
-                let mut end = base_prefix.clone();
-                increment_string(&mut end);
-                end
-            }
-        };
-
-        if start_key >= end_key {
+        let Some((start_key, end_key)) = index_range_scan_bounds(table, column, branch, start, end)
+        else {
             return Vec::new();
-        }
+        };
 
         match self.tree_scan_key_range(&start_key, &end_key) {
             Ok(keys) => keys
