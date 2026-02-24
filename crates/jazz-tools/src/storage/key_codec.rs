@@ -1,3 +1,5 @@
+use std::ops::Bound;
+
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
@@ -63,6 +65,45 @@ pub(super) fn index_value_prefix(table: &str, column: &str, branch: &str, value:
 
 pub(super) fn index_prefix(table: &str, column: &str, branch: &str) -> String {
     format!("idx:{}:{}:{}:", table, column, branch)
+}
+
+/// Compute lexicographic scan bounds for index range queries.
+pub(super) fn index_range_scan_bounds(
+    table: &str,
+    column: &str,
+    branch: &str,
+    start: Bound<&Value>,
+    end: Bound<&Value>,
+) -> Option<(String, String)> {
+    let base_prefix = index_prefix(table, column, branch);
+
+    let start_key = match start {
+        Bound::Included(v) => format!("{}{}", base_prefix, hex::encode(encode_value(v))),
+        Bound::Excluded(v) => {
+            let encoded = hex::encode(encode_value(v));
+            let mut key = format!("{}{}:", base_prefix, encoded);
+            increment_string(&mut key);
+            key
+        }
+        Bound::Unbounded => base_prefix.clone(),
+    };
+
+    let end_key = match end {
+        Bound::Included(v) => {
+            let encoded = hex::encode(encode_value(v));
+            let mut key = format!("{}{}:", base_prefix, encoded);
+            increment_string(&mut key);
+            key
+        }
+        Bound::Excluded(v) => format!("{}{}", base_prefix, hex::encode(encode_value(v))),
+        Bound::Unbounded => {
+            let mut end = base_prefix.clone();
+            increment_string(&mut end);
+            end
+        }
+    };
+
+    (start_key < end_key).then_some((start_key, end_key))
 }
 
 /// Parse a UUID from the last segment of an index key.
