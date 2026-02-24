@@ -32,6 +32,14 @@ export function todoUpdate(fields: { title?: string; done?: boolean }): string {
   return JSON.stringify(obj);
 }
 
+// Build query JSON for a table scan (includes required relation_ir)
+export function tableQuery(table: string): string {
+  return JSON.stringify({
+    table,
+    relation_ir: { TableScan: { table } },
+  });
+}
+
 // Parsed todo row
 export interface Todo {
   id: string;

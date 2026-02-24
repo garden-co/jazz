@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef } from "react";
 import { Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { JazzRuntime } from "./jazz-runtime";
-import { todoValues, todoUpdate } from "./schema";
+import { todoValues, todoUpdate, tableQuery } from "./schema";
 
 interface Props {
   runtime: JazzRuntime;
@@ -97,10 +97,14 @@ export function RuntimeTab({ runtime }: Props) {
   const handleQuery = useCallback(async () => {
     try {
       const t0 = performance.now();
-      const result = await runtime.query(JSON.stringify({ table: "todos" }), undefined, undefined);
+      const result = await runtime.query(tableQuery("todos"), undefined, undefined);
       const elapsed = performance.now() - t0;
-      const rows = JSON.parse(result);
-      append(`query: ${rows.length} rows (${formatMs(elapsed)})`);
+      const parsed = JSON.parse(result);
+      if (parsed.error) {
+        append(`query error: ${parsed.error}`);
+      } else {
+        append(`query: ${parsed.length} rows (${formatMs(elapsed)})`);
+      }
     } catch (e) {
       append(`query failed: ${e}`);
     }
@@ -153,7 +157,7 @@ export function RuntimeTab({ runtime }: Props) {
     try {
       deltaCount.current = 0;
       const h = runtime.subscribe(
-        JSON.stringify({ table: "todos" }),
+        tableQuery("todos"),
         (_deltaJson: string) => {
           deltaCount.current++;
         },
@@ -231,10 +235,14 @@ export function RuntimeTab({ runtime }: Props) {
     append("stress query...");
     try {
       const t0 = performance.now();
-      const result = await runtime.query(JSON.stringify({ table: "todos" }), undefined, undefined);
+      const result = await runtime.query(tableQuery("todos"), undefined, undefined);
       const elapsed = performance.now() - t0;
-      const rows = JSON.parse(result);
-      append(`stress query: ${rows.length} rows in ${formatMs(elapsed)}`);
+      const parsed = JSON.parse(result);
+      if (parsed.error) {
+        append(`stress query error: ${parsed.error}`);
+      } else {
+        append(`stress query: ${parsed.length} rows in ${formatMs(elapsed)}`);
+      }
     } catch (e) {
       append(`stress query failed: ${e}`);
     }
