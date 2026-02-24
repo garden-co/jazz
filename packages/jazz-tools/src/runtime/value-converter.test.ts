@@ -54,6 +54,12 @@ describe("toValue", () => {
     expect(toValue(uuid, colType)).toEqual({ type: "Uuid", value: uuid });
   });
 
+  it("converts Enum values and validates variants", () => {
+    const colType = { type: "Enum", variants: ["done", "todo"] } as ColumnType;
+    expect(toValue("todo", colType)).toEqual({ type: "Text", value: "todo" });
+    expect(() => toValue("invalid", colType)).toThrow("Invalid enum value");
+  });
+
   it("converts Array values", () => {
     const colType: ColumnType = { type: "Array", element: { type: "Text" } };
     expect(toValue(["a", "b", "c"], colType)).toEqual({

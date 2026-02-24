@@ -106,6 +106,11 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
     if (columnType?.type === "Uuid") {
       return { Uuid: value };
     }
+    if (columnType?.type === "Enum" && !columnType.variants.includes(value)) {
+      throw new Error(
+        `Invalid enum value "${value}". Expected one of: ${columnType.variants.join(", ")}`,
+      );
+    }
     return { Text: value };
   }
   throw new Error(`Unsupported value type: ${typeof value}`);
