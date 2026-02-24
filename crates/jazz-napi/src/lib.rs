@@ -1367,3 +1367,65 @@ pub fn parse_schema_fn(env: Env, json: String) -> napi::Result<napi::JsUnknown> 
     let _groove_schema = js_schema_to_groove(js_schema.clone());
     env.to_js_value(&js_schema)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableName, TableSchema};
+    use std::collections::HashMap;
+
+    #[test]
+    fn js_schema_to_groove_parses_enum_column_type() {
+        let js_schema = JsSchema {
+            tables: HashMap::from([(
+                "todos".to_string(),
+                JsTableSchema {
+                    columns: vec![JsColumnDescriptor {
+                        name: "status".to_string(),
+                        column_type: JsColumnType {
+                            type_name: "Enum".to_string(),
+                            element: None,
+                            variants: Some(vec!["done".to_string(), "todo".to_string()]),
+                            columns: None,
+                        },
+                        nullable: false,
+                        references: None,
+                    }],
+                    policies: None,
+                },
+            )]),
+        };
+
+        let schema = js_schema_to_groove(js_schema);
+        let status = schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("status")
+            .unwrap();
+        assert_eq!(
+            status.column_type,
+            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
+        );
+    }
+
+    #[test]
+    fn groove_schema_to_js_emits_enum_column_type() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("todos").column(
+                "status",
+                ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+            ))
+            .build();
+
+        let js_schema = groove_schema_to_js(&schema);
+        let status = &js_schema.tables["todos"].columns[0];
+        assert_eq!(status.column_type.type_name, "Enum");
+        assert_eq!(
+            status.column_type.variants,
+            Some(vec!["done".to_string(), "todo".to_string()])
+        );
+        assert!(status.column_type.element.is_none());
+        assert!(status.column_type.columns.is_none());
+    }
+}
