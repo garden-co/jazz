@@ -681,10 +681,18 @@ impl QueryManager {
                         Ok(result) => {
                             return Some((result.data, commit_id));
                         }
-                        Err(_) => {
-                            // Transform failed - return original data
-                            // This allows graceful degradation
-                            return Some((content, commit_id));
+                        Err(err) => {
+                            tracing::warn!(
+                                sub_id = sub_id.0,
+                                row_id = %id,
+                                table = %table,
+                                source_branch = %source_branch,
+                                source_schema = %source_hash.short(),
+                                target_schema = %schema_context.current_hash.short(),
+                                error = %err,
+                                "lens transform failed; dropping row from query result"
+                            );
+                            return None;
                         }
                     }
                 }

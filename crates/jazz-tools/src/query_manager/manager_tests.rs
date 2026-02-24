@@ -952,6 +952,89 @@ fn synced_update_missing_old_content_panics_fail_fast() {
 }
 
 #[test]
+fn lens_transform_failure_drops_row_instead_of_fallback() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
+
+    // Build a live schema without registering a lens path to current.
+    // Rows from that branch should be dropped at materialization time.
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut live_schema = Schema::new();
+    live_schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+            ColumnDescriptor::new("email", ColumnType::Text),
+        ])
+        .into(),
+    );
+    let live_descriptor = live_schema
+        .get(&TableName::new("users"))
+        .expect("live schema table should exist")
+        .descriptor
+        .clone();
+    qm.add_live_schema(live_schema);
+
+    let current_branch = get_branch(&qm);
+    let live_branch = qm
+        .all_query_branches()
+        .into_iter()
+        .find(|b| b != &current_branch)
+        .expect("live schema branch should exist");
+
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let live_data = encode_row(
+        &live_descriptor,
+        &[
+            Value::Text("Alice".into()),
+            Value::Integer(100),
+            Value::Text("alice@example.com".into()),
+        ],
+    )
+    .unwrap();
+    let commit = Commit {
+        parents: smallvec![],
+        content: live_data,
+        timestamp: 1000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &live_branch, commit)
+        .unwrap();
+    qm.process(&mut storage);
+
+    assert!(
+        qm.row_is_indexed_on_branch(&storage, "users", &live_branch, row_id),
+        "row should be indexed on live branch before subscription settle"
+    );
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        0,
+        "row from branch with failed lens transform should be dropped"
+    );
+}
+
+#[test]
 fn synced_insert_appears_in_subscription_delta() {
     use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::{decode_row, encode_row};
