@@ -864,6 +864,7 @@ impl QueryManager {
         };
 
         let descriptor = table_schema.descriptor.clone();
+        let has_prior_history = !update.previous_commit_ids.is_empty();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
         if self.is_hard_deleted(update.object_id) {
@@ -873,8 +874,21 @@ impl QueryManager {
 
         // Check if incoming update is a hard delete
         if self.is_incoming_hard_delete(update.object_id) {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for historical sync update (hard delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
             // Apply hard delete unconditionally
-            let old_data = update.old_content.as_deref();
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
                 &table,
@@ -890,8 +904,23 @@ impl QueryManager {
 
         // Check if incoming update is a soft delete
         if self.is_soft_delete_commit(update.object_id) {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for historical sync update (soft delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
+
             // Apply soft delete - remove from _id and column indices, add to _id_deleted
-            if let Some(old_data) = &update.old_content {
+            if let Some(old_data) = old_data {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
                     storage,
                     &table,
@@ -969,8 +998,16 @@ impl QueryManager {
                 &new_data,
                 &descriptor,
             );
+        } else {
+            panic!(
+                "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                update.object_id,
+                table,
+                branch,
+                update.previous_commit_ids.len(),
+                update.commit_ids.len(),
+            );
         }
-        // If old_content is None with previous_commit_ids: truncated old data, accept staleness
 
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
