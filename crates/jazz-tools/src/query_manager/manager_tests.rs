@@ -122,29 +122,41 @@ fn insert_and_query() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Bob".into()), Value::Integer(50)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Charlie".into()), Value::Integer(75)],
-    )
-    .unwrap();
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let bob = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let charlie = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
 
     // Query all
     let query = qm.query("users").build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 3);
+    assert!(results.iter().any(|(id, values)| {
+        *id == alice.row_id && values == &vec![Value::Text("Alice".into()), Value::Integer(100)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == bob.row_id && values == &vec![Value::Text("Bob".into()), Value::Integer(50)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == charlie.row_id && values == &vec![Value::Text("Charlie".into()), Value::Integer(75)]
+    }));
 
     // Query with filter
     let query = qm
@@ -153,6 +165,16 @@ fn insert_and_query() {
         .build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|(id, values)| {
+        *id == alice.row_id && values == &vec![Value::Text("Alice".into()), Value::Integer(100)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == charlie.row_id && values == &vec![Value::Text("Charlie".into()), Value::Integer(75)]
+    }));
+    assert!(
+        results.iter().all(|(id, _)| *id != bob.row_id),
+        "Bob should not match score >= 75 filter"
+    );
 }
 
 #[test]
