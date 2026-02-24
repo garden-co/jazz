@@ -158,6 +158,7 @@ function createRuntimeHarness() {
       receivedFromWorker.push(payload);
     },
     addServer() {},
+    removeServer() {},
   } as unknown as Runtime;
 
   return {
