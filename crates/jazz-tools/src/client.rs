@@ -5,16 +5,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
+use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
 use bytes::BytesMut;
 use futures::StreamExt;
-use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{RowDelta, Value};
-use groove::schema_manager::SchemaManager;
-use groove::storage::{Storage, StorageError, SurrealKvStorage};
-use groove::sync_manager::{
+use jazz::query_manager::query::Query;
+use jazz::query_manager::session::Session;
+use jazz::query_manager::types::{RowDelta, Value};
+use jazz::schema_manager::SchemaManager;
+use jazz::storage::{Storage, StorageError, SurrealKvStorage};
+use jazz::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 use tokio::sync::{RwLock, mpsc};
@@ -107,7 +107,7 @@ impl JazzClient {
         //
         // SurrealKV lock release can lag slightly after a close() in the same process.
         // Retry briefly on lock errors so immediate reopen flows remain reliable.
-        let db_path = context.data_dir.join("groove.surrealkv");
+        let db_path = context.data_dir.join("jazz.surrealkv");
         let storage = {
             const MAX_ATTEMPTS: usize = 100;
             const RETRY_DELAY_MS: u64 = 25;
@@ -404,7 +404,7 @@ impl JazzClient {
     }
 
     /// Get the current schema.
-    pub async fn schema(&self) -> Result<groove::query_manager::types::Schema> {
+    pub async fn schema(&self) -> Result<jazz::query_manager::types::Schema> {
         self.runtime
             .current_schema()
             .map_err(|e| JazzError::Query(e.to_string()))

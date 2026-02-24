@@ -416,17 +416,6 @@ export class Db {
   }
 
   /**
-   * @deprecated Use insertWithAck().
-   */
-  async insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    tier: PersistenceTier,
-  ): Promise<string> {
-    return this.insertWithAck(table, data, tier);
-  }
-
-  /**
    * Update an existing row.
    *
    * This is a **synchronous** operation - the row is updated immediately
@@ -468,18 +457,6 @@ export class Db {
   }
 
   /**
-   * @deprecated Use updateWithAck().
-   */
-  async updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.updateWithAck(table, id, data, tier);
-  }
-
-  /**
    * Delete a row.
    *
    * This is a **synchronous** operation - the row is deleted immediately
@@ -513,17 +490,6 @@ export class Db {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     await client.deleteWithAck(id, tier);
-  }
-
-  /**
-   * @deprecated Use deleteFromWithAck().
-   */
-  async deleteFromPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.deleteFromWithAck(table, id, tier);
   }
 
   /**

@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use groove::jazz_transport::{
+use jazz::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -79,9 +79,9 @@ async fn events_handler(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Parse client_id from query param - error if malformed, generate if missing
     let client_id = match params.client_id {
-        Some(s) => groove::sync_manager::ClientId::parse(&s)
+        Some(s) => jazz::sync_manager::ClientId::parse(&s)
             .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
-        None => groove::sync_manager::ClientId::new(),
+        None => jazz::sync_manager::ClientId::new(),
     };
 
     {
@@ -227,7 +227,7 @@ async fn sync_handler(
     headers: HeaderMap,
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
-    use groove::sync_manager::{InboxEntry, Source};
+    use jazz::sync_manager::{InboxEntry, Source};
 
     let payload_size = serde_json::to_vec(&request.payload)
         .map(|v| v.len())

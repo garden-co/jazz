@@ -34,7 +34,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_fn_constructor_rnruntime_new(
     schemaJson: Uint8Array,
     appId: Uint8Array,
-    grooveEnv: Uint8Array,
+    jazzEnv: Uint8Array,
     userBranch: Uint8Array,
     tier: Uint8Array,
     dataPath: Uint8Array,

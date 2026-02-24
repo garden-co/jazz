@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 uniffi = "0.29.3"
 thiserror = "1.0.64"
-groove = { package = "jazz-tools", path = "../../jazz-tools", version = "2.0.0-alpha.0", features = [
+jazz = { package = "jazz-tools", path = "../../jazz-tools", version = "2.0.0-alpha.0", features = [
   "surrealkv",
 ] }
 futures = "0.3"

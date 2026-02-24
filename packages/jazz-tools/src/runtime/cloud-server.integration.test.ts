@@ -491,7 +491,7 @@ describe("cloud-server integration (Jazz TS)", () => {
         makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      const rowId = await clientA.createPersisted(
+      const rowId = await clientA.createWithAck(
         "todos",
         [
           { type: "Text", value: "shared-item" },
@@ -506,7 +506,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
       expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
 
-      await clientA.updatePersisted(rowId, { done: { type: "Boolean", value: true } }, "edge");
+      await clientA.updateWithAck(rowId, { done: { type: "Boolean", value: true } }, "edge");
       const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
         const row = rows.find((r) => r.id === rowId);
         return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
@@ -514,7 +514,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await clientA.deletePersisted(rowId, "edge");
+      await clientA.deleteWithAck(rowId, "edge");
       await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (clientA) await clientA.shutdown();
@@ -546,7 +546,7 @@ describe("cloud-server integration (Jazz TS)", () => {
         writer = await connectClient(
           makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
-        await writer.createPersisted(
+        await writer.createWithAck(
           "todos",
           [
             { type: "Text", value: "persisted-item" },

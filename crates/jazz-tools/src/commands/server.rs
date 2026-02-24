@@ -6,12 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use groove::query_manager::query::QueryBuilder;
-use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
-use groove::runtime_tokio::TokioRuntime;
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::SurrealKvStorage;
-use groove::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
+use jazz::query_manager::query::QueryBuilder;
+use jazz::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz::runtime_tokio::TokioRuntime;
+use jazz::schema_manager::{AppId, SchemaManager};
+use jazz::storage::SurrealKvStorage;
+use jazz::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
 use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
@@ -61,7 +61,7 @@ impl ExternalIdentityStore {
         )
         .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
 
-        let db_path = meta_dir.join("groove.surrealkv");
+        let db_path = meta_dir.join("jazz.surrealkv");
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
@@ -231,7 +231,7 @@ pub async fn run(
     let sync_tx_clone = sync_tx.clone();
 
     // Create persistent storage
-    let db_path = format!("{}/groove.surrealkv", data_dir);
+    let db_path = format!("{}/jazz.surrealkv", data_dir);
     let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
         .map_err(|e| format!("Failed to open storage: {:?}", e))?;
 

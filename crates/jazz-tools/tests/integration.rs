@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use groove::jazz_transport::ServerEvent;
+use jazz::jazz_transport::ServerEvent;
 use reqwest::Client;
 use tempfile::TempDir;
 

@@ -15,20 +15,20 @@ use axum::{
 };
 use base64::Engine;
 use bytes::Bytes;
-use groove::jazz_transport::{
+use hmac::{Hmac, Mac};
+use jazz::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
-use groove::object::ObjectId;
-use groove::query_manager::query::QueryBuilder;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
-use groove::runtime_tokio::TokioRuntime;
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::SurrealKvStorage;
-use groove::sync_manager::{
+use jazz::object::ObjectId;
+use jazz::query_manager::query::QueryBuilder;
+use jazz::query_manager::session::Session;
+use jazz::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz::runtime_tokio::TokioRuntime;
+use jazz::schema_manager::{AppId, SchemaManager};
+use jazz::storage::SurrealKvStorage;
+use jazz::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
 };
-use hmac::{Hmac, Mac};
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
@@ -500,7 +500,7 @@ impl MetaStore {
         )
         .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
 
-        let db_path = meta_dir.join("groove.surrealkv");
+        let db_path = meta_dir.join("jazz.surrealkv");
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
@@ -894,7 +894,7 @@ impl AppRuntime {
         let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
         let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
-        let db_path = data_dir.join("groove.surrealkv");
+        let db_path = data_dir.join("jazz.surrealkv");
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
 

@@ -193,8 +193,8 @@ type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 ///
 /// Stores objects and indices in HashMaps/BTreeMaps. No persistence.
 /// This is sufficient for:
-/// - All groove unit tests
-/// - All groove integration tests
+/// - All jazz unit tests
+/// - All jazz integration tests
 /// - Main thread in browser (acts as cache of worker state)
 #[derive(Default)]
 pub struct MemoryStorage {

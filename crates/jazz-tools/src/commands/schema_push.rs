@@ -9,16 +9,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use groove::jazz_transport::SyncPayloadRequest;
-use groove::query_manager::types::SchemaHash;
-use groove::runtime_tokio::TokioRuntime;
-use groove::schema_manager::{
+use jazz::jazz_transport::SyncPayloadRequest;
+use jazz::query_manager::types::SchemaHash;
+use jazz::runtime_tokio::TokioRuntime;
+use jazz::schema_manager::{
     AppId, Direction, Lens, MigrationFileInfo, SchemaDirectory, SchemaManager,
     parse_migration_filename,
 };
-use groove::storage::MemoryStorage;
-use groove::sync_manager::SyncPayload;
-use groove::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
+use jazz::storage::MemoryStorage;
+use jazz::sync_manager::SyncPayload;
+use jazz::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
 use reqwest::Client;
 use reqwest::header::CONTENT_TYPE;
 

@@ -34,9 +34,9 @@ function makeClient() {
       return 1;
     },
     unsubscribe: () => {},
-    insertPersisted: async () => "00000000-0000-0000-0000-000000000001",
-    updatePersisted: async () => {},
-    deletePersisted: async () => {},
+    insertWithAck: async () => "00000000-0000-0000-0000-000000000001",
+    updateWithAck: async () => {},
+    deleteWithAck: async () => {},
     onSyncMessageReceived: () => {},
     onSyncMessageToSend: () => {},
     addServer: () => {},
