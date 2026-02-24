@@ -1,7 +1,7 @@
 {
   "name": "jazz-wasm",
   "version": "0.1.0",
-  "description": "WebAssembly bindings for the Groove database engine",
+  "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
     "database",

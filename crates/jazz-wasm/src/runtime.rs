@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `OpfsBTreeStorage` provides synchronous storage (from groove::storage)
+//! - `OpfsBTreeStorage` provides synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -33,19 +33,19 @@ fn init_tracing() {
     });
 }
 
-use groove::object::ObjectId;
+use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
-use groove::query_manager::encoding::decode_row;
-use groove::query_manager::session::Session;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
-use groove::query_manager::types::{Row, RowDescriptor};
-use groove::query_manager::types::{Schema, SchemaHash, Value};
-use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::query_manager::types::{Row, RowDescriptor};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
-use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::OpfsBTreeStorage;
-use groove::sync_manager::{
+use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::OpfsBTreeStorage;
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
@@ -460,8 +460,8 @@ impl WasmRuntime {
     /// Insert a row and return a Promise that resolves when the tier acks.
     ///
     /// `tier` must be one of: "worker", "edge", "core".
-    #[wasm_bindgen(js_name = insertPersisted)]
-    pub fn insert_persisted(
+    #[wasm_bindgen(js_name = insertWithAck)]
+    pub fn insert_with_ack(
         &self,
         table: &str,
         values: JsValue,
@@ -492,8 +492,8 @@ impl WasmRuntime {
     }
 
     /// Update a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = updatePersisted)]
-    pub fn update_persisted(
+    #[wasm_bindgen(js_name = updateWithAck)]
+    pub fn update_with_ack(
         &self,
         object_id: &str,
         values: JsValue,
@@ -530,12 +530,8 @@ impl WasmRuntime {
     }
 
     /// Delete a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = deletePersisted)]
-    pub fn delete_persisted(
-        &self,
-        object_id: &str,
-        tier: &str,
-    ) -> Result<js_sys::Promise, JsError> {
+    #[wasm_bindgen(js_name = deleteWithAck)]
+    pub fn delete_with_ack(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -702,7 +698,7 @@ impl WasmRuntime {
     /// * `role` - One of "user", "admin", "peer"
     #[wasm_bindgen(js_name = setClientRole)]
     pub fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
-        use groove::sync_manager::ClientRole;
+        use jazz_tools::sync_manager::ClientRole;
 
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;

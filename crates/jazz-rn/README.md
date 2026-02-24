@@ -1,6 +1,6 @@
 # jazz-rn
 
-A React Native native module that provides high-performance cryptographic operations for the Groove framework, built with Rust and UniFFI. This package exposes the same cryptographic primitives as `groove-napi` and `jazz-wasm` but specifically designed for React Native applications running on iOS and Android.
+A React Native native module that provides high-performance cryptographic operations for the Jazz framework, built with Rust and UniFFI. This package exposes the same cryptographic primitives as `jazz-napi` and `jazz-wasm` but specifically designed for React Native applications running on iOS and Android.
 
 ## What is jazz-rn?
 
@@ -10,7 +10,7 @@ A React Native native module that provides high-performance cryptographic operat
 
 The package consists of:
 
-- **Rust Core** (`rust/`): The core cryptographic implementation, shared with `groove` and `groove-napi`
+- **Rust Core** (`rust/`): The core cryptographic implementation, shared with `jazz` and `jazz-napi`
 - **UniFFI Bindings**: Automatically generated bindings that bridge Rust to React Native
 - **Native Modules**:
   - **iOS**: XCFramework containing static libraries for arm64 (device) and arm64-simulator

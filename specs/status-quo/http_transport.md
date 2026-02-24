@@ -92,7 +92,7 @@ Reconnection behavior currently differs by client implementation:
 
 > `crates/jazz-tools/src/client.rs:157-257`
 > `packages/jazz-tools/src/runtime/client.ts:572-663`
-> `packages/jazz-tools/src/worker/groove-worker.ts:152-241`
+> `packages/jazz-tools/src/worker/jazz-worker.ts:152-241`
 
 ## Authentication
 

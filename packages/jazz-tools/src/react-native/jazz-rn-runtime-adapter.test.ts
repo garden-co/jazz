@@ -116,16 +116,14 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
 
-    await expect(adapter.insertPersisted("todos", [], "worker")).resolves.toBe("row-1");
+    await expect(adapter.insertWithAck("todos", [], "worker")).resolves.toBe("row-1");
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updatePersisted("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deletePersisted("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateWithAck("row-1", {}, "worker")).resolves.toBeUndefined();
+    await expect(adapter.deleteWithAck("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertPersisted("todos", [], "edge")).toThrow(
-      "supports only 'worker' tier",
-    );
+    expect(() => adapter.insertWithAck("todos", [], "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {

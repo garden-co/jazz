@@ -84,7 +84,7 @@ impl std::error::Error for QueryError {}
 /// Handle to a pending query.
 ///
 /// Used to correlate query results with the original request.
-/// Wrappers (groove-runtime, jazz-wasm) use this to fulfill
+/// Wrappers (jazz-runtime, jazz-wasm) use this to fulfill
 /// platform-specific futures/promises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueryHandle(pub u64);
@@ -158,6 +158,13 @@ pub struct QueryUpdate {
     pub descriptor: RowDescriptor,
 }
 
+/// Terminal failure for a local query subscription.
+#[derive(Debug, Clone)]
+pub struct QuerySubscriptionFailure {
+    pub subscription_id: QuerySubscriptionId,
+    pub reason: String,
+}
+
 /// State for an active policy check (graphs and associated data).
 #[derive(Debug)]
 pub(super) struct PolicyCheckState {
@@ -227,6 +234,9 @@ pub struct QueryManager {
     /// Pending query updates
     pub(super) update_outbox: Vec<QueryUpdate>,
 
+    /// Terminal local subscription failures.
+    pub(super) failed_subscriptions: Vec<QuerySubscriptionFailure>,
+
     /// Active policy checks being evaluated.
     pub(super) active_policy_checks: HashMap<PendingUpdateId, PolicyCheckState>,
 
@@ -251,7 +261,7 @@ pub struct QueryManager {
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
-    pub(super) known_schemas: HashMap<SchemaHash, Schema>,
+    pub(super) known_schemas: Arc<HashMap<SchemaHash, Schema>>,
 }
 
 impl QueryManager {
@@ -273,12 +283,13 @@ impl QueryManager {
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
+            failed_subscriptions: Vec::new(),
             active_policy_checks: HashMap::new(),
             server_subscriptions: HashMap::new(),
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
-            known_schemas: HashMap::new(),
+            known_schemas: Arc::new(HashMap::new()),
         }
     }
 
@@ -384,11 +395,13 @@ impl QueryManager {
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self) {
+        let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
+
         // Recompile local subscriptions
-        for sub in self.subscriptions.values_mut() {
+        for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
-                // Update branches from current schema context
-                sub.branches = self
+                // Resolve next branches from current schema context.
+                let next_branches: Vec<String> = self
                     .schema_context
                     .all_branch_names()
                     .into_iter()
@@ -396,34 +409,86 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                let new_graph = Self::compile_graph(
+                match Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                );
-                if let Ok(new_graph) = new_graph {
-                    sub.graph = new_graph;
+                ) {
+                    Ok(new_graph) => {
+                        sub.graph = new_graph;
+                        sub.branches = next_branches;
+                        sub.needs_recompile = false;
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        tracing::error!(
+                            sub_id = sub_id.0,
+                            table = %sub.graph.table,
+                            error = %reason,
+                            "subscription stale recompile failed; dropping subscription"
+                        );
+                        failed_local.push((*sub_id, reason));
+                    }
                 }
-                sub.needs_recompile = false;
             }
         }
 
+        for (sub_id, reason) in failed_local {
+            self.subscriptions.remove(&sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                reason: reason.clone(),
+            });
+            // Keep upstream state in sync for subscriptions created via subscribe_with_sync.
+            self.sync_manager
+                .send_query_unsubscription_to_servers(QueryId(sub_id.0));
+        }
+
+        let mut failed_server: Vec<(ClientId, QueryId, String)> = Vec::new();
+
         // Recompile server-side subscriptions
-        for sub in self.server_subscriptions.values_mut() {
+        for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
                 // Recompile the graph
-                let new_graph = Self::compile_graph(
+                match Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                );
-                if let Ok(new_graph) = new_graph {
-                    sub.graph = new_graph;
+                ) {
+                    Ok(new_graph) => {
+                        sub.graph = new_graph;
+                        sub.needs_recompile = false;
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        tracing::error!(
+                            %client_id,
+                            query_id = query_id.0,
+                            error = %reason,
+                            "server subscription stale recompile failed; dropping subscription"
+                        );
+                        failed_server.push((*client_id, *query_id, reason));
+                    }
                 }
-                sub.needs_recompile = false;
             }
+        }
+
+        for (client_id, query_id, reason) in failed_server {
+            self.server_subscriptions.remove(&(client_id, query_id));
+            self.sync_manager
+                .drop_client_query_subscription(client_id, query_id);
+            self.sync_manager
+                .send_query_unsubscription_to_servers(query_id);
+            self.sync_manager.emit_query_subscription_rejected(
+                client_id,
+                query_id,
+                format!(
+                    "query recompilation failed for query_id {}: {}",
+                    query_id.0, reason
+                ),
+            );
         }
     }
 
@@ -616,10 +681,18 @@ impl QueryManager {
                         Ok(result) => {
                             return Some((result.data, commit_id));
                         }
-                        Err(_) => {
-                            // Transform failed - return original data
-                            // This allows graceful degradation
-                            return Some((content, commit_id));
+                        Err(err) => {
+                            tracing::warn!(
+                                sub_id = sub_id.0,
+                                row_id = %id,
+                                table = %table,
+                                source_branch = %source_branch,
+                                source_schema = %source_hash.short(),
+                                target_schema = %schema_context.current_hash.short(),
+                                error = %err,
+                                "lens transform failed; dropping row from query result"
+                            );
+                            return None;
                         }
                     }
                 }
@@ -799,6 +872,7 @@ impl QueryManager {
         };
 
         let descriptor = table_schema.descriptor.clone();
+        let has_prior_history = !update.previous_commit_ids.is_empty();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
         if self.is_hard_deleted(update.object_id) {
@@ -808,8 +882,21 @@ impl QueryManager {
 
         // Check if incoming update is a hard delete
         if self.is_incoming_hard_delete(update.object_id) {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for historical sync update (hard delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
             // Apply hard delete unconditionally
-            let old_data = update.old_content.as_deref();
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
                 &table,
@@ -825,8 +912,23 @@ impl QueryManager {
 
         // Check if incoming update is a soft delete
         if self.is_soft_delete_commit(update.object_id) {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for historical sync update (soft delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
+
             // Apply soft delete - remove from _id and column indices, add to _id_deleted
-            if let Some(old_data) = &update.old_content {
+            if let Some(old_data) = old_data {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
                     storage,
                     &table,
@@ -904,8 +1006,16 @@ impl QueryManager {
                 &new_data,
                 &descriptor,
             );
+        } else {
+            panic!(
+                "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                update.object_id,
+                table,
+                branch,
+                update.previous_commit_ids.len(),
+                update.commit_ids.len(),
+            );
         }
-        // If old_content is None with previous_commit_ids: truncated old data, accept staleness
 
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);

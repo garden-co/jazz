@@ -15,8 +15,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use groove::schema_manager::{AppId, SchemaManager};
-//! use groove::query_manager::types::{SchemaBuilder, TableSchema, ColumnType};
+//! use crate::schema_manager::{AppId, SchemaManager};
+//! use crate::query_manager::types::{SchemaBuilder, TableSchema, ColumnType};
 //!
 //! let app_id = AppId::from_name("my-app");
 //! let schema = SchemaBuilder::new()

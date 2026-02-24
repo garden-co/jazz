@@ -1,9 +1,9 @@
 //! HTTP/SSE transport for server communication.
 
 use crate::jazz_transport::SyncPayloadRequest;
+use crate::query_manager::session::Session;
+use crate::sync_manager::{ClientId, SyncPayload};
 use base64::Engine;
-use groove::query_manager::session::Session;
-use groove::sync_manager::{ClientId, SyncPayload};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 
@@ -194,10 +194,10 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
             if let Some(meta) = metadata
                 && let Some(type_str) = meta
                     .metadata
-                    .get(groove::metadata::MetadataKey::Type.as_str())
+                    .get(crate::metadata::MetadataKey::Type.as_str())
             {
-                return type_str == groove::metadata::ObjectType::CatalogueSchema.as_str()
-                    || type_str == groove::metadata::ObjectType::CatalogueLens.as_str();
+                return type_str == crate::metadata::ObjectType::CatalogueSchema.as_str()
+                    || type_str == crate::metadata::ObjectType::CatalogueLens.as_str();
             }
             false
         }

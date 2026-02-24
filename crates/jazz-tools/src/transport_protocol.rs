@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use groove::sync_manager::{ClientId, QueryId, SyncPayload};
+use crate::sync_manager::{ClientId, QueryId, SyncPayload};
 
 /// Unique identifier for a client's streaming connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -259,9 +259,9 @@ mod tests {
 
     #[test]
     fn test_sync_payload_request_serialization() {
-        use groove::object::BranchName;
-        use groove::object::ObjectId;
-        use groove::sync_manager::ClientId;
+        use crate::object::BranchName;
+        use crate::object::ObjectId;
+        use crate::sync_manager::ClientId;
 
         let payload = SyncPayload::ObjectUpdated {
             object_id: ObjectId::new(),
