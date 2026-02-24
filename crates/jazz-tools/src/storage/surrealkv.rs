@@ -32,11 +32,11 @@ use crate::sync_manager::PersistenceTier;
 
 use super::{
     LoadedBranch, Storage, StorageError,
-    key_codec::{increment_bytes, index_range_scan_bounds, parse_uuid_from_index_key},
+    key_codec::increment_bytes,
     storage_core::{
         append_commit_core, create_object_core, delete_commit_core, index_insert_core,
-        index_lookup_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
+        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
+        load_branch_core, load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -406,21 +406,12 @@ impl Storage for SurrealKvStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let Some((start_key, end_key)) = index_range_scan_bounds(table, column, branch, start, end)
-        else {
-            return Vec::new();
-        };
-
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        match Self::scan_key_range(&txn, &start_key, &end_key) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_range_core(table, column, branch, start, end, |start_key, end_key| {
+            Self::scan_key_range(&txn, start_key, end_key)
+        })
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {

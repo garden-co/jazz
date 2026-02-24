@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Bound;
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -10,7 +11,7 @@ use crate::query_manager::types::Value;
 
 use super::key_codec::{
     ack_key, branch_tips_key, commit_key, commit_prefix, index_entry_key, index_prefix,
-    index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
 };
 use super::{LoadedBranch, StorageError};
 
@@ -219,6 +220,28 @@ pub(super) fn index_scan_all_core(
 ) -> Vec<ObjectId> {
     let prefix = index_prefix(table, column, branch);
     scan_prefix_keys(&prefix)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn index_range_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    start: Bound<&Value>,
+    end: Bound<&Value>,
+    mut scan_key_range: impl FnMut(&str, &str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let Some((start_key, end_key)) = index_range_scan_bounds(table, column, branch, start, end)
+    else {
+        return Vec::new();
+    };
+
+    scan_key_range(&start_key, &end_key)
         .map(|keys| {
             keys.iter()
                 .filter_map(|key| parse_uuid_from_index_key(key))
