@@ -48,6 +48,23 @@ export interface SyncStreamControllerOptions {
 }
 
 /**
+ * Minimal runtime surface required for sync stream lifecycle wiring.
+ */
+export interface RuntimeSyncTarget {
+  addServer(): void;
+  removeServer(): void;
+  onSyncMessageReceived(messageJson: string): void;
+}
+
+export interface RuntimeSyncStreamControllerOptions {
+  logPrefix?: string;
+  getRuntime(): RuntimeSyncTarget | null | undefined;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getClientId(): string;
+  setClientId(clientId: string): void;
+}
+
+/**
  * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
  *
  * Keeps stream state and backoff policy in one place so both main-thread and
@@ -210,6 +227,71 @@ export class SyncStreamController {
       this.scheduleReconnect();
     }
   }
+}
+
+/**
+ * Build a stream controller bound to a runtime's server/sync hooks.
+ */
+export function createRuntimeSyncStreamController(
+  options: RuntimeSyncStreamControllerOptions,
+): SyncStreamController {
+  return new SyncStreamController({
+    logPrefix: options.logPrefix,
+    getAuth: options.getAuth,
+    getClientId: options.getClientId,
+    setClientId: options.setClientId,
+    onConnected: () => options.getRuntime()?.addServer(),
+    onDisconnected: () => options.getRuntime()?.removeServer(),
+    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+  });
+}
+
+export interface SyncOutboxRouterOptions {
+  logPrefix?: string;
+  onServerPayload(payload: unknown): void | Promise<void>;
+  onClientPayload?(payloadJson: string): void;
+  onServerPayloadError?(error: unknown): void;
+}
+
+/**
+ * Create a shared runtime outbox router for server/client destinations.
+ */
+export function createSyncOutboxRouter(
+  options: SyncOutboxRouterOptions,
+): (envelope: string) => void {
+  const logPrefix = options.logPrefix ?? "";
+
+  return (envelope: string) => {
+    let parsed: { destination?: unknown; payload?: unknown };
+    try {
+      parsed = JSON.parse(envelope) as { destination?: unknown; payload?: unknown };
+    } catch (error) {
+      console.error(`${logPrefix}Sync envelope parse error:`, error);
+      return;
+    }
+
+    const destination = parsed.destination;
+    const payload = parsed.payload;
+    const isObjectDestination = destination !== null && typeof destination === "object";
+
+    if (isObjectDestination && "Client" in destination) {
+      const payloadJson = JSON.stringify(payload);
+      if (payloadJson !== undefined) {
+        options.onClientPayload?.(payloadJson);
+      }
+      return;
+    }
+
+    if (isObjectDestination && "Server" in destination) {
+      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
+        if (options.onServerPayloadError) {
+          options.onServerPayloadError(error);
+          return;
+        }
+        console.error(`${logPrefix}Sync POST error:`, error);
+      });
+    }
+  };
 }
 
 /**

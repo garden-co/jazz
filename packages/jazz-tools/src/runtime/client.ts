@@ -12,8 +12,10 @@ import {
   generateClientId,
   buildEndpointUrl,
   applyUserAuthHeaders,
+  createRuntimeSyncStreamController,
+  createSyncOutboxRouter,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
-  SyncStreamController,
+  type SyncStreamController,
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
@@ -304,7 +306,8 @@ export class JazzClient {
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
-    this.streamController = new SyncStreamController({
+    this.streamController = createRuntimeSyncStreamController({
+      getRuntime: () => this.runtime,
       getAuth: () => ({
         jwtToken: this.context.jwtToken,
         localAuthMode: this.context.localAuthMode,
@@ -314,9 +317,6 @@ export class JazzClient {
       setClientId: (clientId) => {
         this.serverClientId = clientId;
       },
-      onConnected: () => this.runtime.addServer(),
-      onDisconnected: () => this.runtime.removeServer(),
-      onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
     });
   }
 
@@ -727,26 +727,22 @@ export class JazzClient {
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
-    // Set up outgoing message handler
-    this.runtime.onSyncMessageToSend((envelope: string) => {
-      // Envelope is now {destination, payload}
-      const parsed = JSON.parse(envelope);
-      const payload = parsed.payload;
-
-      // Only send server-bound messages
-      if (parsed.destination && "Server" in parsed.destination) {
-        void this.sendSyncMessage(payload).catch((error) => {
+    this.runtime.onSyncMessageToSend(
+      createSyncOutboxRouter({
+        logPrefix: "[client] ",
+        onServerPayload: (payload) => this.sendSyncMessage(payload),
+        onServerPayloadError: (error) => {
           console.error("Sync POST error:", error);
           this.streamController.notifyTransportFailure();
-        });
-      }
-    });
+        },
+      }),
+    );
 
     // Connect to binary stream for incoming messages
     this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(payload: any): Promise<void> {
+  private async sendSyncMessage(payload: unknown): Promise<void> {
     const serverUrl = this.streamController.getServerUrl();
     if (!serverUrl) return;
 
