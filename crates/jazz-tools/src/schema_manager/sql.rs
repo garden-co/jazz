@@ -394,28 +394,69 @@ impl Parser {
 
     fn parse_column_type(&mut self) -> Result<ColumnType, SqlParseError> {
         let type_name = self.expect_ident()?;
+        let upper = type_name.to_uppercase();
 
-        // Skip optional size like VARCHAR(255)
-        if self.peek() == Some(&Token::LParen) {
-            self.advance();
-            // Skip until closing paren
-            while self.peek() != Some(&Token::RParen) {
-                if self.advance().is_none() {
-                    return Err(SqlParseError::UnexpectedEnd);
+        let mut col_type = if upper == "ENUM" {
+            self.expect(&Token::LParen)?;
+            let mut variants = Vec::new();
+            loop {
+                match self.advance() {
+                    Some(Token::StringLit(variant)) => variants.push(variant.clone()),
+                    Some(t) => {
+                        return Err(SqlParseError::Expected(format!(
+                            "enum variant string literal, got {:?}",
+                            t
+                        )));
+                    }
+                    None => return Err(SqlParseError::UnexpectedEnd),
+                }
+
+                match self.peek() {
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
+                    Some(Token::RParen) => {
+                        self.advance();
+                        break;
+                    }
+                    Some(t) => {
+                        return Err(SqlParseError::Expected(format!(
+                            ", or ) in ENUM type, got {:?}",
+                            t
+                        )));
+                    }
+                    None => return Err(SqlParseError::UnexpectedEnd),
                 }
             }
-            self.advance(); // consume RParen
-        }
+            if variants.is_empty() {
+                return Err(SqlParseError::SyntaxError(
+                    "ENUM type requires at least one variant".to_string(),
+                ));
+            }
+            ColumnType::Enum(variants)
+        } else {
+            // Skip optional size like VARCHAR(255)
+            if self.peek() == Some(&Token::LParen) {
+                self.advance();
+                // Skip until closing paren
+                while self.peek() != Some(&Token::RParen) {
+                    if self.advance().is_none() {
+                        return Err(SqlParseError::UnexpectedEnd);
+                    }
+                }
+                self.advance(); // consume RParen
+            }
 
-        let mut col_type = match type_name.to_uppercase().as_str() {
-            "TEXT" | "VARCHAR" | "CHAR" | "STRING" => Ok(ColumnType::Text),
-            "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => Ok(ColumnType::Integer),
-            "BIGINT" => Ok(ColumnType::BigInt),
-            "BOOLEAN" | "BOOL" => Ok(ColumnType::Boolean),
-            "TIMESTAMP" => Ok(ColumnType::Timestamp),
-            "UUID" => Ok(ColumnType::Uuid),
-            _ => Err(SqlParseError::UnsupportedType(type_name)),
-        }?;
+            match upper.as_str() {
+                "TEXT" | "VARCHAR" | "CHAR" | "STRING" => ColumnType::Text,
+                "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => ColumnType::Integer,
+                "BIGINT" => ColumnType::BigInt,
+                "BOOLEAN" | "BOOL" => ColumnType::Boolean,
+                "TIMESTAMP" => ColumnType::Timestamp,
+                "UUID" => ColumnType::Uuid,
+                _ => return Err(SqlParseError::UnsupportedType(type_name)),
+            }
+        };
 
         // Optional array suffixes: UUID[], TEXT[][], etc.
         while self.peek() == Some(&Token::LBracket) {
@@ -1239,6 +1280,14 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         ColumnType::BigInt => "BIGINT".to_string(),
         ColumnType::Boolean => "BOOLEAN".to_string(),
         ColumnType::Text => "TEXT".to_string(),
+        ColumnType::Enum(variants) => {
+            let variants = variants
+                .iter()
+                .map(|variant| format!("'{}'", variant.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("ENUM({variants})")
+        }
         ColumnType::Timestamp => "TIMESTAMP".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
         ColumnType::Array(elem) => format!("{}[]", column_type_to_sql(elem)),
@@ -1626,6 +1675,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_enum_column_type() {
+        let sql = "CREATE TABLE todos (status ENUM('todo','in_progress','done') NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(
+            col.column_type,
+            ColumnType::Enum(vec![
+                "todo".to_string(),
+                "in_progress".to_string(),
+                "done".to_string(),
+            ])
+        );
+        assert!(!col.nullable);
+    }
+
+    #[test]
     fn reject_non_create_in_schema() {
         let sql = "ALTER TABLE users ADD COLUMN age INTEGER;";
 
@@ -1662,6 +1732,29 @@ mod tests {
         match &transform.ops[0] {
             LensOp::AddColumn { default, .. } => {
                 assert_eq!(*default, Value::Integer(-42));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_lens_add_enum_column_with_default() {
+        let sql = "ALTER TABLE todos ADD COLUMN status ENUM('todo','done') DEFAULT 'todo';";
+        let transform = parse_lens(sql).unwrap();
+
+        match &transform.ops[0] {
+            LensOp::AddColumn {
+                column,
+                column_type,
+                default,
+                ..
+            } => {
+                assert_eq!(column, "status");
+                assert_eq!(
+                    *column_type,
+                    ColumnType::Enum(vec!["todo".to_string(), "done".to_string()])
+                );
+                assert_eq!(*default, Value::Text("todo".to_string()));
             }
             _ => panic!(),
         }
@@ -1819,6 +1912,27 @@ mod tests {
             ColumnType::Array(Box::new(ColumnType::Uuid))
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn sql_round_trip_with_enum() {
+        let sql = "CREATE TABLE todos (status ENUM('todo','done') NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+
+        assert!(regenerated.contains("status ENUM('todo','done') NOT NULL"));
+
+        let reparsed = parse_schema(&regenerated).unwrap();
+        let col = &reparsed
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+        assert_eq!(
+            col.column_type,
+            ColumnType::Enum(vec!["todo".to_string(), "done".to_string()])
+        );
         assert!(!col.nullable);
     }
 

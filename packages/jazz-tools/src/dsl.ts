@@ -5,6 +5,7 @@ import type {
   Schema,
   Table,
   SqlType,
+  EnumSqlType,
   Lens,
   LensOp,
   AddOp,
@@ -15,6 +16,22 @@ import type {
   ScalarSqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
+
+function normalizeEnumVariants(variants: readonly string[]): string[] {
+  if (variants.length === 0) {
+    throw new Error("Enum columns require at least one variant.");
+  }
+  for (const variant of variants) {
+    if (variant.length === 0) {
+      throw new Error("Enum variants cannot be empty strings.");
+    }
+  }
+  const unique = new Set(variants);
+  if (unique.size !== variants.length) {
+    throw new Error("Enum variants must be unique.");
+  }
+  return [...unique].sort((a, b) => a.localeCompare(b));
+}
 
 // ============================================================================
 // Column Builder (for schema context)
@@ -31,6 +48,32 @@ class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
 
   constructor(public _sqlType: ScalarSqlType) {}
+
+  optional(): this {
+    this._nullable = true;
+    return this;
+  }
+
+  _build(name: string): Column {
+    return {
+      name,
+      sqlType: this._sqlType,
+      nullable: this._nullable,
+    };
+  }
+
+  get _references(): string | undefined {
+    return undefined;
+  }
+}
+
+class EnumBuilder implements ColumnBuilder {
+  private _nullable = false;
+  public _sqlType: EnumSqlType;
+
+  constructor(...variants: string[]) {
+    this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
+  }
 
   optional(): this {
     this._nullable = true;
@@ -133,6 +176,18 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "REAL", default: opts.default };
   }
 
+  enum<const Variants extends readonly [string, ...string[]]>(
+    ...args: [...variants: Variants, opts: { default: MaybeOptional<Variants[number], Optional> }]
+  ): AddOp {
+    const opts = args[args.length - 1] as { default: MaybeOptional<Variants[number], Optional> };
+    const variants = normalizeEnumVariants(args.slice(0, -1) as string[]);
+    return {
+      _type: "add",
+      sqlType: { kind: "ENUM", variants },
+      default: opts.default,
+    };
+  }
+
   array<T extends SqlType>(opts: {
     of: T;
     default: MaybeOptional<TSTypeFromSqlType<T>[], Optional>;
@@ -170,6 +225,18 @@ class DropBuilder {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
   }
 
+  enum<const Variants extends readonly [string, ...string[]]>(
+    ...args: [...variants: Variants, opts: { backwardsDefault: Variants[number] }]
+  ): DropOp {
+    const opts = args[args.length - 1] as { backwardsDefault: Variants[number] };
+    const variants = normalizeEnumVariants(args.slice(0, -1) as string[]);
+    return {
+      _type: "drop",
+      sqlType: { kind: "ENUM", variants },
+      backwardsDefault: opts.backwardsDefault,
+    };
+  }
+
   array<T extends SqlType>(opts: { of: T; backwardsDefault: TSTypeFromSqlType<T>[] }): DropOp {
     return {
       _type: "drop",
@@ -189,6 +256,7 @@ export const col = {
   boolean: () => new ScalarBuilder("BOOLEAN"),
   int: () => new ScalarBuilder("INTEGER"),
   float: () => new ScalarBuilder("REAL"),
+  enum: (...variants: string[]) => new EnumBuilder(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
   array: (element: ColumnBuilder) => new ArrayBuilder(element),
 

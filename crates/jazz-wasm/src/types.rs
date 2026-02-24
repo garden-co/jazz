@@ -109,6 +109,7 @@ pub enum WasmColumnType {
     BigInt,
     Boolean,
     Text,
+    Enum { variants: Vec<String> },
     Timestamp,
     Uuid,
     Array { element: Box<WasmColumnType> },
@@ -248,6 +249,7 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
             ColumnType::BigInt => WasmColumnType::BigInt,
             ColumnType::Boolean => WasmColumnType::Boolean,
             ColumnType::Text => WasmColumnType::Text,
+            ColumnType::Enum(variants) => WasmColumnType::Enum { variants },
             ColumnType::Timestamp => WasmColumnType::Timestamp,
             ColumnType::Uuid => WasmColumnType::Uuid,
             ColumnType::Array(elem) => WasmColumnType::Array {
@@ -573,6 +575,7 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                 WasmColumnType::BigInt => ColumnType::BigInt,
                 WasmColumnType::Boolean => ColumnType::Boolean,
                 WasmColumnType::Text => ColumnType::Text,
+                WasmColumnType::Enum { variants } => ColumnType::Enum(variants),
                 WasmColumnType::Timestamp => ColumnType::Timestamp,
                 WasmColumnType::Uuid => ColumnType::Uuid,
                 WasmColumnType::Array { element } => {

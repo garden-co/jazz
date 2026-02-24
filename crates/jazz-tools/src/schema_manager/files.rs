@@ -565,10 +565,23 @@ fn value_to_ts_literal(value: &Value) -> String {
     }
 }
 
+fn string_to_ts_literal(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn enum_variants_to_ts_args(variants: &[String]) -> String {
+    variants
+        .iter()
+        .map(|variant| string_to_ts_literal(variant))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Map ColumnType to col builder method name.
 fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
     match column_type {
         ColumnType::Text => "string",
+        ColumnType::Enum(_) => "enum",
         ColumnType::Boolean => "boolean",
         ColumnType::Integer | ColumnType::BigInt => "int",
         ColumnType::Timestamp => "int", // Timestamps are stored as integers
@@ -620,18 +633,28 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                     } else {
                         ""
                     };
-                    if let ColumnType::Array(element_type) = column_type {
-                        let element_literal = column_type_to_sql(element_type);
-                        lines.push(format!(
-                            "  {}: col.add(){}.array({{ of: \"{}\", default: {} }}),{}",
-                            column, optional, element_literal, default_ts, draft_comment
-                        ));
-                    } else {
-                        let method = sql_type_to_col_method(column_type);
-                        lines.push(format!(
-                            "  {}: col.add(){}.{}({{ default: {} }}),{}",
-                            column, optional, method, default_ts, draft_comment
-                        ));
+                    match column_type {
+                        ColumnType::Array(element_type) => {
+                            let element_literal = column_type_to_sql(element_type);
+                            lines.push(format!(
+                                "  {}: col.add(){}.array({{ of: \"{}\", default: {} }}),{}",
+                                column, optional, element_literal, default_ts, draft_comment
+                            ));
+                        }
+                        ColumnType::Enum(variants) => {
+                            let variant_args = enum_variants_to_ts_args(variants);
+                            lines.push(format!(
+                                "  {}: col.add(){}.enum({}, {{ default: {} }}),{}",
+                                column, optional, variant_args, default_ts, draft_comment
+                            ));
+                        }
+                        _ => {
+                            let method = sql_type_to_col_method(column_type);
+                            lines.push(format!(
+                                "  {}: col.add(){}.{}({{ default: {} }}),{}",
+                                column, optional, method, default_ts, draft_comment
+                            ));
+                        }
                     }
                 }
                 LensOp::RemoveColumn {
@@ -641,18 +664,28 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                     ..
                 } => {
                     let default_ts = value_to_ts_literal(default);
-                    if let ColumnType::Array(element_type) = column_type {
-                        let element_literal = column_type_to_sql(element_type);
-                        lines.push(format!(
-                            "  {}: col.drop().array({{ of: \"{}\", backwardsDefault: {} }}),{}",
-                            column, element_literal, default_ts, draft_comment
-                        ));
-                    } else {
-                        let method = sql_type_to_col_method(column_type);
-                        lines.push(format!(
-                            "  {}: col.drop().{}({{ backwardsDefault: {} }}),{}",
-                            column, method, default_ts, draft_comment
-                        ));
+                    match column_type {
+                        ColumnType::Array(element_type) => {
+                            let element_literal = column_type_to_sql(element_type);
+                            lines.push(format!(
+                                "  {}: col.drop().array({{ of: \"{}\", backwardsDefault: {} }}),{}",
+                                column, element_literal, default_ts, draft_comment
+                            ));
+                        }
+                        ColumnType::Enum(variants) => {
+                            let variant_args = enum_variants_to_ts_args(variants);
+                            lines.push(format!(
+                                "  {}: col.drop().enum({}, {{ backwardsDefault: {} }}),{}",
+                                column, variant_args, default_ts, draft_comment
+                            ));
+                        }
+                        _ => {
+                            let method = sql_type_to_col_method(column_type);
+                            lines.push(format!(
+                                "  {}: col.drop().{}({{ backwardsDefault: {} }}),{}",
+                                column, method, default_ts, draft_comment
+                            ));
+                        }
                     }
                 }
                 LensOp::RenameColumn {
@@ -1015,5 +1048,29 @@ mod tests {
         let ts = lens_transform_to_ts(&transform);
         assert!(ts.contains("todos: col.add().array({ of: \"UUID\", default: [] }),"));
         assert!(ts.contains("todos: col.drop().array({ of: \"UUID\", backwardsDefault: [] }),"));
+    }
+
+    #[test]
+    fn lens_transform_to_ts_uses_enum_builder_for_enum_columns() {
+        let transform = LensTransform::with_ops(vec![
+            super::super::lens::LensOp::AddColumn {
+                table: "todos".to_string(),
+                column: "status".to_string(),
+                column_type: ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+                default: crate::query_manager::types::Value::Text("todo".to_string()),
+            },
+            super::super::lens::LensOp::RemoveColumn {
+                table: "todos".to_string(),
+                column: "status".to_string(),
+                column_type: ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+                default: crate::query_manager::types::Value::Text("todo".to_string()),
+            },
+        ]);
+
+        let ts = lens_transform_to_ts(&transform);
+        assert!(ts.contains("status: col.add().enum(\"done\", \"todo\", { default: \"todo\" }),"));
+        assert!(ts.contains(
+            "status: col.drop().enum(\"done\", \"todo\", { backwardsDefault: \"todo\" }),"
+        ));
     }
 }
