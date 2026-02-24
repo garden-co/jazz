@@ -913,6 +913,45 @@ fn synced_update_updates_column_indices() {
 }
 
 #[test]
+#[should_panic(expected = "missing old_content for historical sync update")]
+fn synced_update_missing_old_content_panics_fail_fast() {
+    use crate::object::BranchName;
+    use crate::object_manager::AllObjectUpdate;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    // Simulate a historical sync update where ObjectManager couldn't provide
+    // old_content. We should fail-fast rather than accept index staleness.
+    qm.handle_object_update(
+        &mut storage,
+        AllObjectUpdate {
+            object_id: handle.row_id,
+            metadata,
+            branch_name: BranchName::new(&branch),
+            commit_ids: vec![],
+            is_new_object: false,
+            previous_commit_ids: vec![handle.row_commit_id],
+            old_content: None,
+        },
+    );
+}
+
+#[test]
 fn synced_insert_appears_in_subscription_delta() {
     use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::{decode_row, encode_row};
