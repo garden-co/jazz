@@ -18,7 +18,7 @@ function importMetaTransform(api) {
 module.exports = function (api) {
   api.cache(true);
   return {
-    presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
-    plugins: [importMetaTransform],
+    presets: [["babel-preset-expo", { unstable_transformImportMeta: true}]],
+    plugins: [importMetaTransform, ['@babel/plugin-transform-flow-strip-types', {allowDeclareFields: true}]],
   };
 };

@@ -91,85 +91,85 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [
+  "tables": {
+    "projects": {
+      "columns": [
         {
-          name: "name",
-          column_type: {
-            type: "Text",
+          "name": "name",
+          "column_type": {
+            "type": "Text"
           },
-          nullable: false,
-        },
-      ],
+          "nullable": false
+        }
+      ]
     },
-    todos: {
-      columns: [
+    "todos": {
+      "columns": [
         {
-          name: "title",
-          column_type: {
-            type: "Text",
+          "name": "title",
+          "column_type": {
+            "type": "Text"
           },
-          nullable: false,
+          "nullable": false
         },
         {
-          name: "done",
-          column_type: {
-            type: "Boolean",
+          "name": "done",
+          "column_type": {
+            "type": "Boolean"
           },
-          nullable: false,
+          "nullable": false
         },
         {
-          name: "description",
-          column_type: {
-            type: "Text",
+          "name": "description",
+          "column_type": {
+            "type": "Text"
           },
-          nullable: true,
+          "nullable": true
         },
         {
-          name: "parent",
-          column_type: {
-            type: "Uuid",
+          "name": "parent",
+          "column_type": {
+            "type": "Uuid"
           },
-          nullable: true,
-          references: "todos",
+          "nullable": true,
+          "references": "todos"
         },
         {
-          name: "project",
-          column_type: {
-            type: "Uuid",
+          "name": "project",
+          "column_type": {
+            "type": "Uuid"
           },
-          nullable: true,
-          references: "projects",
-        },
+          "nullable": true,
+          "references": "projects"
+        }
       ],
-      policies: {
-        select: {
-          using: {
-            type: "True",
-          },
+      "policies": {
+        "select": {
+          "using": {
+            "type": "True"
+          }
         },
-        insert: {
-          with_check: {
-            type: "True",
-          },
+        "insert": {
+          "with_check": {
+            "type": "True"
+          }
         },
-        update: {
-          using: {
-            type: "True",
+        "update": {
+          "using": {
+            "type": "True"
           },
-          with_check: {
-            type: "True",
-          },
+          "with_check": {
+            "type": "True"
+          }
         },
-        delete: {
-          using: {
-            type: "True",
-          },
-        },
-      },
-    },
-  },
+        "delete": {
+          "using": {
+            "type": "True"
+          }
+        }
+      }
+    }
+  }
 };
 
 export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {
@@ -263,15 +263,13 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+    const stepBuilt = JSON.parse(
+      (stepOutput as { _build: () => string })._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -295,9 +293,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -442,15 +438,13 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+    const stepBuilt = JSON.parse(
+      (stepOutput as { _build: () => string })._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -474,9 +468,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];

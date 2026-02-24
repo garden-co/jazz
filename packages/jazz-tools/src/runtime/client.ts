@@ -19,6 +19,7 @@ import {
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
+import { fetchWithTimeout } from "./utils.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -623,7 +624,11 @@ export class JazzClient {
    * Get schema context for server requests.
    * @internal
    */
-  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+  getSchemaContext(): {
+    env: string;
+    schema_hash: string;
+    user_branch: string;
+  } {
     return {
       env: this.context.env ?? "dev",
       schema_hash: this.runtime.getSchemaHash(),
