@@ -24,7 +24,7 @@ use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value, index_row_delta};
 use jazz_tools::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
@@ -985,6 +985,8 @@ impl NapiRuntime {
                 Ok(vec![val])
             })?;
 
+        let current_ids = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
+        let callback_current_ids = current_ids.clone();
         let callback = move |delta: SubscriptionDelta| {
             let row_to_json = |row: &jazz_tools::query_manager::types::Row,
                                descriptor: &jazz_tools::query_manager::types::RowDescriptor|
@@ -999,18 +1001,39 @@ impl NapiRuntime {
             };
 
             let descriptor = &delta.descriptor;
+            let mut ids_guard = callback_current_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let indexed = index_row_delta(&ids_guard, &delta.delta);
 
             let delta_obj = serde_json::json!({
+                "protocolVersion": 2,
                 "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
+                    .map(|row| serde_json::json!({
+                        "id": row.id.uuid().to_string(),
+                        "index": indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0),
+                        "row": row_to_json(row, descriptor)
+                    }))
                     .collect::<Vec<_>>(),
                 "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
+                    .map(|row| serde_json::json!({
+                        "id": row.id.uuid().to_string(),
+                        "index": indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0)
+                    }))
                     .collect::<Vec<_>>(),
                 "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
+                    .map(|(old, new)| {
+                        let changed = old.data != new.data || old.commit_id != new.commit_id;
+                        serde_json::json!({
+                            "id": new.id.uuid().to_string(),
+                            "oldIndex": indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0),
+                            "newIndex": indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0),
+                            "row": changed.then(|| row_to_json(new, descriptor))
+                        })
+                    })
                     .collect::<Vec<_>>()
             });
+            *ids_guard = indexed.post_ids;
 
             tsfn.call(Ok(delta_obj), ThreadsafeFunctionCallMode::NonBlocking);
         };

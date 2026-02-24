@@ -38,7 +38,7 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::types::{Row, RowDescriptor};
+use jazz_tools::query_manager::types::{index_row_delta, Row, RowDescriptor};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
@@ -589,6 +589,8 @@ impl WasmRuntime {
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
+        let current_ids = Rc::new(RefCell::new(Vec::<ObjectId>::new()));
+        let callback_current_ids = current_ids.clone();
         let callback = move |delta: SubscriptionDelta| {
             let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
                 let values = decode_row(descriptor, &row.data)
@@ -601,18 +603,38 @@ impl WasmRuntime {
             };
 
             let descriptor = &delta.descriptor;
+            let mut ids_guard = callback_current_ids.borrow_mut();
+            let indexed = index_row_delta(&ids_guard, &delta.delta);
 
             let delta_json = serde_json::json!({
+                "protocolVersion": 2,
                 "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
+                    .map(|row| serde_json::json!({
+                        "id": row.id.uuid().to_string(),
+                        "index": indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0),
+                        "row": row_to_json(row, descriptor)
+                    }))
                     .collect::<Vec<_>>(),
                 "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
+                    .map(|row| serde_json::json!({
+                        "id": row.id.uuid().to_string(),
+                        "index": indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0)
+                    }))
                     .collect::<Vec<_>>(),
                 "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
+                    .map(|(old, new)| {
+                        let changed = old.data != new.data || old.commit_id != new.commit_id;
+                        let row = changed.then(|| row_to_json(new, descriptor));
+                        serde_json::json!({
+                            "id": new.id.uuid().to_string(),
+                            "oldIndex": indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0),
+                            "newIndex": indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0),
+                            "row": row
+                        })
+                    })
                     .collect::<Vec<_>>()
             });
+            *ids_guard = indexed.post_ids;
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
                 let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
