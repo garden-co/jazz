@@ -47,11 +47,13 @@ export class SubscriptionManager<T extends { id: string }> {
     const updated: T[] = [];
     const removed: T[] = [];
 
-    // Process additions
-    for (const row of delta.added) {
-      const item = transform(row);
-      this.currentResults.set(item.id, item);
-      added.push(item);
+    // Process removals
+    for (const row of delta.removed) {
+      const item = this.currentResults.get(row.id);
+      if (item) {
+        this.currentResults.delete(row.id);
+        removed.push(item);
+      }
     }
 
     // Process updates - delta.updated is array of [oldRow, newRow] tuples
@@ -61,13 +63,11 @@ export class SubscriptionManager<T extends { id: string }> {
       updated.push(newItem);
     }
 
-    // Process removals
-    for (const row of delta.removed) {
-      const item = this.currentResults.get(row.id);
-      if (item) {
-        this.currentResults.delete(row.id);
-        removed.push(item);
-      }
+    // Process additions
+    for (const row of delta.added) {
+      const item = transform(row);
+      this.currentResults.set(item.id, item);
+      added.push(item);
     }
 
     return {
