@@ -5503,6 +5503,46 @@ fn server_builds_query_graph_on_subscription() {
 }
 
 #[test]
+fn local_stale_recompile_failure_drops_subscription_and_reports_failure() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    {
+        let sub = qm
+            .subscriptions
+            .get_mut(&sub_id)
+            .expect("subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    qm.process(&mut storage);
+
+    assert!(
+        !qm.subscriptions.contains_key(&sub_id),
+        "failed stale recompile should drop the local subscription"
+    );
+
+    let failures = qm.take_failed_subscriptions();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected exactly one reported local subscription failure"
+    );
+    assert_eq!(failures[0].subscription_id, sub_id);
+    assert!(
+        failures[0].reason.contains("no_such_table"),
+        "failure reason should include compile context: {}",
+        failures[0].reason
+    );
+}
+
+#[test]
 fn server_sends_error_for_uncompilable_query_subscription() {
     use crate::sync_manager::{
         ClientId, Destination, InboxEntry, QueryId, Source, SyncError, SyncPayload,
@@ -5548,6 +5588,95 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     assert!(
         reason.contains("no_such_table"),
         "error reason should include compile error context: {reason}"
+    );
+}
+
+#[test]
+fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, ServerId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_server(upstream_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    let valid_query = server_qm.query("users").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(7),
+            query: Box::new(valid_query),
+            session: None,
+        },
+    });
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    {
+        let sub = server_qm
+            .server_subscriptions
+            .get_mut(&(client_id, QueryId(7)))
+            .expect("server subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    server_qm.process(&mut storage);
+
+    assert!(
+        !server_qm
+            .server_subscriptions
+            .contains_key(&(client_id, QueryId(7))),
+        "failed stale recompile should drop the server subscription"
+    );
+    assert!(
+        !server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .expect("client should still exist")
+            .queries
+            .contains_key(&QueryId(7)),
+        "client query scope should be cleared after fail-fast drop"
+    );
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let rejection_reason = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
+            ) if *id == client_id && *query_id == QueryId(7) => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("client should receive QuerySubscriptionRejected on stale recompile failure");
+    assert!(
+        rejection_reason.contains("query recompilation failed for query_id 7"),
+        "rejection should include query id context: {rejection_reason}"
+    );
+    assert!(
+        rejection_reason.contains("no_such_table"),
+        "rejection should include compile error context: {rejection_reason}"
+    );
+
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Server(id),
+                SyncPayload::QueryUnsubscription { query_id }
+            ) if *id == upstream_id && *query_id == QueryId(7)
+        )),
+        "stale recompile failure should forward QueryUnsubscription upstream"
     );
 }
 

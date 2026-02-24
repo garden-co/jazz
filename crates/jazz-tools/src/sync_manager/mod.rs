@@ -319,6 +319,22 @@ impl SyncManager {
         }
     }
 
+    /// Drop a client's query subscription state.
+    ///
+    /// Removes per-query scope and origin tracking.
+    pub fn drop_client_query_subscription(&mut self, client_id: ClientId, query_id: QueryId) {
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.queries.remove(&query_id);
+        }
+
+        if let Some(clients) = self.query_origin.get_mut(&query_id) {
+            clients.remove(&client_id);
+            if clients.is_empty() {
+                self.query_origin.remove(&query_id);
+            }
+        }
+    }
+
     /// Send a QuerySubscription to all connected servers.
     ///
     /// Called by QueryManager when a client creates a subscription that should
