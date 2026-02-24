@@ -25,7 +25,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
-  REAL: { type: "Integer" }, // REAL maps to Integer in WASM (no Float type)
+  REAL: { type: "Real" },
   UUID: { type: "Uuid" },
 };
 

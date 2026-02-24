@@ -238,6 +238,14 @@ impl MemoryStorage {
 // Values must be encoded so lexicographic byte ordering equals semantic ordering.
 // This enables range queries via BTreeMap::range().
 
+/// Returns true if the value is Real(0.0) or Real(-0.0).
+///
+/// IEEE 754 defines -0.0 == 0.0, but they have distinct bit patterns and
+/// therefore distinct index encodings. Query operations must check both.
+pub(crate) fn is_real_zero(value: &Value) -> bool {
+    matches!(value, Value::Real(f) if *f == 0.0)
+}
+
 /// Encode a Value into bytes that sort correctly for range queries.
 pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
     match value {
@@ -259,6 +267,20 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             // Flip sign bit so negative < positive, big-endian for correct ordering
             let mut bytes = vec![0x03];
             bytes.extend_from_slice(&(*n ^ i64::MIN).to_be_bytes());
+            bytes
+        }
+
+        Value::Real(f) => {
+            let mut bytes = vec![0x09];
+            let bits = f.to_bits();
+            // Flip for lexicographic ordering: if sign bit set, flip all bits;
+            // otherwise flip only the sign bit.
+            let ordered = if bits & (1u64 << 63) != 0 {
+                !bits
+            } else {
+                bits ^ (1u64 << 63)
+            };
+            bytes.extend_from_slice(&ordered.to_be_bytes());
             bytes
         }
 
@@ -472,6 +494,18 @@ impl Storage for MemoryStorage {
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
+
+        // IEEE 754: -0.0 == 0.0, so look up both encodings and merge.
+        if is_real_zero(value) {
+            let mut result = HashSet::new();
+            for zero in &[Value::Real(0.0), Value::Real(-0.0)] {
+                if let Some(ids) = index.get(&encode_value(zero)) {
+                    result.extend(ids.iter().copied());
+                }
+            }
+            return result.into_iter().collect();
+        }
+
         let encoded = encode_value(value);
         index
             .get(&encoded)
@@ -492,12 +526,31 @@ impl Storage for MemoryStorage {
             return Vec::new();
         };
 
+        // IEEE 754: -0.0 == 0.0 but they have distinct encodings where
+        // encoded(-0.0) < encoded(+0.0). Adjust bounds so that both zeros
+        // are treated as the same point:
+        //   Start Included(zero) → use -0.0 (widen to include the lesser encoding)
+        //   Start Excluded(zero) → use +0.0 (skip past both encodings)
+        //   End Included(zero)   → use +0.0 (widen to include the greater encoding)
+        //   End Excluded(zero)   → use -0.0 (stop before both encodings)
         let start_bound = match start {
+            Bound::Included(v) if is_real_zero(v) => {
+                Bound::Included(encode_value(&Value::Real(-0.0)))
+            }
+            Bound::Excluded(v) if is_real_zero(v) => {
+                Bound::Excluded(encode_value(&Value::Real(0.0)))
+            }
             Bound::Included(v) => Bound::Included(encode_value(v)),
             Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match end {
+            Bound::Included(v) if is_real_zero(v) => {
+                Bound::Included(encode_value(&Value::Real(0.0)))
+            }
+            Bound::Excluded(v) if is_real_zero(v) => {
+                Bound::Excluded(encode_value(&Value::Real(-0.0)))
+            }
             Bound::Included(v) => Bound::Included(encode_value(v)),
             Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
             Bound::Unbounded => Bound::Unbounded,
@@ -852,9 +905,15 @@ mod tests {
             Bound::Included(&Value::Real(0.0)),
             Bound::Unbounded,
         );
-        assert!(results.contains(&row_neg_zero), ">= 0.0 should include -0.0");
+        assert!(
+            results.contains(&row_neg_zero),
+            ">= 0.0 should include -0.0"
+        );
         assert!(results.contains(&row_pos_zero), ">= 0.0 should include 0.0");
-        assert!(!results.contains(&row_negative), ">= 0.0 should exclude -1.0");
+        assert!(
+            !results.contains(&row_negative),
+            ">= 0.0 should exclude -1.0"
+        );
     }
 
     #[test]

@@ -451,6 +451,7 @@ impl Parser {
                 "TEXT" | "VARCHAR" | "CHAR" | "STRING" => ColumnType::Text,
                 "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => ColumnType::Integer,
                 "BIGINT" => ColumnType::BigInt,
+                "REAL" | "FLOAT" | "DOUBLE" => ColumnType::Real,
                 "BOOLEAN" | "BOOL" => ColumnType::Boolean,
                 "TIMESTAMP" => ColumnType::Timestamp,
                 "UUID" => ColumnType::Uuid,
@@ -680,7 +681,16 @@ impl Parser {
             Some(Token::True) => Ok(Value::Boolean(true)),
             Some(Token::False) => Ok(Value::Boolean(false)),
             Some(Token::Number(n)) => {
-                if let Ok(i) = n.parse::<i32>() {
+                if n.contains('.') {
+                    if let Ok(f) = n.parse::<f64>() {
+                        Ok(Value::Real(f))
+                    } else {
+                        Err(SqlParseError::InvalidDefaultValue(format!(
+                            "Cannot parse float: {}",
+                            n
+                        )))
+                    }
+                } else if let Ok(i) = n.parse::<i32>() {
                     Ok(Value::Integer(i))
                 } else if let Ok(i) = n.parse::<i64>() {
                     Ok(Value::BigInt(i))
@@ -1278,6 +1288,7 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
     match ct {
         ColumnType::Integer => "INTEGER".to_string(),
         ColumnType::BigInt => "BIGINT".to_string(),
+        ColumnType::Real => "REAL".to_string(),
         ColumnType::Boolean => "BOOLEAN".to_string(),
         ColumnType::Text => "TEXT".to_string(),
         ColumnType::Enum(variants) => {
@@ -1301,6 +1312,10 @@ fn value_to_sql(val: &Value) -> String {
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
+        Value::Real(f) => {
+            assert!(f.is_finite(), "non-finite float in value_to_sql: {f}");
+            format!("{f:?}")
+        }
         Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
         Value::Timestamp(t) => t.to_string(),
         Value::Uuid(id) => format!("'{:?}'", id),
@@ -2077,6 +2092,28 @@ mod tests {
             }
             _ => panic!("Expected AddColumn"),
         }
+    }
+
+    #[test]
+    fn parse_non_finite_float_default_rejected() {
+        // The tokeniser treats inf/NaN as identifiers, not numbers, so these
+        // are rejected at parse time before reaching the value constructor.
+        for literal in &["inf", "-inf", "NaN"] {
+            let sql = format!("ALTER TABLE t ADD COLUMN x REAL DEFAULT {literal};");
+            assert!(parse_lens(&sql).is_err(), "should reject {literal}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite float")]
+    fn value_to_sql_rejects_infinity() {
+        value_to_sql(&Value::Real(f64::INFINITY));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite float")]
+    fn value_to_sql_rejects_nan() {
+        value_to_sql(&Value::Real(f64::NAN));
     }
 
     #[test]

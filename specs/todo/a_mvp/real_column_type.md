@@ -22,7 +22,7 @@ Those imply exact fixed-point arithmetic, which is a different feature. Out of s
 
 ### Negative zero: faithful storage with IEEE 754 query semantics
 
-IEEE 754 defines `-0.0 == 0.0` (they compare equal). However, the two values have different bit patterns (`0x8000000000000000` vs `0x0000000000000000`), and the sign carries real-world meaning: a small negative value that underflows to `-0.0` *was* negative. As a database, our primary concern is persisting what the user gives us faithfully.
+IEEE 754 defines `-0.0 == 0.0` (they compare equal). However, the two values have different bit patterns (`0x8000000000000000` vs `0x0000000000000000`), and the sign carries real-world meaning: a small negative value that underflows to `-0.0` _was_ negative. As a database, our primary concern is persisting what the user gives us faithfully.
 
 Our index key encoding maps f64 bit patterns to bytes that sort lexicographically, which means `-0.0` and `0.0` naturally become distinct, adjacent index entries, with `-0.0` sorting immediately below `0.0`. This is correct for storage identity but deviates from IEEE 754 equality.
 
@@ -207,7 +207,25 @@ Tests live inline (`#[cfg(test)] mod tests`) in the files being changed, followi
 
 The existing TS DSL to native build pipeline path should exercise the full round-trip once the Rust parser accepts REAL.
 
+## Known limitations
+
+### Negative zero may be lost crossing the WASM boundary (bidirectional)
+
+Negative zero can be silently converted to positive zero when crossing the WASM boundary in either direction: JS to Rust (inserts/updates) and Rust to JS (query results).
+
+This is caused by `serde_wasm_bindgen`'s `deserialize_any` implementation. When serde needs to buffer the `content` field of an adjacently tagged enum (`#[serde(tag = "type", content = "value")]`), it calls `deserialize_any` on the value. That implementation checks `Number.isSafeInteger()` to decide whether to store the value as an integer or a float. JavaScript's `Number.isSafeInteger(-0)` returns `true` (because `-0 === 0` in JS), so `-0.0` gets buffered as `Content::I64(0)`, which replays as `f64(0.0)`. The negative sign is lost.
+
+This means:
+
+- **JS to Rust (writes):** if a user inserts `-0.0` from JavaScript and buffering occurs, Rust receives `0.0` and persists it as such. The storage layer faithfully stores whatever it receives, but the value may already be wrong before it reaches storage.
+- **Rust to JS (reads):** if `-0.0` is stored correctly in Rust, it may appear as `0.0` when returned to JavaScript.
+
+The buffering only occurs when the `value` field precedes the `type` field in the JS object. When `type` comes first, serde reads the tag first and calls `deserialize_f64` directly, which preserves `-0.0`. Our `value-converter.ts` constructs objects with `type` first (`{ type: "Real", value: Number(value) }`), and Rust's serde serialisation follows struct field declaration order (also `type` first). So the common path through our own code should preserve `-0.0`, but this depends on JS object field ordering, which is not something we can strictly enforce.
+
+This is not easily fixable on our side; the behaviour is deep inside serde's Content buffering machinery and `serde_wasm_bindgen`'s `deserialize_any` implementation. However, because our storage layer, index encoding, and query methods all handle negative zero correctly, our implementation will begin faithfully persisting and returning `-0.0` end to end as soon as the upstream serialisation issue is resolved. No changes to our code will be needed.
+
 ## Other edge cases
 
-- **NaN**: stored and indexed like any other f64 bit pattern. NaN == NaN for storage identity (bitwise). NaN sorts to one end of index range scans, which is fine.
-- **Infinity**: valid f64 values, stored and sorted correctly by the encoding. No special handling needed.
+- **NaN and Infinity**: the binary encoding and index layer handle these correctly (NaN sorts to one end, infinities to their respective ends). However, non-finite values are rejected as column defaults because `format!("{f:?}")` produces `inf`/`NaN` which are not valid SQL or JavaScript literals. The SQL tokeniser naturally rejects these (they are identifiers, not numbers), and the `value_to_sql`/`value_to_ts_literal` functions assert finiteness as a safety net.
+
+- **Scientific notation**: SQL literals like `1e10` or `2.5e-3` are out of scope. The tokeniser only consumes digits and `.`, so scientific notation is not recognised. This could be added later if needed.

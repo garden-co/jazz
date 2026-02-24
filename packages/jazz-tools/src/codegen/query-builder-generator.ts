@@ -23,6 +23,7 @@ function columnTypeToTs(type: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
+    case "Real":
     case "Timestamp":
       return "number";
     case "Uuid":
@@ -54,6 +55,7 @@ function columnToWhereInputType(col: {
       return "boolean";
     case "Integer":
     case "BigInt":
+    case "Real":
       return "number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
     case "Timestamp":
       return "number | { eq?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
