@@ -11,31 +11,6 @@ type UseAllAction<T extends { id: string }> =
   | { type: "entry_delta"; delta: SubscriptionDelta<T> }
   | { type: "entry_error"; error: unknown };
 
-function applyDelta<T extends { id: string }>(
-  prev: UseAllState<T>,
-  delta: SubscriptionDelta<T>,
-): T[] {
-  if (prev.status !== "fulfilled") {
-    return delta.all;
-  }
-
-  const byId = new Map(prev.data.map((item) => [item.id, item]));
-
-  for (const item of delta.added) {
-    byId.set(item.id, item);
-  }
-
-  for (const item of delta.updated) {
-    byId.set(item.id, item);
-  }
-
-  for (const item of delta.removed) {
-    byId.delete(item.id);
-  }
-
-  return Array.from(byId.values());
-}
-
 function reducer<T extends { id: string }>(
   prev: UseAllState<T>,
   action: UseAllAction<T>,
@@ -46,7 +21,7 @@ function reducer<T extends { id: string }>(
     case "entry_fulfilled":
       return { status: "fulfilled", data: action.data, error: null };
     case "entry_delta":
-      return { status: "fulfilled", data: applyDelta(prev, action.delta), error: null };
+      return { status: "fulfilled", data: action.delta.all, error: null };
     case "entry_error":
       return { status: "rejected", data: undefined, error: action.error };
     default:
