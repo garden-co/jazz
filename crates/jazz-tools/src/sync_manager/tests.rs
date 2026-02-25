@@ -321,11 +321,23 @@ fn local_commit_in_scope_syncs_to_client() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { commits, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert!(commits.iter().any(|c| c.id() == commit_id));
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to matching client scope"),
     }
 }
 
@@ -397,11 +409,23 @@ fn query_update_adds_scope_triggers_initial_sync() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1); // Only obj2 (newly visible)
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { object_id, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj2);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated for newly visible object"),
     }
 }
 
