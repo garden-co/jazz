@@ -6,17 +6,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use jazz_tools::metadata::{MetadataKey, ObjectType};
-use jazz_tools::object::{BranchName, ObjectId};
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
 use jazz_tools::runtime_tokio::TokioRuntime;
-use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::{CatalogueManifest, Storage, SurrealKvStorage};
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
+use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
 use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::middleware::AuthConfig;
 use crate::routes;
@@ -320,134 +318,4 @@ fn now_timestamp_us() -> u64 {
         Ok(duration) => duration.as_micros().min(u128::from(u64::MAX)) as u64,
         Err(_) => 0,
     }
-}
-
-fn latest_catalogue_content(
-    storage: &SurrealKvStorage,
-    object_id: ObjectId,
-) -> Result<Option<Vec<u8>>, String> {
-    let branch_name = BranchName::new("main");
-    let loaded = storage
-        .load_branch(object_id, &branch_name)
-        .map_err(|e| format!("failed to load catalogue branch for {object_id}: {e:?}"))?;
-    let Some(loaded) = loaded else {
-        return Ok(None);
-    };
-
-    Ok(loaded
-        .commits
-        .iter()
-        .rev()
-        .find(|commit| !commit.content.is_empty())
-        .map(|commit| commit.content.clone()))
-}
-
-fn rehydrate_schema_manager_from_manifest(
-    schema_manager: &mut SchemaManager,
-    storage: &SurrealKvStorage,
-    app_id: AppId,
-) -> Result<(), String> {
-    let manifest = storage
-        .load_catalogue_manifest(app_id.as_object_id())
-        .map_err(|e| format!("failed to load catalogue manifest for {app_id}: {e:?}"))?;
-
-    let Some(manifest) = manifest else {
-        return Ok(());
-    };
-
-    fn schema_metadata_for_rehydrate(app_id: AppId, schema_hash: &str) -> HashMap<String, String> {
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            MetadataKey::Type.to_string(),
-            ObjectType::CatalogueSchema.to_string(),
-        );
-        metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-        metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
-        metadata
-    }
-
-    fn lens_metadata_for_rehydrate(
-        app_id: AppId,
-        source_hash: &str,
-        target_hash: &str,
-    ) -> HashMap<String, String> {
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            MetadataKey::Type.to_string(),
-            ObjectType::CatalogueLens.to_string(),
-        );
-        metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-        metadata.insert(MetadataKey::SourceHash.to_string(), source_hash.to_string());
-        metadata.insert(MetadataKey::TargetHash.to_string(), target_hash.to_string());
-        metadata
-    }
-
-    let CatalogueManifest {
-        schema_seen,
-        lens_seen,
-    } = manifest;
-
-    let mut schema_count = 0usize;
-    let mut lens_count = 0usize;
-
-    for (object_id, schema_hash) in schema_seen {
-        let Some(content) = latest_catalogue_content(storage, object_id)? else {
-            warn!(
-                app_id = %app_id,
-                object_id = %object_id,
-                "catalogue schema in manifest missing main branch content"
-            );
-            continue;
-        };
-
-        let metadata = schema_metadata_for_rehydrate(app_id, &schema_hash.to_string());
-        if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
-        {
-            warn!(
-                app_id = %app_id,
-                object_id = %object_id,
-                ?error,
-                "failed to process schema catalogue entry from manifest"
-            );
-        } else {
-            schema_count += 1;
-        }
-    }
-
-    for (object_id, lens) in lens_seen {
-        let Some(content) = latest_catalogue_content(storage, object_id)? else {
-            warn!(
-                app_id = %app_id,
-                object_id = %object_id,
-                "catalogue lens in manifest missing main branch content"
-            );
-            continue;
-        };
-
-        let metadata = lens_metadata_for_rehydrate(
-            app_id,
-            &lens.source_hash.to_string(),
-            &lens.target_hash.to_string(),
-        );
-        if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
-        {
-            warn!(
-                app_id = %app_id,
-                object_id = %object_id,
-                ?error,
-                "failed to process lens catalogue entry from manifest"
-            );
-        } else {
-            lens_count += 1;
-        }
-    }
-
-    info!(
-        app_id = %app_id,
-        schema_count,
-        lens_count,
-        "rehydrated schema manager from catalogue manifest"
-    );
-
-    Ok(())
 }
