@@ -9,7 +9,7 @@ use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{IndexedRowDelta, Value};
+use crate::query_manager::types::{OrderedRowDelta, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::{Storage, StorageError, SurrealKvStorage};
 use crate::sync_manager::{
@@ -33,7 +33,7 @@ pub struct JazzClient {
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Subscription delta senders (for routing deltas from callbacks to streams).
-    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<IndexedRowDelta>>>>,
+    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
     /// Handle for the stream listener task.
@@ -185,7 +185,7 @@ impl JazzClient {
 
         // Create shared subscription senders map
         let subscription_senders: Arc<
-            RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<IndexedRowDelta>>>,
+            RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>,
         > = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn binary stream listener if connected to server
@@ -314,7 +314,7 @@ impl JazzClient {
         );
 
         // Create channel for this subscription's deltas
-        let (tx, rx) = mpsc::channel::<IndexedRowDelta>(64);
+        let (tx, rx) = mpsc::channel::<OrderedRowDelta>(64);
 
         // Store sender before subscribing so callback can find it
         let senders = self.subscription_senders.clone();
@@ -331,7 +331,7 @@ impl JazzClient {
                     if let Ok(senders_guard) = senders.try_read()
                         && let Some(sender) = senders_guard.get(&delta.handle)
                     {
-                        let _ = sender.try_send(delta.indexed_delta);
+                        let _ = sender.try_send(delta.ordered_delta);
                     }
                 },
                 session,

@@ -1054,7 +1054,7 @@ fn rc_subscribe_settled_tier() {
             Query::new("users"),
             move |delta| {
                 let rows: Vec<(ObjectId, Vec<Value>)> = delta
-                    .indexed_delta
+                    .ordered_delta
                     .added
                     .iter()
                     .filter_map(|row| {
@@ -1114,7 +1114,7 @@ fn test_sync_edit_fires_callback_synchronously() {
         .subscribe(
             query,
             move |delta| {
-                if !delta.indexed_delta.added.is_empty() {
+                if !delta.ordered_delta.added.is_empty() {
                     *count_clone.lock().unwrap() += 1;
                 }
             },
