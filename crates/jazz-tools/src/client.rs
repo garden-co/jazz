@@ -9,7 +9,7 @@ use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{RowDelta, Value};
+use crate::query_manager::types::{IndexedRowDelta, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::{Storage, StorageError, SurrealKvStorage};
 use crate::sync_manager::{
@@ -33,7 +33,7 @@ pub struct JazzClient {
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Subscription delta senders (for routing deltas from callbacks to streams).
-    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<RowDelta>>>>,
+    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<IndexedRowDelta>>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
     /// Handle for the stream listener task.
@@ -184,8 +184,9 @@ impl JazzClient {
         }
 
         // Create shared subscription senders map
-        let subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<RowDelta>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let subscription_senders: Arc<
+            RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<IndexedRowDelta>>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn binary stream listener if connected to server
         let stream_listener_task = if let Some(ref conn) = server_connection {
@@ -313,7 +314,7 @@ impl JazzClient {
         );
 
         // Create channel for this subscription's deltas
-        let (tx, rx) = mpsc::channel::<RowDelta>(64);
+        let (tx, rx) = mpsc::channel::<IndexedRowDelta>(64);
 
         // Store sender before subscribing so callback can find it
         let senders = self.subscription_senders.clone();
@@ -330,7 +331,7 @@ impl JazzClient {
                     if let Ok(senders_guard) = senders.try_read()
                         && let Some(sender) = senders_guard.get(&delta.handle)
                     {
-                        let _ = sender.try_send(delta.delta);
+                        let _ = sender.try_send(delta.indexed_delta);
                     }
                 },
                 session,

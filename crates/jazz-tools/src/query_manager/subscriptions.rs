@@ -92,6 +92,7 @@ impl QueryManager {
                 settled_once: false,
                 settled_tier,
                 achieved_tiers: HashSet::new(),
+                current_ids: Vec::new(),
             },
         );
 
@@ -146,6 +147,7 @@ impl QueryManager {
                 settled_once: false,
                 settled_tier: None,
                 achieved_tiers: HashSet::new(),
+                current_ids: Vec::new(),
             },
         );
 

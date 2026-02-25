@@ -620,6 +620,7 @@ mod tests {
         let result1 = node.process_left(TupleDelta {
             added: vec![user.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(result1.added.is_empty(), "No match yet");
@@ -628,6 +629,7 @@ mod tests {
         let result2 = node.process_right(TupleDelta {
             added: vec![post.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -658,12 +660,14 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
         let result = node.process_right(TupleDelta {
             added: vec![post],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -694,6 +698,7 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -701,6 +706,7 @@ mod tests {
         let result = node.process_right(TupleDelta {
             added: vec![post1, post2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -730,11 +736,13 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         node.process_right(TupleDelta {
             added: vec![post.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert_eq!(node.current_tuples().len(), 1);
@@ -743,6 +751,7 @@ mod tests {
         let result = node.process_right(TupleDelta {
             added: vec![],
             removed: vec![post],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -773,6 +782,7 @@ mod tests {
         let result1 = node.process_right(TupleDelta {
             added: vec![post],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(result1.added.is_empty(), "No match yet");
@@ -781,6 +791,7 @@ mod tests {
         let result2 = node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -809,11 +820,13 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         let result = node.process_right(TupleDelta {
             added: vec![post],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 

@@ -14,7 +14,7 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{index_row_delta, Schema, SchemaHash, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
@@ -313,69 +313,55 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JazzRnError> {
     }
 }
 
-fn build_rn_delta_json<F>(
-    delta: &SubscriptionDelta,
-    current_ids: &mut Vec<ObjectId>,
-    mut row_to_json: F,
-) -> serde_json::Value
+fn build_rn_delta_json<F>(delta: &SubscriptionDelta, mut row_to_json: F) -> serde_json::Value
 where
     F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
 {
-    let indexed = index_row_delta(current_ids, &delta.delta);
-
     let added = delta
-        .delta
+        .indexed_delta
         .added
         .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0);
+        .map(|change| {
+            let row_json = row_to_json(&change.row);
             serde_json::json!({
-                "id": row.id.uuid().to_string(),
+                "id": change.id.uuid().to_string(),
                 "row": row_json,
-                "index": index
+                "index": change.index
             })
         })
         .collect::<Vec<_>>();
 
     let removed = delta
-        .delta
+        .indexed_delta
         .removed
         .iter()
-        .map(|row| {
-            let index = indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0);
+        .map(|change| {
             serde_json::json!({
-                "id": row.id.uuid().to_string(),
-                "index": index
+                "id": change.id.uuid().to_string(),
+                "index": change.index
             })
         })
         .collect::<Vec<_>>();
 
     let updated = delta
-        .delta
+        .indexed_delta
         .updated
         .iter()
-        .map(|(old, new)| {
-            let changed = old.data != new.data || old.commit_id != new.commit_id;
-            let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
-            let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
+        .map(|change| {
             serde_json::json!({
-                "id": new.id.uuid().to_string(),
-                "oldIndex": old_index,
-                "newIndex": new_index,
-                "row": changed.then(|| row_to_json(new))
+                "id": change.id.uuid().to_string(),
+                "oldIndex": change.old_index,
+                "newIndex": change.new_index,
+                "row": change.row.as_ref().map(&mut row_to_json)
             })
         })
         .collect::<Vec<_>>();
 
-    *current_ids = indexed.post_ids;
-
     serde_json::json!({
-        "protocolVersion": 2,
         "added": added,
         "removed": removed,
         "updated": updated,
-        "pending": false
+        "pending": delta.indexed_delta.pending
     })
 }
 
@@ -702,12 +688,10 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
 
-            let ids = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
             let handle = core
                 .subscribe_with_settled_tier(
                     query,
                     {
-                        let ids = Arc::clone(&ids);
                         move |delta: SubscriptionDelta| {
                             let descriptor = &delta.descriptor;
                             let row_to_json =
@@ -723,11 +707,7 @@ impl RnRuntime {
                                     })
                                 };
 
-                            let Ok(mut current_ids) = ids.lock() else {
-                                return;
-                            };
-                            let payload =
-                                build_rn_delta_json(&delta, &mut current_ids, row_to_json);
+                            let payload = build_rn_delta_json(&delta, row_to_json);
 
                             if let Ok(json) = serde_json::to_string(&payload) {
                                 let _ =

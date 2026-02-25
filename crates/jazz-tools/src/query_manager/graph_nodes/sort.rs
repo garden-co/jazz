@@ -279,6 +279,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -335,6 +336,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -423,6 +425,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3, tuple4],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -466,6 +469,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -481,6 +485,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -528,6 +533,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple3, tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 

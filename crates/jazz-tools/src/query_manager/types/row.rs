@@ -27,6 +27,9 @@ impl Row {
 pub struct RowDelta {
     pub added: Vec<Row>,
     pub removed: Vec<Row>,
+    /// Rows that stayed in-window but changed position.
+    /// Semantics: detach these IDs from current order, then append in listed order.
+    pub moved: Vec<ObjectId>,
     /// Updated rows as (old, new) pairs.
     pub updated: Vec<(Row, Row)>,
 }
@@ -37,8 +40,52 @@ impl RowDelta {
     }
 
     pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.moved.is_empty()
+            && self.updated.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedAdded {
+    pub id: ObjectId,
+    pub index: usize,
+    pub row: Row,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedRemoved {
+    pub id: ObjectId,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedUpdated {
+    pub id: ObjectId,
+    pub old_index: usize,
+    pub new_index: usize,
+    pub row: Option<Row>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IndexedRowDelta {
+    pub added: Vec<IndexedAdded>,
+    pub removed: Vec<IndexedRemoved>,
+    pub updated: Vec<IndexedUpdated>,
+    pub pending: bool,
+}
+
+impl IndexedRowDelta {
+    pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectedRowDelta {
+    pub delta: IndexedRowDelta,
+    pub post_ids: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +115,9 @@ pub fn index_row_delta(current_ids: &[ObjectId], delta: &RowDelta) -> IndexedRow
             ids_to_detach.insert(old.id);
         }
     }
+    for id in &delta.moved {
+        ids_to_detach.insert(*id);
+    }
 
     let mut post_ids = Vec::with_capacity(current_ids.len() + delta.added.len());
     let mut post_index_by_id = HashMap::new();
@@ -89,13 +139,89 @@ pub fn index_row_delta(current_ids: &[ObjectId], delta: &RowDelta) -> IndexedRow
     for row in &delta.added {
         append_if_missing(row.id);
     }
+    for id in &delta.moved {
+        append_if_missing(*id);
+    }
     for (_, new) in &delta.updated {
-        append_if_missing(new.id);
+        if !delta.moved.contains(&new.id) {
+            append_if_missing(new.id);
+        }
     }
 
     IndexedRowState {
         pre_index_by_id,
         post_index_by_id,
         post_ids,
+    }
+}
+
+/// Build an indexed, wire-ready delta and the resulting ordered post IDs.
+pub fn project_row_delta(
+    current_ids: &[ObjectId],
+    delta: &RowDelta,
+    pending: bool,
+) -> ProjectedRowDelta {
+    let indexed = index_row_delta(current_ids, delta);
+
+    let added = delta
+        .added
+        .iter()
+        .map(|row| IndexedAdded {
+            id: row.id,
+            index: indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0),
+            row: row.clone(),
+        })
+        .collect();
+
+    let removed = delta
+        .removed
+        .iter()
+        .map(|row| IndexedRemoved {
+            id: row.id,
+            index: indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0),
+        })
+        .collect();
+
+    let mut updated = delta
+        .moved
+        .iter()
+        .map(|id| IndexedUpdated {
+            id: *id,
+            old_index: indexed.pre_index_by_id.get(id).copied().unwrap_or(0),
+            new_index: indexed.post_index_by_id.get(id).copied().unwrap_or(0),
+            row: None,
+        })
+        .collect::<Vec<_>>();
+
+    for (old, new) in &delta.updated {
+        let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
+        let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
+        let row_changed = old.data != new.data || old.commit_id != new.commit_id;
+
+        if row_changed {
+            updated.push(IndexedUpdated {
+                id: new.id,
+                old_index,
+                new_index,
+                row: Some(new.clone()),
+            });
+        } else if old_index != new_index {
+            updated.push(IndexedUpdated {
+                id: new.id,
+                old_index,
+                new_index,
+                row: None,
+            });
+        }
+    }
+
+    ProjectedRowDelta {
+        delta: IndexedRowDelta {
+            added,
+            removed,
+            updated,
+            pending,
+        },
+        post_ids: indexed.post_ids,
     }
 }

@@ -362,6 +362,7 @@ mod tests {
         TupleDelta {
             added: ids.iter().map(|&id| Tuple::from_id(id)).collect(),
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         }
     }
@@ -370,6 +371,7 @@ mod tests {
         TupleDelta {
             added: vec![],
             removed: tuples,
+            moved: vec![],
             updated: vec![],
         }
     }

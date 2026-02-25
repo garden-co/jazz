@@ -32,7 +32,6 @@ function transform(row: WasmRow): TestItem {
 
 function makeDelta(partial: Partial<RowDelta>): RowDelta {
   return {
-    protocolVersion: 2,
     added: [],
     removed: [],
     updated: [],

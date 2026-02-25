@@ -90,8 +90,6 @@ pub struct WasmRow {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmRowDelta {
-    #[serde(rename = "protocolVersion")]
-    pub protocol_version: u8,
     pub added: Vec<WasmAdded>,
     pub removed: Vec<WasmRemoved>,
     pub updated: Vec<WasmUpdated>,
