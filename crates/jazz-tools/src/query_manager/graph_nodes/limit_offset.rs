@@ -53,7 +53,9 @@ impl LimitOffsetNode {
             Some(limit) => (start + limit).min(self.all_tuples.len()),
             None => self.all_tuples.len(),
         };
-        self.windowed_tuples = self.all_tuples[start..end].to_vec();
+        self.windowed_tuples.clear();
+        self.windowed_tuples
+            .extend_from_slice(&self.all_tuples[start..end]);
         self.current_tuples = self.windowed_tuples.iter().cloned().collect();
     }
 
@@ -109,8 +111,9 @@ impl LimitOffsetNode {
 
     /// Rebuild state from a full ordered input (e.g. upstream SortNode output).
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
-        let old_tuples = self.windowed_tuples.clone();
-        self.all_tuples = ordered_tuples.to_vec();
+        let old_tuples = std::mem::take(&mut self.windowed_tuples);
+        self.all_tuples.clear();
+        self.all_tuples.extend_from_slice(ordered_tuples);
         self.recompute_tuple_window();
         self.dirty = false;
         self.compute_tuple_delta(&old_tuples, &self.windowed_tuples)
@@ -138,7 +141,7 @@ impl RowNode for LimitOffsetNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        let old_tuples = self.windowed_tuples.clone();
+        let old_tuples = std::mem::take(&mut self.windowed_tuples);
 
         // Apply changes to all_tuples
         for tuple in input.removed {
