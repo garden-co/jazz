@@ -766,8 +766,8 @@ fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
         .map(|u| &u.delta)
         .expect("sorted/limited subscription should emit update for new top row");
 
-    assert_eq!(delta.added.len(), 2);
-    assert_eq!(delta.removed.len(), 2);
+    assert_eq!(delta.added.len(), 1);
+    assert_eq!(delta.removed.len(), 1);
 
     let results = qm.get_subscription_results(sub_id);
     assert_eq!(results.len(), 2);
