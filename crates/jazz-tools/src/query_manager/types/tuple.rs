@@ -229,6 +229,9 @@ pub struct TupleDelta {
     pub added: Vec<Tuple>,
     /// Tuples removed from the result set.
     pub removed: Vec<Tuple>,
+    /// Tuples that stayed in-window but changed position.
+    /// Semantics: detach these IDs, then append in listed order.
+    pub moved: Vec<Tuple>,
     /// Updated tuples as (old, new) pairs - same IDs, different content.
     pub updated: Vec<(Tuple, Tuple)>,
 }
@@ -239,7 +242,10 @@ impl TupleDelta {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.moved.is_empty()
+            && self.updated.is_empty()
     }
 
     /// Convert to a RowDelta (for single-table queries where all tuples are length-1).
@@ -282,6 +288,7 @@ impl TupleDelta {
         Some(RowDelta {
             added: added?,
             removed: removed?,
+            moved: self.moved.iter().filter_map(|t| t.first_id()).collect(),
             updated: updated?,
         })
     }
@@ -348,6 +355,7 @@ impl TupleDelta {
         Some(RowDelta {
             added: added?,
             removed: removed?,
+            moved: self.moved.iter().filter_map(|t| t.first_id()).collect(),
             updated: updated?,
         })
     }
@@ -356,6 +364,7 @@ impl TupleDelta {
     pub fn merge(&mut self, other: TupleDelta) {
         self.added.extend(other.added);
         self.removed.extend(other.removed);
+        self.moved.extend(other.moved);
         self.updated.extend(other.updated);
     }
 }

@@ -15,7 +15,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::Once;
 
 use js_sys::Function;
 use serde::Serialize;
@@ -23,15 +22,7 @@ use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
 /// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
-fn init_tracing() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::TRACE)
-            .with_console_group_spans();
-        let _ = wasm_tracing::set_as_global_default_with_config(config);
-    });
-}
+fn init_tracing() {}
 
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +44,7 @@ use jazz_tools::sync_manager::{
 
 use crate::query::parse_query;
 #[cfg(target_arch = "wasm32")]
-use crate::types::WasmRowDelta;
+use crate::types::{WasmAdded, WasmRemoved, WasmRowChange, WasmRowDelta, WasmUpdated};
 use crate::types::{WasmRow, WasmSchema, WasmValue};
 
 /// Parse a persistence tier string from JS.
@@ -603,28 +594,36 @@ impl WasmRuntime {
             };
 
             let descriptor = &delta.descriptor;
-
-            let wasm_delta = WasmRowDelta {
-                added: delta
-                    .delta
-                    .added
-                    .iter()
-                    .map(|row| row_to_wasm(row, descriptor))
-                    .collect::<Vec<_>>(),
-                removed: delta
-                    .delta
+            let wasm_delta = WasmRowDelta(
+                delta
+                    .ordered_delta
                     .removed
                     .iter()
-                    .map(|row| row_to_wasm(row, descriptor))
+                    .map(|change| {
+                        WasmRowChange::Removed(WasmRemoved {
+                            kind: 1,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                        })
+                    })
+                    .chain(delta.ordered_delta.updated.iter().map(|change| {
+                        WasmRowChange::Updated(WasmUpdated {
+                            kind: 2,
+                            id: change.id.uuid().to_string(),
+                            index: change.new_index,
+                            row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
+                        })
+                    }))
+                    .chain(delta.ordered_delta.added.iter().map(|change| {
+                        WasmRowChange::Added(WasmAdded {
+                            kind: 0,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                            row: row_to_wasm(&change.row, descriptor),
+                        })
+                    }))
                     .collect::<Vec<_>>(),
-                updated: delta
-                    .delta
-                    .updated
-                    .iter()
-                    .map(|(old, new)| (row_to_wasm(old, descriptor), row_to_wasm(new, descriptor)))
-                    .collect::<Vec<_>>(),
-                pending: false,
-            };
+            );
 
             let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
             if let Ok(delta_value) = wasm_delta.serialize(&serializer) {

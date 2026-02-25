@@ -319,7 +319,7 @@ function isLeaderDebugEnabled(): boolean {
  * // Subscriptions
  * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
  *   console.log("All todos:", delta.all);
- *   console.log("Added:", delta.added);
+ *   console.log("Changes:", delta.delta);
  * });
  * ```
  */
@@ -1042,9 +1042,7 @@ export class Db {
    *
    * The callback receives a SubscriptionDelta with:
    * - `all`: Complete current result set
-   * - `added`: Items added in this update
-   * - `updated`: Items modified in this update
-   * - `removed`: Items removed in this update
+   * - `delta`: Ordered list of row-level changes
    *
    * @param query QueryBuilder instance
    * @param callback Called with delta whenever results change
@@ -1054,8 +1052,10 @@ export class Db {
    * ```typescript
    * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
    *   setTodos(delta.all);
-   *   if (delta.added.length > 0) {
-   *     console.log("New todos:", delta.added);
+   *   for (const change of delta.delta) {
+   *     if (change.kind === 0) {
+   *       console.log("New row:", change.row);
+   *     }
    *   }
    * });
    *

@@ -202,6 +202,7 @@ fn tuple_delta_to_row_delta() {
     let tuple_delta = TupleDelta {
         added: vec![tuple],
         removed: vec![],
+        moved: vec![],
         updated: vec![],
     };
 

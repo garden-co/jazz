@@ -1018,20 +1018,39 @@ impl NapiRuntime {
             };
 
             let descriptor = &delta.descriptor;
+            let delta_obj = delta
+                .ordered_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    serde_json::json!({
+                        "kind": 1,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index
+                    })
+                })
+                .chain(delta.ordered_delta.updated.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 2,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.new_index,
+                        "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
+                    })
+                }))
+                .chain(delta.ordered_delta.added.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 0,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index,
+                        "row": row_to_json(&change.row, descriptor)
+                    })
+                }))
+                .collect::<Vec<_>>();
 
-            let delta_obj = serde_json::json!({
-                "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
-                    .collect::<Vec<_>>()
-            });
-
-            tsfn.call(Ok(delta_obj), ThreadsafeFunctionCallMode::NonBlocking);
+            tsfn.call(
+                Ok(serde_json::Value::Array(delta_obj)),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
         };
 
         let mut core = self
