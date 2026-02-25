@@ -2289,16 +2289,30 @@ fn sort_keys_from_order_by(
     order_by
         .iter()
         .filter_map(|(col, dir)| {
-            if col == "id" || col == "_id" {
+            if col == "_id" {
                 Some(SortKey {
                     target: SortTarget::RowId,
                     direction: *dir,
                 })
             } else {
-                descriptor.column_index(col).map(|idx| SortKey {
-                    target: SortTarget::Column(idx),
-                    direction: *dir,
-                })
+                descriptor
+                    .column_index(col)
+                    .map(|idx| SortKey {
+                        target: SortTarget::Column(idx),
+                        direction: *dir,
+                    })
+                    .or_else(|| {
+                        // Backward compatibility: "id" maps to internal row id when no explicit
+                        // "id" column exists on the descriptor.
+                        if col == "id" {
+                            Some(SortKey {
+                                target: SortTarget::RowId,
+                                direction: *dir,
+                            })
+                        } else {
+                            None
+                        }
+                    })
             }
         })
         .collect()
@@ -2416,8 +2430,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: IndexScan -> Materialize -> Output (Filter elided - Eq fully covered)
-        assert_eq!(graph.nodes.len(), 3);
+        // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
+        assert_eq!(graph.nodes.len(), 4);
         assert_eq!(graph.index_scan_nodes.len(), 1);
     }
 
@@ -2432,8 +2446,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: 2x IndexScan -> Union -> Materialize -> Output (Filter elided)
-        assert_eq!(graph.nodes.len(), 5);
+        // Should have: 2x IndexScan -> Union -> Materialize -> Sort(default id ASC) -> Output
+        assert_eq!(graph.nodes.len(), 6);
         assert_eq!(graph.index_scan_nodes.len(), 2);
     }
 
@@ -2460,8 +2474,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: IndexScan -> Materialize -> Output
-        assert_eq!(graph.nodes.len(), 3);
+        // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     // ========================================================================
@@ -2485,12 +2499,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         // Eq is fully covered by index scan, no FilterNode needed
-        // Should have: IndexScan -> Materialize -> Output (3 nodes)
+        // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
         assert!(
             !has_filter_node(&graph),
             "FilterNode should be elided for single Eq condition"
         );
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     #[test]
@@ -2507,7 +2521,7 @@ mod tests {
             !has_filter_node(&graph),
             "FilterNode should be elided for single Lt condition"
         );
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     #[test]
@@ -2524,7 +2538,7 @@ mod tests {
             !has_filter_node(&graph),
             "FilterNode should be elided for single Between condition"
         );
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     #[test]
@@ -2538,12 +2552,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         // Index scan covers score < 50, but name = 'Alice' still needs filtering
-        // Should have: IndexScan -> Materialize -> Filter -> Output (4 nodes)
+        // Should have: IndexScan -> Materialize -> Filter -> Sort(default id ASC) -> Output
         assert!(
             has_filter_node(&graph),
             "FilterNode needed for non-indexed condition"
         );
-        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.nodes.len(), 5);
     }
 
     #[test]
@@ -2556,12 +2570,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         // Ne is not index-scannable, uses full scan + filter
-        // Should have: IndexScan -> Materialize -> Filter -> Output (4 nodes)
+        // Should have: IndexScan -> Materialize -> Filter -> Sort(default id ASC) -> Output
         assert!(
             has_filter_node(&graph),
             "FilterNode needed for non-indexable condition"
         );
-        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.nodes.len(), 5);
     }
 
     #[test]
@@ -2577,12 +2591,12 @@ mod tests {
 
         // Each disjunct has one Eq condition fully covered by its index scan
         // Union combines them, no additional filtering needed
-        // Should have: 2x IndexScan -> Union -> Materialize -> Output (5 nodes)
+        // Should have: 2x IndexScan -> Union -> Materialize -> Sort(default id ASC) -> Output
         assert!(
             !has_filter_node(&graph),
             "FilterNode should be elided when all disjuncts are fully covered"
         );
-        assert_eq!(graph.nodes.len(), 5);
+        assert_eq!(graph.nodes.len(), 6);
     }
 
     // ========================================================================
