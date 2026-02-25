@@ -77,12 +77,45 @@ function stripQualifier(column: string): string {
   return parts[parts.length - 1] ?? column;
 }
 
+function toTimestampMs(value: unknown): number {
+  if (value instanceof Date) {
+    const ts = value.getTime();
+    if (!Number.isFinite(ts)) {
+      throw new Error("Invalid Date value for timestamp condition");
+    }
+    return ts;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error("Invalid number value for timestamp condition");
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const fromNumber = Number(trimmed);
+      if (Number.isFinite(fromNumber)) {
+        return fromNumber;
+      }
+    }
+    const fromIso = Date.parse(trimmed);
+    if (Number.isFinite(fromIso)) {
+      return fromIso;
+    }
+  }
+  throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
+}
+
 /**
  * Translate a JavaScript value to WasmValue format.
  */
 function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { Null: null };
+  }
+  if (columnType.type === "Timestamp" && value instanceof Date) {
+    return { Timestamp: toTimestampMs(value) };
   }
   if (Array.isArray(value)) {
     if (columnType.type !== "Array") {
@@ -97,12 +130,15 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
   }
   if (typeof value === "number") {
     if (columnType?.type === "Timestamp") {
-      return { Timestamp: value };
+      return { Timestamp: toTimestampMs(value) };
     }
     // Use Integer for all numbers - WASM will handle type coercion
     return { Integer: value };
   }
   if (typeof value === "string") {
+    if (columnType?.type === "Timestamp") {
+      return { Timestamp: toTimestampMs(value) };
+    }
     if (columnType?.type === "Uuid") {
       return { Uuid: value };
     }
