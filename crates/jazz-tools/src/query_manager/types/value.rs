@@ -39,6 +39,7 @@ impl PartialEq for Value {
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
+            (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Row(a), Value::Row(b)) => a == b,
             (Value::Null, Value::Null) => true,
