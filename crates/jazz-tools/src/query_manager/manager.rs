@@ -19,7 +19,7 @@ use super::query::Query;
 use super::session::Session;
 use super::types::{
     ComposedBranchName, IndexedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash, TableName,
-    TableSchema, Value, project_row_delta,
+    TableSchema, Value, project_row_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -729,7 +729,18 @@ impl QueryManager {
                 // First delivery — full current state snapshot
                 subscription.settled_once = true;
                 let full_result = subscription.graph.current_result_as_delta();
-                let projected = project_row_delta(&subscription.current_ids, &full_result, false);
+                let post_ids: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let projected = project_row_delta_with_post_ids(
+                    &subscription.current_ids,
+                    &post_ids,
+                    &full_result,
+                    false,
+                );
                 subscription.current_ids = projected.post_ids;
                 // Always emit the first snapshot once tier is satisfied, even if empty.
                 // This guarantees one-shot queries can resolve to [] instead of hanging.
@@ -745,7 +756,18 @@ impl QueryManager {
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             } else if !delta.is_empty() {
-                let projected = project_row_delta(&subscription.current_ids, &delta, false);
+                let post_ids: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let projected = project_row_delta_with_post_ids(
+                    &subscription.current_ids,
+                    &post_ids,
+                    &delta,
+                    false,
+                );
                 subscription.current_ids = projected.post_ids;
                 tracing::debug!(
                     sub_id = sub_id.0,

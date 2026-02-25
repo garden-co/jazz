@@ -776,6 +776,83 @@ fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
 }
 
 #[test]
+fn offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm
+        .query("users")
+        .order_by("score")
+        .offset(1)
+        .limit(2)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle_a = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("A".into()), Value::Integer(1)],
+        )
+        .unwrap();
+    let handle_b = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("B".into()), Value::Integer(2)],
+        )
+        .unwrap();
+    let handle_c = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("C".into()), Value::Integer(3)],
+        )
+        .unwrap();
+    let handle_d = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("D".into()), Value::Integer(4)],
+        )
+        .unwrap();
+
+    qm.process(&mut storage);
+    let _initial_updates = qm.take_updates();
+
+    let initial_results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        initial_results
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![handle_b.row_id, handle_c.row_id]
+    );
+
+    qm.delete(&mut storage, handle_a.row_id).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("offset/limit subscription should emit update when leading row is deleted");
+
+    assert_eq!(delta.removed.len(), 1);
+    assert_eq!(delta.removed[0].id, handle_b.row_id);
+    assert_eq!(delta.added.len(), 1);
+    assert_eq!(delta.added[0].id, handle_d.row_id);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![handle_c.row_id, handle_d.row_id]
+    );
+}
+
+#[test]
 fn multiple_inserts_all_visible_in_query() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
