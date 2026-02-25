@@ -567,4 +567,130 @@ describe("db.subscribeAll sorting browser integration", () => {
       }
     });
   });
+
+  it("supports explicit id descending ordering", async () => {
+    await withDb("order-by-id-desc", async (db) => {
+      const snapshots: Todo[][] = [];
+      const unsubscribe = db.subscribeAll(
+        makeTodosQuery({ orderBy: [["id", "desc"]] }),
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
+
+      try {
+        const idA = db.insert(todos, { title: "A", rank: 3, done: false });
+        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = db.insert(todos, { title: "C", rank: 1, done: false });
+
+        await waitForCondition(
+          () => latestRows(snapshots).length === 3,
+          10_000,
+          "expected rows for id-desc query",
+        );
+
+        const expected = [idA, idB, idC].toSorted((a, b) => b.localeCompare(a));
+        expect(latestIds(snapshots)).toEqual(expected);
+
+        db.update(todos, idB, { title: "B-updated" });
+
+        await waitForCondition(
+          () => latestRows(snapshots).some((row) => row.id === idB && row.title === "B-updated"),
+          10_000,
+          "expected id-desc row update",
+        );
+
+        expect(latestIds(snapshots)).toEqual(expected);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  it("shifts offset window when removing a row before the window", async () => {
+    await withDb("offset-shift-on-remove-before-window", async (db) => {
+      const snapshots: Todo[][] = [];
+      const unsubscribe = db.subscribeAll(
+        makeTodosQuery({ orderBy: [["rank", "asc"]], offset: 1, limit: 2 }),
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
+
+      try {
+        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = db.insert(todos, { title: "D", rank: 4, done: false });
+
+        await waitForCondition(
+          () => latestRows(snapshots).length === 2,
+          10_000,
+          "expected initial window rows",
+        );
+        expect(latestIds(snapshots)).toEqual([idB, idC]);
+
+        db.deleteFrom(todos, idA);
+
+        await waitForCondition(
+          () => {
+            const ids = latestIds(snapshots);
+            return ids.length === 2 && ids[0] === idC && ids[1] === idD;
+          },
+          10_000,
+          "expected offset window shift after deleting leading row",
+        );
+
+        expect(latestIds(snapshots)).toEqual([idC, idD]);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  it("respects explicit id descending tie-break in mixed sorting", async () => {
+    await withDb("mixed-sort-rank-id-desc", async (db) => {
+      const snapshots: Todo[][] = [];
+      const unsubscribe = db.subscribeAll(
+        makeTodosQuery({
+          orderBy: [
+            ["rank", "asc"],
+            ["id", "desc"],
+          ],
+        }),
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
+
+      try {
+        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = db.insert(todos, { title: "B", rank: 1, done: false });
+        const idC = db.insert(todos, { title: "C", rank: 2, done: false });
+
+        await waitForCondition(
+          () => latestRows(snapshots).length === 3,
+          10_000,
+          "expected initial mixed-sort rows",
+        );
+
+        const expectedTieOrder = [idA, idB].toSorted((a, b) => b.localeCompare(a));
+        expect(latestIds(snapshots)).toEqual([...expectedTieOrder, idC]);
+
+        db.update(todos, idC, { rank: 1 });
+
+        await waitForCondition(
+          () =>
+            latestRows(snapshots).length === 3 && latestRows(snapshots).every((r) => r.rank === 1),
+          10_000,
+          "expected row C to join tie group",
+        );
+
+        const expectedAll = [idA, idB, idC].toSorted((a, b) => b.localeCompare(a));
+        expect(latestIds(snapshots)).toEqual(expectedAll);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
 });
