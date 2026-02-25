@@ -140,6 +140,38 @@ describe("SubscriptionManager", () => {
     expect(result.all.map((item) => item.id)).toEqual(["A", "D", "C", "E"]);
   });
 
+  it("applies index positions correctly for mixed bulk updates", () => {
+    const manager = new SubscriptionManager<TestItem>();
+
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
+        { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
+        { kind: 0, id: "C", index: 2, row: makeRow("C", "C", 3) },
+        { kind: 0, id: "D", index: 3, row: makeRow("D", "D", 4) },
+      ]),
+      transform,
+    );
+
+    const result = manager.handleDelta(
+      makeDelta([
+        // Bulk mixed change set:
+        // - remove B
+        // - move D to index 1 with payload update
+        // - move C to index 0 (no payload)
+        // - add E at tail
+        { kind: 1, id: "B", index: 1 },
+        { kind: 2, id: "D", index: 1, row: makeRow("D", "D*", 40) },
+        { kind: 2, id: "C", index: 0 },
+        { kind: 0, id: "E", index: 3, row: makeRow("E", "E", 5) },
+      ]),
+      transform,
+    );
+
+    expect(result.all.map((item) => item.id)).toEqual(["C", "D", "A", "E"]);
+    expect(result.all.find((item) => item.id === "D")?.name).toBe("D*");
+  });
+
   it("clears state", () => {
     const manager = new SubscriptionManager<TestItem>();
 
