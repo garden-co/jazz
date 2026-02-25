@@ -55,7 +55,6 @@ describe("startLocalJazzServer", () => {
       appId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       port: 19111,
       dataDir,
-      jwksUrl: "http://127.0.0.1:3981/jwks",
       backendSecret: "test-backend-secret",
       adminSecret: "test-admin-secret",
       allowAnonymous: true,
