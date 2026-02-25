@@ -219,6 +219,33 @@ describe("schemaToWasm", () => {
       },
     });
   });
+
+  it("carries InheritsReferencing policies into wasm schema", () => {
+    table("files", { owner_id: col.string() });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
+        },
+      },
+    };
+
+    const wasm = schemaToWasm(schema);
+    expect(wasm.tables.files.policies).toEqual({
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
+        },
+      },
+    });
+  });
 });
 
 describe("generateTypes", () => {

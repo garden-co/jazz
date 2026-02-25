@@ -208,6 +208,41 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
                 }
             }
         }
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => {
+            hasher.update(&[13]);
+            match operation {
+                Operation::Select => {
+                    hasher.update(&[1]);
+                }
+                Operation::Insert => {
+                    hasher.update(&[2]);
+                }
+                Operation::Update => {
+                    hasher.update(&[3]);
+                }
+                Operation::Delete => {
+                    hasher.update(&[4]);
+                }
+            }
+            hasher.update(source_table.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(via_column.as_bytes());
+            hasher.update(&[0]);
+            match max_depth {
+                Some(depth) => {
+                    hasher.update(&[1]);
+                    hasher.update(&(*depth as u64).to_le_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
         PolicyExpr::And(exprs) => {
             hasher.update(&[7]);
             hasher.update(&(exprs.len() as u64).to_le_bytes());

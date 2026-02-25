@@ -114,6 +114,14 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         via_column: expr.via_column,
         max_depth: expr.max_depth,
       };
+    case "InheritsReferencing":
+      return {
+        type: "InheritsReferencing",
+        operation: expr.operation,
+        source_table: expr.source_table,
+        via_column: expr.via_column,
+        max_depth: expr.max_depth,
+      };
     case "And":
       return { type: "And", exprs: expr.exprs.map(clonePolicyExpr) };
     case "Or":
