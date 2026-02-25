@@ -18,7 +18,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
+    ComposedBranchName, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash, TableName,
+    TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -146,6 +147,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) settled_tier: Option<PersistenceTier>,
     /// Tiers that have confirmed settlement for this query.
     pub(crate) achieved_tiers: HashSet<PersistenceTier>,
+    /// Current ordered IDs for ordered delta construction.
+    pub(crate) current_ordered_ids: Vec<ObjectId>,
 }
 
 /// Update for a query subscription.
@@ -153,6 +156,7 @@ pub(crate) struct QuerySubscription {
 pub struct QueryUpdate {
     pub subscription_id: QuerySubscriptionId,
     pub delta: RowDelta,
+    pub ordered_delta: OrderedRowDelta,
     /// Output descriptor for decoding the binary row data.
     /// This matches the query's output schema (handles JOINs, projections, etc).
     pub descriptor: RowDescriptor,
@@ -725,6 +729,19 @@ impl QueryManager {
                 // First delivery — full current state snapshot
                 subscription.settled_once = true;
                 let full_result = subscription.graph.current_result_as_delta();
+                let ordered_ids_after: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &full_result,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
                 // Always emit the first snapshot once tier is satisfied, even if empty.
                 // This guarantees one-shot queries can resolve to [] instead of hanging.
                 tracing::debug!(
@@ -735,9 +752,23 @@ impl QueryManager {
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
                     delta: full_result,
+                    ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             } else if !delta.is_empty() {
+                let ordered_ids_after: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
                 tracing::debug!(
                     sub_id = sub_id.0,
                     added = delta.added.len(),
@@ -748,7 +779,8 @@ impl QueryManager {
                 // Incremental delivery
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
-                    delta,
+                    delta: delta.clone(),
+                    ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             }

@@ -57,9 +57,7 @@ function makeQuery(payload?: Record<string, unknown>): QueryBuilder<Todo> {
 function makeDelta(all: Todo[]): SubscriptionDelta<Todo> {
   return {
     all,
-    added: [],
-    updated: [],
-    removed: [],
+    delta: [],
   };
 }
 
