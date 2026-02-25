@@ -85,6 +85,8 @@ pub enum ColumnType {
     Enum(Vec<String>),
     /// 8-byte unsigned timestamp (microseconds since Unix epoch).
     Timestamp,
+    /// 8-byte IEEE 754 double-precision float (f64).
+    Double,
     /// 16-byte UUID (ObjectId).
     Uuid,
     /// Homogeneous array of values.
@@ -100,6 +102,7 @@ impl ColumnType {
         match self {
             ColumnType::Integer => Some(4),
             ColumnType::BigInt => Some(8),
+            ColumnType::Double => Some(8),
             ColumnType::Boolean => Some(1),
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),

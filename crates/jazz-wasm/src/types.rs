@@ -18,6 +18,7 @@ use tsify::Tsify;
 pub enum WasmValue {
     Integer(i32),
     BigInt(i64),
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
@@ -33,6 +34,7 @@ impl From<jazz_tools::query_manager::types::Value> for WasmValue {
         match v {
             Value::Integer(i) => WasmValue::Integer(i),
             Value::BigInt(i) => WasmValue::BigInt(i),
+            Value::Double(f) => WasmValue::Double(f),
             Value::Boolean(b) => WasmValue::Boolean(b),
             Value::Text(s) => WasmValue::Text(s),
             Value::Timestamp(t) => WasmValue::Timestamp(t),
@@ -54,6 +56,7 @@ impl TryFrom<WasmValue> for jazz_tools::query_manager::types::Value {
         Ok(match v {
             WasmValue::Integer(i) => Value::Integer(i),
             WasmValue::BigInt(i) => Value::BigInt(i),
+            WasmValue::Double(f) => Value::Double(f),
             WasmValue::Boolean(b) => Value::Boolean(b),
             WasmValue::Text(s) => Value::Text(s),
             WasmValue::Timestamp(t) => Value::Timestamp(t),
@@ -89,11 +92,44 @@ pub struct WasmRow {
 /// Delta for row-level changes (mirrors jazz_tools::query_manager::types::RowDelta).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
-pub struct WasmRowDelta {
-    pub added: Vec<WasmRow>,
-    pub removed: Vec<WasmRow>,
-    pub updated: Vec<(WasmRow, WasmRow)>,
-    pub pending: bool,
+#[serde(transparent)]
+pub struct WasmRowDelta(pub Vec<WasmRowChange>);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmAdded {
+    pub kind: u8,
+    pub id: String,
+    pub index: usize,
+    pub row: WasmRow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmRemoved {
+    pub kind: u8,
+    pub id: String,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmUpdated {
+    pub kind: u8,
+    pub id: String,
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[tsify(optional)]
+    pub row: Option<WasmRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(untagged)]
+pub enum WasmRowChange {
+    Added(WasmAdded),
+    Removed(WasmRemoved),
+    Updated(WasmUpdated),
 }
 
 // ============================================================================
@@ -107,6 +143,7 @@ pub struct WasmRowDelta {
 pub enum WasmColumnType {
     Integer,
     BigInt,
+    Double,
     Boolean,
     Text,
     Enum { variants: Vec<String> },
@@ -247,6 +284,7 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
         match ct {
             ColumnType::Integer => WasmColumnType::Integer,
             ColumnType::BigInt => WasmColumnType::BigInt,
+            ColumnType::Double => WasmColumnType::Double,
             ColumnType::Boolean => WasmColumnType::Boolean,
             ColumnType::Text => WasmColumnType::Text,
             ColumnType::Enum(variants) => WasmColumnType::Enum { variants },
@@ -573,6 +611,7 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
             match wt {
                 WasmColumnType::Integer => ColumnType::Integer,
                 WasmColumnType::BigInt => ColumnType::BigInt,
+                WasmColumnType::Double => ColumnType::Double,
                 WasmColumnType::Boolean => ColumnType::Boolean,
                 WasmColumnType::Text => ColumnType::Text,
                 WasmColumnType::Enum { variants } => ColumnType::Enum(variants),
