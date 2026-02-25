@@ -697,13 +697,11 @@ mod tests {
 
         node.process_left(TupleDelta {
             added: vec![file],
-            removed: vec![],
-            updated: vec![],
+            ..Default::default()
         });
         let delta = node.process_right(TupleDelta {
             added: vec![row_a, row_b],
-            removed: vec![],
-            updated: vec![],
+            ..Default::default()
         });
 
         assert_eq!(
@@ -740,13 +738,11 @@ mod tests {
 
         node.process_right(TupleDelta {
             added: vec![file],
-            removed: vec![],
-            updated: vec![],
+            ..Default::default()
         });
         let delta = node.process_left(TupleDelta {
             added: vec![row_a, row_b],
-            removed: vec![],
-            updated: vec![],
+            ..Default::default()
         });
 
         assert_eq!(
