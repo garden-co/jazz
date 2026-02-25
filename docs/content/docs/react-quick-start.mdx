@@ -263,9 +263,20 @@ Outside of components (or when you need the delta), use `db.subscribeAll` direct
 ```ts
 const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), (delta) => {
   delta.all; // Todo[]  — full current result set
-  delta.added; // { item: Todo, index: number }[]
-  delta.updated; // { oldItem: Todo, newItem: Todo, oldIndex: number, newIndex: number }[]
-  delta.removed; // { item: Todo, index: number }[]
+  delta.delta; // RowDelta<Todo>[]
+  for (const change of delta.delta) {
+    switch (change.kind) {
+      case 0:
+        change.row; // WasmRow payload for the inserted row
+        break;
+      case 1:
+        change.id; // removed row id
+        break;
+      case 2:
+        change.index; // new position
+        break;
+    }
+  }
 });
 
 // Later:

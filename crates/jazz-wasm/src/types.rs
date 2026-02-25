@@ -92,11 +92,44 @@ pub struct WasmRow {
 /// Delta for row-level changes (mirrors jazz_tools::query_manager::types::RowDelta).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
-pub struct WasmRowDelta {
-    pub added: Vec<WasmRow>,
-    pub removed: Vec<WasmRow>,
-    pub updated: Vec<(WasmRow, WasmRow)>,
-    pub pending: bool,
+#[serde(transparent)]
+pub struct WasmRowDelta(pub Vec<WasmRowChange>);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmAdded {
+    pub kind: u8,
+    pub id: String,
+    pub index: usize,
+    pub row: WasmRow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmRemoved {
+    pub kind: u8,
+    pub id: String,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct WasmUpdated {
+    pub kind: u8,
+    pub id: String,
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[tsify(optional)]
+    pub row: Option<WasmRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(untagged)]
+pub enum WasmRowChange {
+    Added(WasmAdded),
+    Removed(WasmRemoved),
+    Updated(WasmUpdated),
 }
 
 // ============================================================================

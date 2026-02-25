@@ -7,5 +7,5 @@ export type {
   TableSchema,
   WasmSchema,
   WasmRow,
-  RowDelta,
+  RowDelta as WireRowDelta,
 } from "./types.js";

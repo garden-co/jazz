@@ -5,23 +5,31 @@
  * WASM row deltas into typed object deltas with full state tracking.
  */
 
-import type { WasmRow, RowDelta } from "../drivers/types.js";
+import type { WasmRow, RowDelta as WireRowDelta } from "../drivers/types.js";
+
+const RowChangeKind = {
+  Added: 0 as const,
+  Removed: 1 as const,
+  Updated: 2 as const,
+} as const;
+export type RowChangeKind = typeof RowChangeKind;
+export type RowChangeKindValue = (typeof RowChangeKind)[keyof typeof RowChangeKind];
+
+export type RowDelta<T> =
+  | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
+  | { kind: RowChangeKind["Removed"]; id: string; index: number }
+  | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
 
 /**
  * Delta result from a subscription callback.
  *
- * Contains the full current state (`all`) plus granular changes
- * (`added`, `updated`, `removed`) for efficient UI updates.
+ * Contains the full current state (`all`) plus an ordered row-change stream.
  */
 export interface SubscriptionDelta<T> {
   /** Current full result set after applying this delta */
   all: T[];
-  /** Items added in this delta */
-  added: T[];
-  /** Items updated in this delta (new values) */
-  updated: T[];
-  /** Items removed in this delta */
-  removed: T[];
+  /** Ordered list of changes for this delta */
+  delta: RowDelta<T>[];
 }
 
 /**
@@ -34,6 +42,19 @@ export interface SubscriptionDelta<T> {
  */
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
+  private orderedIds: string[] = [];
+
+  private removeId(id: string): void {
+    const index = this.orderedIds.indexOf(id);
+    if (index !== -1) {
+      this.orderedIds.splice(index, 1);
+    }
+  }
+
+  private insertIdAt(id: string, index: number): void {
+    const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
+    this.orderedIds.splice(clamped, 0, id);
+  }
 
   /**
    * Process a row delta and return typed object delta.
@@ -42,39 +63,34 @@ export class SubscriptionManager<T extends { id: string }> {
    * @param transform Function to convert WasmRow to typed object T
    * @returns Typed delta with full state and changes
    */
-  handleDelta(delta: RowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
-    const added: T[] = [];
-    const updated: T[] = [];
-    const removed: T[] = [];
+  handleDelta(delta: WireRowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
+    delta.sort((a, b) => a.index - b.index);
 
-    // Process additions
-    for (const row of delta.added) {
-      const item = transform(row);
-      this.currentResults.set(item.id, item);
-      added.push(item);
-    }
-
-    // Process updates - delta.updated is array of [oldRow, newRow] tuples
-    for (const [_oldRow, newRow] of delta.updated) {
-      const newItem = transform(newRow);
-      this.currentResults.set(newItem.id, newItem);
-      updated.push(newItem);
-    }
-
-    // Process removals
-    for (const row of delta.removed) {
-      const item = this.currentResults.get(row.id);
-      if (item) {
-        this.currentResults.delete(row.id);
-        removed.push(item);
+    for (const change of delta) {
+      switch (change.kind) {
+        case RowChangeKind.Added:
+          this.currentResults.set(change.id, transform(change.row));
+          this.insertIdAt(change.id, change.index);
+          break;
+        case RowChangeKind.Removed:
+          this.currentResults.delete(change.id);
+          this.removeId(change.id);
+          break;
+        case RowChangeKind.Updated:
+          this.removeId(change.id);
+          this.insertIdAt(change.id, change.index);
+          if (change.row) {
+            this.currentResults.set(change.id, transform(change.row));
+          }
+          break;
       }
     }
 
     return {
-      all: Array.from(this.currentResults.values()),
-      added,
-      updated,
-      removed,
+      all: this.orderedIds
+        .map((id) => this.currentResults.get(id))
+        .filter((item): item is T => item !== undefined),
+      delta: delta as RowDelta<T>[],
     };
   }
 
@@ -85,6 +101,7 @@ export class SubscriptionManager<T extends { id: string }> {
    */
   clear(): void {
     this.currentResults.clear();
+    this.orderedIds = [];
   }
 
   /**
