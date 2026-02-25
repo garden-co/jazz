@@ -53,7 +53,7 @@ impl QueryManager {
             });
         }
 
-        self.validate_uuid_array_foreign_keys_for_values(
+        self.validate_foreign_keys_for_values(
             storage,
             &table_name,
             &descriptor,
@@ -165,13 +165,7 @@ impl QueryManager {
             });
         }
 
-        self.validate_uuid_array_foreign_keys_for_values(
-            storage,
-            &table_name,
-            &descriptor,
-            values,
-            branch,
-        )?;
+        self.validate_foreign_keys_for_values(storage, &table_name, &descriptor, values, branch)?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -242,7 +236,7 @@ impl QueryManager {
         })
     }
 
-    fn validate_uuid_array_foreign_keys_for_values(
+    fn validate_foreign_keys_for_values(
         &self,
         storage: &dyn Storage,
         table_name: &TableName,
@@ -254,40 +248,54 @@ impl QueryManager {
             let Some(referenced_table) = column.references else {
                 continue;
             };
-            let ColumnType::Array(element_type) = &column.column_type else {
-                continue;
-            };
-            if !matches!(element_type.as_ref(), ColumnType::Uuid) {
-                continue;
-            }
-            let Value::Array(elements) = value else {
-                continue;
-            };
 
-            for element in elements {
-                let Value::Uuid(target_id) = element else {
-                    continue;
-                };
-                if self.row_is_indexed_on_branch(
-                    storage,
-                    referenced_table.as_str(),
-                    branch,
-                    *target_id,
-                ) {
-                    continue;
+            match (&column.column_type, value) {
+                (ColumnType::Uuid, Value::Uuid(target_id)) => {
+                    if self.row_is_indexed_on_branch(
+                        storage,
+                        referenced_table.as_str(),
+                        branch,
+                        *target_id,
+                    ) {
+                        continue;
+                    }
+                    return Err(QueryError::UuidForeignKeyViolation {
+                        table: *table_name,
+                        column: column.name.as_str().to_string(),
+                        referenced_table,
+                        missing_id: *target_id,
+                    });
                 }
-                return Err(QueryError::UuidArrayForeignKeyViolation {
-                    table: *table_name,
-                    column: column.name.as_str().to_string(),
-                    referenced_table,
-                    missing_id: *target_id,
-                });
+                (ColumnType::Array(element_type), Value::Array(elements))
+                    if matches!(element_type.as_ref(), ColumnType::Uuid) =>
+                {
+                    for element in elements {
+                        let Value::Uuid(target_id) = element else {
+                            continue;
+                        };
+                        if self.row_is_indexed_on_branch(
+                            storage,
+                            referenced_table.as_str(),
+                            branch,
+                            *target_id,
+                        ) {
+                            continue;
+                        }
+                        return Err(QueryError::UuidArrayForeignKeyViolation {
+                            table: *table_name,
+                            column: column.name.as_str().to_string(),
+                            referenced_table,
+                            missing_id: *target_id,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
     }
 
-    pub(super) fn validate_uuid_array_foreign_keys_for_content(
+    pub(super) fn validate_foreign_keys_for_content(
         &self,
         storage: &dyn Storage,
         table_name: &TableName,
@@ -297,9 +305,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         let values = decode_row(descriptor, content)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        self.validate_uuid_array_foreign_keys_for_values(
-            storage, table_name, descriptor, &values, branch,
-        )
+        self.validate_foreign_keys_for_values(storage, table_name, descriptor, &values, branch)
     }
 
     /// Evaluate a policy expression against encoded row content using full policy context.
@@ -418,7 +424,7 @@ impl QueryManager {
             });
         }
 
-        self.validate_uuid_array_foreign_keys_for_values(
+        self.validate_foreign_keys_for_values(
             storage,
             &table_name,
             &descriptor,
@@ -766,7 +772,7 @@ impl QueryManager {
             });
         }
 
-        self.validate_uuid_array_foreign_keys_for_values(
+        self.validate_foreign_keys_for_values(
             storage,
             &table_name,
             &descriptor,
