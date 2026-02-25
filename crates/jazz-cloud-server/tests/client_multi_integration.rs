@@ -87,6 +87,7 @@ struct ServerProcess {
 
 #[derive(Default)]
 struct ServerProcessOptions {
+    port: Option<u16>,
     delay_server_send_object_updated_ms: Option<String>,
     delay_server_send_object_updated_every: Option<String>,
 }
@@ -97,7 +98,7 @@ impl ServerProcess {
     }
 
     async fn start_with_options(data_root: &Path, options: ServerProcessOptions) -> Self {
-        let port = get_free_port();
+        let port = options.port.unwrap_or_else(get_free_port);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
         cmd.args([
             "--port",
@@ -548,6 +549,7 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     let delayed_server = ServerProcess::start_with_options(
         server_data.path(),
         ServerProcessOptions {
+            port: None,
             delay_server_send_object_updated_ms: Some("1400-1800".to_string()),
             delay_server_send_object_updated_every: Some("1".to_string()),
         },
@@ -702,6 +704,7 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
     )
     .await;
 
+    let restart_port = server.port;
     drop(server);
     wait_for_catalogue_manifest_schema_count_on_disk(
         app_id,
@@ -710,7 +713,14 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
         Duration::from_secs(20),
     )
     .await;
-    let restarted = ServerProcess::start(server_data.path()).await;
+    let restarted = ServerProcess::start_with_options(
+        server_data.path(),
+        ServerProcessOptions {
+            port: Some(restart_port),
+            ..ServerProcessOptions::default()
+        },
+    )
+    .await;
 
     let rows_after_restart = wait_for_todos_count(
         &client,
