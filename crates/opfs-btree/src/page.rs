@@ -292,6 +292,10 @@ pub(crate) fn raw_leaf_find_value<'a>(
     Ok(None)
 }
 
+/// Scan a leaf page for key-value pairs in the range [start, end).
+/// Calls the `visit` function for each key-value pair in the range.
+/// If the end of the range (or the limit of results) is reached, the function returns None.
+/// Otherwise, the function returns the next page ID so the caller can continue scanning.
 pub(crate) fn raw_leaf_scan<'a>(
     raw: &'a [u8],
     expected_page_size: usize,
@@ -305,7 +309,7 @@ pub(crate) fn raw_leaf_scan<'a>(
         return Err(BTreeError::Corrupt("expected leaf page".to_string()));
     }
     if limit == 0 {
-        return Ok(header.next_page_id);
+        return Ok(None);
     }
 
     let entry_count = header.item_count as usize;
@@ -377,7 +381,7 @@ pub(crate) fn raw_leaf_scan<'a>(
         slot_base += LEAF_SLOT_BYTES;
     }
 
-    if reached_end {
+    if reached_end || emitted == limit {
         Ok(None)
     } else {
         Ok(header.next_page_id)
@@ -1391,6 +1395,22 @@ fn take_bytes<'a>(
 mod tests {
     use super::*;
 
+    fn sample_leaf_page(next: Option<PageId>) -> Vec<u8> {
+        encode_page(
+            &Page::Leaf {
+                entries: vec![
+                    (b"a".to_vec(), ValueCell::Inline(b"1".to_vec())),
+                    (b"b".to_vec(), ValueCell::Inline(b"2".to_vec())),
+                    (b"c".to_vec(), ValueCell::Inline(b"3".to_vec())),
+                    (b"d".to_vec(), ValueCell::Inline(b"4".to_vec())),
+                ],
+                next,
+            },
+            4096,
+        )
+        .expect("encode sample leaf")
+    }
+
     #[test]
     fn leaf_page_round_trip() {
         let page = Page::Leaf {
@@ -1534,5 +1554,57 @@ mod tests {
                 is_empty: true,
             }
         );
+    }
+
+    #[test]
+    fn raw_leaf_scan_limit_zero_returns_none_and_does_not_visit() {
+        let raw = sample_leaf_page(Some(55));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan(&raw, 4096, b"a", b"z", 0, |key, _| {
+            visited.push(key.to_vec());
+            Ok(())
+        })
+        .expect("scan");
+        assert_eq!(next, None);
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn raw_leaf_scan_honors_start_inclusive_end_exclusive() {
+        let raw = sample_leaf_page(Some(77));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan(&raw, 4096, b"b", b"d", 10, |key, _| {
+            visited.push(key.to_vec());
+            Ok(())
+        })
+        .expect("scan");
+        assert_eq!(visited, vec![b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn raw_leaf_scan_returns_next_when_page_exhausted_before_end() {
+        let raw = sample_leaf_page(Some(88));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan(&raw, 4096, b"b", b"z", 10, |key, _| {
+            visited.push(key.to_vec());
+            Ok(())
+        })
+        .expect("scan");
+        assert_eq!(visited, vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
+        assert_eq!(next, Some(88));
+    }
+
+    #[test]
+    fn raw_leaf_scan_returns_none_when_limit_is_reached() {
+        let raw = sample_leaf_page(Some(99));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan(&raw, 4096, b"a", b"z", 2, |key, _| {
+            visited.push(key.to_vec());
+            Ok(())
+        })
+        .expect("scan");
+        assert_eq!(visited, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(next, None);
     }
 }
