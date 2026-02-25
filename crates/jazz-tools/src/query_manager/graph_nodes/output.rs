@@ -146,13 +146,13 @@ impl OutputNode {
 
     /// Rebuild ordered output from a full ordered upstream input.
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
-        let old_tuples = self.ordered_tuples.clone();
+        let delta = self.compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
+
         self.ordered_tuples = ordered_tuples.to_vec();
         self.current_tuples = self.ordered_tuples.iter().cloned().collect();
         self.dirty = false;
         self.subscriber_initialized = true;
 
-        let delta = self.compute_tuple_delta(&old_tuples, &self.ordered_tuples);
         if !delta.is_empty() {
             self.pending_tuple_deltas.push(delta.clone());
         }

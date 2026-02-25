@@ -1971,9 +1971,6 @@ impl QueryGraph {
                 }
                 Some(GraphNode::LimitOffset(_)) => {
                     let input_node = self.get_inputs(node_id).first().copied();
-                    let input_delta = input_node
-                        .and_then(|dep| tuple_deltas.get(&dep).cloned())
-                        .unwrap_or_default();
                     let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
                         Some(GraphNode::Sort(sort_node)) => {
                             Some(sort_node.sorted_tuples().to_vec())
@@ -1985,6 +1982,9 @@ impl QueryGraph {
                         let delta = if let Some(ordered) = ordered_input {
                             lo_node.process_with_ordered_input(&ordered)
                         } else {
+                            let input_delta = input_node
+                                .and_then(|dep| tuple_deltas.get(&dep).cloned())
+                                .unwrap_or_default();
                             RowNode::process(lo_node, input_delta)
                         };
                         tracing::debug!(
@@ -2035,9 +2035,6 @@ impl QueryGraph {
                 }
                 Some(GraphNode::Output(_)) => {
                     let input_node = self.get_inputs(node_id).first().copied();
-                    let input_delta = input_node
-                        .and_then(|dep| tuple_deltas.get(&dep).cloned())
-                        .unwrap_or_default();
                     let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
                         Some(GraphNode::LimitOffset(lo_node)) => {
                             Some(lo_node.windowed_tuples().to_vec())
@@ -2052,6 +2049,9 @@ impl QueryGraph {
                         let delta = if let Some(ordered) = ordered_input {
                             output_node.process_with_ordered_input(&ordered)
                         } else {
+                            let input_delta = input_node
+                                .and_then(|dep| tuple_deltas.get(&dep).cloned())
+                                .unwrap_or_default();
                             RowNode::process(output_node, input_delta)
                         };
                         tracing::debug!(
@@ -2279,6 +2279,7 @@ fn sort_keys_from_order_by(
     descriptor: &RowDescriptor,
 ) -> Vec<SortKey> {
     if order_by.is_empty() {
+        // Deterministic default ordering when no explicit orderBy is provided.
         return vec![SortKey {
             target: SortTarget::RowId,
             direction: SortDirection::Ascending,

@@ -25,6 +25,10 @@ pub struct SortKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortTarget {
     Column(usize),
+    /// Virtual sort key for object identity (`id`/`_id`).
+    ///
+    /// This is needed because object ID is not part of row payload columns,
+    /// but query semantics allow `ORDER BY id|_id` (including desc and mixed keys).
     RowId,
 }
 
