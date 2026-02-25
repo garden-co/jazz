@@ -83,6 +83,7 @@ enum Token {
     Session,
     Inherits,
     Via,
+    Referencing,
     Select,
     Insert,
     Update,
@@ -304,8 +305,9 @@ impl<'a> Tokenizer<'a> {
                     "WITH" => Token::With,
                     "CHECK" => Token::Check,
                     "SESSION" => Token::Session,
-                    "INHERITS" => Token::Inherits,
+                    "INHERITS" | "INHERIT" => Token::Inherits,
                     "VIA" => Token::Via,
+                    "REFERENCING" => Token::Referencing,
                     "SELECT" => Token::Select,
                     "INSERT" => Token::Insert,
                     "UPDATE" => Token::Update,
@@ -571,13 +573,26 @@ impl Parser {
             Some(Token::Inherits) => {
                 self.advance();
                 let operation = self.parse_policy_operation()?;
-                self.expect(&Token::Via)?;
-                let via_column = self.expect_ident()?;
-                Ok(PolicyExpr::Inherits {
-                    operation,
-                    via_column,
-                    max_depth: None,
-                })
+                if self.peek() == Some(&Token::Referencing) {
+                    self.advance();
+                    let source_table = self.expect_ident()?;
+                    self.expect(&Token::Via)?;
+                    let via_column = self.expect_ident()?;
+                    Ok(PolicyExpr::InheritsReferencing {
+                        operation,
+                        source_table,
+                        via_column,
+                        max_depth: None,
+                    })
+                } else {
+                    self.expect(&Token::Via)?;
+                    let via_column = self.expect_ident()?;
+                    Ok(PolicyExpr::Inherits {
+                        operation,
+                        via_column,
+                        max_depth: None,
+                    })
+                }
             }
             Some(Token::Ident(_)) => {
                 let column = self.expect_ident()?;
@@ -1171,6 +1186,26 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
                 via_column
             ),
         },
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => match max_depth {
+            Some(depth) => format!(
+                "INHERITS {} REFERENCING {} VIA {} MAX DEPTH {}",
+                operation.to_string().to_uppercase(),
+                source_table,
+                via_column,
+                depth
+            ),
+            None => format!(
+                "INHERITS {} REFERENCING {} VIA {}",
+                operation.to_string().to_uppercase(),
+                source_table,
+                via_column
+            ),
+        },
         PolicyExpr::And(exprs) => exprs
             .iter()
             .map(|e| format!("({})", policy_expr_to_sql(e)))
@@ -1431,6 +1466,48 @@ mod tests {
         assert!(table.policies.update.using.is_some());
         assert!(table.policies.update.with_check.is_some());
         assert!(table.policies.delete.using.is_some());
+    }
+
+    #[test]
+    fn parse_create_policy_with_inherits_referencing() {
+        let sql = r#"
+            CREATE TABLE files (
+                owner_id TEXT NOT NULL
+            );
+
+            CREATE TABLE todos (
+                owner_id TEXT NOT NULL,
+                image UUID REFERENCES files
+            );
+
+            CREATE POLICY files_select_policy ON files FOR SELECT
+                USING (owner_id = @session.user_id OR INHERITS SELECT REFERENCING todos VIA image);
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let files = schema.get(&TableName::new("files")).unwrap();
+        let using = files
+            .policies
+            .select
+            .using
+            .as_ref()
+            .expect("missing select policy");
+        match using {
+            PolicyExpr::Or(exprs) => {
+                assert!(exprs.iter().any(|expr| {
+                    matches!(
+                        expr,
+                        PolicyExpr::InheritsReferencing {
+                            operation: Operation::Select,
+                            source_table,
+                            via_column,
+                            max_depth: None,
+                        } if source_table == "todos" && via_column == "image"
+                    )
+                }));
+            }
+            other => panic!("expected OR policy, got {other:?}"),
+        }
     }
 
     #[test]

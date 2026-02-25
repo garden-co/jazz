@@ -193,6 +193,13 @@ enum JsPolicyExpr {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_depth: Option<usize>,
     },
+    InheritsReferencing {
+        operation: JsPolicyOperation,
+        source_table: String,
+        via_column: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
+    },
     And {
         exprs: Vec<JsPolicyExpr>,
     },
@@ -335,6 +342,22 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                     JsPolicyOperation::Update => Operation::Update,
                     JsPolicyOperation::Delete => Operation::Delete,
                 },
+                via_column,
+                max_depth,
+            },
+            JsPolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => PolicyExpr::InheritsReferencing {
+                operation: match operation {
+                    JsPolicyOperation::Select => Operation::Select,
+                    JsPolicyOperation::Insert => Operation::Insert,
+                    JsPolicyOperation::Update => Operation::Update,
+                    JsPolicyOperation::Delete => Operation::Delete,
+                },
+                source_table,
                 via_column,
                 max_depth,
             },
@@ -545,6 +568,22 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     Operation::Update => JsPolicyOperation::Update,
                     Operation::Delete => JsPolicyOperation::Delete,
                 },
+                via_column: via_column.clone(),
+                max_depth: *max_depth,
+            },
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => JsPolicyExpr::InheritsReferencing {
+                operation: match operation {
+                    Operation::Select => JsPolicyOperation::Select,
+                    Operation::Insert => JsPolicyOperation::Insert,
+                    Operation::Update => JsPolicyOperation::Update,
+                    Operation::Delete => JsPolicyOperation::Delete,
+                },
+                source_table: source_table.clone(),
                 via_column: via_column.clone(),
                 max_depth: *max_depth,
             },
@@ -1455,5 +1494,30 @@ mod tests {
         );
         assert!(status.column_type.element.is_none());
         assert!(status.column_type.columns.is_none());
+    }
+
+    #[test]
+    fn js_schema_roundtrip_preserves_fk_references() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("name", ColumnType::Text))
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .fk_column("image", "files"),
+            )
+            .build();
+
+        let js_schema = groove_schema_to_js(&schema);
+        let image = &js_schema.tables["todos"].columns[1];
+        assert_eq!(image.references.as_deref(), Some("files"));
+
+        let decoded = js_schema_to_groove(js_schema);
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
     }
 }
