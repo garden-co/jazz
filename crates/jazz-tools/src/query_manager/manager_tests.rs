@@ -2664,7 +2664,10 @@ fn undelete_hard_deleted_row_fails() {
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
-    assert!(matches!(result, Err(QueryError::RowHardDeleted(_))));
+    match result {
+        Err(QueryError::RowHardDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowHardDeleted for hard-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2715,7 +2718,10 @@ fn truncate_nondeleted_row_fails() {
 
     // Try to truncate a non-deleted row - should fail
     let result = qm.truncate(&mut storage, handle.row_id);
-    assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    match result {
+        Err(QueryError::RowNotDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowNotDeleted for non-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================

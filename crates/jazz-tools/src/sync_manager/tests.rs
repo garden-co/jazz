@@ -760,15 +760,23 @@ fn user_without_session_rejected() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::Error(SyncError::SessionRequired {
-            object_id,
-            branch_name,
-        }) => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::SessionRequired {
+                    object_id,
+                    branch_name,
+                }),
+        } => {
+            assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
             assert_eq!(branch_name.as_str(), "main");
         }
-        other => panic!("Expected SessionRequired error, got {:?}", other),
+        other => panic!(
+            "Expected SessionRequired error to source client, got {:?}",
+            other
+        ),
     }
 
     // Object should not exist
@@ -821,15 +829,23 @@ fn user_catalogue_write_rejected() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::Error(SyncError::CatalogueWriteDenied {
-            object_id,
-            branch_name,
-        }) => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                    object_id,
+                    branch_name,
+                }),
+        } => {
+            assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
             assert_eq!(branch_name.as_str(), "main");
         }
-        other => panic!("Expected CatalogueWriteDenied error, got {:?}", other),
+        other => panic!(
+            "Expected CatalogueWriteDenied error to source client, got {:?}",
+            other
+        ),
     }
 
     // Object should not exist
