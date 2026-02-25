@@ -963,6 +963,7 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: napi::JsFunction,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        #[napi(ts_arg_type = "(reason: string) => void")] on_error: Option<napi::JsFunction>,
     ) -> napi::Result<f64> {
         let query = parse_query(&query_json)?;
 
@@ -1015,12 +1016,28 @@ impl NapiRuntime {
             tsfn.call(Ok(delta_obj), ThreadsafeFunctionCallMode::NonBlocking);
         };
 
+        let error_callback = if let Some(on_err) = on_error {
+            let tsfn_err: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled> =
+                on_err.create_threadsafe_function(0, |ctx| {
+                    let val = ctx.env.to_js_value(&ctx.value)?;
+                    Ok(vec![val])
+                })?;
+            Some(Box::new(move |reason: String| {
+                tsfn_err.call(
+                    Ok(serde_json::Value::String(reason)),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
+            }) as Box<dyn Fn(String) + Send + 'static>)
+        } else {
+            None
+        };
+
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let handle = core
-            .subscribe_with_settled_tier(query, callback, session, tier)
+            .subscribe_with_settled_tier(query, callback, session, tier, error_callback)
             .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
 
         Ok(handle.0 as f64)

@@ -456,6 +456,8 @@ pub trait SyncMessageCallback: Send + Sync {
 pub trait SubscriptionCallback: Send + Sync {
     /// Called when a subscription produces an update.
     fn on_update(&self, delta_json: String);
+    /// Called when the server rejects the subscription.
+    fn on_error(&self, reason: String);
 }
 
 // ============================================================================
@@ -760,43 +762,48 @@ impl RnRuntime {
             })?;
 
             let ids = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
+            let cb = Arc::new(callback);
+
+            let update_cb = {
+                let cb = Arc::clone(&cb);
+                let ids = Arc::clone(&ids);
+                move |delta: SubscriptionDelta| {
+                    let descriptor = &delta.descriptor;
+                    let row_to_json =
+                        |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
+                            let values = decode_row(descriptor, &row.data)
+                                .map(|vals| vals.into_iter().map(RnValue::from).collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            serde_json::json!({
+                                "id": row.id.uuid().to_string(),
+                                "values": values,
+                            })
+                        };
+
+                    let Ok(mut current_ids) = ids.lock() else {
+                        return;
+                    };
+                    let payload = build_rn_delta_json(&delta, &mut current_ids, row_to_json);
+
+                    if let Ok(json) = serde_json::to_string(&payload) {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cb.on_update(json);
+                        }));
+                    }
+                }
+            };
+
+            let error_callback = {
+                let cb = Arc::clone(&cb);
+                Some(Box::new(move |reason: String| {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cb.on_error(reason);
+                    }));
+                }) as Box<dyn Fn(String) + Send + 'static>)
+            };
+
             let handle = core
-                .subscribe_with_settled_tier(
-                    query,
-                    {
-                        let ids = Arc::clone(&ids);
-                        move |delta: SubscriptionDelta| {
-                            let descriptor = &delta.descriptor;
-                            let row_to_json =
-                                |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
-                                    let values = decode_row(descriptor, &row.data)
-                                        .map(|vals| {
-                                            vals.into_iter().map(RnValue::from).collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or_default();
-                                    serde_json::json!({
-                                        "id": row.id.uuid().to_string(),
-                                        "values": values,
-                                    })
-                                };
-
-                            let Ok(mut current_ids) = ids.lock() else {
-                                return;
-                            };
-                            let payload =
-                                build_rn_delta_json(&delta, &mut current_ids, row_to_json);
-
-                            if let Ok(json) = serde_json::to_string(&payload) {
-                                let _ =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        callback.on_update(json);
-                                    }));
-                            }
-                        }
-                    },
-                    session,
-                    tier,
-                )
+                .subscribe_with_settled_tier(query, update_cb, session, tier, error_callback)
                 .map_err(runtime_err)?;
 
             Ok(handle.0)

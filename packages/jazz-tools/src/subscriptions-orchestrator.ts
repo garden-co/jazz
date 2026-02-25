@@ -148,6 +148,7 @@ interface DbLike {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     settledTier?: PersistenceTier,
+    onError?: (error: unknown) => void,
   ): () => void;
 }
 
@@ -291,6 +292,14 @@ export class SubscriptionsOrchestrator {
           }
         },
         entry.tier,
+        (error) => {
+          entry.state = { status: "rejected", data: undefined, error };
+          entry.rejectfulfilled(error);
+          for (const listener of Array.from(entry.listeners)) {
+            listener.onError?.(error);
+          }
+          this.scheduleCleanup(entry);
+        },
       );
     } catch (error) {
       entry.state = { status: "rejected", data: undefined, error };

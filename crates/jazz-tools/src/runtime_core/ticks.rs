@@ -75,25 +75,28 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
                     if let Some(sender) = pending.sender.take() {
                         let _ = sender.send(Err(RuntimeError::QueryError(format!(
-                            "query subscription {} failed during schema recompile: {}",
+                            "query subscription {} failed: {}",
                             failure.subscription_id.0, failure.reason
                         ))));
                     }
                     failed_one_shots.push(handle);
-                } else if self.subscriptions.remove(&handle).is_some() {
+                } else if let Some(state) = self.subscriptions.remove(&handle) {
                     self.subscription_reverse.remove(&failure.subscription_id);
-                    tracing::error!(
+                    if let Some(on_error) = state.on_error {
+                        (on_error)(failure.reason.clone());
+                    }
+                    tracing::warn!(
                         handle = handle.0,
                         sub_id = failure.subscription_id.0,
                         error = %failure.reason,
-                        "subscription failed during schema recompile and was dropped"
+                        "subscription failed and was dropped"
                     );
                 }
             } else {
                 tracing::error!(
                     sub_id = failure.subscription_id.0,
                     error = %failure.reason,
-                    "subscription failed during schema recompile and was dropped"
+                    "subscription failed but no handle found in reverse map"
                 );
             }
         }

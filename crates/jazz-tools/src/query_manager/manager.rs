@@ -599,7 +599,19 @@ impl QueryManager {
             }
         }
 
-        // 7. Settle all subscriptions - row_loader reads from subscription's branches
+        // 7b. Process incoming query subscription rejections
+        let rejections = self.sync_manager.take_pending_query_rejections();
+        for (query_id, reason) in rejections {
+            let sub_id = QuerySubscriptionId(query_id.0);
+            if self.subscriptions.remove(&sub_id).is_some() {
+                self.failed_subscriptions.push(QuerySubscriptionFailure {
+                    subscription_id: sub_id,
+                    reason,
+                });
+            }
+        }
+
+        // 7c. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let dirty_count = self
             .subscriptions

@@ -195,12 +195,21 @@ pub type SubscriptionCallback = Box<dyn Fn(SubscriptionDelta) + 'static>;
 #[cfg(not(target_arch = "wasm32"))]
 pub type SubscriptionCallback = Box<dyn Fn(SubscriptionDelta) + Send + 'static>;
 
+/// Error callback type for subscriptions (invoked on server rejection).
+#[cfg(target_arch = "wasm32")]
+pub type SubscriptionErrorCallback = Box<dyn Fn(String) + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type SubscriptionErrorCallback = Box<dyn Fn(String) + Send + 'static>;
+
 /// State for a subscription.
 struct SubscriptionState {
     /// QueryManager's internal subscription ID.
     query_sub_id: QuerySubscriptionId,
     /// Callback invoked on updates.
     callback: SubscriptionCallback,
+    /// Optional callback invoked on server rejection.
+    on_error: Option<SubscriptionErrorCallback>,
 }
 
 /// Pending one-shot query waiting for first subscription callback.

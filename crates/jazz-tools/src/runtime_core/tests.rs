@@ -1067,6 +1067,7 @@ fn rc_subscribe_settled_tier() {
             },
             None,
             Some(PersistenceTier::Worker),
+            None,
         )
         .unwrap();
 

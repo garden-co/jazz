@@ -51,6 +51,7 @@ export interface Runtime {
     on_update: Function,
     session_json?: string | null,
     settled_tier?: string | null,
+    on_error?: Function,
   ): number;
   unsubscribe(handle: number): void;
   insertWithAck(table: string, values: any, tier: string): Promise<string>;
@@ -544,8 +545,9 @@ export class JazzClient {
     query: string | QueryInput,
     callback: SubscriptionCallback,
     settledTier?: PersistenceTier,
+    onError?: (reason: string) => void,
   ): number {
-    return this.subscribeInternal(query, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, undefined, settledTier, onError);
   }
 
   /**
@@ -557,6 +559,7 @@ export class JazzClient {
     callback: SubscriptionCallback,
     session?: Session,
     settledTier?: PersistenceTier,
+    onError?: (reason: string) => void,
   ): number {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
@@ -570,6 +573,7 @@ export class JazzClient {
       },
       sessionJson,
       settledTier,
+      onError,
     );
     this.subscriptions.set(subId, callback);
     return subId;

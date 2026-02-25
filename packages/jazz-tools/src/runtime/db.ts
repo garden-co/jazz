@@ -1067,6 +1067,7 @@ export class Db {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     settledTier?: PersistenceTier,
+    onError?: (error: unknown) => void,
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
@@ -1090,6 +1091,7 @@ export class Db {
         callback(typedDelta);
       },
       settledTier,
+      onError ? (reason: string) => onError(reason) : undefined,
     );
 
     // Return unsubscribe function

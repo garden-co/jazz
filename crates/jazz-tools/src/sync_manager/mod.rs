@@ -56,6 +56,8 @@ pub struct SyncManager {
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<(QueryId, PersistenceTier)>,
+    /// Pending query subscription rejections for QueryManager to process.
+    pub(super) pending_query_rejections: Vec<(QueryId, String)>,
 
     /// Acks received during inbox processing, for RuntimeCore to consume.
     pub(super) received_acks: Vec<(CommitId, PersistenceTier)>,
@@ -83,6 +85,7 @@ impl std::fmt::Debug for SyncManager {
             .field("commit_interest", &self.commit_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
+            .field("pending_query_rejections", &self.pending_query_rejections)
             .field("received_acks", &self.received_acks)
             .finish()
     }
@@ -115,6 +118,7 @@ impl SyncManager {
             commit_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
+            pending_query_rejections: Vec::new(),
             received_acks: Vec::new(),
         }
     }
@@ -395,6 +399,11 @@ impl SyncManager {
     /// Take pending QuerySettled notifications for QueryManager to process.
     pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, PersistenceTier)> {
         std::mem::take(&mut self.pending_query_settled)
+    }
+
+    /// Take pending query subscription rejections for QueryManager to process.
+    pub fn take_pending_query_rejections(&mut self) -> Vec<(QueryId, String)> {
+        std::mem::take(&mut self.pending_query_rejections)
     }
 
     /// Take received persistence acks since last call.

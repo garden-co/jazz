@@ -574,6 +574,7 @@ impl WasmRuntime {
         on_update: Function,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        on_error: Option<Function>,
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
@@ -619,10 +620,17 @@ impl WasmRuntime {
             }
         };
 
+        let error_callback = on_error.map(|f| {
+            let cb: Box<dyn Fn(String) + 'static> = Box::new(move |reason: String| {
+                let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&reason));
+            });
+            cb
+        });
+
         let handle = self
             .core
             .borrow_mut()
-            .subscribe_with_settled_tier(query, callback, session, tier)
+            .subscribe_with_settled_tier(query, callback, session, tier, error_callback)
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
         let subscription_id = handle.0;

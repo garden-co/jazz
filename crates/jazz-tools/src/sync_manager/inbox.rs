@@ -133,8 +133,27 @@ impl SyncManager {
                     }
                 }
             }
+            SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }) => {
+                tracing::debug!(?query_id, %reason, "server→QuerySubscriptionRejected");
+
+                // Queue for local QueryManager to process
+                self.pending_query_rejections
+                    .push((query_id, reason.clone()));
+
+                // Relay to interested downstream clients
+                if let Some(clients) = self.query_origin.get(&query_id) {
+                    for &cid in clients {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                                query_id,
+                                reason: reason.clone(),
+                            }),
+                        });
+                    }
+                }
+            }
             SyncPayload::Error(err) => {
-                // Log or handle server error
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
             }
             // Servers shouldn't send these to us

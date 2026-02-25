@@ -16,7 +16,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + Send + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, None)
+        self.subscribe_impl(query, Box::new(callback), session, None, None)
     }
 
     /// Subscribe to a query with a callback (WASM version - no Send required).
@@ -30,7 +30,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, None)
+        self.subscribe_impl(query, Box::new(callback), session, None, None)
     }
 
     /// Subscribe with optional settled tier.
@@ -41,11 +41,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         callback: F,
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
+        on_error: Option<SubscriptionErrorCallback>,
     ) -> Result<SubscriptionHandle, RuntimeError>
     where
         F: Fn(SubscriptionDelta) + Send + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, settled_tier)
+        self.subscribe_impl(query, Box::new(callback), session, settled_tier, on_error)
     }
 
     /// Subscribe with settled tier (WASM version - no Send required).
@@ -56,11 +57,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         callback: F,
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
+        on_error: Option<SubscriptionErrorCallback>,
     ) -> Result<SubscriptionHandle, RuntimeError>
     where
         F: Fn(SubscriptionDelta) + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, settled_tier)
+        self.subscribe_impl(query, Box::new(callback), session, settled_tier, on_error)
     }
 
     /// Internal subscribe implementation.
@@ -70,6 +72,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         callback: SubscriptionCallback,
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
+        on_error: Option<SubscriptionErrorCallback>,
     ) -> Result<SubscriptionHandle, RuntimeError> {
         let _span = debug_span!("subscribe", table = query.table.as_str()).entered();
         let query_sub_id = self
@@ -87,6 +90,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             SubscriptionState {
                 query_sub_id,
                 callback,
+                on_error,
             },
         );
         self.subscription_reverse.insert(query_sub_id, handle);

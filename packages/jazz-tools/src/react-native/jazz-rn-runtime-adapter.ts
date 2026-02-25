@@ -35,7 +35,7 @@ export interface JazzRnRuntimeBinding {
   setClientRole(clientId: string, role: string): void;
   subscribe(
     queryJson: string,
-    callback: { onUpdate(deltaJson: string): void },
+    callback: { onUpdate(deltaJson: string): void; onError(reason: string): void },
     sessionJson: string | undefined,
     settledTier: string | undefined,
   ): bigint;
@@ -150,6 +150,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     on_update: Function,
     session_json?: string | null,
     settled_tier?: string | null,
+    on_error?: Function,
   ): number {
     const handle = this.binding.subscribe(
       query_json,
@@ -159,6 +160,15 @@ export class JazzRnRuntimeAdapter implements Runtime {
             on_update(deltaJson);
           } catch (error) {
             swallowCallbackError("subscription", error);
+          }
+        },
+        onError: (reason: string) => {
+          if (on_error) {
+            try {
+              on_error(reason);
+            } catch (error) {
+              swallowCallbackError("subscription error", error);
+            }
           }
         },
       },
