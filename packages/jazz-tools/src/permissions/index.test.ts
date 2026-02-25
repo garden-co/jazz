@@ -47,6 +47,36 @@ interface TodoShareWhere {
   canRead?: boolean;
 }
 
+interface Profile {
+  id: string;
+}
+
+interface ProfileWhere {
+  id?: string;
+}
+
+interface Person {
+  id: string;
+  profileId?: string;
+}
+
+interface PersonWhere {
+  id?: string;
+  profileId?: string;
+}
+
+interface Friendship {
+  id: string;
+  personAId: string;
+  personBId: string;
+}
+
+interface FriendshipWhere {
+  id?: string;
+  personAId?: string;
+  personBId?: string;
+}
+
 interface Team {
   id: string;
   kind: string;
@@ -102,6 +132,27 @@ class TodoShareQueryBuilder {
 class ProjectQueryBuilder {
   declare readonly _rowType: Project;
   where(_input: ProjectWhere): ProjectQueryBuilder {
+    return this;
+  }
+}
+
+class ProfileQueryBuilder {
+  declare readonly _rowType: Profile;
+  where(_input: ProfileWhere): ProfileQueryBuilder {
+    return this;
+  }
+}
+
+class PersonQueryBuilder {
+  declare readonly _rowType: Person;
+  where(_input: PersonWhere): PersonQueryBuilder {
+    return this;
+  }
+}
+
+class FriendshipQueryBuilder {
+  declare readonly _rowType: Friendship;
+  where(_input: FriendshipWhere): FriendshipQueryBuilder {
     return this;
   }
 }
@@ -222,6 +273,47 @@ const appWithoutSchema = {
   teams: new TeamQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
+};
+
+const socialApp = {
+  profiles: new ProfileQueryBuilder(),
+  people: new PersonQueryBuilder(),
+  friendships: new FriendshipQueryBuilder(),
+  wasmSchema: {
+    tables: {
+      profiles: {
+        columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
+      },
+      people: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "profileId",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "profiles",
+          },
+        ],
+      },
+      friendships: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "personAId",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "people",
+          },
+          {
+            name: "personBId",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "people",
+          },
+        ],
+      },
+    },
+  },
 };
 
 describe("permissions DSL", () => {
@@ -426,6 +518,129 @@ describe("permissions DSL", () => {
         policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todoId")),
       ]),
     ).toThrow(/references "todos" but this rule is for "projects"/i);
+  });
+
+  it("supports split friend-profile chain style (friendships + readReferencing)", () => {
+    const compiled = definePermissions(socialApp, ({ policy, anyOf, allowedTo, session }) => [
+      policy.people.allowRead.where((person) =>
+        anyOf([
+          policy.friendships.exists.where({
+            personAId: session.personId,
+            personBId: person.id,
+          }),
+          policy.friendships.exists.where({
+            personBId: session.personId,
+            personAId: person.id,
+          }),
+        ]),
+      ),
+      policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId")),
+    ]);
+
+    expect(compiled.profiles.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "people",
+      via_column: "profileId",
+    });
+
+    const peopleUsing = compiled.people.select?.using;
+    expect(peopleUsing?.type).toBe("Or");
+    if (!peopleUsing || peopleUsing.type !== "Or") {
+      throw new Error("Expected people policy to compile to OR.");
+    }
+    expect(peopleUsing.exprs).toHaveLength(2);
+    for (const expr of peopleUsing.exprs) {
+      expect(expr.type).toBe("Exists");
+      if (expr.type !== "Exists") {
+        throw new Error("Expected OR branch to be Exists.");
+      }
+      expect(expr.table).toBe("friendships");
+    }
+  });
+
+  it("supports one-clause friend-profile chain style using join(...)", () => {
+    const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        anyOf([
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .join(policy.friendships, { left: "id", right: "personAId" })
+              .where({ personBId: session.personId }),
+          ),
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .join(policy.friendships, { left: "id", right: "personBId" })
+              .where({ personAId: session.personId }),
+          ),
+        ]),
+      ),
+    ]);
+
+    const using = compiled.profiles.select?.using;
+    expect(using?.type).toBe("Or");
+    if (!using || using.type !== "Or") {
+      throw new Error("Expected profile policy to compile to OR.");
+    }
+    expect(using.exprs).toHaveLength(2);
+    for (const branch of using.exprs) {
+      expect(branch.type).toBe("ExistsRel");
+      if (branch.type !== "ExistsRel") {
+        throw new Error("Expected OR branch to be ExistsRel.");
+      }
+      expect(branch.rel.type).toBe("Filter");
+      if (branch.rel.type !== "Filter") {
+        throw new Error("Expected ExistsRel relation to be Filter.");
+      }
+      expect(branch.rel.input.type).toBe("Join");
+      expect(JSON.stringify(branch.rel)).toContain('"type":"OuterColumn"');
+    }
+  });
+
+  it("supports one-clause friend-profile chain style using hopTo(...).where(...)", () => {
+    const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        anyOf([
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .hopTo("friendshipsViaPersonAId")
+              .where({ personBId: session.personId }),
+          ),
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .hopTo("friendshipsViaPersonBId")
+              .where({ personAId: session.personId }),
+          ),
+        ]),
+      ),
+    ]);
+
+    const using = compiled.profiles.select?.using;
+    expect(using?.type).toBe("Or");
+    if (!using || using.type !== "Or") {
+      throw new Error("Expected profile policy to compile to OR.");
+    }
+    expect(using.exprs).toHaveLength(2);
+    for (const branch of using.exprs) {
+      expect(branch.type).toBe("ExistsRel");
+      if (branch.type !== "ExistsRel") {
+        throw new Error("Expected OR branch to be ExistsRel.");
+      }
+      expect(branch.rel.type).toBe("Project");
+      if (branch.rel.type !== "Project") {
+        throw new Error("Expected ExistsRel relation to be Project.");
+      }
+      expect(branch.rel.input.type).toBe("Filter");
+      if (branch.rel.input.type !== "Filter") {
+        throw new Error("Expected hop relation filter.");
+      }
+      expect(branch.rel.input.input.type).toBe("Join");
+      expect(JSON.stringify(branch.rel)).toContain('"type":"OuterColumn"');
+    }
   });
 
   it("supports bounded recursive inherits depth override", () => {

@@ -453,11 +453,11 @@ impl PolicyFilterNode {
                 depth,
                 visited_referencing,
             ),
-            PolicyExpr::Exists { table, condition } => {
-                self.evaluate_exists_with_context(table, condition, row, io, row_loader, depth)
-            }
+            PolicyExpr::Exists { table, condition } => self.evaluate_exists_with_context(
+                table, condition, row, descriptor, io, row_loader, depth,
+            ),
             PolicyExpr::ExistsRel { rel } => {
-                self.evaluate_exists_rel_with_context(rel, row, io, row_loader, depth)
+                self.evaluate_exists_rel_with_context(rel, row, descriptor, io, row_loader, depth)
             }
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
@@ -601,6 +601,7 @@ impl PolicyFilterNode {
         table: &str,
         condition: &PolicyExpr,
         row: &Row,
+        descriptor: &RowDescriptor,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
@@ -609,7 +610,7 @@ impl PolicyFilterNode {
             return false;
         }
 
-        let bound_condition = match bind_outer_row_refs(condition, &row.data, &self.descriptor) {
+        let bound_condition = match bind_outer_row_refs(condition, &row.data, descriptor) {
             Some(expr) => expr,
             None => return false,
         };
@@ -641,6 +642,7 @@ impl PolicyFilterNode {
         &self,
         rel: &crate::query_manager::relation_ir::RelExpr,
         row: &Row,
+        descriptor: &RowDescriptor,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
@@ -649,16 +651,11 @@ impl PolicyFilterNode {
             return false;
         }
 
-        let bound_rel = match bind_relation_refs(
-            rel,
-            &row.data,
-            &self.descriptor,
-            &self.session,
-            Some(row.id),
-        ) {
-            Some(expr) => expr,
-            None => return false,
-        };
+        let bound_rel =
+            match bind_relation_refs(rel, &row.data, descriptor, &self.session, Some(row.id)) {
+                Some(expr) => expr,
+                None => return false,
+            };
 
         let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, &self.schema, &self.branch) {
             Some(g) => g,
