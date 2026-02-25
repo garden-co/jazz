@@ -1,3 +1,9 @@
+import {
+  createNavigatorLocksLeaderLockStrategy,
+  type LeaderLockLease,
+  type LeaderLockStrategy,
+} from "./leader-lock.js";
+
 /**
  * Cross-tab leader election for browser tabs using BroadcastChannel.
  *
@@ -5,24 +11,25 @@
  *
  *   start
  *     |
- *     +--> request current leader
- *     +--> arm initial-election timeout
- *     |
- *     +--> receive heartbeat/claim --------> follower (lease deadline armed)
- *     |                                         |
- *     |                                         +--> lease deadline expires
- *     |                                               without heartbeat
- *     |                                               |
- *     +-----------------------------------------------+--> promote self to leader
- *                                                           |
- *                                                           +--> emit claim + heartbeat
- *                                                           +--> send periodic heartbeats
+ *     +--> requestCurrentLeader() ------------------------------+
+ *     |                                                        |
+ *     +--> tryAcquireLeadershipLock()                         |
+ *            |                                                |
+ *            +--> acquired -> leader                          |
+ *            |       |                                        |
+ *            |       +--> claim + heartbeat                   |
+ *            |       +--> keep lock lease until step-down     |
+ *            |                                                |
+ *            +--> not acquired -> follower                    |
+ *                    |                                        |
+ *                    +--> wait for heartbeat/claim -----------+
+ *                    |
+ *                    +--> lease timeout -> tryAcquireLeadershipLock() again
  *
  * Election model:
- * - Each tab has a stable random tab ID.
- * - Leaders send periodic heartbeats with term + leader ID.
- * - Followers start an election when the lease deadline expires.
- * - Higher term always wins; same-term ties are broken by tab ID.
+ * - Lock ownership determines who may become leader.
+ * - Leader messages still use term + leader ID fencing.
+ * - Followers discover leader over BroadcastChannel and re-probe on timeout.
  */
 
 export type LeaderRole = "leader" | "follower";
@@ -39,9 +46,9 @@ export interface TabLeaderElectionOptions {
   dbName: string;
   heartbeatMs?: number;
   leaseMs?: number;
-  initialElectionDelayMs?: number;
   tabId?: string;
   now?: () => number;
+  lockStrategy?: LeaderLockStrategy;
 }
 
 interface LeaderHeartbeatMessage {
@@ -52,7 +59,7 @@ interface LeaderHeartbeatMessage {
 }
 
 interface LeaderRequestMessage {
-  type: "leader-request";
+  type: "who-is-leader";
   requesterTabId: string;
 }
 
@@ -77,10 +84,8 @@ interface BroadcastChannelLike {
 function randomTabId(): string {
   const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
   if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
-    // Prefer UUID when available to minimize collision risk across tabs/processes.
     return cryptoObj.randomUUID();
   }
-  // Fallback for environments lacking randomUUID (still sufficient for local tie-breaks).
   return `tab-${Math.random().toString(36).slice(2, 12)}`;
 }
 
@@ -99,7 +104,7 @@ function isMessage(value: unknown): value is LeaderElectionMessage {
       typeof msg.sentAtMs === "number"
     );
   }
-  if (msg.type === "leader-request") {
+  if (msg.type === "who-is-leader") {
     return typeof msg.requesterTabId === "string";
   }
   if (msg.type === "leader-claim") {
@@ -122,9 +127,10 @@ export class TabLeaderElection {
   private readonly tabId: string;
   private readonly heartbeatMs: number;
   private readonly leaseMs: number;
-  private readonly initialElectionDelayMs: number;
   private readonly now: () => number;
   private readonly channelName: string;
+  private readonly lockName: string;
+  private readonly lockStrategy: LeaderLockStrategy | null;
 
   private started = false;
   private channel: BroadcastChannelLike | null = null;
@@ -135,12 +141,13 @@ export class TabLeaderElection {
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private leaseDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
-  private initialElectionTimer: ReturnType<typeof setTimeout> | null = null;
+  private probeInFlight = false;
+  private leadershipLockLease: LeaderLockLease | null = null;
 
   private readonly listeners = new Set<LeaderChangeListener>();
   private readyResolve: ((snapshot: LeaderSnapshot) => void) | null = null;
   private readyReject: ((reason?: unknown) => void) | null = null;
-  private readyPromise: Promise<LeaderSnapshot>;
+  private readonly readyPromise: Promise<LeaderSnapshot>;
   private readySettled = false;
 
   private readonly onMessage = (event: MessageEvent): void => {
@@ -151,12 +158,10 @@ export class TabLeaderElection {
     this.tabId = options.tabId ?? randomTabId();
     this.heartbeatMs = Math.max(100, options.heartbeatMs ?? 1000);
     this.leaseMs = Math.max(this.heartbeatMs * 2, options.leaseMs ?? 5000);
-    this.initialElectionDelayMs = Math.max(
-      this.heartbeatMs,
-      options.initialElectionDelayMs ?? this.heartbeatMs,
-    );
     this.now = options.now ?? (() => Date.now());
     this.channelName = `jazz-leader:${options.appId}:${options.dbName}`;
+    this.lockName = `jazz-leader-lock:${options.appId}:${options.dbName}`;
+    this.lockStrategy = options.lockStrategy ?? createNavigatorLocksLeaderLockStrategy();
 
     this.readyPromise = new Promise<LeaderSnapshot>((resolve, reject) => {
       this.readyResolve = resolve;
@@ -169,41 +174,27 @@ export class TabLeaderElection {
     this.started = true;
 
     const ChannelCtor = resolveBroadcastChannelCtor();
-    if (!ChannelCtor) {
-      this.promoteToLeader(this.term + 1);
-      return;
+    if (ChannelCtor) {
+      this.channel = new ChannelCtor(this.channelName);
+      this.channel.addEventListener("message", this.onMessage);
+      this.requestCurrentLeader();
     }
 
-    this.channel = new ChannelCtor(this.channelName);
-    this.channel.addEventListener("message", this.onMessage);
-
-    this.postMessage({
-      type: "leader-request",
-      requesterTabId: this.tabId,
-    });
-
-    // Startup liveness guard:
-    // if request/heartbeat messages are dropped or delayed, this tab must not wait forever.
-    this.initialElectionTimer = setTimeout(() => {
-      if (!this.leaderTabId) {
-        this.promoteToLeader(this.term + 1);
-      }
-    }, this.initialElectionDelayMs);
+    void this.tryTakeLeadership({ requestLeaderOnFailure: false });
+    this.scheduleLeaseDeadlineCheck();
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
 
-    if (this.initialElectionTimer) {
-      clearTimeout(this.initialElectionTimer);
-      this.initialElectionTimer = null;
-    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
     this.clearLeaseDeadlineTimer();
+    this.releaseLeadershipLock();
+
     if (this.channel) {
       this.channel.removeEventListener("message", this.onMessage);
       this.channel.close();
@@ -255,7 +246,7 @@ export class TabLeaderElection {
     if (!isMessage(raw)) return;
 
     switch (raw.type) {
-      case "leader-request":
+      case "who-is-leader":
         if (this.role === "leader") {
           this.sendHeartbeat();
         }
@@ -328,6 +319,9 @@ export class TabLeaderElection {
       this.ensureHeartbeatTimer();
       this.clearLeaseDeadlineTimer();
     } else {
+      if (prevRole === "leader") {
+        this.releaseLeadershipLock();
+      }
       this.clearHeartbeatTimer();
       this.scheduleLeaseDeadlineCheck();
     }
@@ -359,10 +353,9 @@ export class TabLeaderElection {
       return;
     }
 
-    const referenceTime =
-      this.lastLeaderSeenAtMs > 0 ? this.lastLeaderSeenAtMs : this.now() - this.heartbeatMs;
-    const deadlineMs = referenceTime + this.leaseMs;
-    const delayMs = Math.max(0, deadlineMs - this.now());
+    const delayMs = this.leaderTabId
+      ? Math.max(0, this.lastLeaderSeenAtMs + this.leaseMs - this.now())
+      : this.heartbeatMs;
 
     this.clearLeaseDeadlineTimer();
     this.leaseDeadlineTimer = setTimeout(() => {
@@ -379,14 +372,15 @@ export class TabLeaderElection {
 
   private onLeaseDeadline(): void {
     if (!this.started || this.role === "leader") return;
+
     if (!this.leaderTabId) {
-      this.promoteToLeader(this.term + 1);
+      void this.tryTakeLeadership({ requestLeaderOnFailure: true });
       return;
     }
 
     const elapsed = this.now() - this.lastLeaderSeenAtMs;
     if (elapsed >= this.leaseMs) {
-      this.promoteToLeader(this.term + 1);
+      void this.tryTakeLeadership({ requestLeaderOnFailure: true });
       return;
     }
 
@@ -405,6 +399,52 @@ export class TabLeaderElection {
 
   private postMessage(message: LeaderElectionMessage): void {
     this.channel?.postMessage(message);
+  }
+
+  private requestCurrentLeader(): void {
+    this.postMessage({
+      type: "who-is-leader",
+      requesterTabId: this.tabId,
+    });
+  }
+
+  private async tryTakeLeadership(options: { requestLeaderOnFailure: boolean }): Promise<void> {
+    if (!this.started || this.isLeader()) return;
+    if (this.probeInFlight) return;
+
+    this.probeInFlight = true;
+    try {
+      const acquired = await this.tryAcquireLeadershipLock();
+      if (!this.started || this.isLeader()) return;
+
+      if (acquired) {
+        this.promoteToLeader(this.term + 1);
+        return;
+      }
+
+      if (options.requestLeaderOnFailure) {
+        this.requestCurrentLeader();
+      }
+      this.scheduleLeaseDeadlineCheck();
+    } finally {
+      this.probeInFlight = false;
+    }
+  }
+
+  private async tryAcquireLeadershipLock(): Promise<boolean> {
+    if (this.leadershipLockLease) return true;
+    if (!this.lockStrategy) return false;
+
+    const lease = await this.lockStrategy.tryAcquire(this.lockName);
+    if (!lease) return false;
+    this.leadershipLockLease = lease;
+    return true;
+  }
+
+  private releaseLeadershipLock(): void {
+    const lease = this.leadershipLockLease;
+    this.leadershipLockLease = null;
+    lease?.release();
   }
 
   private emitChange(): void {
