@@ -22,8 +22,9 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
-    case "Timestamp":
       return "number";
+    case "Timestamp":
+      return "Date";
     case "Uuid":
       return "string";
     case "Enum":

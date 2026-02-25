@@ -23,8 +23,9 @@ function columnTypeToTs(type: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
-    case "Timestamp":
       return "number";
+    case "Timestamp":
+      return "Date";
     case "Uuid":
       return "string";
     case "Enum":
@@ -56,7 +57,7 @@ function columnToWhereInputType(col: {
     case "BigInt":
       return "number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
     case "Timestamp":
-      return "number | { eq?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
+      return "Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number }";
     case "Uuid":
       if (col.references) {
         // FK - add isNull for optional refs

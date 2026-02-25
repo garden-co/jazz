@@ -1,7 +1,7 @@
 // Schema type definitions
 import type { RelExpr } from "./ir.js";
 
-export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "TIMESTAMP" | "UUID";
 export interface EnumSqlType {
   kind: "ENUM";
   variants: string[];
@@ -31,6 +31,8 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
       ? number
       : T extends "REAL"
         ? number
+        : T extends "TIMESTAMP"
+          ? number
         : T extends "UUID"
           ? string
           : never;

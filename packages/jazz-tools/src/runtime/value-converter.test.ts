@@ -48,6 +48,18 @@ describe("toValue", () => {
     expect(toValue(now, colType)).toEqual({ type: "Timestamp", value: now });
   });
 
+  it("converts Date objects for Timestamp columns", () => {
+    const colType: ColumnType = { type: "Timestamp" };
+    const ts = 1704067200000;
+    const date = new Date(ts);
+    expect(toValue(date, colType)).toEqual({ type: "Timestamp", value: ts });
+  });
+
+  it("throws for invalid Date in Timestamp columns", () => {
+    const colType: ColumnType = { type: "Timestamp" };
+    expect(() => toValue(new Date("not-a-date"), colType)).toThrow("Invalid timestamp value");
+  });
+
   it("converts Uuid values", () => {
     const colType: ColumnType = { type: "Uuid" };
     const uuid = "550e8400-e29b-41d4-a716-446655440000";

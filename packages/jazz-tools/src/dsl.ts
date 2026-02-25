@@ -168,6 +168,10 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
+  timestamp(opts: { default: MaybeOptional<number, Optional> }): AddOp {
+    return { _type: "add", sqlType: "TIMESTAMP", default: opts.default };
+  }
+
   boolean(opts: { default: MaybeOptional<boolean, Optional> }): AddOp {
     return { _type: "add", sqlType: "BOOLEAN", default: opts.default };
   }
@@ -217,6 +221,10 @@ class DropBuilder {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
+  timestamp(opts: { backwardsDefault: number }): DropOp {
+    return { _type: "drop", sqlType: "TIMESTAMP", backwardsDefault: opts.backwardsDefault };
+  }
+
   boolean(opts: { backwardsDefault: boolean }): DropOp {
     return { _type: "drop", sqlType: "BOOLEAN", backwardsDefault: opts.backwardsDefault };
   }
@@ -255,6 +263,7 @@ export const col = {
   string: () => new ScalarBuilder("TEXT"),
   boolean: () => new ScalarBuilder("BOOLEAN"),
   int: () => new ScalarBuilder("INTEGER"),
+  timestamp: () => new ScalarBuilder("TIMESTAMP"),
   float: () => new ScalarBuilder("REAL"),
   enum: (...variants: string[]) => new EnumBuilder(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
