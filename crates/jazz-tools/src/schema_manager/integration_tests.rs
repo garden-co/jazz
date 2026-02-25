@@ -429,6 +429,34 @@ mod tests {
             .unwrap();
     }
 
+    /// Ingest a remote catalogue object on the `main` branch through sync path.
+    fn ingest_remote_catalogue_object(
+        qm: &mut QueryManager,
+        storage: &mut MemoryStorage,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        content: Vec<u8>,
+        timestamp: u64,
+    ) {
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(storage, object_id, metadata);
+
+        let commit = Commit {
+            parents: Default::default(),
+            content,
+            timestamp,
+            author: object_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(storage, object_id, "main", commit)
+            .unwrap();
+    }
+
     /// Test QueryManager with schema context initialization.
     #[test]
     fn query_manager_with_schema_context() {
@@ -1281,13 +1309,98 @@ mod tests {
 
         let mut qm = QueryManager::new(SyncManager::new());
         qm.set_current_schema(v1.clone(), "dev", "main");
+        let mut storage = MemoryStorage::new();
 
         // Initially no pending catalogue updates
         assert!(qm.take_pending_catalogue_updates().is_empty());
 
-        // Simulate a catalogue object being received via sync
-        // For this to work, we'd need to inject via the object manager and process
-        // This is more of a unit test showing the API exists
+        // Inject two real catalogue schema objects via sync path.
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+        let v2_hash = SchemaHash::compute(&v2);
+        let object_id_v2 = v2_hash.to_object_id();
+        let encoded_schema_v2 = encode_schema(&v2);
+
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text)
+                    .nullable_column("role", ColumnType::Text),
+            )
+            .build();
+        let v3_hash = SchemaHash::compute(&v3);
+        let object_id_v3 = v3_hash.to_object_id();
+        let encoded_schema_v3 = encode_schema(&v3);
+
+        let mut metadata_v2 = HashMap::new();
+        metadata_v2.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata_v2.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata_v2.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+
+        let mut metadata_v3 = HashMap::new();
+        metadata_v3.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata_v3.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata_v3.insert(MetadataKey::SchemaHash.to_string(), v3_hash.to_string());
+
+        ingest_remote_catalogue_object(
+            &mut qm,
+            &mut storage,
+            object_id_v2,
+            metadata_v2,
+            encoded_schema_v2.clone(),
+            1,
+        );
+        ingest_remote_catalogue_object(
+            &mut qm,
+            &mut storage,
+            object_id_v3,
+            metadata_v3,
+            encoded_schema_v3.clone(),
+            2,
+        );
+
+        qm.process(&mut storage);
+
+        let pending = qm.take_pending_catalogue_updates();
+        assert_eq!(pending.len(), 2, "two catalogue objects should be queued");
+        assert_eq!(pending[0].object_id, object_id_v2);
+        assert_eq!(pending[1].object_id, object_id_v3);
+
+        for update in &pending {
+            assert_eq!(
+                update.metadata.get(MetadataKey::Type.as_str()),
+                Some(&ObjectType::CatalogueSchema.to_string())
+            );
+            assert_eq!(
+                update.metadata.get(MetadataKey::AppId.as_str()),
+                Some(&test_app_id().uuid().to_string())
+            );
+        }
+        assert_eq!(pending[0].content, encoded_schema_v2);
+        assert_eq!(pending[1].content, encoded_schema_v3);
+
+        // Queue should be drained after take().
+        assert!(qm.take_pending_catalogue_updates().is_empty());
     }
 
     /// E2E test: Full catalogue sync flow with data query.

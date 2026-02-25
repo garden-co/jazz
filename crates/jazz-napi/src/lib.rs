@@ -44,6 +44,7 @@ use jazz_tools::sync_manager::{
 enum NapiValue {
     Integer(i32),
     BigInt(i64),
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
@@ -59,6 +60,7 @@ impl From<Value> for NapiValue {
         match v {
             Value::Integer(i) => NapiValue::Integer(i),
             Value::BigInt(i) => NapiValue::BigInt(i),
+            Value::Double(f) => NapiValue::Double(f),
             Value::Boolean(b) => NapiValue::Boolean(b),
             Value::Text(s) => NapiValue::Text(s),
             Value::Timestamp(t) => NapiValue::Timestamp(t),
@@ -75,6 +77,7 @@ fn napi_value_to_groove(v: NapiValue) -> Result<Value, String> {
     Ok(match v {
         NapiValue::Integer(i) => Value::Integer(i),
         NapiValue::BigInt(i) => Value::BigInt(i),
+        NapiValue::Double(f) => Value::Double(f),
         NapiValue::Boolean(b) => Value::Boolean(b),
         NapiValue::Text(s) => Value::Text(s),
         NapiValue::Timestamp(t) => Value::Timestamp(t),
@@ -427,6 +430,12 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             },
             ColumnType::BigInt => JsColumnType {
                 type_name: "BigInt".into(),
+                element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Double => JsColumnType {
+                type_name: "Double".into(),
                 element: None,
                 variants: None,
                 columns: None,

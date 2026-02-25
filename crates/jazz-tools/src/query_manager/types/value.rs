@@ -6,10 +6,16 @@ use super::*;
 
 /// Value type for API boundary (insert input, query output).
 /// Internally, rows are stored as binary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq`/`Eq` are implemented manually because `f64` does not implement
+/// `Eq`. We use bitwise comparison (`f64::to_bits`) so that NaN == NaN and
+/// -0.0 != 0.0, which is the correct semantics for storage identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
+    /// 8-byte IEEE 754 double-precision float.
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
@@ -23,6 +29,26 @@ pub enum Value {
     Null,
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
+            (Value::Double(a), Value::Double(b)) => a.to_bits() == b.to_bits(),
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Row(a), Value::Row(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
 impl Value {
     /// Returns the column type this value represents, or None for Null/Row.
     /// Row returns None because its schema is external.
@@ -30,6 +56,7 @@ impl Value {
         match self {
             Value::Integer(_) => Some(ColumnType::Integer),
             Value::BigInt(_) => Some(ColumnType::BigInt),
+            Value::Double(_) => Some(ColumnType::Double),
             Value::Boolean(_) => Some(ColumnType::Boolean),
             Value::Text(_) => Some(ColumnType::Text),
             Value::Timestamp(_) => Some(ColumnType::Timestamp),

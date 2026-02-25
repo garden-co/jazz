@@ -196,7 +196,7 @@ Ack mutation (`insertWithAck`, `updateWithAck`, `deleteFromWithAck`):
 Outgoing:
 
 1. Worker runtime emits server-destination sync envelope.
-2. Worker sends `/sync` POST via `sendSyncPayload()`.
+2. Worker sends `/sync` POST via `sendSyncPayload()` for standard payloads; catalogue payloads are only POSTed when `adminSecret` is configured, otherwise they are dropped client-side.
 3. Auth headers are selected by payload type and auth context.
 
 Incoming:
@@ -240,7 +240,7 @@ Worker `simulate-crash` (tests):
 From `sync-transport.ts`:
 
 - User auth precedence: JWT bearer first, then local auth headers.
-- Catalogue payloads use `X-Jazz-Admin-Secret`.
+- Catalogue payloads use `X-Jazz-Admin-Secret` and are skipped entirely when no admin secret is configured.
 - Optional path prefix support for multi-tenant routing.
 
 ### Local Auth Defaults
