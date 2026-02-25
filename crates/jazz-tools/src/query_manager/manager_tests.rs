@@ -2249,7 +2249,10 @@ fn delete_already_deleted_row_fails() {
 
     // Try to delete again - should fail
     let result = qm.delete(&mut storage, handle.row_id);
-    assert!(matches!(result, Err(QueryError::RowAlreadyDeleted(_))));
+    match result {
+        Err(QueryError::RowAlreadyDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowAlreadyDeleted for deleted row, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2523,7 +2526,10 @@ fn undelete_nondeleted_row_fails() {
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
-    assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    match result {
+        Err(QueryError::RowNotDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowNotDeleted for non-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
