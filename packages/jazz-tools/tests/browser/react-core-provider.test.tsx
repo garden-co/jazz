@@ -5,9 +5,9 @@ import { JazzProvider, useDb, useSession } from "../../src/react-core/provider.j
 import { useAll, useAllSuspense } from "../../src/react-core/use-all.js";
 import {
   makeDeferred,
+  SubscriptionsOrchestrator,
   type CacheEntryHandle,
   type QueryEntryCallbacks,
-  type SubscriptionsOrchestrator,
 } from "../../src/subscriptions-orchestrator.js";
 import type { Session } from "../../src/runtime/context.js";
 import type { QueryBuilder } from "../../src/runtime/db.js";
@@ -330,6 +330,51 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("error", "boom");
+  });
+
+  it("RCB-B13: async rejection through real orchestrator transitions useAllSuspense to error boundary", async () => {
+    // Wire a real SubscriptionsOrchestrator with a mock db that captures the
+    // onError callback. This exercises the full orchestrator → React chain.
+    let capturedOnError: ((error: unknown) => void) | undefined;
+
+    const db = {
+      subscribeAll<T extends { id: string }>(
+        _query: QueryBuilder<T>,
+        _callback: (delta: SubscriptionDelta<T>) => void,
+        _tier?: unknown,
+        onError?: (error: unknown) => void,
+      ): () => void {
+        capturedOnError = onError;
+        return () => {};
+      },
+    };
+
+    const manager = new SubscriptionsOrchestrator({ appId: "rcb-b13" }, db);
+    const client = makeClient({ manager: manager as unknown as ControlledManager });
+
+    render(
+      <CaptureErrorBoundary>
+        <React.Suspense fallback={<div data-testid="rows-fallback">loading-rows</div>}>
+          <JazzProvider client={client}>
+            <UseAllSuspenseView query={BASE_QUERY} />
+          </JazzProvider>
+        </React.Suspense>
+      </CaptureErrorBoundary>,
+    );
+
+    // Entry starts pending, so suspense fallback should show.
+    await expectText("rows-fallback", "loading-rows");
+
+    // The orchestrator should have passed onError to db.subscribeAll().
+    expect(capturedOnError).toBeDefined();
+
+    // Simulate server rejecting the query subscription asynchronously.
+    capturedOnError!(new Error("no read permission on private_chats"));
+
+    // Error boundary should catch the thrown error.
+    await expectText("error", "no read permission on private_chats");
+
+    await manager.shutdown();
   });
 
   it("RCB-B12: hook usage outside provider throws expected invariant error", async () => {

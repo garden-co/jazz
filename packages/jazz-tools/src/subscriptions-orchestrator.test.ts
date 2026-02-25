@@ -445,7 +445,59 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U20 listener unsubscribe is idempotent", async () => {
+  it("SO-U20 async error from subscribeAll transitions entry to rejected and notifies listeners", async () => {
+    // Captures the onError callback that the orchestrator should pass to subscribeAll.
+    // Currently the orchestrator does NOT pass onError, so capturedOnError will be undefined.
+    let capturedOnError: ((error: unknown) => void) | undefined;
+    const calls: SubscribeCall[] = [];
+
+    const db = {
+      subscribeAll<T extends { id: string }>(
+        query: QueryBuilder<T>,
+        callback: (delta: SubscriptionDelta<T>) => void,
+        tier?: PersistenceTier,
+        onError?: (error: unknown) => void,
+      ): () => void {
+        capturedOnError = onError;
+        const unsubscribe = vi.fn();
+        calls.push({
+          callback: callback as (delta: SubscriptionDelta<any>) => void,
+          query: query as QueryBuilder<any>,
+          tier,
+          unsubscribe,
+        });
+        return unsubscribe;
+      },
+    };
+
+    const manager = new SubscriptionsOrchestrator({ appId: "so-u20-async-error" }, db);
+
+    try {
+      const key = manager.makeQueryKey(makeQuery());
+      const entry = manager.getCacheEntry<Todo>(key);
+
+      const onError = vi.fn();
+      const onfulfilled = vi.fn();
+      entry.subscribe({ onError, onfulfilled });
+
+      // The orchestrator should have passed onError to subscribeAll.
+      expect(capturedOnError).toBeDefined();
+
+      // Simulate server rejecting the query subscription.
+      capturedOnError!("no read permission on private_chats");
+
+      expect(entry.status).toBe("rejected");
+      expect(entry.error).toBe("no read permission on private_chats");
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith("no read permission on private_chats");
+      expect(onfulfilled).not.toHaveBeenCalled();
+      await expect(entry.promise).rejects.toBe("no read permission on private_chats");
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  it("SO-U21 listener unsubscribe is idempotent", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
     try {

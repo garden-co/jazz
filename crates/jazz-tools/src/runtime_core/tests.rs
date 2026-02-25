@@ -1092,6 +1092,188 @@ fn rc_subscribe_settled_tier() {
     assert_eq!(first_delivery[0].0, id);
 }
 
+// =========================================================================
+// Query Subscription Rejection Tests
+// =========================================================================
+//
+// These tests verify that SyncPayload::Error(QuerySubscriptionRejected)
+// propagates from a server back through the subscription chain. Currently
+// inbox.rs discards the error; these tests should fail until the
+// propagation path is implemented.
+//
+//   Server (B)                       Client (A)
+//   ─────────                        ──────────
+//   QuerySubscriptionRejected ──►    inbox
+//                                      ├─► relay to downstream clients
+//                                      └─► pending_query_rejections
+//                                            ├─► failed_subscriptions
+//                                            └─► error callback / query Err
+
+/// Helper: inject a QuerySubscriptionRejected from B into A's inbox.
+fn inject_rejection(s: &mut ThreeTierRC, query_id: crate::sync_manager::QueryId, reason: &str) {
+    s.a.park_sync_message(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::Error(crate::sync_manager::SyncError::QuerySubscriptionRejected {
+            query_id,
+            reason: reason.to_string(),
+        }),
+    });
+    s.a.batched_tick();
+    s.a.immediate_tick();
+}
+
+#[test]
+fn rc_server_rejection_relayed_to_downstream_client() {
+    //  A (client) ←─ B (relay) ←─ C (server)
+    //
+    //  A subscribes to "users" via B. C rejects the query.
+    //  B should relay the rejection to A via the outbox.
+    let mut s = create_3tier_rc();
+
+    // A subscribes — query flows A → B → C.
+    let _handle =
+        s.a.subscribe(Query::new("users"), |_delta| {}, None)
+            .unwrap();
+    pump_a_to_b(&mut s);
+    pump_b_to_c(&mut s);
+    s.b.sync_sender().take(); // drain
+    s.c.sync_sender().take();
+
+    // C sends QuerySubscriptionRejected back to B.
+    // Find the query_id B forwarded to C.
+    let query_id = {
+        let sm = s.b.schema_manager().query_manager().sync_manager();
+        let first_query_id = sm
+            .query_origin
+            .keys()
+            .next()
+            .expect("B should have a query_origin entry after A subscribed");
+        *first_query_id
+    };
+
+    s.b.park_sync_message(InboxEntry {
+        source: Source::Server(s.c_server_for_b),
+        payload: SyncPayload::Error(crate::sync_manager::SyncError::QuerySubscriptionRejected {
+            query_id,
+            reason: "no read permission on private_chats".to_string(),
+        }),
+    });
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    s.b.batched_tick();
+
+    // B should relay the rejection to A.
+    let b_out = s.b.sync_sender().take();
+    let rejection_to_a = b_out.iter().find(|entry| {
+        entry.destination == Destination::Client(s.a_client_of_b)
+            && matches!(
+                &entry.payload,
+                SyncPayload::Error(
+                    crate::sync_manager::SyncError::QuerySubscriptionRejected { .. }
+                )
+            )
+    });
+
+    assert!(
+        rejection_to_a.is_some(),
+        "B should relay QuerySubscriptionRejected to downstream client A. \
+         Outbox had: {:?}",
+        b_out
+            .iter()
+            .map(|e| format!("{:?} → {:?}", e.destination, e.payload.variant_name()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rc_server_rejection_fails_one_shot_query() {
+    //  A (client) ←─ B (server/worker)
+    //
+    //  A issues a one-shot query with settled tier. B rejects it.
+    //  The QueryFuture should resolve with Err.
+    let mut s = create_3tier_rc();
+
+    // Issue a one-shot settled query.
+    let mut future =
+        s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
+
+    // Deliver A → B so B registers the subscription.
+    pump_a_to_b(&mut s);
+    s.b.sync_sender().take();
+
+    // Find the query_id that A sent upstream.
+    let query_id = {
+        // query_origin won't have entries on A (A is a client, not a relay),
+        // but the QuerySubscriptionId was used as QueryId. We can derive it
+        // from the subscription_reverse map.
+        let sub_id =
+            s.a.subscription_reverse
+                .keys()
+                .next()
+                .expect("A should have a subscription for the one-shot query");
+        crate::sync_manager::QueryId(sub_id.0)
+    };
+
+    // B sends QuerySubscriptionRejected back to A.
+    inject_rejection(&mut s, query_id, "table private_chats does not exist");
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Err(_)) => {
+            // Expected: rejection should surface as query error.
+        }
+        Poll::Ready(Ok(rows)) => {
+            panic!(
+                "One-shot query should fail after rejection, but got {} rows",
+                rows.len()
+            );
+        }
+        Poll::Pending => {
+            panic!("One-shot query should not remain pending after server rejection");
+        }
+    }
+}
+
+#[test]
+fn rc_server_rejection_removes_subscription() {
+    //  A (client) ←─ B (server/worker)
+    //
+    //  A subscribes to "users". B rejects the subscription.
+    //  A's subscription should be cleaned up (no dangling state).
+    let mut s = create_3tier_rc();
+
+    let handle =
+        s.a.subscribe(Query::new("users"), |_delta| {}, None)
+            .unwrap();
+
+    pump_a_to_b(&mut s);
+    s.b.sync_sender().take();
+
+    let query_id = {
+        let sub_id =
+            s.a.subscription_reverse
+                .keys()
+                .next()
+                .expect("A should have a subscription");
+        crate::sync_manager::QueryId(sub_id.0)
+    };
+
+    // Verify subscription exists before rejection.
+    assert!(
+        s.a.subscriptions.contains_key(&handle),
+        "Subscription should exist before rejection"
+    );
+
+    inject_rejection(&mut s, query_id, "access denied");
+
+    // After rejection, the subscription should be removed.
+    assert!(
+        !s.a.subscriptions.contains_key(&handle),
+        "Subscription should be cleaned up after server rejection"
+    );
+}
+
 fn noop_waker() -> std::task::Waker {
     fn noop(_: *const ()) {}
     fn clone(_: *const ()) -> std::task::RawWaker {
