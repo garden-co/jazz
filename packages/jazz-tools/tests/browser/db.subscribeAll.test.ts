@@ -574,8 +574,12 @@ describe("db.subscribeAll browser integration", () => {
       "expected hop result to move after scalar FK update",
     );
 
-    expect(deltas.some((delta) => delta.removed.some((row) => row.id === teamAId))).toBe(true);
-    expect(deltas.some((delta) => delta.added.some((row) => row.id === teamBId))).toBe(true);
+    expect(deltas.some((delta) => (delta.removed ?? []).some((row) => row.id === teamAId))).toBe(
+      true,
+    );
+    expect(deltas.some((delta) => (delta.added ?? []).some((row) => row.id === teamBId))).toBe(
+      true,
+    );
 
     unsubscribe();
   });
@@ -620,8 +624,12 @@ describe("db.subscribeAll browser integration", () => {
       "expected hop result to move after UUID[] FK update",
     );
 
-    expect(deltas.some((delta) => delta.removed.some((row) => row.id === partAId))).toBe(true);
-    expect(deltas.some((delta) => delta.added.some((row) => row.id === partBId))).toBe(true);
+    expect(deltas.some((delta) => (delta.removed ?? []).some((row) => row.id === partAId))).toBe(
+      true,
+    );
+    expect(deltas.some((delta) => (delta.added ?? []).some((row) => row.id === partBId))).toBe(
+      true,
+    );
 
     unsubscribe();
   });
