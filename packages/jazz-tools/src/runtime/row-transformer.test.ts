@@ -38,7 +38,7 @@ describe("unwrapValue", () => {
   });
 
   it("unwraps Bytea to Uint8Array", () => {
-    const v: WasmValue = { type: "Bytea", value: [0, 1, 255] };
+    const v: WasmValue = { type: "Bytea", value: new Uint8Array([0, 1, 255]) };
     const unwrapped = unwrapValue(v);
     expect(unwrapped).toBeInstanceOf(Uint8Array);
     expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);

@@ -57,7 +57,13 @@ describe("toValue", () => {
   it("converts Bytea Uint8Array values", () => {
     const colType: ColumnType = { type: "Bytea" };
     const bytes = new Uint8Array([0, 10, 255]);
-    expect(toValue(bytes, colType)).toEqual({ type: "Bytea", value: [0, 10, 255] });
+    const converted = toValue(bytes, colType);
+    expect(converted.type).toBe("Bytea");
+    if (converted.type !== "Bytea") {
+      throw new Error("expected Bytea value");
+    }
+    expect(converted.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(converted.value)).toEqual([0, 10, 255]);
   });
 
   it("rejects invalid Bytea values", () => {

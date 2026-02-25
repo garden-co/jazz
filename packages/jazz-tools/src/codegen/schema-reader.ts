@@ -45,7 +45,7 @@ function sqlTypeToWasm(sqlType: SqlType): ColumnType {
 
 function literalToWasmValue(value: unknown): Value {
   if (value instanceof Uint8Array) {
-    return { type: "Bytea", value: [...value] };
+    return { type: "Bytea", value };
   }
   if (value === null) {
     return { type: "Null" };

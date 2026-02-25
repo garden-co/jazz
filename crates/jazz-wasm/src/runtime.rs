@@ -52,7 +52,9 @@ use jazz_tools::sync_manager::{
 };
 
 use crate::query::parse_query;
-use crate::types::{WasmSchema, WasmValue};
+#[cfg(target_arch = "wasm32")]
+use crate::types::WasmRowDelta;
+use crate::types::{WasmRow, WasmSchema, WasmValue};
 
 /// Parse a persistence tier string from JS.
 fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
@@ -394,10 +396,10 @@ impl WasmRuntime {
                 .into_iter()
                 .map(|(id, values)| {
                     let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
-                    serde_json::json!({
-                        "id": id.uuid().to_string(),
-                        "values": wasm_values
-                    })
+                    WasmRow {
+                        id: id.uuid().to_string(),
+                        values: wasm_values,
+                    }
                 })
                 .collect();
 
@@ -590,32 +592,43 @@ impl WasmRuntime {
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
+            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> WasmRow {
                 let values = decode_row(descriptor, &row.data)
                     .map(|vals| vals.into_iter().map(WasmValue::from).collect::<Vec<_>>())
                     .unwrap_or_default();
-                serde_json::json!({
-                    "id": row.id.uuid().to_string(),
-                    "values": values
-                })
+                WasmRow {
+                    id: row.id.uuid().to_string(),
+                    values,
+                }
             };
 
             let descriptor = &delta.descriptor;
 
-            let delta_json = serde_json::json!({
-                "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
+            let wasm_delta = WasmRowDelta {
+                added: delta
+                    .delta
+                    .added
+                    .iter()
+                    .map(|row| row_to_wasm(row, descriptor))
                     .collect::<Vec<_>>(),
-                "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
+                removed: delta
+                    .delta
+                    .removed
+                    .iter()
+                    .map(|row| row_to_wasm(row, descriptor))
                     .collect::<Vec<_>>(),
-                "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
-                    .collect::<Vec<_>>()
-            });
+                updated: delta
+                    .delta
+                    .updated
+                    .iter()
+                    .map(|(old, new)| (row_to_wasm(old, descriptor), row_to_wasm(new, descriptor)))
+                    .collect::<Vec<_>>(),
+                pending: false,
+            };
 
-            if let Ok(json_str) = serde_json::to_string(&delta_json) {
-                let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+                let _ = on_update.call1(&JsValue::NULL, &delta_value);
             }
         };
 
