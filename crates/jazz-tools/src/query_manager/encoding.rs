@@ -405,7 +405,18 @@ fn variable_column_bytes<'a>(
         0
     };
 
-    let var_data_start = fixed_size + offset_table_size;
+    let var_data_start =
+        fixed_size
+            .checked_add(offset_table_size)
+            .ok_or(EncodingError::MalformedData {
+                message: "variable data start offset overflowed".into(),
+            })?;
+
+    if var_data_start > data.len() {
+        return Err(EncodingError::MalformedData {
+            message: "data too short for variable section".into(),
+        });
+    }
 
     // Find which variable column index this is
     let mut var_index = 0;
@@ -444,8 +455,32 @@ fn variable_column_bytes<'a>(
         data.len() - var_data_start
     };
 
+    if start_offset > end_offset {
+        return Err(EncodingError::MalformedData {
+            message: "variable column offsets out of order".into(),
+        });
+    }
+
+    let var_section_len = data.len() - var_data_start;
+    if end_offset > var_section_len {
+        return Err(EncodingError::MalformedData {
+            message: "variable column offset out of bounds".into(),
+        });
+    }
+
+    let start = var_data_start
+        .checked_add(start_offset)
+        .ok_or(EncodingError::MalformedData {
+            message: "variable column start overflowed".into(),
+        })?;
+    let end = var_data_start
+        .checked_add(end_offset)
+        .ok_or(EncodingError::MalformedData {
+            message: "variable column end overflowed".into(),
+        })?;
+
     let col = &descriptor.columns[col_index];
-    let bytes = &data[var_data_start + start_offset..var_data_start + end_offset];
+    let bytes = &data[start..end];
 
     if col.nullable {
         if bytes.is_empty() {
