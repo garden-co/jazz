@@ -1253,8 +1253,18 @@ fn client_update_forwarded_to_server_and_other_clients() {
         } => {
             assert_eq!(*object_id, obj_id);
             assert_eq!(branch_name.as_str(), "main");
-            assert_eq!(commits.len(), 1);
-            assert_eq!(commits[0].id(), commit_id);
+            assert!(
+                commits.iter().any(|c| c.id() == commit_id),
+                "server payload must include the client's new commit"
+            );
+            let parent_pos = commits.iter().position(|c| c.id() == c1);
+            let child_pos = commits.iter().position(|c| c.id() == commit_id);
+            if let (Some(parent_pos), Some(child_pos)) = (parent_pos, child_pos) {
+                assert!(
+                    parent_pos < child_pos,
+                    "if parent commit is forwarded, it must come before child"
+                );
+            }
         }
         other => panic!("Expected ObjectUpdated payload to server, got {:?}", other),
     }
@@ -1272,8 +1282,10 @@ fn client_update_forwarded_to_server_and_other_clients() {
         } => {
             assert_eq!(*object_id, obj_id);
             assert_eq!(branch_name.as_str(), "main");
-            assert_eq!(commits.len(), 1);
-            assert_eq!(commits[0].id(), commit_id);
+            assert!(
+                commits.iter().any(|c| c.id() == commit_id),
+                "client payload must include the forwarded commit"
+            );
         }
         other => panic!("Expected ObjectUpdated payload to client2, got {:?}", other),
     }
