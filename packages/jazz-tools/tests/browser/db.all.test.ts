@@ -36,6 +36,7 @@ const schema: WasmSchema = {
           column_type: { type: "Array", element: { type: "Text" } },
           nullable: false,
         },
+        { name: "payload", column_type: { type: "Bytea" }, nullable: true },
       ],
     },
   },
@@ -67,6 +68,7 @@ interface Todo {
   priority?: number;
   owner_id?: string;
   tags: string[];
+  payload?: Uint8Array;
   owner?: User;
 }
 
@@ -197,6 +199,11 @@ describe("db.all browser integration", () => {
       conditions: [{ column: "title", op: "contains", value: "" }],
       expectedTitles: ["alpha", "beta", "gamma"],
     },
+    {
+      name: "eq-bytea",
+      conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
+      expectedTitles: ["alpha"],
+    },
   ];
 
   function track(db: Db): Db {
@@ -215,6 +222,7 @@ describe("db.all browser integration", () => {
       priority: 1,
       owner_id: userId,
       tags: ["work", "backend"],
+      payload: new Uint8Array([1, 2, 3]),
     });
     db.insert(todos, {
       title: "beta",
@@ -222,6 +230,7 @@ describe("db.all browser integration", () => {
       priority: 2,
       owner_id: userId,
       tags: ["home"],
+      payload: new Uint8Array([4, 5, 6]),
     });
     db.insert(todos, {
       title: "gamma",
@@ -229,6 +238,7 @@ describe("db.all browser integration", () => {
       priority: undefined,
       owner_id: userId,
       tags: ["work", "urgent"],
+      payload: undefined,
     });
   }
 
@@ -257,6 +267,29 @@ describe("db.all browser integration", () => {
       expect(actual).toEqual(expected);
     });
   }
+
+  it("returns BYTEA columns as Uint8Array", async () => {
+    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("bytea") }));
+
+    const id = db.insert(todos, {
+      title: "has-bytes",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+      payload: new Uint8Array([0, 1, 2, 255]),
+    });
+
+    const rows = await db.all<Todo>(
+      makeQuery<Todo>("todos", {
+        conditions: [{ column: "id", op: "eq", value: id }],
+      }),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload).toBeInstanceOf(Uint8Array);
+    expect(Array.from(rows[0]?.payload ?? [])).toEqual([0, 1, 2, 255]);
+  });
 
   it("supports orderBy + limit + offset", async () => {
     const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("paginate") }));
