@@ -256,6 +256,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -303,6 +304,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -343,6 +345,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![old_tuple.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -350,6 +353,7 @@ mod tests {
         let result = node.process(TupleDelta {
             added: vec![],
             removed: vec![],
+            moved: vec![],
             updated: vec![(old_tuple, new_tuple)],
         });
 

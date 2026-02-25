@@ -36,7 +36,6 @@ export interface RowDeltaUpdated {
 }
 
 export type RowDelta = Omit<JazzWasmRowDelta, "added" | "removed" | "updated"> & {
-  protocolVersion: number;
   added: RowDeltaAdded[];
   removed: RowDeltaRemoved[];
   updated: RowDeltaUpdated[];

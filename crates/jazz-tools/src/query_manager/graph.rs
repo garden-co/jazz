@@ -2147,6 +2147,7 @@ impl QueryGraph {
         let td = TupleDelta {
             added: output_tuples,
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
