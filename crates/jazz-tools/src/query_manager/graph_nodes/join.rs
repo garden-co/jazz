@@ -181,6 +181,18 @@ impl JoinNode {
         self.extract_keys(tuple, &self.right_key_spec)
     }
 
+    fn encode_unique_values(values: &[Value]) -> Vec<Vec<u8>> {
+        let mut out = Vec::with_capacity(values.len());
+        let mut seen = AHashSet::new();
+        for value in values {
+            let encoded = encode_value(value);
+            if seen.insert(encoded.clone()) {
+                out.push(encoded);
+            }
+        }
+        out
+    }
+
     fn extract_keys(&self, tuple: &Tuple, spec: &JoinKeySpec) -> Vec<Vec<u8>> {
         match spec {
             JoinKeySpec::TupleId { element_index } => {
@@ -214,16 +226,7 @@ impl JoinNode {
                 else {
                     return Vec::new();
                 };
-
-                let mut out = Vec::new();
-                let mut seen = AHashSet::new();
-                for value in values {
-                    let encoded = encode_value(&value);
-                    if seen.insert(encoded.clone()) {
-                        out.push(encoded);
-                    }
-                }
-                out
+                Self::encode_unique_values(&values)
             }
         }
     }
@@ -323,15 +326,12 @@ impl JoinNode {
         let mut new_outputs = Vec::new();
 
         let keys = self.extract_left_keys(&tuple);
+        let mut right_matches = AHashSet::new();
         for key in &keys {
             self.left_by_key
                 .entry(key.clone())
                 .or_default()
                 .insert(tuple.clone());
-        }
-
-        let mut right_matches = AHashSet::new();
-        for key in &keys {
             if let Some(matches_for_key) = self.right_by_key.get(key) {
                 right_matches.extend(matches_for_key.iter().cloned());
             }
@@ -399,15 +399,12 @@ impl JoinNode {
         let mut new_outputs = Vec::new();
 
         let keys = self.extract_right_keys(&tuple);
+        let mut left_matches = AHashSet::new();
         for key in &keys {
             self.right_by_key
                 .entry(key.clone())
                 .or_default()
                 .insert(tuple.clone());
-        }
-
-        let mut left_matches = AHashSet::new();
-        for key in &keys {
             if let Some(matches_for_key) = self.left_by_key.get(key) {
                 left_matches.extend(matches_for_key.iter().cloned());
             }

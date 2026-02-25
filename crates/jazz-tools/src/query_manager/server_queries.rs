@@ -419,7 +419,7 @@ impl QueryManager {
 
         if check.operation == Operation::Insert
             && let Some(new_content) = check.new_content.as_ref()
-            && let Err(err) = self.validate_uuid_array_foreign_keys_for_content(
+            && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
                 &table_schema.descriptor,
@@ -542,7 +542,7 @@ impl QueryManager {
         branch: &str,
     ) {
         if let Some(new_content) = check.new_content.as_ref()
-            && let Err(err) = self.validate_uuid_array_foreign_keys_for_content(
+            && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
                 &table_schema.descriptor,
