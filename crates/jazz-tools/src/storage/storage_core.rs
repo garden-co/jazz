@@ -202,6 +202,22 @@ pub(super) fn index_lookup_core(
     value: &Value,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Vec<ObjectId> {
+    // IEEE 754: -0.0 == 0.0, so scan both prefixes and merge.
+    if super::is_double_zero(value) {
+        let mut result = HashSet::new();
+        for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
+            let prefix = index_value_prefix(table, column, branch, zero);
+            if let Ok(keys) = scan_prefix_keys(&prefix) {
+                for key in &keys {
+                    if let Some(id) = parse_uuid_from_index_key(key) {
+                        result.insert(id);
+                    }
+                }
+            }
+        }
+        return result.into_iter().collect();
+    }
+
     let prefix = index_value_prefix(table, column, branch, value);
     scan_prefix_keys(&prefix)
         .map(|keys| {
