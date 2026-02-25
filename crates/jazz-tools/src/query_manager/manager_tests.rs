@@ -470,7 +470,12 @@ fn table_not_found_error() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let result = qm.insert(&mut storage, "nonexistent", &[Value::Text("test".into())]);
-    assert!(matches!(result, Err(QueryError::TableNotFound(_))));
+    match result {
+        Err(QueryError::TableNotFound(table)) => {
+            assert_eq!(table, TableName::new("nonexistent"));
+        }
+        other => panic!("Expected TableNotFound(nonexistent), got {other:?}"),
+    }
 }
 
 #[test]
@@ -480,10 +485,13 @@ fn column_count_mismatch_error() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let result = qm.insert(&mut storage, "users", &[Value::Text("Alice".into())]);
-    assert!(matches!(
-        result,
-        Err(QueryError::ColumnCountMismatch { .. })
-    ));
+    match result {
+        Err(QueryError::ColumnCountMismatch { expected, actual }) => {
+            assert_eq!(expected, 2, "users table has two columns in test_schema()");
+            assert_eq!(actual, 1, "insert call provided one value");
+        }
+        other => panic!("Expected ColumnCountMismatch, got {other:?}"),
+    }
 }
 
 #[test]
@@ -615,12 +623,13 @@ fn subscription_updates_after_insert_and_process() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Insert a row
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
 
     // Process - should settle subscriptions
     qm.process(&mut storage);
@@ -630,6 +639,10 @@ fn subscription_updates_after_insert_and_process() {
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(
+        updates[0].delta.added[0].id, handle.row_id,
+        "Delta should identify the inserted row"
+    );
 }
 
 #[test]
@@ -1606,11 +1619,13 @@ fn update_fails_filter_emits_removal() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(
         updates[0].delta.added.len(),
         1,
         "Row should be added initially"
     );
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
 
     // Update score to 30 (fails filter)
     qm.update(
@@ -1630,6 +1645,7 @@ fn update_fails_filter_emits_removal() {
         1,
         "Row should be removed when it fails filter"
     );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
 }
 
 #[test]
@@ -1733,6 +1749,8 @@ fn update_still_passes_filter_emits_update() {
         1,
         "Row should be updated when it still passes filter"
     );
+    assert_eq!(updates[0].delta.updated[0].0.id, handle.row_id);
+    assert_eq!(updates[0].delta.updated[0].1.id, handle.row_id);
 }
 
 #[test]
@@ -2249,7 +2267,10 @@ fn delete_already_deleted_row_fails() {
 
     // Try to delete again - should fail
     let result = qm.delete(&mut storage, handle.row_id);
-    assert!(matches!(result, Err(QueryError::RowAlreadyDeleted(_))));
+    match result {
+        Err(QueryError::RowAlreadyDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowAlreadyDeleted for deleted row, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2523,7 +2544,10 @@ fn undelete_nondeleted_row_fails() {
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
-    assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    match result {
+        Err(QueryError::RowNotDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowNotDeleted for non-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2650,7 +2674,10 @@ fn undelete_hard_deleted_row_fails() {
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
-    assert!(matches!(result, Err(QueryError::RowHardDeleted(_))));
+    match result {
+        Err(QueryError::RowHardDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowHardDeleted for hard-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2701,7 +2728,10 @@ fn truncate_nondeleted_row_fails() {
 
     // Try to truncate a non-deleted row - should fail
     let result = qm.truncate(&mut storage, handle.row_id);
-    assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    match result {
+        Err(QueryError::RowNotDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowNotDeleted for non-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2769,12 +2799,13 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
             &[Value::Text("Alice".into()), Value::Integer(100)],
         )
         .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Bob".into()), Value::Integer(50)],
-    )
-    .unwrap();
+    let bob_handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
 
     // Hard delete Alice
     qm.hard_delete(&mut storage, handle1.row_id).unwrap();
@@ -2783,6 +2814,7 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
     let query = qm.query("users").include_deleted().build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, bob_handle.row_id);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
 
@@ -2813,7 +2845,9 @@ fn soft_delete_emits_removal_delta() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1); // Alice added
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
 
     // Delete Alice
     qm.delete(&mut storage, handle.row_id).unwrap();
@@ -2825,6 +2859,8 @@ fn soft_delete_emits_removal_delta() {
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.removed.len(), 1);
     assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 #[test]
@@ -2850,7 +2886,9 @@ fn hard_delete_emits_removal_delta() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1); // Alice added
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
 
     // Hard delete Alice
     qm.hard_delete(&mut storage, handle.row_id).unwrap();
@@ -2862,6 +2900,8 @@ fn hard_delete_emits_removal_delta() {
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.removed.len(), 1);
     assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 #[test]
@@ -2896,7 +2936,9 @@ fn delete_row_not_in_subscription_no_delta() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1); // Only Alice
+    assert_eq!(updates[0].delta.added[0].id, alice_handle.row_id);
 
     // Delete Alice (who IS in subscription) - should emit removal delta
     qm.delete(&mut storage, alice_handle.row_id).unwrap();
@@ -2907,6 +2949,9 @@ fn delete_row_not_in_subscription_no_delta() {
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.removed.len(), 1);
+    assert_eq!(updates[0].delta.removed[0].id, alice_handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 // ========================================================================
@@ -3116,10 +3161,17 @@ fn join_subscription_fails_for_invalid_join_column() {
         .build();
     let result = qm.subscribe(query);
 
-    assert!(
-        matches!(result, Err(QueryError::QueryCompilationError(_))),
-        "Join queries with invalid join columns should fail during subscription compilation"
-    );
+    match result {
+        Err(QueryError::QueryCompilationError(msg)) => {
+            assert_eq!(
+                msg,
+                "invalid relation plan: unsupported relation_ir shape for schema-context query compilation"
+            );
+        }
+        other => panic!(
+            "Join queries with invalid join columns should fail with QueryCompilationError, got {other:?}"
+        ),
+    }
 }
 
 #[test]
@@ -3137,10 +3189,17 @@ fn join_subscription_fails_for_circular_join_chain() {
         .build();
     let result = qm.subscribe(query);
 
-    assert!(
-        matches!(result, Err(QueryError::QueryCompilationError(_))),
-        "Circular/self join chains are not supported and should fail compilation"
-    );
+    match result {
+        Err(QueryError::QueryCompilationError(msg)) => {
+            assert_eq!(
+                msg,
+                "invalid relation plan: unsupported relation_ir shape for schema-context query compilation"
+            );
+        }
+        other => panic!(
+            "Circular/self join chains should fail with QueryCompilationError, got {other:?}"
+        ),
+    }
 }
 
 #[test]
