@@ -98,6 +98,7 @@ where
 enum RnValue {
     Integer(i32),
     BigInt(i64),
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
@@ -112,6 +113,7 @@ impl From<Value> for RnValue {
         match v {
             Value::Integer(i) => RnValue::Integer(i),
             Value::BigInt(i) => RnValue::BigInt(i),
+            Value::Double(f) => RnValue::Double(f),
             Value::Boolean(b) => RnValue::Boolean(b),
             Value::Text(s) => RnValue::Text(s),
             Value::Timestamp(t) => RnValue::Timestamp(t),
@@ -130,6 +132,7 @@ impl TryFrom<RnValue> for Value {
         Ok(match v {
             RnValue::Integer(i) => Value::Integer(i),
             RnValue::BigInt(i) => Value::BigInt(i),
+            RnValue::Double(f) => Value::Double(f),
             RnValue::Boolean(b) => Value::Boolean(b),
             RnValue::Text(s) => Value::Text(s),
             RnValue::Timestamp(t) => Value::Timestamp(t),
@@ -213,6 +216,7 @@ impl TryFrom<JsColumnType> for jazz_tools::query_manager::types::ColumnType {
         match ct.type_name.as_str() {
             "Integer" => Ok(ColumnType::Integer),
             "BigInt" => Ok(ColumnType::BigInt),
+            "Double" => Ok(ColumnType::Double),
             "Boolean" => Ok(ColumnType::Boolean),
             "Text" => Ok(ColumnType::Text),
             "Timestamp" => Ok(ColumnType::Timestamp),

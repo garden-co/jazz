@@ -551,6 +551,13 @@ fn value_to_ts_literal(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
+        Value::Double(f) => {
+            assert!(
+                f.is_finite(),
+                "non-finite float in value_to_ts_literal: {f}"
+            );
+            format!("{f:?}")
+        }
         Value::Text(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Timestamp(t) => t.to_string(),
         Value::Uuid(u) => format!("\"{}\"", u.uuid()),
@@ -1072,5 +1079,17 @@ mod tests {
         assert!(ts.contains(
             "status: col.drop().enum(\"done\", \"todo\", { backwardsDefault: \"todo\" }),"
         ));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite float")]
+    fn value_to_ts_literal_rejects_infinity() {
+        value_to_ts_literal(&crate::query_manager::types::Value::Double(f64::INFINITY));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite float")]
+    fn value_to_ts_literal_rejects_nan() {
+        value_to_ts_literal(&crate::query_manager::types::Value::Double(f64::NAN));
     }
 }
