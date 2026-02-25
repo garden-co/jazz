@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 const INTERNAL_API_SECRET: &str = "integration-internal-secret";
 const SECRET_HASH_KEY: &str = "integration-secret-hash-key";
+const MANAGEMENT_PASSWORD: &str = "integration-management-password";
 
 #[derive(Debug, Deserialize)]
 struct AppSummaryResponse {
@@ -46,24 +47,32 @@ struct ServerProcess {
 
 impl ServerProcess {
     async fn start(data_root: &Path) -> Self {
+        Self::start_with_management_password(data_root, None).await
+    }
+
+    async fn start_with_management_password(data_root: &Path, password: Option<&str>) -> Self {
         let port = get_free_port();
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--data-root",
-                data_root.to_str().expect("data root path"),
-                "--internal-api-secret",
-                INTERNAL_API_SECRET,
-                "--secret-hash-key",
-                SECRET_HASH_KEY,
-                "--worker-threads",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn jazz-cloud-server");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--data-root",
+            data_root.to_str().expect("data root path"),
+            "--internal-api-secret",
+            INTERNAL_API_SECRET,
+            "--secret-hash-key",
+            SECRET_HASH_KEY,
+            "--worker-threads",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+        if let Some(password) = password {
+            cmd.env("JAZZ_MANAGEMENT_PASSWORD", password);
+        }
+
+        let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
         let server = Self {
             process,
@@ -200,6 +209,14 @@ fn encode_session(user_id: &str) -> String {
     let session = Session::new(user_id);
     let json = serde_json::to_string(&session).expect("serialize session");
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+}
+
+fn basic_auth_header(username: &str, password: &str) -> String {
+    let raw = format!("{username}:{password}");
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+    )
 }
 
 fn sync_body() -> Value {
@@ -394,4 +411,155 @@ async fn app_registry_and_auth_survive_server_restart() {
         StatusCode::UNAUTHORIZED,
         "backend secret auth should still work after restart"
     );
+}
+
+#[tokio::test]
+async fn management_routes_are_disabled_when_password_not_set() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+
+    let response = server
+        .client
+        .get(format!("{}/manage", server.base_url()))
+        .send()
+        .await
+        .expect("management page request");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn management_routes_require_valid_basic_auth() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server =
+        ServerProcess::start_with_management_password(temp_dir.path(), Some(MANAGEMENT_PASSWORD))
+            .await;
+    let url = format!("{}/manage", server.base_url());
+
+    let missing_auth = server
+        .client
+        .get(&url)
+        .send()
+        .await
+        .expect("missing auth request");
+    assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+    let challenge = missing_auth
+        .headers()
+        .get("WWW-Authenticate")
+        .and_then(|v| v.to_str().ok())
+        .expect("missing WWW-Authenticate challenge header");
+    assert!(
+        challenge.starts_with("Basic "),
+        "expected basic challenge, got: {challenge}"
+    );
+
+    let wrong_auth = server
+        .client
+        .get(&url)
+        .header(
+            "Authorization",
+            basic_auth_header("admin", "wrong-password"),
+        )
+        .send()
+        .await
+        .expect("wrong auth request");
+    assert_eq!(wrong_auth.status(), StatusCode::UNAUTHORIZED);
+
+    let ok_auth = server
+        .client
+        .get(&url)
+        .header(
+            "Authorization",
+            basic_auth_header("admin", MANAGEMENT_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("valid auth request");
+    assert_eq!(ok_auth.status(), StatusCode::OK);
+    let body = ok_auth.text().await.expect("management page body");
+    assert!(body.contains("Jazz Cloud Server Management"));
+}
+
+#[tokio::test]
+async fn management_api_create_list_and_status_update_work() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server =
+        ServerProcess::start_with_management_password(temp_dir.path(), Some(MANAGEMENT_PASSWORD))
+            .await;
+    let auth_header = basic_auth_header("admin", MANAGEMENT_PASSWORD);
+
+    let create_response = server
+        .client
+        .post(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .json(&json!({
+            "app_name": "managed-app",
+            "jwks_endpoint": "http://example.invalid/jwks",
+            "allow_anonymous": false,
+            "allow_demo": true,
+            "backend_secret": "managed-backend-secret",
+            "admin_secret": "managed-admin-secret"
+        }))
+        .send()
+        .await
+        .expect("manage create app request");
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let created: CreateAppResponse = create_response
+        .json()
+        .await
+        .expect("parse manage create app response");
+    assert_eq!(created.app_name, "managed-app");
+    assert_eq!(created.status, "active");
+
+    let list_response = server
+        .client
+        .get(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage list apps request");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let listed: Vec<AppSummaryResponse> = list_response.json().await.expect("parse app list");
+    let listed_created = listed
+        .iter()
+        .find(|app| app.app_id == created.app_id)
+        .expect("created app should exist in management list");
+    assert_eq!(listed_created.status, "active");
+
+    let update_response = server
+        .client
+        .post(format!(
+            "{}/manage/api/apps/{}/status",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .json(&json!({ "status": "disabled" }))
+        .send()
+        .await
+        .expect("manage update status request");
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let updated: UpdateAppResponse = update_response
+        .json()
+        .await
+        .expect("parse update status response");
+    assert_eq!(updated.status, "disabled");
+
+    let listed_after_update = server
+        .client
+        .get(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage list after update request");
+    assert_eq!(listed_after_update.status(), StatusCode::OK);
+    let listed_after_update: Vec<AppSummaryResponse> = listed_after_update
+        .json()
+        .await
+        .expect("parse app list after update");
+    let updated_created = listed_after_update
+        .iter()
+        .find(|app| app.app_id == created.app_id)
+        .expect("updated app should exist in management list");
+    assert_eq!(updated_created.status, "disabled");
 }
