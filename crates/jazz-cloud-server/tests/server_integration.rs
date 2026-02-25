@@ -12,12 +12,14 @@ use uuid::Uuid;
 
 const INTERNAL_API_SECRET: &str = "integration-internal-secret";
 const SECRET_HASH_KEY: &str = "integration-secret-hash-key";
-const MANAGEMENT_PASSWORD: &str = "integration-management-password";
 
 #[derive(Debug, Deserialize)]
 struct AppSummaryResponse {
     app_id: String,
     app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     status: String,
 }
 
@@ -39,6 +41,12 @@ struct UpdateAppResponse {
     admin_secret: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManageAdminSecretResponse {
+    app_id: String,
+    admin_secret: Option<String>,
+}
+
 struct ServerProcess {
     process: Child,
     port: u16,
@@ -47,10 +55,6 @@ struct ServerProcess {
 
 impl ServerProcess {
     async fn start(data_root: &Path) -> Self {
-        Self::start_with_management_password(data_root, None).await
-    }
-
-    async fn start_with_management_password(data_root: &Path, password: Option<&str>) -> Self {
         let port = get_free_port();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
         cmd.args([
@@ -67,10 +71,6 @@ impl ServerProcess {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-
-        if let Some(password) = password {
-            cmd.env("JAZZ_MANAGEMENT_PASSWORD", password);
-        }
 
         let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
@@ -414,7 +414,7 @@ async fn app_registry_and_auth_survive_server_restart() {
 }
 
 #[tokio::test]
-async fn management_routes_are_disabled_when_password_not_set() {
+async fn management_routes_are_enabled_and_require_basic_auth() {
     let temp_dir = TempDir::new().expect("temp dir");
     let server = ServerProcess::start(temp_dir.path()).await;
 
@@ -425,15 +425,13 @@ async fn management_routes_are_disabled_when_password_not_set() {
         .await
         .expect("management page request");
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn management_routes_require_valid_basic_auth() {
     let temp_dir = TempDir::new().expect("temp dir");
-    let server =
-        ServerProcess::start_with_management_password(temp_dir.path(), Some(MANAGEMENT_PASSWORD))
-            .await;
+    let server = ServerProcess::start(temp_dir.path()).await;
     let url = format!("{}/manage", server.base_url());
 
     let missing_auth = server
@@ -470,7 +468,7 @@ async fn management_routes_require_valid_basic_auth() {
         .get(&url)
         .header(
             "Authorization",
-            basic_auth_header("admin", MANAGEMENT_PASSWORD),
+            basic_auth_header("admin", INTERNAL_API_SECRET),
         )
         .send()
         .await
@@ -483,10 +481,8 @@ async fn management_routes_require_valid_basic_auth() {
 #[tokio::test]
 async fn management_api_create_list_and_status_update_work() {
     let temp_dir = TempDir::new().expect("temp dir");
-    let server =
-        ServerProcess::start_with_management_password(temp_dir.path(), Some(MANAGEMENT_PASSWORD))
-            .await;
-    let auth_header = basic_auth_header("admin", MANAGEMENT_PASSWORD);
+    let server = ServerProcess::start(temp_dir.path()).await;
+    let auth_header = basic_auth_header("admin", INTERNAL_API_SECRET);
 
     let create_response = server
         .client
@@ -511,6 +507,54 @@ async fn management_api_create_list_and_status_update_work() {
     assert_eq!(created.app_name, "managed-app");
     assert_eq!(created.status, "active");
 
+    let reveal_response = server
+        .client
+        .get(format!(
+            "{}/manage/api/apps/{}/admin-secret",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage reveal admin secret request");
+    assert_eq!(reveal_response.status(), StatusCode::OK);
+    let revealed: ManageAdminSecretResponse = reveal_response
+        .json()
+        .await
+        .expect("parse revealed admin secret response");
+    assert_eq!(revealed.app_id, created.app_id);
+    assert_eq!(
+        revealed.admin_secret.as_deref(),
+        Some("managed-admin-secret")
+    );
+
+    let auth_update_response = server
+        .client
+        .patch(format!(
+            "{}/manage/api/apps/{}/auth",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .json(&json!({
+            "allow_anonymous": true,
+            "allow_demo": false,
+            "jwks_endpoint": ""
+        }))
+        .send()
+        .await
+        .expect("manage update auth request");
+    assert_eq!(auth_update_response.status(), StatusCode::OK);
+    let auth_updated: UpdateAppResponse = auth_update_response
+        .json()
+        .await
+        .expect("parse auth update response");
+    assert_eq!(auth_updated.app_id, created.app_id);
+    assert_eq!(auth_updated.status, "active");
+    assert!(auth_updated.backend_secret.is_none());
+    assert!(auth_updated.admin_secret.is_none());
+
     let list_response = server
         .client
         .get(format!("{}/manage/api/apps", server.base_url()))
@@ -524,6 +568,9 @@ async fn management_api_create_list_and_status_update_work() {
         .iter()
         .find(|app| app.app_id == created.app_id)
         .expect("created app should exist in management list");
+    assert_eq!(listed_created.jwks_endpoint, "");
+    assert!(listed_created.allow_anonymous);
+    assert!(!listed_created.allow_demo);
     assert_eq!(listed_created.status, "active");
 
     let update_response = server
@@ -544,6 +591,48 @@ async fn management_api_create_list_and_status_update_work() {
         .await
         .expect("parse update status response");
     assert_eq!(updated.status, "disabled");
+
+    let rotate_response = server
+        .client
+        .post(format!(
+            "{}/manage/api/apps/{}/admin-secret/rotate",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage rotate admin secret request");
+    assert_eq!(rotate_response.status(), StatusCode::OK);
+    let rotated: UpdateAppResponse = rotate_response
+        .json()
+        .await
+        .expect("parse rotate admin secret response");
+    let rotated_secret = rotated
+        .admin_secret
+        .expect("rotating admin secret should return secret value");
+    assert_ne!(rotated_secret, "managed-admin-secret");
+
+    let reveal_after_rotate_response = server
+        .client
+        .get(format!(
+            "{}/manage/api/apps/{}/admin-secret",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage reveal after rotate request");
+    assert_eq!(reveal_after_rotate_response.status(), StatusCode::OK);
+    let revealed_after_rotate: ManageAdminSecretResponse = reveal_after_rotate_response
+        .json()
+        .await
+        .expect("parse reveal after rotate response");
+    assert_eq!(
+        revealed_after_rotate.admin_secret.as_deref(),
+        Some(rotated_secret.as_str())
+    );
 
     let listed_after_update = server
         .client
