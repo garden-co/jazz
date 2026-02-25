@@ -367,6 +367,42 @@ async fn wait_for_todos_count_on_disk(
     panic!("timed out waiting for on-disk todos count {expected_count}, last_count={last_count}");
 }
 
+async fn wait_for_catalogue_manifest_schema_count_on_disk(
+    app_id: AppId,
+    data_root: &Path,
+    expected_min_count: usize,
+    timeout: Duration,
+) {
+    let db_path = data_root
+        .join("apps")
+        .join(app_id.to_string())
+        .join("jazz.surrealkv");
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_count = 0usize;
+
+    while tokio::time::Instant::now() < deadline {
+        if db_path.exists()
+            && let Ok(storage) = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+        {
+            let manifest = storage
+                .load_catalogue_manifest(app_id.as_object_id())
+                .ok()
+                .flatten();
+            last_count = manifest.map(|m| m.schema_seen.len()).unwrap_or(0);
+            let _ = storage.close();
+            if last_count >= expected_min_count {
+                return;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    panic!(
+        "timed out waiting for schema manifest count >= {expected_min_count}, last_count={last_count}"
+    );
+}
+
 #[tokio::test]
 async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     let jwks_server = JwksServer::start().await;
@@ -667,6 +703,13 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
     .await;
 
     drop(server);
+    wait_for_catalogue_manifest_schema_count_on_disk(
+        app_id,
+        server_data.path(),
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
     let restarted = ServerProcess::start(server_data.path()).await;
 
     let rows_after_restart = wait_for_todos_count(
