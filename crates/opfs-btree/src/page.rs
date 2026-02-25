@@ -345,6 +345,7 @@ pub(crate) fn raw_leaf_scan<'a>(
     }
 
     let mut emitted = 0usize;
+    let mut reached_end = false;
     let mut slot_base = leaf_slot_base(lo)?;
     while slot_base < slots_bytes && emitted < limit {
         let slot = &slots[slot_base..slot_base + LEAF_SLOT_BYTES];
@@ -367,6 +368,7 @@ pub(crate) fn raw_leaf_scan<'a>(
         }
         let key = &payload[key_off..key_end];
         if key >= end {
+            reached_end = true;
             break;
         }
         let value = parse_leaf_value_cell_at(payload, value_off)?;
@@ -375,7 +377,11 @@ pub(crate) fn raw_leaf_scan<'a>(
         slot_base += LEAF_SLOT_BYTES;
     }
 
-    Ok(header.next_page_id)
+    if reached_end {
+        Ok(None)
+    } else {
+        Ok(header.next_page_id)
+    }
 }
 
 pub(crate) fn raw_leaf_upsert_in_place(
