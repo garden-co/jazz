@@ -5,8 +5,7 @@
  * into the Value[] format expected by JazzClient.
  */
 
-import type { WasmSchema, ColumnType } from "../drivers/types.js";
-import type { WasmValue } from "./row-transformer.js";
+import type { WasmSchema, ColumnType, Value as WasmValue } from "../drivers/types.js";
 
 /**
  * Convert a JS value to WasmValue based on column type.
@@ -33,7 +32,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       return { type: "Uuid", value: String(value) };
     case "Bytea": {
       if (value instanceof Uint8Array) {
-        return { type: "Bytea", value: [...value] };
+        return { type: "Bytea", value };
       }
       if (Array.isArray(value)) {
         const bytes = value.map((entry) => {
@@ -43,7 +42,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
           }
           return n;
         });
-        return { type: "Bytea", value: bytes };
+        return { type: "Bytea", value: new Uint8Array(bytes) };
       }
       throw new Error("Expected Uint8Array or byte array for Bytea column type");
     }

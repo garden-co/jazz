@@ -23,7 +23,11 @@ pub enum WasmValue {
     Text(String),
     Timestamp(u64),
     Uuid(String), // UUID as string for JS compatibility
-    Bytea(Vec<u8>),
+    Bytea(
+        #[serde(with = "serde_bytes")]
+        #[tsify(type = "Uint8Array")]
+        Vec<u8>,
+    ),
     Array(Vec<WasmValue>),
     Row(Vec<WasmValue>),
     Null,
