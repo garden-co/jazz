@@ -97,6 +97,7 @@ need_cmd aws
 need_cmd docker
 need_cmd git
 need_cmd pulumi
+need_cmd rsync
 
 if ! docker buildx version >/dev/null 2>&1; then
   die "docker buildx is required"
@@ -133,12 +134,31 @@ aws ecr describe-repositories --repository-names "${IMAGE_REPO}" --region "${IMA
 aws ecr get-login-password --region "${IMAGE_REGION}" | \
   docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null
 
+TMP_CONTEXT="$(mktemp -d -t jazz-cloud-server-build-XXXXXX)"
+cleanup() {
+  rm -rf "${TMP_CONTEXT}"
+}
+trap cleanup EXIT
+
+rsync -a \
+  --exclude='.git' \
+  --exclude='target' \
+  --exclude='node_modules' \
+  "${REPO_ROOT}/Cargo.toml" \
+  "${REPO_ROOT}/Cargo.lock" \
+  "${REPO_ROOT}/crates" \
+  "${REPO_ROOT}/examples" \
+  "${TMP_CONTEXT}/"
+
 docker buildx build \
   --platform linux/amd64 \
   --file "${SCRIPT_DIR}/Dockerfile" \
   --tag "${IMAGE_URI}" \
   --push \
-  "${REPO_ROOT}"
+  "${TMP_CONTEXT}"
+
+trap - EXIT
+cleanup
 
 echo "Pushed: ${IMAGE_URI}"
 

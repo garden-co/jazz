@@ -14,7 +14,7 @@ use axum::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
     },
     response::{Html, IntoResponse, Json},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use base64::Engine;
 use bytes::Bytes;
@@ -123,6 +123,10 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
         background: #fff;
         color: #18202a;
       }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -156,12 +160,37 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
       .error {
         color: #b42318;
       }
+      .muted {
+        color: #57606a;
+        font-size: 0.82rem;
+      }
+      .auth-editor {
+        display: grid;
+        gap: 0.45rem;
+        margin-top: 0.45rem;
+      }
+      .auth-editor input[type="text"] {
+        font-size: 0.85rem;
+        padding: 0.35rem;
+      }
+      .auth-editor .checkboxes {
+        gap: 0.5rem;
+      }
+      .auth-editor .checkboxes label {
+        font-size: 0.82rem;
+      }
+      .secret-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.45rem;
+      }
     </style>
   </head>
   <body>
     <main>
       <h1>Jazz Cloud Server Management</h1>
-      <p>Authenticated as basic user <code>admin</code>. Use this page for simple app provisioning and status toggles.</p>
+      <p>Authenticated as basic user <code>admin</code>. Use this page for app provisioning, auth-mode edits, and admin secret management.</p>
 
       <section class="card">
         <h2>Create App</h2>
@@ -205,8 +234,8 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
             <tr>
               <th>App</th>
               <th>Status</th>
-              <th>Auth modes</th>
-              <th>JWKS endpoint</th>
+              <th>Auth config</th>
+              <th>Admin secret</th>
               <th>Worker</th>
               <th>Actions</th>
             </tr>
@@ -220,6 +249,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
       const statusEl = document.getElementById("status");
       const appsBodyEl = document.getElementById("apps-body");
       const resultEl = document.getElementById("create-result");
+      const revealedAdminSecrets = new Map();
 
       async function api(path, options = {}) {
         const config = { ...options };
@@ -263,6 +293,10 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
         resultEl.textContent = JSON.stringify(value, null, 2);
       }
 
+      function maskSecret(secret) {
+        return "*".repeat(Math.max(8, Math.min(secret.length, 24)));
+      }
+
       async function loadApps() {
         const apps = await api("/manage/api/apps");
         appsBodyEl.textContent = "";
@@ -291,10 +325,153 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           statusCell.textContent = app.status;
 
           const authCell = document.createElement("td");
-          authCell.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}`;
+          const authSummary = document.createElement("div");
+          authSummary.className = "muted";
+          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}`;
+          authCell.appendChild(authSummary);
 
-          const jwksCell = document.createElement("td");
-          jwksCell.textContent = app.jwks_endpoint || "(disabled)";
+          const authEditor = document.createElement("div");
+          authEditor.className = "auth-editor";
+
+          const flags = document.createElement("div");
+          flags.className = "checkboxes";
+
+          const anonymousLabel = document.createElement("label");
+          const anonymousCheckbox = document.createElement("input");
+          anonymousCheckbox.type = "checkbox";
+          anonymousCheckbox.checked = Boolean(app.allow_anonymous);
+          anonymousLabel.appendChild(anonymousCheckbox);
+          anonymousLabel.appendChild(document.createTextNode("Allow anonymous"));
+
+          const demoLabel = document.createElement("label");
+          const demoCheckbox = document.createElement("input");
+          demoCheckbox.type = "checkbox";
+          demoCheckbox.checked = Boolean(app.allow_demo);
+          demoLabel.appendChild(demoCheckbox);
+          demoLabel.appendChild(document.createTextNode("Allow demo"));
+
+          flags.appendChild(anonymousLabel);
+          flags.appendChild(demoLabel);
+
+          const jwksInput = document.createElement("input");
+          jwksInput.type = "text";
+          jwksInput.placeholder = "JWKS endpoint (blank disables JWT auth)";
+          jwksInput.value = app.jwks_endpoint || "";
+
+          const saveAuthButton = document.createElement("button");
+          saveAuthButton.type = "button";
+          saveAuthButton.className = "secondary";
+          saveAuthButton.textContent = "Save auth";
+          saveAuthButton.addEventListener("click", async () => {
+            saveAuthButton.disabled = true;
+            try {
+              await api(`/manage/api/apps/${encodeURIComponent(app.app_id)}/auth`, {
+                method: "PATCH",
+                body: JSON.stringify({
+                  allow_anonymous: anonymousCheckbox.checked,
+                  allow_demo: demoCheckbox.checked,
+                  jwks_endpoint: jwksInput.value.trim(),
+                }),
+              });
+              setStatus(`Saved auth config for ${app.app_id}`);
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              saveAuthButton.disabled = false;
+            }
+          });
+
+          authEditor.appendChild(flags);
+          authEditor.appendChild(jwksInput);
+          authEditor.appendChild(saveAuthButton);
+          authCell.appendChild(authEditor);
+
+          const secretCell = document.createElement("td");
+          const secretDisplay = document.createElement("code");
+          const knownSecretState = revealedAdminSecrets.get(app.app_id);
+          if (knownSecretState && knownSecretState.value) {
+            secretDisplay.textContent = knownSecretState.visible
+              ? knownSecretState.value
+              : maskSecret(knownSecretState.value);
+          } else {
+            secretDisplay.textContent = "(hidden)";
+          }
+          secretCell.appendChild(secretDisplay);
+
+          const secretControls = document.createElement("div");
+          secretControls.className = "secret-controls";
+
+          const revealButton = document.createElement("button");
+          revealButton.type = "button";
+          revealButton.className = "secondary";
+          revealButton.textContent =
+            knownSecretState && knownSecretState.visible ? "Hide" : "Reveal";
+          revealButton.addEventListener("click", async () => {
+            const currentState = revealedAdminSecrets.get(app.app_id);
+            if (currentState && currentState.value) {
+              currentState.visible = !currentState.visible;
+              revealedAdminSecrets.set(app.app_id, currentState);
+              await loadApps();
+              return;
+            }
+
+            revealButton.disabled = true;
+            try {
+              const revealed = await api(
+                `/manage/api/apps/${encodeURIComponent(app.app_id)}/admin-secret`
+              );
+              if (revealed && revealed.admin_secret) {
+                revealedAdminSecrets.set(app.app_id, {
+                  value: revealed.admin_secret,
+                  visible: true,
+                });
+                setStatus(`Revealed admin secret for ${app.app_id}`);
+                setCreateResult(revealed);
+              } else {
+                setStatus(
+                  `No stored admin secret for ${app.app_id}. Rotate to generate a new one.`,
+                  true
+                );
+              }
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              revealButton.disabled = false;
+            }
+          });
+
+          const rotateButton = document.createElement("button");
+          rotateButton.type = "button";
+          rotateButton.className = "secondary";
+          rotateButton.textContent = "Rotate";
+          rotateButton.addEventListener("click", async () => {
+            rotateButton.disabled = true;
+            try {
+              const rotated = await api(
+                `/manage/api/apps/${encodeURIComponent(app.app_id)}/admin-secret/rotate`,
+                { method: "POST" }
+              );
+              if (rotated && rotated.admin_secret) {
+                revealedAdminSecrets.set(app.app_id, {
+                  value: rotated.admin_secret,
+                  visible: true,
+                });
+                setCreateResult(rotated);
+              }
+              setStatus(`Rotated admin secret for ${app.app_id}`);
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              rotateButton.disabled = false;
+            }
+          });
+
+          secretControls.appendChild(revealButton);
+          secretControls.appendChild(rotateButton);
+          secretCell.appendChild(secretControls);
 
           const workerCell = document.createElement("td");
           workerCell.textContent = String(app.worker);
@@ -324,7 +501,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           tr.appendChild(appCell);
           tr.appendChild(statusCell);
           tr.appendChild(authCell);
-          tr.appendChild(jwksCell);
+          tr.appendChild(secretCell);
           tr.appendChild(workerCell);
           tr.appendChild(actionCell);
           appsBodyEl.appendChild(tr);
@@ -362,6 +539,12 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
             method: "POST",
             body: JSON.stringify(payload),
           });
+          if (created && created.app_id && created.admin_secret) {
+            revealedAdminSecrets.set(created.app_id, {
+              value: created.admin_secret,
+              visible: true,
+            });
+          }
           setCreateResult(created);
           setStatus("App created.");
           event.target.reset();
@@ -430,7 +613,6 @@ pub struct ServerConfig {
     pub internal_api_secret: String,
     pub secret_hash_key: String,
     pub worker_threads: usize,
-    pub management_password: Option<String>,
 }
 
 struct WorkerPool {
@@ -784,6 +966,7 @@ struct MetaAppRow {
     status: AppStatus,
     created_at: u64,
     updated_at: u64,
+    admin_secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -814,7 +997,8 @@ impl MetaStore {
                     .column("admin_secret_hash", ColumnType::Text)
                     .column("status", ColumnType::Text)
                     .column("created_at", ColumnType::Timestamp)
-                    .column("updated_at", ColumnType::Timestamp),
+                    .column("updated_at", ColumnType::Timestamp)
+                    .column("admin_secret", ColumnType::Text),
             )
             .table(
                 TableSchema::builder("external_identities")
@@ -909,6 +1093,7 @@ impl MetaStore {
         backend_secret_hash: String,
         admin_secret_hash: String,
         status: AppStatus,
+        admin_secret: Option<String>,
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
         let values = vec![
@@ -922,6 +1107,10 @@ impl MetaStore {
             Value::Text(status.as_str().to_string()),
             Value::Timestamp(now),
             Value::Timestamp(now),
+            match &admin_secret {
+                Some(value) => Value::Text(value.clone()),
+                None => Value::Null,
+            },
         ];
 
         let object_id = self
@@ -945,6 +1134,7 @@ impl MetaStore {
             status,
             created_at: now,
             updated_at: now,
+            admin_secret,
         })
     }
 
@@ -973,6 +1163,13 @@ impl MetaStore {
                 Value::Text(row.status.as_str().to_string()),
             ),
             ("updated_at".to_string(), Value::Timestamp(row.updated_at)),
+            (
+                "admin_secret".to_string(),
+                match &row.admin_secret {
+                    Some(value) => Value::Text(value.clone()),
+                    None => Value::Null,
+                },
+            ),
         ];
 
         self.runtime
@@ -1160,6 +1357,20 @@ impl MetaStore {
             }
         };
 
+        let admin_secret = if values.len() > 8 + idx_shift {
+            match &values[8 + idx_shift] {
+                Value::Text(value) => Some(value.clone()),
+                Value::Null => None,
+                other => {
+                    return Err(format!(
+                        "meta row field admin_secret expected text|null, got {other:?}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(MetaAppRow {
             object_id,
             app_id: AppId::from_object_id(app_obj_id),
@@ -1172,6 +1383,7 @@ impl MetaStore {
             status,
             created_at,
             updated_at,
+            admin_secret,
         })
     }
 
@@ -1452,7 +1664,6 @@ struct ServerState {
     apps: tokio::sync::RwLock<HashMap<AppId, Arc<AppEntry>>>,
     data_root: PathBuf,
     internal_api_secret: String,
-    management_password: Option<String>,
     workers: WorkerPool,
     meta_store: Arc<MetaStore>,
     jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
@@ -1509,6 +1720,13 @@ struct ManageSetStatusRequest {
     status: AppStatus,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManageUpdateAuthRequest {
+    jwks_endpoint: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 struct AppSummaryResponse {
     app_id: String,
@@ -1553,6 +1771,12 @@ struct LinkExternalResponse {
     issuer: String,
     subject: String,
     created: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ManageAdminSecretResponse {
+    app_id: String,
+    admin_secret: Option<String>,
 }
 
 pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -1613,7 +1837,6 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         apps: tokio::sync::RwLock::new(app_map),
         data_root,
         internal_api_secret: config.internal_api_secret,
-        management_password: config.management_password,
         workers,
         meta_store,
         jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
@@ -1629,12 +1852,10 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
     warn!(
         "TODO(security): JWT auth currently validates signatures only; add claim validation before production."
     );
-    if state.management_password.is_some() {
-        info!(
-            username = MANAGEMENT_USERNAME,
-            "management UI enabled at /manage (HTTP basic auth)"
-        );
-    }
+    info!(
+        username = MANAGEMENT_USERNAME,
+        "management UI enabled at /manage (HTTP basic auth, password = JAZZ_INTERNAL_API_SECRET)"
+    );
 
     let app = create_router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -1673,7 +1894,7 @@ async fn shutdown_signal() {
 }
 
 fn create_router(state: Arc<ServerState>) -> Router {
-    let mut router = Router::new()
+    Router::new()
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
         .route(
@@ -1688,22 +1909,28 @@ fn create_router(state: Arc<ServerState>) -> Router {
             "/internal/apps/:app_id",
             get(get_app_handler).patch(update_app_handler),
         )
-        .route("/health", get(health_handler));
-
-    if state.management_password.is_some() {
-        router = router
-            .route("/manage", get(manage_page_handler))
-            .route(
-                "/manage/api/apps",
-                get(manage_list_apps_handler).post(manage_create_app_handler),
-            )
-            .route(
-                "/manage/api/apps/:app_id/status",
-                post(manage_set_status_handler),
-            );
-    }
-
-    router
+        .route("/health", get(health_handler))
+        .route("/manage", get(manage_page_handler))
+        .route(
+            "/manage/api/apps",
+            get(manage_list_apps_handler).post(manage_create_app_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/status",
+            post(manage_set_status_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/auth",
+            patch(manage_update_auth_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/admin-secret",
+            get(manage_get_admin_secret_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/admin-secret/rotate",
+            post(manage_rotate_admin_secret_handler),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -2242,14 +2469,12 @@ fn validate_internal_secret(
 
 #[derive(Debug, Clone, Copy)]
 enum ManageAuthError {
-    Disabled,
     Unauthorized,
 }
 
 impl ManageAuthError {
     fn into_response(self) -> axum::response::Response {
         match self {
-            Self::Disabled => StatusCode::NOT_FOUND.into_response(),
             Self::Unauthorized => management_basic_auth_challenge(),
         }
     }
@@ -2280,10 +2505,6 @@ fn authorize_management_request(
     headers: &HeaderMap,
     state: &ServerState,
 ) -> Result<(), ManageAuthError> {
-    let Some(expected_password) = state.management_password.as_deref() else {
-        return Err(ManageAuthError::Disabled);
-    };
-
     let encoded = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -2301,7 +2522,7 @@ fn authorize_management_request(
         .ok_or(ManageAuthError::Unauthorized)?;
 
     let username_valid = constant_time_eq(username, MANAGEMENT_USERNAME);
-    let password_valid = constant_time_eq(password, expected_password);
+    let password_valid = constant_time_eq(password, &state.internal_api_secret);
     if username_valid && password_valid {
         Ok(())
     } else {
@@ -2440,6 +2661,127 @@ async fn manage_set_status_handler(
             status: Some(request.status),
             rotate_backend_secret: None,
             rotate_admin_secret: None,
+        }),
+    )
+    .await
+    .into_response()
+}
+
+async fn manage_update_auth_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<ManageUpdateAuthRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    update_app_handler(
+        State(state),
+        AxumPath(path),
+        internal_headers,
+        Json(UpdateAppRequest {
+            app_name: None,
+            jwks_endpoint: request.jwks_endpoint,
+            allow_anonymous: request.allow_anonymous,
+            allow_demo: request.allow_demo,
+            status: None,
+            rotate_backend_secret: None,
+            rotate_admin_secret: None,
+        }),
+    )
+    .await
+    .into_response()
+}
+
+async fn manage_get_admin_secret_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let row = match state.meta_store.get_by_app_id(app_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(err)),
+            )
+                .into_response();
+        }
+    };
+
+    Json(ManageAdminSecretResponse {
+        app_id: app_id.to_string(),
+        admin_secret: row.admin_secret,
+    })
+    .into_response()
+}
+
+async fn manage_rotate_admin_secret_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    update_app_handler(
+        State(state),
+        AxumPath(path),
+        internal_headers,
+        Json(UpdateAppRequest {
+            app_name: None,
+            jwks_endpoint: None,
+            allow_anonymous: None,
+            allow_demo: None,
+            status: None,
+            rotate_backend_secret: None,
+            rotate_admin_secret: Some(true),
         }),
     )
     .await
@@ -2697,6 +3039,7 @@ async fn create_app_handler(
             backend_secret_hash,
             admin_secret_hash,
             AppStatus::Active,
+            Some(admin_secret.clone()),
         )
         .await
     {
@@ -2906,6 +3249,7 @@ async fn update_app_handler(
     if request.rotate_admin_secret.unwrap_or(false) {
         let secret = generate_secret();
         row.admin_secret_hash = state.meta_store.hash_secret(&secret);
+        row.admin_secret = Some(secret.clone());
         new_admin_secret = Some(secret);
     }
     row.updated_at = now_timestamp_us().max(row.created_at);

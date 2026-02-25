@@ -25,11 +25,6 @@ struct Cli {
     /// Number of worker threads used for app placement and fairness scheduling.
     #[arg(long)]
     worker_threads: Option<usize>,
-
-    /// Password for the management UI (`/manage`) basic auth.
-    /// Username is fixed to `admin`.
-    #[arg(long, env = "JAZZ_MANAGEMENT_PASSWORD")]
-    management_password: Option<String>,
 }
 
 #[tokio::main]
@@ -54,10 +49,6 @@ async fn main() {
         eprintln!("Missing secret hash key. Set --secret-hash-key or JAZZ_SECRET_HASH_KEY.");
         std::process::exit(1);
     }
-    if matches!(cli.management_password.as_deref(), Some("")) {
-        eprintln!("JAZZ_MANAGEMENT_PASSWORD cannot be empty when provided.");
-        std::process::exit(1);
-    }
 
     let worker_threads = cli.worker_threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -71,7 +62,6 @@ async fn main() {
         internal_api_secret: cli.internal_api_secret,
         secret_hash_key: cli.secret_hash_key,
         worker_threads,
-        management_password: cli.management_password,
     };
 
     if let Err(err) = server::run(config).await {
