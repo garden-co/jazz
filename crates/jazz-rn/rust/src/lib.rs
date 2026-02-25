@@ -317,26 +317,13 @@ fn build_rn_delta_json<F>(delta: &SubscriptionDelta, mut row_to_json: F) -> serd
 where
     F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
 {
-    let added = delta
-        .indexed_delta
-        .added
-        .iter()
-        .map(|change| {
-            let row_json = row_to_json(&change.row);
-            serde_json::json!({
-                "id": change.id.uuid().to_string(),
-                "row": row_json,
-                "index": change.index
-            })
-        })
-        .collect::<Vec<_>>();
-
     let removed = delta
         .indexed_delta
         .removed
         .iter()
         .map(|change| {
             serde_json::json!({
+                "kind": 1,
                 "id": change.id.uuid().to_string(),
                 "index": change.index
             })
@@ -349,20 +336,36 @@ where
         .iter()
         .map(|change| {
             serde_json::json!({
+                "kind": 2,
                 "id": change.id.uuid().to_string(),
-                "oldIndex": change.old_index,
-                "newIndex": change.new_index,
+                "index": change.new_index,
                 "row": change.row.as_ref().map(&mut row_to_json)
             })
         })
         .collect::<Vec<_>>();
 
-    serde_json::json!({
-        "added": added,
-        "removed": removed,
-        "updated": updated,
-        "pending": delta.indexed_delta.pending
-    })
+    let added = delta
+        .indexed_delta
+        .added
+        .iter()
+        .map(|change| {
+            let row_json = row_to_json(&change.row);
+            serde_json::json!({
+                "kind": 0,
+                "id": change.id.uuid().to_string(),
+                "index": change.index,
+                "row": row_json
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let changes = removed
+        .into_iter()
+        .chain(updated)
+        .chain(added)
+        .collect::<Vec<_>>();
+
+    serde_json::Value::Array(changes)
 }
 
 // ============================================================================
