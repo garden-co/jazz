@@ -21,17 +21,6 @@ describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
 
-  async function clearTodos() {
-    const listRes = await fetch(`${baseUrl}/todos`);
-    expect(listRes.status).toBe(200);
-    const todos: Todo[] = await listRes.json();
-
-    for (const todo of todos) {
-      const deleteRes = await fetch(`${baseUrl}/todos/${todo.id}`, { method: "DELETE" });
-      expect(deleteRes.status).toBe(204);
-    }
-  }
-
   beforeAll(async () => {
     // Create server with SurrealKV-backed storage (temp directory)
     const todoServer = await createServer();
@@ -240,46 +229,47 @@ describe("Todo Server Integration", () => {
 
   describe("SSE Live Endpoint", () => {
     it("streams all todos and updates on changes", async () => {
-      // Ensure this test starts from a known clean state.
-      await clearTodos();
+      // Use an isolated server instance so this test has an independent persistence context.
+      const sseServer = await startServer(await createServer(), 0);
+      const sseBaseUrl = sseServer.baseUrl;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      try {
+        // Connect to SSE endpoint
+        const res = await fetch(`${sseBaseUrl}/todos/live`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("text/event-stream");
 
-      // Connect to SSE endpoint
-      const res = await fetch(`${baseUrl}/todos/live`);
-      expect(res.status).toBe(200);
-      expect(res.headers.get("content-type")).toBe("text/event-stream");
+        reader = res.body!.getReader();
+        const decoder = new TextDecoder();
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
+        // Helper to read next SSE event
+        async function readEvent(): Promise<Todo[]> {
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) throw new Error("Stream ended unexpectedly");
+            buffer += decoder.decode(value, { stream: true });
 
-      // Helper to read next SSE event
-      async function readEvent(): Promise<Todo[]> {
-        let buffer = "";
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) throw new Error("Stream ended unexpectedly");
-          buffer += decoder.decode(value, { stream: true });
+            // Parse SSE format: "data: {...}\n\n"
+            const eventEnd = buffer.indexOf("\n\n");
+            if (eventEnd !== -1) {
+              const eventData = buffer.slice(0, eventEnd);
+              buffer = buffer.slice(eventEnd + 2);
 
-          // Parse SSE format: "data: {...}\n\n"
-          const eventEnd = buffer.indexOf("\n\n");
-          if (eventEnd !== -1) {
-            const eventData = buffer.slice(0, eventEnd);
-            buffer = buffer.slice(eventEnd + 2);
-
-            const dataLine = eventData.split("\n").find((line) => line.startsWith("data: "));
-            if (dataLine) {
-              return JSON.parse(dataLine.slice(6));
+              const dataLine = eventData.split("\n").find((line) => line.startsWith("data: "));
+              if (dataLine) {
+                return JSON.parse(dataLine.slice(6));
+              }
             }
           }
         }
-      }
 
-      try {
         // 1. Initial event should be empty list
         const initial = await readEvent();
         expect(initial).toEqual([]);
 
         // 2. Create a todo - should see it in next event
-        const createRes = await fetch(`${baseUrl}/todos`, {
+        const createRes = await fetch(`${sseBaseUrl}/todos`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title: "SSE Test Todo" }),
@@ -293,7 +283,7 @@ describe("Todo Server Integration", () => {
         expect(afterCreate[0].title).toBe("SSE Test Todo");
 
         // 3. Update the todo - should see updated state
-        await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
+        await fetch(`${sseBaseUrl}/todos/${createdTodo.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ done: true }),
@@ -304,14 +294,17 @@ describe("Todo Server Integration", () => {
         expect(afterUpdate[0].done).toBe(true);
 
         // 4. Delete the todo - should see empty list again
-        await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
+        await fetch(`${sseBaseUrl}/todos/${createdTodo.id}`, {
           method: "DELETE",
         });
 
         const afterDelete = await readEvent();
         expect(afterDelete).toEqual([]);
       } finally {
-        await reader.cancel().catch(() => undefined);
+        if (reader) {
+          await reader.cancel().catch(() => undefined);
+        }
+        await stopServer(sseServer);
       }
     });
   });
