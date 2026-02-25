@@ -4,7 +4,7 @@
 // generator runs UniFFI in "library mode", reading this crate's metadata.
 uniffi::setup_scaffolding!();
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -321,127 +321,59 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JazzRnError> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct IndexedRowState {
-    pre_index_by_id: HashMap<ObjectId, usize>,
-    post_index_by_id: HashMap<ObjectId, usize>,
-    post_ids: Vec<ObjectId>,
-}
-
-fn index_row_delta(
-    current_ids: &[ObjectId],
-    delta: &jazz_tools::query_manager::types::RowDelta,
-) -> IndexedRowState {
-    let pre_index_by_id: HashMap<_, _> = current_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index))
-        .collect();
-
-    let mut ids_to_detach = HashSet::new();
-    for row in &delta.removed {
-        ids_to_detach.insert(row.id);
-    }
-    for (old, _) in &delta.updated {
-        ids_to_detach.insert(old.id);
-    }
-
-    let mut post_ids = Vec::with_capacity(current_ids.len() + delta.added.len());
-    let mut post_index_by_id = HashMap::new();
-
-    for id in current_ids {
-        if !ids_to_detach.contains(id) {
-            post_index_by_id.insert(*id, post_ids.len());
-            post_ids.push(*id);
-        }
-    }
-
-    let mut append_if_missing = |id: ObjectId| {
-        if let std::collections::hash_map::Entry::Vacant(entry) = post_index_by_id.entry(id) {
-            entry.insert(post_ids.len());
-            post_ids.push(id);
-        }
-    };
-
-    for row in &delta.added {
-        append_if_missing(row.id);
-    }
-
-    for (_, new) in &delta.updated {
-        append_if_missing(new.id);
-    }
-
-    IndexedRowState {
-        pre_index_by_id,
-        post_index_by_id,
-        post_ids,
-    }
-}
-
-fn build_rn_delta_json<F>(
-    delta: &SubscriptionDelta,
-    current_ids: &mut Vec<ObjectId>,
-    mut row_to_json: F,
-) -> serde_json::Value
+fn build_rn_delta_json<F>(delta: &SubscriptionDelta, mut row_to_json: F) -> serde_json::Value
 where
     F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
 {
-    let indexed = index_row_delta(current_ids, &delta.delta);
-
-    let added = delta
-        .delta
-        .added
-        .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0);
-            serde_json::json!({
-                "row": row_json,
-                "index": index
-            })
-        })
-        .collect::<Vec<_>>();
-
     let removed = delta
-        .delta
+        .ordered_delta
         .removed
         .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0);
+        .map(|change| {
             serde_json::json!({
-                "row": row_json,
-                "index": index
+                "kind": 1,
+                "id": change.id.uuid().to_string(),
+                "index": change.index
             })
         })
         .collect::<Vec<_>>();
 
     let updated = delta
-        .delta
+        .ordered_delta
         .updated
         .iter()
-        .map(|(old, new)| {
-            let old_json = row_to_json(old);
-            let new_json = row_to_json(new);
-            let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
-            let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
+        .map(|change| {
             serde_json::json!({
-                "old_row": old_json,
-                "new_row": new_json,
-                "old_index": old_index,
-                "new_index": new_index
+                "kind": 2,
+                "id": change.id.uuid().to_string(),
+                "index": change.new_index,
+                "row": change.row.as_ref().map(&mut row_to_json)
             })
         })
         .collect::<Vec<_>>();
 
-    *current_ids = indexed.post_ids;
+    let added = delta
+        .ordered_delta
+        .added
+        .iter()
+        .map(|change| {
+            let row_json = row_to_json(&change.row);
+            serde_json::json!({
+                "kind": 0,
+                "id": change.id.uuid().to_string(),
+                "index": change.index,
+                "row": row_json
+            })
+        })
+        .collect::<Vec<_>>();
 
-    serde_json::json!({
-        "added": added,
-        "removed": removed,
-        "updated": updated,
-        "pending": false
-    })
+    let changes = removed
+        .into_iter()
+        .chain(updated)
+        .chain(added)
+        .collect::<Vec<_>>();
+
+    serde_json::Value::Array(changes)
 }
 
 // ============================================================================
@@ -767,12 +699,10 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
 
-            let ids = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
             let handle = core
                 .subscribe_with_settled_tier(
                     query,
                     {
-                        let ids = Arc::clone(&ids);
                         move |delta: SubscriptionDelta| {
                             let descriptor = &delta.descriptor;
                             let row_to_json =
@@ -788,11 +718,7 @@ impl RnRuntime {
                                     })
                                 };
 
-                            let Ok(mut current_ids) = ids.lock() else {
-                                return;
-                            };
-                            let payload =
-                                build_rn_delta_json(&delta, &mut current_ids, row_to_json);
+                            let payload = build_rn_delta_json(&delta, row_to_json);
 
                             if let Ok(json) = serde_json::to_string(&payload) {
                                 let _ =

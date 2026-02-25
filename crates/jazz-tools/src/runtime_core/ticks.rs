@@ -43,13 +43,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     if let Some(sender) = pending.sender.take() {
                         // Decode rows using the query's output descriptor
                         let results: Vec<(ObjectId, Vec<Value>)> = update
-                            .delta
+                            .ordered_delta
                             .added
                             .iter()
                             .filter_map(|row| {
-                                decode_row(&update.descriptor, &row.data)
+                                decode_row(&update.descriptor, &row.row.data)
                                     .ok()
-                                    .map(|values| (row.id, values))
+                                    .map(|values| (row.row.id, values))
                             })
                             .collect();
                         let _ = sender.send(Ok(results));
@@ -60,7 +60,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     // Regular subscription - call callback
                     let delta = SubscriptionDelta {
                         handle,
-                        delta: update.delta.clone(),
+                        ordered_delta: update.ordered_delta.clone(),
                         descriptor: update.descriptor.clone(),
                     };
                     (state.callback)(delta);

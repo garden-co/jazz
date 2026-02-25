@@ -155,6 +155,10 @@ async function waitForCondition(
   throw new Error(errorMessage);
 }
 
+function hasChangeForId<T>(delta: SubscriptionDelta<T>, kind: 0 | 1 | 2, id: string): boolean {
+  return delta.delta.some((change) => change.kind === kind && change.id === id);
+}
+
 describe("db.subscribeAll browser integration", () => {
   const dbs: Db[] = [];
   const unsubscribes: Array<() => void> = [];
@@ -309,7 +313,7 @@ describe("db.subscribeAll browser integration", () => {
     await conditionsDb.shutdown();
   });
 
-  it("emits added, updated, removed, and all", async () => {
+  it("emits add, update, remove changes and all", async () => {
     const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("delta") }));
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
@@ -333,7 +337,7 @@ describe("db.subscribeAll browser integration", () => {
     });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.added.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 0, id)),
       4000,
       "expected add delta",
     );
@@ -341,7 +345,7 @@ describe("db.subscribeAll browser integration", () => {
     db.update(todos, id, { title: "watch-me-updated" });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.updated.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 2, id)),
       4000,
       "expected update delta",
     );
@@ -349,7 +353,7 @@ describe("db.subscribeAll browser integration", () => {
     db.update(todos, id, { done: true });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.removed.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 1, id)),
       4000,
       "expected remove delta",
     );
@@ -372,7 +376,7 @@ describe("db.subscribeAll browser integration", () => {
       const insertedId = conditionsDb.insert(todos, testCase.insert);
 
       await waitForCondition(
-        () => deltas.some((delta) => delta.added.some((row) => row.id === insertedId)),
+        () => deltas.some((delta) => hasChangeForId(delta, 0, insertedId)),
         4000,
         `expected add delta for ${testCase.name}`,
       );
@@ -486,7 +490,7 @@ describe("db.subscribeAll browser integration", () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(deltas.some((delta) => delta.added.some((row) => row.id === insertedId))).toBe(false);
+    expect(deltas.some((delta) => hasChangeForId(delta, 0, insertedId))).toBe(false);
 
     unsubscribe();
   });
@@ -509,7 +513,7 @@ describe("db.subscribeAll browser integration", () => {
     const userId = db.insert(users, { name: "Owner", team_id: undefined });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.added.some((row) => row.id === userId)),
+      () => deltas.some((delta) => hasChangeForId(delta, 0, userId)),
       4000,
       "expected include query subscription delta",
     );

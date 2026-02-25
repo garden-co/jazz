@@ -132,6 +132,7 @@ impl SourceNode for IndexScanNode {
         TupleDelta {
             added: added.into_iter().map(Tuple::from_id).collect(),
             removed: removed.into_iter().map(Tuple::from_id).collect(),
+            moved: vec![],
             updated: vec![],
         }
     }

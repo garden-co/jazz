@@ -214,6 +214,7 @@ mod tests {
         let first = node.process(TupleDelta {
             added: vec![tuple_a],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert_eq!(first.added.len(), 1);
@@ -221,6 +222,7 @@ mod tests {
         let second = node.process(TupleDelta {
             added: vec![tuple_b],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(
