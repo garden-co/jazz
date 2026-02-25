@@ -45,13 +45,18 @@ fn add_server_receives_existing_objects() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated {
-            object_id,
-            metadata,
-            branch_name,
-            commits,
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    metadata,
+                    branch_name,
+                    commits,
+                },
         } => {
+            assert_eq!(*id, server_id);
             assert_eq!(*object_id, obj_id);
             let metadata = metadata
                 .as_ref()
@@ -64,7 +69,7 @@ fn add_server_receives_existing_objects() {
             assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 1);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to the newly added server"),
     }
 }
 
@@ -202,15 +207,27 @@ fn commits_sent_in_causal_order() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { commits, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 3);
             // Parents should come before children
             assert_eq!(commits[0].id(), c1);
             assert_eq!(commits[1].id(), c2);
             assert_eq!(commits[2].id(), c3);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated with causal commit ordering"),
     }
 }
 
@@ -250,10 +267,18 @@ fn client_with_query_receives_matching_objects() {
     match &outbox[0] {
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::ObjectUpdated { object_id, .. },
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
         }
         _ => panic!("Expected ObjectUpdated to client"),
     }
