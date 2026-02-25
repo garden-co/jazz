@@ -42,7 +42,7 @@ pub use query_manager::query::{Query, QueryBuilder};
 pub use query_manager::session::Session;
 #[cfg(feature = "client")]
 pub use query_manager::types::{
-    ColumnType, IndexedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,
+    ColumnType, OrderedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,
     Value,
 };
 #[cfg(feature = "client")]
@@ -128,18 +128,18 @@ pub struct SubscriptionHandle(pub u64);
 /// Stream of row deltas from a subscription.
 #[cfg(feature = "client")]
 pub struct SubscriptionStream {
-    receiver: tokio::sync::mpsc::Receiver<IndexedRowDelta>,
+    receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>,
 }
 
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
-    pub(crate) fn new(receiver: tokio::sync::mpsc::Receiver<IndexedRowDelta>) -> Self {
+    pub(crate) fn new(receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>) -> Self {
         Self { receiver }
     }
 
     /// Get the next delta, waiting if necessary.
-    pub async fn next(&mut self) -> Option<IndexedRowDelta> {
+    pub async fn next(&mut self) -> Option<OrderedRowDelta> {
         self.receiver.recv().await
     }
 }

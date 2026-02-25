@@ -318,7 +318,7 @@ where
     F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
 {
     let removed = delta
-        .indexed_delta
+        .ordered_delta
         .removed
         .iter()
         .map(|change| {
@@ -331,7 +331,7 @@ where
         .collect::<Vec<_>>();
 
     let updated = delta
-        .indexed_delta
+        .ordered_delta
         .updated
         .iter()
         .map(|change| {
@@ -345,7 +345,7 @@ where
         .collect::<Vec<_>>();
 
     let added = delta
-        .indexed_delta
+        .ordered_delta
         .added
         .iter()
         .map(|change| {

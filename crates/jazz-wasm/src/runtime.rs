@@ -593,7 +593,7 @@ impl WasmRuntime {
 
             let descriptor = &delta.descriptor;
             let mut delta_json = delta
-                .indexed_delta
+                .ordered_delta
                 .removed
                 .iter()
                 .map(|change| {
@@ -603,7 +603,7 @@ impl WasmRuntime {
                         "index": change.index
                     })
                 })
-                .chain(delta.indexed_delta.updated.iter().map(|change| {
+                .chain(delta.ordered_delta.updated.iter().map(|change| {
                     let row = change.row.as_ref().map(|row| row_to_json(row, descriptor));
                     serde_json::json!({
                         "kind": 2,
@@ -612,7 +612,7 @@ impl WasmRuntime {
                         "row": row
                     })
                 }))
-                .chain(delta.indexed_delta.added.iter().map(|change| {
+                .chain(delta.ordered_delta.added.iter().map(|change| {
                     serde_json::json!({
                         "kind": 0,
                         "id": change.id.uuid().to_string(),

@@ -48,20 +48,20 @@ impl RowDelta {
 }
 
 #[derive(Debug, Clone)]
-pub struct IndexedAdded {
+pub struct OrderedAdded {
     pub id: ObjectId,
     pub index: usize,
     pub row: Row,
 }
 
 #[derive(Debug, Clone)]
-pub struct IndexedRemoved {
+pub struct OrderedRemoved {
     pub id: ObjectId,
     pub index: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct IndexedUpdated {
+pub struct OrderedUpdated {
     pub id: ObjectId,
     pub old_index: usize,
     pub new_index: usize,
@@ -69,41 +69,41 @@ pub struct IndexedUpdated {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct IndexedRowDelta {
-    pub added: Vec<IndexedAdded>,
-    pub removed: Vec<IndexedRemoved>,
-    pub updated: Vec<IndexedUpdated>,
+pub struct OrderedRowDelta {
+    pub added: Vec<OrderedAdded>,
+    pub removed: Vec<OrderedRemoved>,
+    pub updated: Vec<OrderedUpdated>,
     pub pending: bool,
 }
 
-impl IndexedRowDelta {
+impl OrderedRowDelta {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectedRowDelta {
-    pub delta: IndexedRowDelta,
-    pub post_ids: Vec<ObjectId>,
+pub struct OrderedDeltaResult {
+    pub delta: OrderedRowDelta,
+    pub ordered_ids_after: Vec<ObjectId>,
 }
 
-/// Build an indexed, wire-ready delta using an explicit post-order.
+/// Build an ordered, wire-ready delta using an explicit post-order.
 ///
 /// This variant avoids reconstructing order from delta semantics and should be used
 /// when the caller already has the exact post-settle ordered IDs.
-pub fn project_row_delta_with_post_ids(
-    current_ids: &[ObjectId],
-    post_ids: &[ObjectId],
+pub fn build_ordered_delta_with_post_ids(
+    ordered_ids_before: &[ObjectId],
+    ordered_ids_after: &[ObjectId],
     delta: &RowDelta,
     pending: bool,
-) -> ProjectedRowDelta {
-    let pre_index_by_id: HashMap<_, _> = current_ids
+) -> OrderedDeltaResult {
+    let pre_index_by_id: HashMap<_, _> = ordered_ids_before
         .iter()
         .enumerate()
         .map(|(index, id)| (*id, index))
         .collect();
-    let post_index_by_id: HashMap<_, _> = post_ids
+    let post_index_by_id: HashMap<_, _> = ordered_ids_after
         .iter()
         .enumerate()
         .map(|(index, id)| (*id, index))
@@ -112,7 +112,7 @@ pub fn project_row_delta_with_post_ids(
     let added = delta
         .added
         .iter()
-        .map(|row| IndexedAdded {
+        .map(|row| OrderedAdded {
             id: row.id,
             index: post_index_by_id.get(&row.id).copied().unwrap_or(0),
             row: row.clone(),
@@ -122,7 +122,7 @@ pub fn project_row_delta_with_post_ids(
     let removed = delta
         .removed
         .iter()
-        .map(|row| IndexedRemoved {
+        .map(|row| OrderedRemoved {
             id: row.id,
             index: pre_index_by_id.get(&row.id).copied().unwrap_or(0),
         })
@@ -131,7 +131,7 @@ pub fn project_row_delta_with_post_ids(
     let mut updated = delta
         .moved
         .iter()
-        .map(|id| IndexedUpdated {
+        .map(|id| OrderedUpdated {
             id: *id,
             old_index: pre_index_by_id.get(id).copied().unwrap_or(0),
             new_index: post_index_by_id.get(id).copied().unwrap_or(0),
@@ -145,14 +145,14 @@ pub fn project_row_delta_with_post_ids(
         let row_changed = old.data != new.data || old.commit_id != new.commit_id;
 
         if row_changed {
-            updated.push(IndexedUpdated {
+            updated.push(OrderedUpdated {
                 id: new.id,
                 old_index,
                 new_index,
                 row: Some(new.clone()),
             });
         } else if old_index != new_index {
-            updated.push(IndexedUpdated {
+            updated.push(OrderedUpdated {
                 id: new.id,
                 old_index,
                 new_index,
@@ -161,13 +161,13 @@ pub fn project_row_delta_with_post_ids(
         }
     }
 
-    ProjectedRowDelta {
-        delta: IndexedRowDelta {
+    OrderedDeltaResult {
+        delta: OrderedRowDelta {
             added,
             removed,
             updated,
             pending,
         },
-        post_ids: post_ids.to_vec(),
+        ordered_ids_after: ordered_ids_after.to_vec(),
     }
 }
