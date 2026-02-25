@@ -10,36 +10,40 @@ import type {
   WasmColumnDescriptor as JazzWasmColumnDescriptor,
   WasmColumnType as JazzWasmColumnType,
   WasmRow as JazzWasmRow,
-  WasmRowDelta as JazzWasmRowDelta,
   WasmTableSchema as JazzWasmTableSchema,
   WasmValue as JazzWasmValue,
 } from "jazz-wasm";
 
 export type Value = JazzWasmValue;
 export type WasmRow = JazzWasmRow;
-export interface RowDeltaAdded {
+export type RowAdded = 0;
+export type RowRemoved = 1;
+export type RowUpdated = 2;
+export type RowChangeKind = RowAdded | RowRemoved | RowUpdated;
+
+export interface WireRowDeltaAdded {
+  kind: RowAdded;
   id: string;
   index: number;
   row: JazzWasmRow;
 }
 
-export interface RowDeltaRemoved {
+export interface WireRowDeltaRemoved {
+  kind: RowRemoved;
   id: string;
   index: number;
 }
 
-export interface RowDeltaUpdated {
+export interface WireRowDeltaUpdated {
+  kind: RowUpdated;
   id: string;
-  oldIndex: number;
-  newIndex: number;
+  index: number;
   row?: JazzWasmRow | null;
 }
 
-export type RowDelta = Omit<JazzWasmRowDelta, "added" | "removed" | "updated"> & {
-  added: RowDeltaAdded[];
-  removed: RowDeltaRemoved[];
-  updated: RowDeltaUpdated[];
-};
+export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDeltaUpdated;
+
+export type RowDelta = WireRowChange[];
 export type ColumnType = JazzWasmColumnType;
 export type ColumnDescriptor = JazzWasmColumnDescriptor;
 

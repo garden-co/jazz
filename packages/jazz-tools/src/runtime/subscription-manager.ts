@@ -5,23 +5,31 @@
  * WASM row deltas into typed object deltas with full state tracking.
  */
 
-import type { WasmRow, RowDelta } from "../drivers/types.js";
+import type { WasmRow, RowDelta as WireRowDelta } from "../drivers/types.js";
+
+const RowChangeKind = {
+  Added: 0 as const,
+  Removed: 1 as const,
+  Updated: 2 as const,
+} as const;
+export type RowChangeKind = typeof RowChangeKind;
+export type RowChangeKindValue = (typeof RowChangeKind)[keyof typeof RowChangeKind];
+
+export type RowDelta<T> =
+  | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
+  | { kind: RowChangeKind["Removed"]; id: string; index: number }
+  | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
 
 /**
  * Delta result from a subscription callback.
  *
- * Contains the full current state (`all`) plus granular changes
- * (`added`, `updated`, `removed`) for efficient UI updates.
+ * Contains the full current state (`all`) plus an ordered row-change stream.
  */
 export interface SubscriptionDelta<T> {
   /** Current full result set after applying this delta */
   all: T[];
-  /** Items added in this delta */
-  added: T[];
-  /** Items updated in this delta (new values) */
-  updated: T[];
-  /** Items removed in this delta */
-  removed: T[];
+  /** Ordered list of changes for this delta */
+  delta: RowDelta<T>[];
 }
 
 /**
@@ -55,53 +63,34 @@ export class SubscriptionManager<T extends { id: string }> {
    * @param transform Function to convert WasmRow to typed object T
    * @returns Typed delta with full state and changes
    */
-  handleDelta(delta: RowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
-    const added: T[] = [];
-    const updated: T[] = [];
-    const removed: T[] = [];
+  handleDelta(delta: WireRowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
+    delta.sort((a, b) => a.index - b.index);
 
-    // Process removals first (indices refer to pre-window).
-    for (const row of delta.removed) {
-      const item = this.currentResults.get(row.id);
-      if (item) {
-        this.currentResults.delete(row.id);
-        this.removeId(row.id);
-        removed.push(item);
+    for (const change of delta) {
+      switch (change.kind) {
+        case RowChangeKind.Added:
+          this.currentResults.set(change.id, transform(change.row));
+          this.insertIdAt(change.id, change.index);
+          break;
+        case RowChangeKind.Removed:
+          this.currentResults.delete(change.id);
+          this.removeId(change.id);
+          break;
+        case RowChangeKind.Updated:
+          this.removeId(change.id);
+          this.insertIdAt(change.id, change.index);
+          if (change.row) {
+            this.currentResults.set(change.id, transform(change.row));
+          }
+          break;
       }
-    }
-
-    // Apply updates and moves.
-    for (const change of delta.updated) {
-      this.removeId(change.id);
-
-      if (change.row) {
-        const item = transform(change.row);
-        this.currentResults.set(change.id, item);
-      }
-
-      const existing = this.currentResults.get(change.id);
-      if (!existing) continue;
-
-      this.insertIdAt(change.id, change.newIndex);
-      updated.push(existing);
-    }
-
-    // Process additions last (indices refer to post-window).
-    for (const change of delta.added) {
-      const item = transform(change.row);
-      this.currentResults.set(change.id, item);
-      this.removeId(change.id);
-      this.insertIdAt(change.id, change.index);
-      added.push(item);
     }
 
     return {
       all: this.orderedIds
         .map((id) => this.currentResults.get(id))
         .filter((item): item is T => item !== undefined),
-      added,
-      updated,
-      removed,
+      delta: delta as RowDelta<T>[],
     };
   }
 

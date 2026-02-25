@@ -999,34 +999,39 @@ impl NapiRuntime {
             };
 
             let descriptor = &delta.descriptor;
-            let delta_obj = serde_json::json!({
-                "added": delta.indexed_delta.added.iter()
-                    .map(|change| serde_json::json!({
+            let delta_obj = delta
+                .indexed_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    serde_json::json!({
+                        "kind": 1,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index
+                    })
+                })
+                .chain(delta.indexed_delta.updated.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 2,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.new_index,
+                        "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
+                    })
+                }))
+                .chain(delta.indexed_delta.added.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 0,
                         "id": change.id.uuid().to_string(),
                         "index": change.index,
                         "row": row_to_json(&change.row, descriptor)
-                    }))
-                    .collect::<Vec<_>>(),
-                "removed": delta.indexed_delta.removed.iter()
-                    .map(|change| serde_json::json!({
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index
-                    }))
-                    .collect::<Vec<_>>(),
-                "updated": delta.indexed_delta.updated.iter()
-                    .map(|change| {
-                        serde_json::json!({
-                            "id": change.id.uuid().to_string(),
-                            "oldIndex": change.old_index,
-                            "newIndex": change.new_index,
-                            "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
-                        })
                     })
-                    .collect::<Vec<_>>(),
-                "pending": delta.indexed_delta.pending
-            });
+                }))
+                .collect::<Vec<_>>();
 
-            tsfn.call(Ok(delta_obj), ThreadsafeFunctionCallMode::NonBlocking);
+            tsfn.call(
+                Ok(serde_json::Value::Array(delta_obj)),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
         };
 
         let mut core = self

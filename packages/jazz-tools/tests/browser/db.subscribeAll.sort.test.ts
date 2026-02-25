@@ -87,7 +87,53 @@ function latestRows(snapshots: Todo[][]): Todo[] {
   return snapshots[snapshots.length - 1] ?? [];
 }
 
+function hasUpdateForId(delta: SubscriptionDelta<Todo>, id: string): boolean {
+  return delta.delta.some((change) => change.kind === 2 && change.id === id);
+}
+
 describe("db.subscribeAll sorting browser integration", () => {
+  it("keeps unique ids and deterministic order after a sort-field move causes multiple shifts", async () => {
+    await withDb("real-move-multi-shift", async (db) => {
+      const deltas: Array<SubscriptionDelta<Todo>> = [];
+      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
+        deltas.push(delta);
+      });
+
+      try {
+        const idA = db.insert(todos, { title: "A", rank: 10, done: false });
+        const idB = db.insert(todos, { title: "B", rank: 20, done: false });
+        const idC = db.insert(todos, { title: "C", rank: 30, done: false });
+        const idD = db.insert(todos, { title: "D", rank: 40, done: false });
+
+        await waitForCondition(
+          () => latestRows(deltas.map((delta) => delta.all)).length === 4,
+          10_000,
+          "expected initial rows",
+        );
+        expect(latestIds(deltas.map((delta) => delta.all))).toEqual([idA, idB, idC, idD]);
+
+        db.update(todos, idD, { rank: 15 });
+
+        await waitForCondition(
+          () => {
+            const latest = deltas[deltas.length - 1];
+            if (!latest || latest.all.length !== 4) return false;
+            const allIds = latest.all.map((row) => row.id);
+            const uniqueCount = new Set(allIds).size;
+            return uniqueCount === 4 && allIds[0] === idA && allIds[1] === idD;
+          },
+          10_000,
+          "expected unique ordered rows after moving D into the middle",
+        );
+
+        const latest = deltas[deltas.length - 1];
+        expect(latest.all.map((row) => row.id)).toEqual([idA, idD, idB, idC]);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
   it("keeps order stable when updating a non-sort field", async () => {
     await withDb("stable-non-sort-update", async (db) => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];
@@ -102,7 +148,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
         await waitForCondition(
           () => deltas.some((delta) => delta.all.length === 3),
-          10_000,
+          500,
           "expected initial sorted snapshot",
         );
 
@@ -112,8 +158,8 @@ describe("db.subscribeAll sorting browser integration", () => {
         db.update(todos, idB, { title: "B-updated" });
 
         await waitForCondition(
-          () => deltas.some((delta) => delta.updated.some((row) => row.id === idB)),
-          10_000,
+          () => deltas.some((delta) => hasUpdateForId(delta, idB)),
+          500,
           "expected update delta for row B",
         );
 

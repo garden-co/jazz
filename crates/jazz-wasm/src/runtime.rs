@@ -15,7 +15,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::Once;
 
 use js_sys::Function;
 use serde::Serialize;
@@ -23,15 +22,7 @@ use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
 /// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
-fn init_tracing() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::TRACE)
-            .with_console_group_spans();
-        let _ = wasm_tracing::set_as_global_default_with_config(config);
-    });
-}
+fn init_tracing() {}
 
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
@@ -601,33 +592,35 @@ impl WasmRuntime {
             };
 
             let descriptor = &delta.descriptor;
-            let delta_json = serde_json::json!({
-                "added": delta.indexed_delta.added.iter()
-                    .map(|change| serde_json::json!({
+            let mut delta_json = delta
+                .indexed_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    serde_json::json!({
+                        "kind": 1,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index
+                    })
+                })
+                .chain(delta.indexed_delta.updated.iter().map(|change| {
+                    let row = change.row.as_ref().map(|row| row_to_json(row, descriptor));
+                    serde_json::json!({
+                        "kind": 2,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.new_index,
+                        "row": row
+                    })
+                }))
+                .chain(delta.indexed_delta.added.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 0,
                         "id": change.id.uuid().to_string(),
                         "index": change.index,
                         "row": row_to_json(&change.row, descriptor)
-                    }))
-                    .collect::<Vec<_>>(),
-                "removed": delta.indexed_delta.removed.iter()
-                    .map(|change| serde_json::json!({
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index
-                    }))
-                    .collect::<Vec<_>>(),
-                "updated": delta.indexed_delta.updated.iter()
-                    .map(|change| {
-                        let row = change.row.as_ref().map(|row| row_to_json(row, descriptor));
-                        serde_json::json!({
-                            "id": change.id.uuid().to_string(),
-                            "oldIndex": change.old_index,
-                            "newIndex": change.new_index,
-                            "row": row
-                        })
                     })
-                    .collect::<Vec<_>>(),
-                "pending": delta.indexed_delta.pending
-            });
+                }))
+                .collect::<Vec<_>>();
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
                 let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
