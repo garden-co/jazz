@@ -391,6 +391,12 @@ impl QueryManager {
         storage: &mut H,
         check: PendingPermissionCheck,
     ) {
+        let branch = match &check.payload {
+            SyncPayload::ObjectUpdated { branch_name, .. }
+            | SyncPayload::ObjectTruncated { branch_name, .. } => branch_name.as_str().to_string(),
+            _ => self.current_branch(),
+        };
+
         // Get table name from metadata
         let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => TableName::new(t),
@@ -411,9 +417,24 @@ impl QueryManager {
             }
         };
 
+        if check.operation == Operation::Insert
+            && let Some(new_content) = check.new_content.as_ref()
+            && let Err(err) = self.validate_foreign_keys_for_content(
+                storage,
+                &table_name,
+                &table_schema.descriptor,
+                new_content,
+                &branch,
+            )
+        {
+            self.sync_manager
+                .reject_permission_check(check, err.to_string());
+            return;
+        }
+
         // Handle UPDATE specially - needs both USING and WITH CHECK
         if check.operation == Operation::Update {
-            self.evaluate_update_permission(storage, check, table_name, table_schema);
+            self.evaluate_update_permission(storage, check, table_name, table_schema, &branch);
             return;
         }
 
@@ -571,7 +592,22 @@ impl QueryManager {
         check: PendingPermissionCheck,
         table_name: TableName,
         table_schema: TableSchema,
+        branch: &str,
     ) {
+        if let Some(new_content) = check.new_content.as_ref()
+            && let Err(err) = self.validate_foreign_keys_for_content(
+                storage,
+                &table_name,
+                &table_schema.descriptor,
+                new_content,
+                branch,
+            )
+        {
+            self.sync_manager
+                .reject_permission_check(check, err.to_string());
+            return;
+        }
+
         let using_policy = table_schema.policies.update.using.as_ref();
         let check_policy = table_schema.policies.update.with_check.as_ref();
 

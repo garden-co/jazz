@@ -513,6 +513,36 @@ describe("analyzeRelations", () => {
     );
   });
 
+  it("marks forward UUID[] references as array relations", () => {
+    const schema: WasmSchema = {
+      tables: {
+        files: {
+          columns: [
+            {
+              name: "parts",
+              column_type: { type: "Array", element: { type: "Uuid" } },
+              nullable: false,
+              references: "file_parts",
+            },
+          ],
+        },
+        file_parts: { columns: [] },
+      },
+    };
+
+    const relations = analyzeRelations(schema);
+    const fileRels = relations.get("files")!;
+
+    expect(fileRels).toContainEqual(
+      expect.objectContaining({
+        name: "parts",
+        type: "forward",
+        toTable: "file_parts",
+        isArray: true,
+      }),
+    );
+  });
+
   it("handles self-referential relations", () => {
     const schema: WasmSchema = {
       tables: {
@@ -597,6 +627,28 @@ describe("analyzeRelations", () => {
 
     expect(() => analyzeRelations(schema)).toThrow(
       'Table "todos" references unknown table "users" via column "owner_id"',
+    );
+  });
+
+  it("throws for non-UUID references", () => {
+    const schema: WasmSchema = {
+      tables: {
+        files: {
+          columns: [
+            {
+              name: "parts",
+              column_type: { type: "Array", element: { type: "Text" } },
+              nullable: false,
+              references: "file_parts",
+            },
+          ],
+        },
+        file_parts: { columns: [] },
+      },
+    };
+
+    expect(() => analyzeRelations(schema)).toThrow(
+      'Column "files.parts" uses references but is not UUID or UUID[]',
     );
   });
 });
