@@ -1,6 +1,6 @@
 // Schema type definitions
 import type { RelExpr } from "./ir.js";
-import type { FromSchema } from "json-schema-to-ts";
+import type { FromSchema, JSONSchema } from "json-schema-to-ts";
 
 export type ScalarSqlType =
   | "TEXT"
@@ -13,7 +13,7 @@ export type ScalarSqlType =
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | { [key: string]: JsonValue } | JsonValue[];
-export type JsonSchema = Record<string, unknown>;
+export type JsonSchema = Exclude<JSONSchema, boolean>;
 export type JsonSchemaToTs<Schema extends JsonSchema> = FromSchema<Schema>;
 
 export interface EnumSqlType {

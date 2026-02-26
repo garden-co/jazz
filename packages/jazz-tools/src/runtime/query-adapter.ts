@@ -9,6 +9,7 @@
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
@@ -105,24 +106,6 @@ function toTimestampMs(value: unknown): number {
     }
   }
   throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
-}
-
-function toJsonText(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  let encoded: string | undefined;
-  try {
-    encoded = JSON.stringify(value);
-  } catch (error) {
-    throw new Error(
-      `JSON values must be serializable: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (encoded === undefined) {
-    throw new Error("JSON values must be serializable");
-  }
-  return encoded;
 }
 
 /**

@@ -48,7 +48,7 @@ function normalizeJsonSchema<Output>(schema: JsonSchemaSource<Output>): JsonSche
     schema as {
       "~standard"?: {
         jsonSchema?: {
-          input?: (options: { target: string }) => Record<string, unknown>;
+          input?: (options: { target: string }) => unknown;
         };
       };
     }
