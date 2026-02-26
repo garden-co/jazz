@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
+use crate::query_manager::types::{SchemaHash, Value};
 use crate::sync_manager::PersistenceTier;
 
 // ============================================================================
@@ -48,6 +48,69 @@ pub enum StorageError {
 pub struct LoadedBranch {
     pub commits: Vec<Commit>,
     pub tails: HashSet<CommitId>,
+}
+
+/// Lens edge stored in the catalogue manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogueLensSeen {
+    pub source_hash: SchemaHash,
+    pub target_hash: SchemaHash,
+}
+
+/// Append-only catalogue manifest operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CatalogueManifestOp {
+    SchemaSeen {
+        object_id: ObjectId,
+        schema_hash: SchemaHash,
+    },
+    LensSeen {
+        object_id: ObjectId,
+        source_hash: SchemaHash,
+        target_hash: SchemaHash,
+    },
+}
+
+impl CatalogueManifestOp {
+    pub fn object_id(&self) -> ObjectId {
+        match self {
+            Self::SchemaSeen { object_id, .. } | Self::LensSeen { object_id, .. } => *object_id,
+        }
+    }
+}
+
+/// Materialized view of catalogue objects known for an app.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogueManifest {
+    pub schema_seen: HashMap<ObjectId, SchemaHash>,
+    pub lens_seen: HashMap<ObjectId, CatalogueLensSeen>,
+}
+
+impl CatalogueManifest {
+    pub fn apply(&mut self, op: &CatalogueManifestOp) {
+        match op {
+            CatalogueManifestOp::SchemaSeen {
+                object_id,
+                schema_hash,
+            } => {
+                self.schema_seen.insert(*object_id, *schema_hash);
+            }
+            CatalogueManifestOp::LensSeen {
+                object_id,
+                source_hash,
+                target_hash,
+            } => {
+                self.lens_seen.insert(
+                    *object_id,
+                    CatalogueLensSeen {
+                        source_hash: *source_hash,
+                        target_hash: *target_hash,
+                    },
+                );
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -123,6 +186,32 @@ pub trait Storage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError>;
+
+    // ================================================================
+    // Catalogue manifest storage
+    // ================================================================
+
+    /// Append one catalogue manifest operation for an app.
+    ///
+    /// Implementations must be idempotent by operation `object_id`.
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError>;
+
+    /// Append multiple catalogue manifest operations for an app.
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError>;
+
+    /// Load the materialized catalogue manifest for an app.
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError>;
 
     // ================================================================
     // Index operations (sync)
@@ -241,6 +330,29 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).store_ack_tier(commit_id, tier)
     }
 
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError> {
+        (**self).append_catalogue_manifest_op(app_id, op)
+    }
+
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError> {
+        (**self).append_catalogue_manifest_ops(app_id, ops)
+    }
+
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        (**self).load_catalogue_manifest(app_id)
+    }
+
     fn index_insert(
         &mut self,
         table: &str,
@@ -324,6 +436,8 @@ pub struct MemoryStorage {
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<PersistenceTier>>,
+    /// Append-only manifest ops keyed by app_id then op object_id.
+    catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
 
 /// Internal object storage structure.
@@ -557,6 +671,56 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         self.ack_tiers.entry(commit_id).or_default().insert(tier);
         Ok(())
+    }
+
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError> {
+        let object_id = op.object_id();
+        let app_ops = self.catalogue_manifest_ops.entry(app_id).or_default();
+
+        match app_ops.get(&object_id) {
+            Some(existing) if existing == &op => Ok(()),
+            Some(existing) => Err(StorageError::IoError(format!(
+                "conflicting catalogue manifest op for object {object_id}: existing={existing:?} new={op:?}"
+            ))),
+            None => {
+                app_ops.insert(object_id, op);
+                Ok(())
+            }
+        }
+    }
+
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError> {
+        for op in ops {
+            self.append_catalogue_manifest_op(app_id, op.clone())?;
+        }
+        Ok(())
+    }
+
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        let Some(ops) = self.catalogue_manifest_ops.get(&app_id) else {
+            return Ok(None);
+        };
+
+        if ops.is_empty() {
+            return Ok(None);
+        }
+
+        let mut manifest = CatalogueManifest::default();
+        for op in ops.values() {
+            manifest.apply(op);
+        }
+        Ok(Some(manifest))
     }
 
     // ================================================================
@@ -932,6 +1096,61 @@ mod tests {
     }
 
     #[test]
+    fn memory_storage_catalogue_manifest_roundtrip() {
+        let mut storage = MemoryStorage::new();
+        let app_id = ObjectId::new();
+        let schema_object_id = ObjectId::new();
+        let lens_object_id = ObjectId::new();
+        let schema_hash = SchemaHash::from_bytes([0x11; 32]);
+        let source_hash = SchemaHash::from_bytes([0x22; 32]);
+        let target_hash = SchemaHash::from_bytes([0x33; 32]);
+
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::LensSeen {
+                    object_id: lens_object_id,
+                    source_hash,
+                    target_hash,
+                },
+            )
+            .unwrap();
+
+        // Idempotent append for the same object/op.
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+
+        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
+        assert_eq!(
+            manifest.schema_seen.get(&schema_object_id),
+            Some(&schema_hash)
+        );
+        assert_eq!(
+            manifest.lens_seen.get(&lens_object_id),
+            Some(&CatalogueLensSeen {
+                source_hash,
+                target_hash,
+            })
+        );
+    }
+
+    #[test]
     fn real_encode_value_ordering() {
         let neg_inf = encode_value(&Value::Double(f64::NEG_INFINITY));
         let neg_big = encode_value(&Value::Double(-1000.0));
@@ -1090,5 +1309,31 @@ mod tests {
             "< 0.0 should exclude -0.0"
         );
         assert!(results.contains(&row_negative), "< 0.0 should include -1.0");
+    }
+
+    #[test]
+    fn memory_storage_catalogue_manifest_conflict_is_rejected() {
+        let mut storage = MemoryStorage::new();
+        let app_id = ObjectId::new();
+        let schema_object_id = ObjectId::new();
+
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash: SchemaHash::from_bytes([0x44; 32]),
+                },
+            )
+            .unwrap();
+
+        let conflict = storage.append_catalogue_manifest_op(
+            app_id,
+            CatalogueManifestOp::SchemaSeen {
+                object_id: schema_object_id,
+                schema_hash: SchemaHash::from_bytes([0x55; 32]),
+            },
+        );
+        assert!(matches!(conflict, Err(StorageError::IoError(_))));
     }
 }

@@ -330,6 +330,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self.schema_manager
     }
 
+    /// Add a historical live schema and persist both schema and lens catalogue objects.
+    pub fn add_live_schema_and_persist_catalogue(
+        &mut self,
+        schema: Schema,
+    ) -> Result<(), crate::schema_manager::context::SchemaError> {
+        let lens = self.schema_manager.add_live_schema(schema.clone())?.clone();
+        self.schema_manager
+            .persist_schema_object(&mut self.storage, &schema);
+        self.schema_manager.persist_lens(&mut self.storage, &lens);
+        Ok(())
+    }
+
     /// Get access to the underlying SchemaManager.
     pub fn schema_manager(&self) -> &SchemaManager {
         &self.schema_manager

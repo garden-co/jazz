@@ -36,6 +36,18 @@ pub(super) fn ack_key(commit_id: CommitId) -> String {
     format!("ack:{}", hex::encode(commit_id.0))
 }
 
+pub(super) fn catalogue_manifest_op_key(app_id: ObjectId, object_id: ObjectId) -> String {
+    format!(
+        "catman:{}:op:{}",
+        format_uuid(app_id),
+        format_uuid(object_id)
+    )
+}
+
+pub(super) fn catalogue_manifest_op_prefix(app_id: ObjectId) -> String {
+    format!("catman:{}:op:", format_uuid(app_id))
+}
+
 pub(super) fn index_entry_key(
     table: &str,
     column: &str,
