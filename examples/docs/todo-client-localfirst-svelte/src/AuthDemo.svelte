@@ -1,6 +1,7 @@
 <!-- #region auth-demo-svelte -->
 <script lang="ts">
 	import {
+		createJazzClient,
 		JazzSvelteProvider,
 		SyntheticUserSwitcher,
 		getActiveSyntheticAuth,
@@ -9,16 +10,16 @@
 	const appId = 'my-app';
 	const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
 
-	const config = {
+	const client = createJazzClient({
 		appId,
 		serverUrl: 'http://127.0.0.1:4200',
 		localAuthMode: active.localAuthMode,
 		localAuthToken: active.localAuthToken,
-	};
+	});
 </script>
 
 <SyntheticUserSwitcher {appId} defaultMode="demo" />
-<JazzSvelteProvider {config}>
+<JazzSvelteProvider {client}>
 	{#snippet children({ db })}
 		<slot />
 	{/snippet}

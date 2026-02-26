@@ -8,24 +8,28 @@ Svelte bindings follow the same sub-export packaging pattern as the React bindin
 
 ## Design Decisions
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Packaging | Sub-export (`jazz-tools/svelte`) | Matches React bindings pattern; avoids a separate package |
-| Query API | `QuerySubscription` reactive class | Idiomatic Svelte 5; reactive classes (`$state` fields) compose naturally with `$derived`, `$effect`, `{#each}` |
-| Context access | `getDb()`, `getSession()` | Matches Svelte's `getContext()` naming; avoids React `useXxx` idiom |
-| Provider | `<JazzSvelteProvider>` component | Wraps `createDb()` lifecycle; uses Svelte 5 snippets for children/fallback |
-| No `useOne` / single-row hook | Omitted | Not present in React bindings; unnecessary for current scope |
-| Config | Mount-only (no reactive reconfiguration) | Provider calls `createDb()` once on mount, tears down on destroy |
+| Decision                      | Choice                                   | Rationale                                                                                                      |
+| ----------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Packaging                     | Sub-export (`jazz-tools/svelte`)         | Matches React bindings pattern; avoids a separate package                                                      |
+| Query API                     | `QuerySubscription` reactive class       | Idiomatic Svelte 5; reactive classes (`$state` fields) compose naturally with `$derived`, `$effect`, `{#each}` |
+| Context access                | `getDb()`, `getSession()`                | Matches Svelte's `getContext()` naming; avoids React `useXxx` idiom                                            |
+| Provider                      | `<JazzSvelteProvider>` component         | Wraps `createDb()` lifecycle; uses Svelte 5 snippets for children/fallback                                     |
+| No `useOne` / single-row hook | Omitted                                  | Not present in React bindings; unnecessary for current scope                                                   |
+| Config                        | Mount-only (no reactive reconfiguration) | Provider calls `createDb()` once on mount, tears down on destroy                                               |
 
 ## Exports
 
 ```typescript
 // jazz-tools/svelte
-export { JazzSvelteProvider } from './JazzSvelteProvider.svelte';
-export { getDb, getSession, getJazzContext, type JazzContext } from './context.svelte.js';
-export { QuerySubscription } from './use-all.svelte.js';
-export { SyntheticUserSwitcher } from './SyntheticUserSwitcher.svelte';
-export { useLinkExternalIdentity, type LinkExternalIdentityInput, type UseLinkExternalIdentityOptions } from './use-link-external-identity.js';
+export { JazzSvelteProvider } from "./JazzSvelteProvider.svelte";
+export { getDb, getSession, getJazzContext, type JazzContext } from "./context.svelte.js";
+export { QuerySubscription } from "./use-all.svelte.js";
+export { SyntheticUserSwitcher } from "./SyntheticUserSwitcher.svelte";
+export {
+  useLinkExternalIdentity,
+  type LinkExternalIdentityInput,
+  type UseLinkExternalIdentityOptions,
+} from "./use-link-external-identity.js";
 ```
 
 ## API Surface
@@ -70,6 +74,7 @@ Reactive class wrapping `db.subscribeAll()`. Instantiate in a component script b
 ```
 
 Properties:
+
 - `.current: T[] | undefined` — result array (`undefined` while loading with a tier, `[]` without)
 - `.loading: boolean` — `true` until first delta arrives
 - `.error: Error | null` — set if `subscribeAll` throws synchronously
@@ -115,12 +120,12 @@ packages/jazz-tools/
 
 ## Test Coverage
 
-| Suite | Tests | Scope |
-|---|---|---|
-| context.test.ts | 6 | Context init, get/set, getDb/getSession guards |
-| use-all.test.ts | 10 | Subscription wiring, loading/error states, context integration |
-| use-link-external-identity.test.ts | 5 | Auth resolution, fallback, overrides, error cases |
-| **Total** | **21** | |
+| Suite                              | Tests  | Scope                                                          |
+| ---------------------------------- | ------ | -------------------------------------------------------------- |
+| context.test.ts                    | 6      | Context init, get/set, getDb/getSession guards                 |
+| use-all.test.ts                    | 10     | Subscription wiring, loading/error states, context integration |
+| use-link-external-identity.test.ts | 5      | Auth resolution, fallback, overrides, error cases              |
+| **Total**                          | **21** |                                                                |
 
 Tests run within the jazz-tools vitest suite (`vitest run src/svelte/`), mocking `svelte` module functions.
 

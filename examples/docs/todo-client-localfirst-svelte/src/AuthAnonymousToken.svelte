@@ -1,15 +1,15 @@
 <!-- #region auth-anon-token-svelte -->
 <script lang="ts">
-	import { JazzSvelteProvider } from 'jazz-tools/svelte';
-</script>
+	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
-<JazzSvelteProvider
-	config={{
+	const client = createJazzClient({
 		appId: 'my-app',
 		localAuthMode: 'anonymous',
 		localAuthToken: 'device-token-123',
-	}}
->
+	});
+</script>
+
+<JazzSvelteProvider {client}>
 	{#snippet children({ db })}
 		<slot />
 	{/snippet}

@@ -62,9 +62,9 @@ app.todos; // query builder for the todos table
 app.projects; // query builder for the projects table
 ```
 
-## Wrap your app in JazzSvelteProvider
+## Create a client and wrap your app
 
-`JazzSvelteProvider` initialises the Jazz runtime (loads the WASM core, opens local storage in OPFS, connects to the sync server) and makes the database available to all descendant components via Svelte context.
+Call `createJazzClient` with your config outside the component tree. This initialises the Jazz runtime (loads the WASM core, opens local storage in OPFS, connects to the sync server). Pass the resulting promise (or resolved client) to `JazzSvelteProvider`, which makes the database available to all descendant components via Svelte context.
 
 <include cwd lang="svelte" title="src/App.svelte">
   ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
@@ -84,7 +84,7 @@ app.projects; // query builder for the projects table
 | `env`            | no       | Environment label (e.g. `"dev"`, `"prod"`).                                                           |
 | `userBranch`     | no       | Branch name. Defaults to `"main"`.                                                                    |
 
-`config` is read once at mount. If you need to change it (e.g. after login), use a `{#key}` block to remount the provider.
+`createJazzClient` is typically called once at the top level. If you need to reinitialise (e.g. after login), use a `{#key}` block to remount the provider with a new client.
 
 ## Read data with QuerySubscription
 

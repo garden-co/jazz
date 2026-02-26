@@ -1,9 +1,11 @@
 <!-- #region auth-offline-svelte -->
 <script lang="ts">
-	import { JazzSvelteProvider } from 'jazz-tools/svelte';
+	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+
+	const client = createJazzClient({ appId: 'my-app' });
 </script>
 
-<JazzSvelteProvider config={{ appId: 'my-app' }}>
+<JazzSvelteProvider {client}>
 	{#snippet children({ db })}
 		<slot />
 	{/snippet}

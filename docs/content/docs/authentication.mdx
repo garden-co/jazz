@@ -36,16 +36,16 @@ On first load, Jazz auto-generates a device token and persists it in `localStora
   <Tab value="Svelte">
     ```svelte
     <script lang="ts">
-      import { JazzSvelteProvider } from 'jazz-tools/svelte';
+      import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
-      const config = {
+      const client = createJazzClient({
         appId: import.meta.env.JAZZ_APP_ID ?? 'my-app',
         env: 'dev',
         userBranch: 'main',
-      };
+      });
     </script>
 
-    <JazzSvelteProvider {config}>
+    <JazzSvelteProvider {client}>
       {#snippet children({ db })}
         <TodoApp />
       {/snippet}
@@ -120,6 +120,7 @@ When you want to test multi-user flows locally, switch to `demo` profiles and ex
     ```svelte
     <script lang="ts">
       import {
+        createJazzClient,
         JazzSvelteProvider,
         SyntheticUserSwitcher,
         getActiveSyntheticAuth,
@@ -128,17 +129,17 @@ When you want to test multi-user flows locally, switch to `demo` profiles and ex
       const appId = import.meta.env.JAZZ_APP_ID ?? 'my-app';
       const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
 
-      const config = {
+      const client = createJazzClient({
         appId,
         env: 'dev',
         userBranch: 'main',
         localAuthMode: active.localAuthMode,
         localAuthToken: active.localAuthToken,
-      };
+      });
     </script>
 
     <SyntheticUserSwitcher {appId} defaultMode="demo" />
-    <JazzSvelteProvider {config}>
+    <JazzSvelteProvider {client}>
       {#snippet children({ db })}
         <TodoApp />
       {/snippet}
@@ -229,7 +230,11 @@ Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created 
   <Tab value="Svelte">
     ```svelte
     <script lang="ts">
-      import { JazzSvelteProvider, useLinkExternalIdentity } from 'jazz-tools/svelte';
+      import {
+        createJazzClient,
+        JazzSvelteProvider,
+        useLinkExternalIdentity,
+      } from 'jazz-tools/svelte';
 
       const appId = import.meta.env.JAZZ_APP_ID ?? 'my-app';
       const serverUrl = import.meta.env.JAZZ_SERVER_URL!;
@@ -247,20 +252,23 @@ Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created 
         jwtToken = providerJwt;
       }
 
-      const config = $derived({
-        appId,
-        env: 'dev',
-        userBranch: 'main',
-        jwtToken,
-      });
+      const client = $derived(
+        createJazzClient({
+          appId,
+          serverUrl,
+          jwtToken,
+        }),
+      );
     </script>
 
-    <JazzSvelteProvider {config}>
-      {#snippet children({ db })}
-        <button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
-        <TodoApp />
-      {/snippet}
-    </JazzSvelteProvider>
+    {#key jwtToken}
+      <JazzSvelteProvider {client}>
+        {#snippet children({ db })}
+          <button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
+          <TodoApp />
+        {/snippet}
+      </JazzSvelteProvider>
+    {/key}
     ```
 
   </Tab>

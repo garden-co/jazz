@@ -1,17 +1,16 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
-	import { JazzSvelteProvider } from 'jazz-tools/svelte';
-	import type { DbConfig } from 'jazz-tools';
+	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 	import TodoList from './TodoList.svelte';
 
-	const config: DbConfig = {
+	const client = createJazzClient({
 		appId: 'todo-svelte-example',
 		env: 'dev',
 		userBranch: 'main',
-	};
+	});
 </script>
 
-<JazzSvelteProvider {config}>
+<JazzSvelteProvider {client}>
 	{#snippet children({ db })}
 		<h1>Todos</h1>
 		<TodoList />
