@@ -5,8 +5,10 @@ import {
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
   generateClientId,
+  isExpectedFetchAbortError,
   linkExternalIdentity,
   normalizePathPrefix,
+  readBinaryFrames,
   sendSyncPayload,
   SyncStreamController,
 } from "./sync-transport.js";
@@ -295,6 +297,76 @@ describe("sync-transport", () => {
     expect(clientId).toBe("server-client-2");
 
     controller.stop();
+  });
+
+  it("classifies canceled fetch errors as expected aborts", () => {
+    expect(
+      isExpectedFetchAbortError(new Error("fetch failed: Fetch request has been canceled")),
+    ).toBe(true);
+    expect(
+      isExpectedFetchAbortError({
+        message: "outer",
+        cause: new Error("fetch failed: Fetch request has been cancelled"),
+      }),
+    ).toBe(true);
+    expect(isExpectedFetchAbortError(new Error("network down"))).toBe(false);
+  });
+
+  it("suppresses expected canceled-fetch errors when stopping an in-flight stream", async () => {
+    const fetchMock = vi.fn().mockImplementation((_url, init) => {
+      const signal = (init as RequestInit).signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            reject(new Error("fetch failed: Fetch request has been canceled"));
+          },
+          { once: true },
+        );
+      });
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const controller = new SyncStreamController({
+      getAuth: () => ({}),
+      getClientId: () => "initial-client-id",
+      setClientId: vi.fn(),
+      onConnected: vi.fn(),
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+    });
+
+    controller.start("http://localhost:3000");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    controller.stop();
+    await Promise.resolve();
+
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("Stream connect error:"),
+      expect.anything(),
+    );
+  });
+
+  it("labels callback failures separately from parse failures", async () => {
+    const response = streamResponse([{ type: "Connected", client_id: "server-client-4" }]);
+    const reader = response.body!.getReader();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await readBinaryFrames(
+      reader,
+      {
+        onSyncMessage: vi.fn(),
+        onConnected: () => {
+          throw new Error("callback blew up");
+        },
+      },
+      "[client] ",
+    );
+
+    expect(errorSpy).toHaveBeenCalledWith("[client] Stream callback error:", expect.any(Error));
+    expect(errorSpy).not.toHaveBeenCalledWith("[client] Stream parse error:", expect.any(Error));
   });
 
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
