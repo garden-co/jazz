@@ -6,6 +6,7 @@ import { join } from "node:path";
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_PORT = 1625;
 const HEALTH_POLL_INTERVAL_MS = 100;
+const HEALTH_REQUEST_TIMEOUT_MS = 1_000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 2_000;
 const DEFAULT_STDERR_MAX_CHARS = 8_192;
@@ -63,11 +64,17 @@ function formatServerError(message: string, stderrText: string): Error {
 }
 
 async function isHealthy(port: number): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HEALTH_REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: controller.signal,
+    });
     return response.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

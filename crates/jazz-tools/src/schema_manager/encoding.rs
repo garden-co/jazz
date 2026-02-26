@@ -321,6 +321,7 @@ const TYPE_ARRAY: u8 = 7;
 const TYPE_ROW: u8 = 8;
 const TYPE_ENUM: u8 = 9;
 const TYPE_DOUBLE: u8 = 10;
+const TYPE_BYTEA: u8 = 11;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
@@ -331,6 +332,7 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
+        ColumnType::Bytea => buf.push(TYPE_BYTEA),
         ColumnType::Enum(variants) => {
             buf.push(TYPE_ENUM);
             write_u32(buf, variants.len() as u32);
@@ -362,6 +364,7 @@ fn decode_column_type(
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
         TYPE_UUID => Ok(ColumnType::Uuid),
+        TYPE_BYTEA => Ok(ColumnType::Bytea),
         TYPE_ENUM => {
             let variant_count = read_u32(data, offset)? as usize;
             let mut variants = Vec::with_capacity(variant_count);
@@ -978,6 +981,7 @@ const VALUE_ROW: u8 = 8;
 // 9 intentionally skipped: TYPE_ENUM is 9, and Values have no Enum tag
 // (enum values are stored as Text). Keeping Double at 10 aligns with TYPE_DOUBLE.
 const VALUE_DOUBLE: u8 = 10;
+const VALUE_BYTEA: u8 = 11;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -1009,6 +1013,11 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
         Value::Uuid(id) => {
             buf.push(VALUE_UUID);
             buf.extend_from_slice(id.uuid().as_bytes());
+        }
+        Value::Bytea(bytes) => {
+            buf.push(VALUE_BYTEA);
+            write_u32(buf, bytes.len() as u32);
+            buf.extend_from_slice(bytes);
         }
         Value::Array(elements) => {
             buf.push(VALUE_ARRAY);
@@ -1066,6 +1075,11 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
                     message: format!("invalid uuid: {e}"),
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
+        }
+        VALUE_BYTEA => {
+            let len = read_u32(data, offset)? as usize;
+            let bytes = read_bytes(data, offset, len)?;
+            Ok(Value::Bytea(bytes.to_vec()))
         }
         VALUE_ARRAY => {
             let count = read_u32(data, offset)?;
@@ -1222,6 +1236,25 @@ mod tests {
         let posts = decoded.get(&TableName::new("posts")).unwrap();
         let tags_col = posts.descriptor.column("tags").unwrap();
         assert!(matches!(tags_col.column_type, ColumnType::Array(_)));
+    }
+
+    #[test]
+    fn schema_roundtrip_with_bytea() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("chunks")
+                    .column("id", ColumnType::Uuid)
+                    .column("payload", ColumnType::Bytea),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let chunks = decoded.get(&TableName::new("chunks")).unwrap();
+        assert_eq!(
+            chunks.descriptor.column("payload").unwrap().column_type,
+            ColumnType::Bytea
+        );
     }
 
     #[test]
@@ -1533,6 +1566,7 @@ mod tests {
             Value::Text("hello world".to_string()),
             Value::Timestamp(1234567890123456),
             Value::Uuid(ObjectId::from_uuid(uuid::Uuid::from_u128(0xDEADBEEF))),
+            Value::Bytea(vec![0, 1, 2, 3, 0, 255]),
             Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
             Value::Row(vec![Value::Text("a".to_string()), Value::Boolean(false)]),
         ];

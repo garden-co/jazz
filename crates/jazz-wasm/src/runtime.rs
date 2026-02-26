@@ -18,6 +18,8 @@ use std::rc::{Rc, Weak};
 
 use js_sys::Function;
 use serde::Serialize;
+#[cfg(target_arch = "wasm32")]
+use tracing::warn;
 use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
@@ -34,6 +36,8 @@ use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::schema_manager::rehydrate_schema_manager_from_manifest;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
@@ -43,7 +47,26 @@ use jazz_tools::sync_manager::{
 };
 
 use crate::query::parse_query;
-use crate::types::{WasmSchema, WasmValue};
+#[cfg(target_arch = "wasm32")]
+use crate::types::{WasmAdded, WasmRemoved, WasmRowChange, WasmRowDelta, WasmUpdated};
+use crate::types::{WasmRow, WasmSchema, WasmValue};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmSchemaStateDebug {
+    current_schema_hash: String,
+    live_schema_hashes: Vec<String>,
+    known_schema_hashes: Vec<String>,
+    pending_schema_hashes: Vec<String>,
+    lens_edges: Vec<WasmLensEdgeDebug>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmLensEdgeDebug {
+    source_hash: String,
+    target_hash: String,
+}
 
 /// Parse a persistence tier string from JS.
 fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
@@ -242,15 +265,11 @@ impl WasmRuntime {
             sync_manager = sync_manager.with_tier(t);
         }
 
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+
         // Create schema manager
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id)),
-            env,
-            user_branch,
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
+            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
@@ -406,10 +425,10 @@ impl WasmRuntime {
                 .into_iter()
                 .map(|(id, values)| {
                     let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
-                    serde_json::json!({
-                        "id": id.uuid().to_string(),
-                        "values": wasm_values
-                    })
+                    WasmRow {
+                        id: id.uuid().to_string(),
+                        values: wasm_values,
+                    }
                 })
                 .collect();
 
@@ -602,49 +621,51 @@ impl WasmRuntime {
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
+            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> WasmRow {
                 let values = decode_row(descriptor, &row.data)
                     .map(|vals| vals.into_iter().map(WasmValue::from).collect::<Vec<_>>())
                     .unwrap_or_default();
-                serde_json::json!({
-                    "id": row.id.uuid().to_string(),
-                    "values": values
-                })
+                WasmRow {
+                    id: row.id.uuid().to_string(),
+                    values,
+                }
             };
 
             let descriptor = &delta.descriptor;
-            let mut delta_json = delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    serde_json::json!({
-                        "kind": 1,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index
+            let wasm_delta = WasmRowDelta(
+                delta
+                    .ordered_delta
+                    .removed
+                    .iter()
+                    .map(|change| {
+                        WasmRowChange::Removed(WasmRemoved {
+                            kind: 1,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                        })
                     })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    let row = change.row.as_ref().map(|row| row_to_json(row, descriptor));
-                    serde_json::json!({
-                        "kind": 2,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.new_index,
-                        "row": row
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    serde_json::json!({
-                        "kind": 0,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index,
-                        "row": row_to_json(&change.row, descriptor)
-                    })
-                }))
-                .collect::<Vec<_>>();
+                    .chain(delta.ordered_delta.updated.iter().map(|change| {
+                        WasmRowChange::Updated(WasmUpdated {
+                            kind: 2,
+                            id: change.id.uuid().to_string(),
+                            index: change.new_index,
+                            row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
+                        })
+                    }))
+                    .chain(delta.ordered_delta.added.iter().map(|change| {
+                        WasmRowChange::Added(WasmAdded {
+                            kind: 0,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                            row: row_to_wasm(&change.row, descriptor),
+                        })
+                    }))
+                    .collect::<Vec<_>>(),
+            );
 
-            if let Ok(json_str) = serde_json::to_string(&delta_json) {
-                let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+                let _ = on_update.call1(&JsValue::NULL, &delta_value);
             }
         };
 
@@ -772,6 +793,83 @@ impl WasmRuntime {
         SchemaHash::compute(schema).to_string()
     }
 
+    /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
+    #[wasm_bindgen(js_name = __debugSchemaState)]
+    pub fn debug_schema_state(&self) -> Result<JsValue, JsError> {
+        let core = self.core.borrow();
+        let schema_manager = core.schema_manager();
+
+        let mut live_schema_hashes: Vec<String> = schema_manager
+            .all_live_hashes()
+            .into_iter()
+            .map(|hash| hash.to_string())
+            .collect();
+        live_schema_hashes.sort();
+
+        let mut known_schema_hashes: Vec<String> = schema_manager
+            .known_schema_hashes()
+            .into_iter()
+            .map(|hash| hash.to_string())
+            .collect();
+        known_schema_hashes.sort();
+
+        let mut pending_schema_hashes: Vec<String> = schema_manager
+            .pending_schema_hashes()
+            .into_iter()
+            .map(|hash| hash.to_string())
+            .collect();
+        pending_schema_hashes.sort();
+
+        let mut lens_edges: Vec<WasmLensEdgeDebug> = schema_manager
+            .lens_edges()
+            .into_iter()
+            .map(|(source_hash, target_hash)| WasmLensEdgeDebug {
+                source_hash: source_hash.to_string(),
+                target_hash: target_hash.to_string(),
+            })
+            .collect();
+        lens_edges.sort_by(|left, right| {
+            left.source_hash
+                .cmp(&right.source_hash)
+                .then(left.target_hash.cmp(&right.target_hash))
+        });
+
+        let state = WasmSchemaStateDebug {
+            current_schema_hash: schema_manager.current_hash().to_string(),
+            live_schema_hashes,
+            known_schema_hashes,
+            pending_schema_hashes,
+            lens_edges,
+        };
+
+        serde_wasm_bindgen::to_value(&state).map_err(|error| {
+            JsError::new(&format!(
+                "Failed to serialize debug schema state: {:?}",
+                error
+            ))
+        })
+    }
+
+    /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
+    #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
+    pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
+        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        let schema: Schema = wasm_schema
+            .try_into()
+            .map_err(|e: String| JsError::new(&e))?;
+
+        let mut core = self.core.borrow_mut();
+        core.add_live_schema_and_persist_catalogue(schema)
+            .map_err(|e| JsError::new(&format!("Failed to seed live schema: {:?}", e)))?;
+
+        // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
+        core.immediate_tick();
+        core.batched_tick();
+
+        Ok(())
+    }
+
     /// Flush all data to persistent storage (snapshot).
     #[wasm_bindgen]
     pub fn flush(&self) {
@@ -838,22 +936,28 @@ impl WasmRuntime {
             sync_manager = sync_manager.with_tier(t);
         }
 
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+
         // Create schema manager
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id)),
-            env,
-            user_branch,
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let mut schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
+            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
-        let storage: Box<dyn Storage> = Box::new(
+        let mut storage: Box<dyn Storage> = Box::new(
             OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
                 .await
                 .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
         );
+        if let Err(error) =
+            rehydrate_schema_manager_from_manifest(&mut schema_manager, storage.as_ref(), app_id)
+        {
+            warn!(
+                %app_id,
+                ?error,
+                "failed to rehydrate schema manager from catalogue manifest"
+            );
+        }
+        schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();

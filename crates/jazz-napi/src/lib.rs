@@ -49,6 +49,7 @@ enum NapiValue {
     Text(String),
     Timestamp(u64),
     Uuid(String),
+    Bytea(Vec<u8>),
     Array(Vec<NapiValue>),
     Row(Vec<NapiValue>),
     Null,
@@ -64,6 +65,7 @@ impl From<Value> for NapiValue {
             Value::Text(s) => NapiValue::Text(s),
             Value::Timestamp(t) => NapiValue::Timestamp(t),
             Value::Uuid(id) => NapiValue::Uuid(id.uuid().to_string()),
+            Value::Bytea(bytes) => NapiValue::Bytea(bytes),
             Value::Array(arr) => NapiValue::Array(arr.into_iter().map(Into::into).collect()),
             Value::Row(row) => NapiValue::Row(row.into_iter().map(Into::into).collect()),
             Value::Null => NapiValue::Null,
@@ -83,6 +85,7 @@ fn napi_value_to_groove(v: NapiValue) -> Result<Value, String> {
             let uuid = uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {}", e))?;
             Value::Uuid(ObjectId::from_uuid(uuid))
         }
+        NapiValue::Bytea(bytes) => Value::Bytea(bytes),
         NapiValue::Array(arr) => {
             let converted: Result<Vec<_>, _> = arr.into_iter().map(napi_value_to_groove).collect();
             Value::Array(converted?)
@@ -259,6 +262,7 @@ fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::type
         }
         "Timestamp" => ColumnType::Timestamp,
         "Uuid" => ColumnType::Uuid,
+        "Bytea" => ColumnType::Bytea,
         "Array" => {
             let elem = ct.element.expect("Array type requires element");
             ColumnType::Array(Box::new(js_column_type_to_groove(*elem)))
@@ -485,6 +489,12 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             },
             ColumnType::Uuid => JsColumnType {
                 type_name: "Uuid".into(),
+                element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Bytea => JsColumnType {
+                type_name: "Bytea".into(),
                 element: None,
                 variants: None,
                 columns: None,

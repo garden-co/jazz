@@ -66,6 +66,24 @@ describe("toValue", () => {
     expect(toValue(uuid, colType)).toEqual({ type: "Uuid", value: uuid });
   });
 
+  it("converts Bytea Uint8Array values", () => {
+    const colType: ColumnType = { type: "Bytea" };
+    const bytes = new Uint8Array([0, 10, 255]);
+    const converted = toValue(bytes, colType);
+    expect(converted.type).toBe("Bytea");
+    if (converted.type !== "Bytea") {
+      throw new Error("expected Bytea value");
+    }
+    expect(converted.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(converted.value)).toEqual([0, 10, 255]);
+  });
+
+  it("rejects invalid Bytea values", () => {
+    const colType: ColumnType = { type: "Bytea" };
+    expect(() => toValue("abc", colType)).toThrow("Expected Uint8Array or byte array");
+    expect(() => toValue([0, 256], colType)).toThrow("Bytea arrays must contain integers");
+  });
+
   it("converts Enum values and validates variants", () => {
     const colType = { type: "Enum", variants: ["done", "todo"] } as ColumnType;
     expect(toValue("todo", colType)).toEqual({ type: "Text", value: "todo" });

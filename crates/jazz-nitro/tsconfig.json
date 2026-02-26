@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "strictNullChecks": true,
+    "noUncheckedIndexedAccess": true,
+    "paths": {
+      "react-native-nitro-modules": ["./node_modules/react-native-nitro-modules/src/index.ts"]
+    }
+  }
+}

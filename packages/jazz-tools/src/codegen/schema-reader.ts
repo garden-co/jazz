@@ -28,6 +28,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
   REAL: { type: "Double" },
   TIMESTAMP: { type: "Timestamp" },
   UUID: { type: "Uuid" },
+  BYTEA: { type: "Bytea" },
 };
 
 /**
@@ -44,6 +45,9 @@ function sqlTypeToWasm(sqlType: SqlType): ColumnType {
 }
 
 function literalToWasmValue(value: unknown): Value {
+  if (value instanceof Uint8Array) {
+    return { type: "Bytea", value };
+  }
   if (value === null) {
     return { type: "Null" };
   }

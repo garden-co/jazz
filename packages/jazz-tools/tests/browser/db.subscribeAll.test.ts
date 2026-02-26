@@ -37,6 +37,7 @@ const schema: WasmSchema = {
           column_type: { type: "Array", element: { type: "Text" } },
           nullable: false,
         },
+        { name: "payload", column_type: { type: "Bytea" }, nullable: true },
       ],
     },
     file_parts: {
@@ -81,6 +82,7 @@ interface Todo {
   priority?: number;
   owner_id?: string;
   tags: string[];
+  payload?: Uint8Array;
 }
 
 interface FilePart {
@@ -299,6 +301,20 @@ describe("db.subscribeAll browser integration", () => {
         tags: ["x"],
       },
     },
+    {
+      name: "eq-bytea",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
+      }),
+      insert: {
+        title: "eq-bytea-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+        payload: new Uint8Array([1, 2, 3]),
+      },
+    },
   ];
 
   function track(db: Db): Db {
@@ -407,6 +423,41 @@ describe("db.subscribeAll browser integration", () => {
       unsubscribe();
     });
   }
+
+  it("emits BYTEA columns as Uint8Array", async () => {
+    const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("bytea") }));
+
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<Todo>("todos", {
+          conditions: [{ column: "title", op: "eq", value: "bytes-hit" }],
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    const id = db.insert(todos, {
+      title: "bytes-hit",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+      payload: new Uint8Array([9, 8, 7, 0]),
+    });
+
+    await waitForCondition(
+      () => deltas.some((delta) => hasChangeForId(delta, 0, id)),
+      4000,
+      "expected bytea add delta",
+    );
+
+    const added = deltas.flatMap((delta) => delta.all).find((row) => row.id === id);
+    expect(added?.payload).toBeInstanceOf(Uint8Array);
+    expect(Array.from(added?.payload ?? [])).toEqual([9, 8, 7, 0]);
+
+    unsubscribe();
+  });
 
   it("supports orderBy + limit + offset", async () => {
     const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("order") }));

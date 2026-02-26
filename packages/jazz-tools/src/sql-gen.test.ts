@@ -59,6 +59,7 @@ describe("schemaToSql", () => {
       ts_null: col.timestamp().optional(),
       real: col.float(),
       real_null: col.float().optional(),
+      blob: col.bytes(),
     });
     const schema = getCollectedSchema();
 
@@ -74,6 +75,7 @@ describe("schemaToSql", () => {
     expect(sql).toContain("ts_null TIMESTAMP");
     expect(sql).toContain("real REAL NOT NULL");
     expect(sql).toContain("real_null REAL");
+    expect(sql).toContain("blob BYTEA NOT NULL");
   });
 
   it("handles enum column types", () => {
@@ -320,6 +322,18 @@ describe("lensToSql", () => {
       `ALTER TABLE todos DROP COLUMN description;
 `,
     );
+  });
+
+  it("renders bytea defaults as hex literals", () => {
+    resetCollectedState();
+    migrate("files", {
+      payload: col.add().bytes({ default: new Uint8Array([0, 1, 255]) }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd"))
+      .toBe(`ALTER TABLE files ADD COLUMN payload BYTEA DEFAULT '\\\\x0001ff';
+`);
   });
 
   it("preserves SQL type for add lens operations", () => {
