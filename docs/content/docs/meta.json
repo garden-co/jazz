@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "react-quick-start",
+    "svelte-quick-start",
     "setup",
     "authentication",
     "schemas",
