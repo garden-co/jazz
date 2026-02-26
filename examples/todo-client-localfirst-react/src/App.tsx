@@ -17,12 +17,13 @@ function defaultConfig(
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
-    appId,
+    appId: "6316f08d-d5d1-41df-82b8-8c16aa26db84",
     env: "dev",
     userBranch: "main",
     localAuthMode: active.localAuthMode,
     localAuthToken: active.localAuthToken,
-    ...overrides,
+    serverUrl: "http://localhost:1625",
+    adminSecret: "d0a2f110-36a8-45b9-8632-ecbc09128e2a",
   };
 }
 // #endregion context-setup-react

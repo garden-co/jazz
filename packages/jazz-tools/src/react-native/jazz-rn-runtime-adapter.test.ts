@@ -180,4 +180,20 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(() => adapter.update("row-1", { done: true })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
   });
+
+  it("no-ops sync hooks after close", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    adapter.close();
+    adapter.addServer();
+    adapter.removeServer();
+    adapter.onSyncMessageReceived('{"Ping":{}}');
+    adapter.onSyncMessageReceivedFromClient("client-1", '{"Ping":{}}');
+
+    expect(binding.addServer).not.toHaveBeenCalled();
+    expect(binding.removeServer).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
+  });
 });
