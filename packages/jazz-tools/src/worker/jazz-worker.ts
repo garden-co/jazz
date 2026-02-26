@@ -15,12 +15,6 @@ import {
   applyUserAuthHeaders,
   isCataloguePayload,
 } from "../runtime/sync-transport.js";
-import {
-  openPersistentWithRetry,
-  isRetryableOpfsInitError,
-  OpfsInitRetryCancelled,
-  OpfsInitRetryFailure,
-} from "./init-retry.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -30,658 +24,517 @@ declare const self: {
   close(): void;
 };
 
-type WorkerPhase =
-  | "booting"
-  | "ready-for-init"
-  | "initializing"
-  | "running"
-  | "shutting-down"
-  | "closed";
+let runtime: any = null; // WasmRuntime instance
+let mainClientId: string | null = null;
+let jwtToken: string | undefined;
+let localAuthMode: "anonymous" | "demo" | undefined;
+let localAuthToken: string | undefined;
+let adminSecret: string | undefined;
+let streamAbortController: AbortController | null = null;
+let serverClientId: string = generateClientId();
+let activeServerUrl: string | null = null;
+let activeServerPathPrefix: string | undefined;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempt = 0;
+let streamConnecting = false;
+let streamAttached = false;
+let isShuttingDown = false;
+let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
+let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
+let pendingSyncPayloadsForMain: string[] = [];
+let syncBatchFlushQueued = false;
+let initComplete = false;
+let bootstrapCatalogueForwarding = false;
+let peerRuntimeClientByPeerId = new Map<string, string>();
+let peerIdByRuntimeClient = new Map<string, string>();
+let peerTermByPeerId = new Map<string, number>();
 
-type WorkerEvent =
-  | { type: "WASM_LOADED" }
-  | { type: "WASM_LOAD_FAILED" }
-  | { type: "INIT_REQUESTED" }
-  | { type: "INIT_SUCCEEDED" }
-  | { type: "INIT_FAILED" }
-  | { type: "SHUTDOWN_REQUESTED" }
-  | { type: "SHUTDOWN_COMPLETED" };
+function enqueueSyncMessageForMain(payload: string): void {
+  pendingSyncPayloadsForMain.push(payload);
+  if (syncBatchFlushQueued) return;
 
-interface WorkerState {
-  phase: WorkerPhase;
-  runtime: any | null;
-  mainClientId: string | null;
-  jwtToken: string | undefined;
-  localAuthMode: "anonymous" | "demo" | undefined;
-  localAuthToken: string | undefined;
-  adminSecret: string | undefined;
-  streamAbortController: AbortController | null;
-  serverClientId: string;
-  activeServerUrl: string | null;
-  activeServerPathPrefix: string | undefined;
-  reconnectTimer: ReturnType<typeof setTimeout> | null;
-  reconnectAttempt: number;
-  streamConnecting: boolean;
-  streamAttached: boolean;
-  pendingSyncMessages: string[];
-  pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }>;
-  pendingSyncPayloadsForMain: string[];
-  syncBatchFlushQueued: boolean;
-  initComplete: boolean;
-  bootstrapCatalogueForwarding: boolean;
-  peerRuntimeClientByPeerId: Map<string, string>;
-  peerIdByRuntimeClient: Map<string, string>;
-  peerTermByPeerId: Map<string, number>;
-  initSessionId: number;
+  syncBatchFlushQueued = true;
+  queueMicrotask(() => {
+    syncBatchFlushQueued = false;
+    const payloads = pendingSyncPayloadsForMain;
+    pendingSyncPayloadsForMain = [];
+    if (payloads.length === 0) return;
+    post({ type: "sync", payload: payloads });
+  });
 }
 
-interface FreeableRuntime {
-  free: () => void;
+function post(msg: WorkerToMainMessage): void {
+  self.postMessage(msg);
 }
 
-function isFreeableRuntime(value: unknown): value is FreeableRuntime {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { free?: unknown }).free === "function"
+// ============================================================================
+// Startup: Load WASM
+// ============================================================================
+
+async function startup(): Promise<void> {
+  try {
+    const wasmModule: any = await import("jazz-wasm");
+    // With vite-plugin-wasm, init happens at import time and default is not a function.
+    // Without it, default is the init function that must be called.
+    if (typeof wasmModule.default === "function") {
+      await wasmModule.default();
+    }
+    post({ type: "ready" });
+  } catch (e: any) {
+    post({ type: "error", message: `WASM load failed: ${e.message}` });
+  }
+}
+
+// ============================================================================
+// Init: Open persistent runtime, register main thread as client
+// ============================================================================
+
+async function handleInit(msg: InitMessage): Promise<void> {
+  try {
+    const wasmModule: any = await import("jazz-wasm");
+    initComplete = false;
+    isShuttingDown = false;
+    activeServerUrl = msg.serverUrl ?? null;
+    activeServerPathPrefix = msg.serverPathPrefix;
+    reconnectAttempt = 0;
+    streamAttached = false;
+    streamConnecting = false;
+    serverClientId = generateClientId();
+    peerRuntimeClientByPeerId.clear();
+    peerIdByRuntimeClient.clear();
+    peerTermByPeerId.clear();
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (streamAbortController) {
+      streamAbortController.abort();
+      streamAbortController = null;
+    }
+
+    // Open persistent OPFS-backed runtime with Worker tier
+    runtime = await wasmModule.WasmRuntime.openPersistent(
+      msg.schemaJson,
+      msg.appId,
+      msg.env,
+      msg.userBranch,
+      msg.dbName,
+      "worker",
+    );
+
+    // Store auth
+    jwtToken = msg.jwtToken;
+    localAuthMode = msg.localAuthMode;
+    localAuthToken = msg.localAuthToken;
+    adminSecret = msg.adminSecret;
+
+    // Register main thread as a Peer client
+    mainClientId = runtime.addClient();
+    runtime.setClientRole(mainClientId, "peer");
+
+    // Set up outbox routing
+    runtime.onSyncMessageToSend((envelope: string) => {
+      const parsed = JSON.parse(envelope);
+
+      if (parsed.destination && "Client" in parsed.destination) {
+        const destinationClientId = parsed.destination.Client as string;
+        if (destinationClientId === mainClientId) {
+          // Local main-thread client-bound payload.
+          enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+          return;
+        }
+
+        // Follower peer client-bound payload.
+        const peerId = peerIdByRuntimeClient.get(destinationClientId);
+        if (!peerId) {
+          return;
+        }
+        const term = peerTermByPeerId.get(peerId) ?? 0;
+        post({
+          type: "peer-sync",
+          peerId,
+          term,
+          payload: [JSON.stringify(parsed.payload)],
+        });
+      } else if (parsed.destination && "Server" in parsed.destination) {
+        if (bootstrapCatalogueForwarding) {
+          if (isCataloguePayload(parsed.payload)) {
+            enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+          }
+          return;
+        }
+
+        // Server-bound → HTTP POST to upstream
+        if (activeServerUrl) {
+          void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
+            console.error("[worker] Sync POST error:", error);
+            detachServer();
+            scheduleReconnect();
+          });
+        }
+      }
+    });
+
+    // Runtime is now fully ready to ingest client sync traffic.
+    const bufferedSyncMessages = pendingSyncMessages;
+    pendingSyncMessages = [];
+    initComplete = true;
+
+    // Drain sync messages that arrived before init completed.
+    for (const payload of bufferedSyncMessages) {
+      runtime.onSyncMessageReceivedFromClient(mainClientId!, payload);
+    }
+
+    const bufferedPeerSyncMessages = pendingPeerSyncMessages;
+    pendingPeerSyncMessages = [];
+    for (const buffered of bufferedPeerSyncMessages) {
+      const peerClientId = ensurePeerClient(buffered.peerId);
+      if (!peerClientId) continue;
+      peerTermByPeerId.set(buffered.peerId, buffered.term);
+      for (const payload of buffered.payload) {
+        runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
+      }
+    }
+
+    // Bootstrap catalogue-only sync from worker to main runtime.
+    // This sends persisted schema/lens objects (including rehydrated ones)
+    // without syncing user data rows.
+    bootstrapCatalogueForwarding = true;
+    try {
+      runtime.addServer();
+      runtime.removeServer();
+    } finally {
+      bootstrapCatalogueForwarding = false;
+    }
+
+    post({ type: "init-ok", clientId: mainClientId! });
+
+    // Connect upstream in background (do not block init).
+    if (activeServerUrl) {
+      void connectStream();
+    }
+  } catch (e: any) {
+    post({ type: "error", message: `Init failed: ${e.message}` });
+  }
+}
+
+// ============================================================================
+// Upstream server communication
+// ============================================================================
+
+/** POST a sync payload to the upstream server. */
+async function sendToServer(serverUrl: string, payload: any): Promise<void> {
+  await sendSyncPayload(
+    serverUrl,
+    payload,
+    {
+      jwtToken,
+      localAuthMode,
+      localAuthToken,
+      adminSecret,
+      clientId: serverClientId,
+      pathPrefix: activeServerPathPrefix,
+    },
+    "[worker] ",
   );
 }
 
-class JazzWorkerRuntime {
-  private state: WorkerState = {
-    phase: "booting",
-    runtime: null,
-    mainClientId: null,
-    jwtToken: undefined,
-    localAuthMode: undefined,
-    localAuthToken: undefined,
-    adminSecret: undefined,
-    streamAbortController: null,
-    serverClientId: generateClientId(),
-    activeServerUrl: null,
-    activeServerPathPrefix: undefined,
-    reconnectTimer: null,
-    reconnectAttempt: 0,
-    streamConnecting: false,
-    streamAttached: false,
-    pendingSyncMessages: [],
-    pendingPeerSyncMessages: [],
-    pendingSyncPayloadsForMain: [],
-    syncBatchFlushQueued: false,
-    initComplete: false,
-    bootstrapCatalogueForwarding: false,
-    peerRuntimeClientByPeerId: new Map<string, string>(),
-    peerIdByRuntimeClient: new Map<string, string>(),
-    peerTermByPeerId: new Map<string, number>(),
-    initSessionId: 0,
+function attachServer(): void {
+  if (!runtime) return;
+  // Re-attach every time the stream reconnects so query subscriptions replay.
+  if (streamAttached) {
+    runtime.removeServer();
+  }
+  runtime.addServer();
+  streamAttached = true;
+  reconnectAttempt = 0;
+}
+
+function detachServer(): void {
+  if (!runtime || !streamAttached) return;
+  runtime.removeServer();
+  streamAttached = false;
+}
+
+function scheduleReconnect(): void {
+  if (isShuttingDown || !activeServerUrl) return;
+  if (reconnectTimer) return;
+
+  const baseMs = 300;
+  const maxMs = 10_000;
+  const jitterMs = Math.floor(Math.random() * 200);
+  const delayMs = Math.min(maxMs, baseMs * 2 ** reconnectAttempt) + jitterMs;
+  reconnectAttempt += 1;
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connectStream();
+  }, delayMs);
+}
+
+/** Connect to the server's binary streaming endpoint. */
+async function connectStream(): Promise<void> {
+  if (streamConnecting || !activeServerUrl || isShuttingDown) return;
+  streamConnecting = true;
+
+  const headers: Record<string, string> = {
+    Accept: "application/octet-stream",
   };
+  applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
 
-  transition(event: WorkerEvent): void {
-    switch (event.type) {
-      case "WASM_LOADED":
-      case "WASM_LOAD_FAILED":
-        if (this.state.phase === "booting") {
-          this.state.phase = "ready-for-init";
-        }
-        return;
-      case "INIT_REQUESTED":
-        if (this.state.phase === "ready-for-init" || this.state.phase === "running") {
-          this.state.phase = "initializing";
-        }
-        return;
-      case "INIT_SUCCEEDED":
-        if (this.state.phase === "initializing") {
-          this.state.phase = "running";
-        }
-        return;
-      case "INIT_FAILED":
-        if (this.state.phase === "initializing") {
-          this.state.phase = "ready-for-init";
-        }
-        return;
-      case "SHUTDOWN_REQUESTED":
-        if (this.state.phase !== "closed") {
-          this.state.phase = "shutting-down";
-          this.state.initSessionId += 1;
-        }
-        return;
-      case "SHUTDOWN_COMPLETED":
-        this.state.phase = "closed";
-        return;
-    }
-  }
+  streamAbortController = new AbortController();
 
-  async startup(): Promise<void> {
-    try {
-      const wasmModule: any = await import("jazz-wasm");
-      if (typeof wasmModule.default === "function") {
-        await wasmModule.default();
-      }
-      this.transition({ type: "WASM_LOADED" });
-      this.post({ type: "ready" });
-    } catch (e: any) {
-      this.transition({ type: "WASM_LOAD_FAILED" });
-      this.post({ type: "error", message: `WASM load failed: ${e.message}` });
-    }
-  }
+  try {
+    const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
 
-  async onMessage(event: MessageEvent<MainToWorkerMessage>): Promise<void> {
-    const msg = event.data;
-
-    switch (msg.type) {
-      case "init":
-        await this.handleInit(msg);
-        break;
-
-      case "sync": {
-        const payloads = msg.payload;
-        if (this.state.runtime && this.state.mainClientId && this.state.initComplete) {
-          for (const payload of payloads) {
-            this.state.runtime.onSyncMessageReceivedFromClient(this.state.mainClientId, payload);
-          }
-        } else {
-          this.state.pendingSyncMessages.push(...payloads);
-        }
-        break;
-      }
-
-      case "peer-open":
-        if (this.state.runtime && this.state.initComplete) {
-          this.ensurePeerClient(msg.peerId);
-        }
-        break;
-
-      case "peer-sync": {
-        if (!this.state.runtime || !this.state.mainClientId || !this.state.initComplete) {
-          this.state.pendingPeerSyncMessages.push({
-            peerId: msg.peerId,
-            term: msg.term,
-            payload: msg.payload,
-          });
-          break;
-        }
-
-        const peerClientId = this.ensurePeerClient(msg.peerId);
-        if (!peerClientId) break;
-        this.state.peerTermByPeerId.set(msg.peerId, msg.term);
-        for (const payload of msg.payload) {
-          this.state.runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
-        }
-        break;
-      }
-
-      case "peer-close":
-        this.closePeer(msg.peerId);
-        break;
-
-      case "lifecycle-hint":
-        if (
-          msg.event === "visibility-hidden" ||
-          msg.event === "pagehide" ||
-          msg.event === "freeze"
-        ) {
-          this.flushWalBestEffort();
-        } else if (msg.event === "visibility-visible" || msg.event === "resume") {
-          this.nudgeReconnectAfterResume();
-        }
-        break;
-
-      case "update-auth":
-        this.state.jwtToken = msg.jwtToken;
-        this.state.localAuthMode = msg.localAuthMode;
-        this.state.localAuthToken = msg.localAuthToken;
-        if (this.state.streamAbortController) {
-          this.state.streamAbortController.abort();
-          this.state.streamAbortController = null;
-        }
-        this.detachServer();
-        if (this.state.activeServerUrl && !this.isShuttingDownLike()) {
-          this.scheduleReconnect();
-        }
-        break;
-
-      case "shutdown":
-        this.completeShutdown("flush");
-        break;
-
-      case "simulate-crash":
-        this.completeShutdown("flushWal");
-        break;
-
-      case "debug-schema-state":
-        if (!this.state.runtime || !this.state.initComplete) {
-          this.post({
-            type: "error",
-            message: "debug-schema-state requested before worker init complete",
-          });
-          break;
-        }
-        try {
-          const statePayload = this.state.runtime.__debugSchemaState();
-          this.post({ type: "debug-schema-state-ok", state: statePayload });
-        } catch (error: any) {
-          this.post({
-            type: "error",
-            message: `debug-schema-state failed: ${error?.message ?? error}`,
-          });
-        }
-        break;
-
-      case "debug-seed-live-schema":
-        if (!this.state.runtime || !this.state.initComplete) {
-          this.post({
-            type: "error",
-            message: "debug-seed-live-schema requested before worker init complete",
-          });
-          break;
-        }
-        try {
-          const runtimeAny = this.state.runtime as Record<string, unknown>;
-          const seedMethod =
-            runtimeAny.__debugSeedLiveSchema ??
-            runtimeAny.debugSeedLiveSchema ??
-            runtimeAny.debug_seed_live_schema;
-          if (typeof seedMethod !== "function") {
-            throw new Error("worker runtime does not expose a debug seed method");
-          }
-          (seedMethod as (schemaJson: string) => void).call(this.state.runtime, msg.schemaJson);
-          this.post({ type: "debug-seed-live-schema-ok" });
-        } catch (error: any) {
-          this.post({
-            type: "error",
-            message: `debug-seed-live-schema failed: ${error?.message ?? error}`,
-          });
-        }
-        break;
-    }
-  }
-
-  private post(msg: WorkerToMainMessage): void {
-    self.postMessage(msg);
-  }
-
-  private isShuttingDownLike(): boolean {
-    return this.state.phase === "shutting-down" || this.state.phase === "closed";
-  }
-
-  private resetBeforeInit(msg: InitMessage): void {
-    this.state.initComplete = false;
-    this.state.activeServerUrl = msg.serverUrl ?? null;
-    this.state.activeServerPathPrefix = msg.serverPathPrefix;
-    this.state.reconnectAttempt = 0;
-    this.state.streamAttached = false;
-    this.state.streamConnecting = false;
-    this.state.serverClientId = generateClientId();
-    this.state.peerRuntimeClientByPeerId.clear();
-    this.state.peerIdByRuntimeClient.clear();
-    this.state.peerTermByPeerId.clear();
-    this.state.mainClientId = null;
-    this.state.bootstrapCatalogueForwarding = false;
-
-    if (this.state.reconnectTimer) {
-      clearTimeout(this.state.reconnectTimer);
-      this.state.reconnectTimer = null;
-    }
-    if (this.state.streamAbortController) {
-      this.state.streamAbortController.abort();
-      this.state.streamAbortController = null;
-    }
-  }
-
-  private resetPeerState(): void {
-    this.state.peerRuntimeClientByPeerId.clear();
-    this.state.peerIdByRuntimeClient.clear();
-    this.state.peerTermByPeerId.clear();
-    this.state.pendingPeerSyncMessages = [];
-  }
-
-  private disposeRuntime(clean: "flush" | "flushWal"): void {
-    if (!this.state.runtime) return;
-    this.detachServer();
-    if (clean === "flush") {
-      this.state.runtime.flush();
-    } else {
-      this.state.runtime.flushWal();
-    }
-    this.state.runtime.free();
-    this.state.runtime = null;
-    this.state.mainClientId = null;
-  }
-
-  private teardownConnectionState(): void {
-    this.state.activeServerUrl = null;
-    this.state.activeServerPathPrefix = undefined;
-    if (this.state.reconnectTimer) {
-      clearTimeout(this.state.reconnectTimer);
-      this.state.reconnectTimer = null;
-    }
-    if (this.state.streamAbortController) {
-      this.state.streamAbortController.abort();
-      this.state.streamAbortController = null;
-    }
-    this.state.streamAttached = false;
-    this.state.streamConnecting = false;
-    this.state.reconnectAttempt = 0;
-  }
-
-  private completeShutdown(clean: "flush" | "flushWal"): void {
-    this.transition({ type: "SHUTDOWN_REQUESTED" });
-    this.state.initComplete = false;
-    this.teardownConnectionState();
-    this.disposeRuntime(clean);
-    this.resetPeerState();
-    this.post({ type: "shutdown-ok" });
-    this.transition({ type: "SHUTDOWN_COMPLETED" });
-    self.close();
-  }
-
-  private enqueueSyncMessageForMain(payload: string): void {
-    this.state.pendingSyncPayloadsForMain.push(payload);
-    if (this.state.syncBatchFlushQueued) return;
-
-    this.state.syncBatchFlushQueued = true;
-    queueMicrotask(() => {
-      this.state.syncBatchFlushQueued = false;
-      const payloads = this.state.pendingSyncPayloadsForMain;
-      this.state.pendingSyncPayloadsForMain = [];
-      if (payloads.length === 0) return;
-      this.post({ type: "sync", payload: payloads });
+    const response = await fetch(eventsUrl, {
+      headers,
+      signal: streamAbortController.signal,
     });
-  }
 
-  private ensurePeerClient(peerId: string): string | null {
-    if (!this.state.runtime) return null;
-    const existing = this.state.peerRuntimeClientByPeerId.get(peerId);
-    if (existing) return existing;
+    if (!response.ok) {
+      console.error(`[worker] Stream connect failed: ${response.status}`);
+      detachServer();
+      streamConnecting = false;
+      scheduleReconnect();
+      return;
+    }
 
-    const clientId = this.state.runtime.addClient();
-    this.state.runtime.setClientRole(clientId, "peer");
-    this.state.peerRuntimeClientByPeerId.set(peerId, clientId);
-    this.state.peerIdByRuntimeClient.set(clientId, peerId);
-    return clientId;
-  }
-
-  private closePeer(peerId: string): void {
-    const runtimeClientId = this.state.peerRuntimeClientByPeerId.get(peerId);
-    if (!runtimeClientId) return;
-    this.state.peerRuntimeClientByPeerId.delete(peerId);
-    this.state.peerIdByRuntimeClient.delete(runtimeClientId);
-    this.state.peerTermByPeerId.delete(peerId);
-  }
-
-  private async sendToServer(serverUrl: string, payload: any): Promise<void> {
-    await sendSyncPayload(
-      serverUrl,
-      payload,
+    const reader = response.body!.getReader();
+    let connected = false;
+    await readBinaryFrames(
+      reader,
       {
-        jwtToken: this.state.jwtToken,
-        localAuthMode: this.state.localAuthMode,
-        localAuthToken: this.state.localAuthToken,
-        adminSecret: this.state.adminSecret,
-        clientId: this.state.serverClientId,
-        pathPrefix: this.state.activeServerPathPrefix,
+        onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+        onConnected: (clientId) => {
+          serverClientId = clientId;
+          if (!connected) {
+            connected = true;
+            attachServer();
+          }
+        },
       },
       "[worker] ",
     );
+  } catch (e: any) {
+    if (e?.name === "AbortError") return;
+    console.error("[worker] Stream connect error:", e);
+  } finally {
+    streamConnecting = false;
   }
 
-  private attachServer(): void {
-    if (!this.state.runtime) return;
-    if (this.state.streamAttached) {
-      this.state.runtime.removeServer();
-    }
-    this.state.runtime.addServer();
-    this.state.streamAttached = true;
-    this.state.reconnectAttempt = 0;
-  }
-
-  private detachServer(): void {
-    if (!this.state.runtime || !this.state.streamAttached) return;
-    this.state.runtime.removeServer();
-    this.state.streamAttached = false;
-  }
-
-  private scheduleReconnect(): void {
-    if (this.isShuttingDownLike() || !this.state.activeServerUrl) return;
-    if (this.state.reconnectTimer) return;
-
-    const baseMs = 300;
-    const maxMs = 10_000;
-    const jitterMs = Math.floor(Math.random() * 200);
-    const delayMs = Math.min(maxMs, baseMs * 2 ** this.state.reconnectAttempt) + jitterMs;
-    this.state.reconnectAttempt += 1;
-
-    this.state.reconnectTimer = setTimeout(() => {
-      this.state.reconnectTimer = null;
-      void this.connectStream();
-    }, delayMs);
-  }
-
-  private async connectStream(): Promise<void> {
-    if (this.state.streamConnecting || !this.state.activeServerUrl || this.isShuttingDownLike())
-      return;
-    this.state.streamConnecting = true;
-
-    const headers: Record<string, string> = {
-      Accept: "application/octet-stream",
-    };
-    applyUserAuthHeaders(headers, {
-      jwtToken: this.state.jwtToken,
-      localAuthMode: this.state.localAuthMode,
-      localAuthToken: this.state.localAuthToken,
-    });
-
-    this.state.streamAbortController = new AbortController();
-
-    try {
-      const eventsUrl = buildEventsUrl(
-        this.state.activeServerUrl,
-        this.state.serverClientId,
-        this.state.activeServerPathPrefix,
-      );
-
-      const response = await fetch(eventsUrl, {
-        headers,
-        signal: this.state.streamAbortController.signal,
-      });
-
-      if (!response.ok) {
-        console.error(`[worker] Stream connect failed: ${response.status}`);
-        this.detachServer();
-        this.state.streamConnecting = false;
-        this.scheduleReconnect();
-        return;
-      }
-
-      const reader = response.body!.getReader();
-      let connected = false;
-      await readBinaryFrames(
-        reader,
-        {
-          onSyncMessage: (json) => this.state.runtime?.onSyncMessageReceived(json),
-          onConnected: (clientId) => {
-            this.state.serverClientId = clientId;
-            if (!connected) {
-              connected = true;
-              this.attachServer();
-            }
-          },
-        },
-        "[worker] ",
-      );
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      console.error("[worker] Stream connect error:", e);
-    } finally {
-      this.state.streamConnecting = false;
-    }
-
-    if (this.state.streamAbortController && !this.state.streamAbortController.signal.aborted) {
-      this.detachServer();
-      this.scheduleReconnect();
-    }
-  }
-
-  private flushWalBestEffort(): void {
-    if (!this.state.runtime || !this.state.initComplete) return;
-    try {
-      this.state.runtime.flushWal();
-    } catch (error) {
-      console.warn("[worker] flushWal on lifecycle hint failed:", error);
-    }
-  }
-
-  private nudgeReconnectAfterResume(): void {
-    if (!this.state.activeServerUrl || this.isShuttingDownLike()) return;
-    if (this.state.streamAttached || this.state.streamConnecting) return;
-    if (this.state.reconnectTimer) return;
-    this.state.reconnectAttempt = 0;
-    this.scheduleReconnect();
-  }
-
-  private async handleInit(msg: InitMessage): Promise<void> {
-    this.transition({ type: "INIT_REQUESTED" });
-    const thisInitSessionId = ++this.state.initSessionId;
-
-    try {
-      const wasmModule: any = await import("jazz-wasm");
-      this.resetBeforeInit(msg);
-
-      const initResult = await openPersistentWithRetry({
-        open: () =>
-          wasmModule.WasmRuntime.openPersistent(
-            msg.schemaJson,
-            msg.appId,
-            msg.env,
-            msg.userBranch,
-            msg.dbName,
-            "worker",
-          ),
-        isRetryable: isRetryableOpfsInitError,
-        isCancelled: () =>
-          this.state.initSessionId !== thisInitSessionId || this.isShuttingDownLike(),
-      });
-
-      if (this.state.initSessionId !== thisInitSessionId || this.isShuttingDownLike()) {
-        if (isFreeableRuntime(initResult?.value)) {
-          try {
-            initResult.value.free();
-          } catch {
-            // Best effort if cancellation raced after open succeeded.
-          }
-        }
-        return;
-      }
-
-      this.state.runtime = initResult.value;
-
-      this.state.jwtToken = msg.jwtToken;
-      this.state.localAuthMode = msg.localAuthMode;
-      this.state.localAuthToken = msg.localAuthToken;
-      this.state.adminSecret = msg.adminSecret;
-
-      this.state.mainClientId = this.state.runtime.addClient();
-      this.state.runtime.setClientRole(this.state.mainClientId, "peer");
-
-      this.state.runtime.onSyncMessageToSend((envelope: string) => {
-        const parsed = JSON.parse(envelope);
-
-        if (parsed.destination && "Client" in parsed.destination) {
-          const destinationClientId = parsed.destination.Client as string;
-          if (destinationClientId === this.state.mainClientId) {
-            this.enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
-            return;
-          }
-
-          const peerId = this.state.peerIdByRuntimeClient.get(destinationClientId);
-          if (!peerId) {
-            return;
-          }
-          const term = this.state.peerTermByPeerId.get(peerId) ?? 0;
-          this.post({
-            type: "peer-sync",
-            peerId,
-            term,
-            payload: [JSON.stringify(parsed.payload)],
-          });
-        } else if (parsed.destination && "Server" in parsed.destination) {
-          if (this.state.bootstrapCatalogueForwarding) {
-            if (isCataloguePayload(parsed.payload)) {
-              this.enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
-            }
-            return;
-          }
-
-          if (this.state.activeServerUrl) {
-            void this.sendToServer(this.state.activeServerUrl, parsed.payload).catch((error) => {
-              console.error("[worker] Sync POST error:", error);
-              this.detachServer();
-              this.scheduleReconnect();
-            });
-          }
-        }
-      });
-
-      const bufferedSyncMessages = this.state.pendingSyncMessages;
-      this.state.pendingSyncMessages = [];
-      this.state.initComplete = true;
-
-      for (const payload of bufferedSyncMessages) {
-        this.state.runtime.onSyncMessageReceivedFromClient(this.state.mainClientId!, payload);
-      }
-
-      const bufferedPeerSyncMessages = this.state.pendingPeerSyncMessages;
-      this.state.pendingPeerSyncMessages = [];
-      for (const buffered of bufferedPeerSyncMessages) {
-        const peerClientId = this.ensurePeerClient(buffered.peerId);
-        if (!peerClientId) continue;
-        this.state.peerTermByPeerId.set(buffered.peerId, buffered.term);
-        for (const payload of buffered.payload) {
-          this.state.runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
-        }
-      }
-
-      this.state.bootstrapCatalogueForwarding = true;
-      try {
-        this.state.runtime.addServer();
-        this.state.runtime.removeServer();
-      } finally {
-        this.state.bootstrapCatalogueForwarding = false;
-      }
-
-      this.transition({ type: "INIT_SUCCEEDED" });
-      this.post({ type: "init-ok", clientId: this.state.mainClientId! });
-
-      if (this.state.activeServerUrl) {
-        void this.connectStream();
-      }
-    } catch (e: unknown) {
-      if (e instanceof OpfsInitRetryCancelled) {
-        return;
-      }
-
-      if (this.state.initSessionId !== thisInitSessionId || this.isShuttingDownLike()) {
-        return;
-      }
-
-      this.transition({ type: "INIT_FAILED" });
-
-      if (e instanceof OpfsInitRetryFailure) {
-        this.post({
-          type: "error",
-          message: `Init failed: ${e.message}`,
-        });
-        return;
-      }
-
-      const message = e instanceof Error ? e.message : String(e);
-      this.post({ type: "error", message: `Init failed: ${message}` });
-    }
+  if (streamAbortController && !streamAbortController.signal.aborted) {
+    detachServer();
+    scheduleReconnect();
   }
 }
 
-const runtime = new JazzWorkerRuntime();
-self.onmessage = (event: MessageEvent) => {
-  void runtime.onMessage(event as MessageEvent<MainToWorkerMessage>);
+function ensurePeerClient(peerId: string): string | null {
+  if (!runtime) return null;
+  const existing = peerRuntimeClientByPeerId.get(peerId);
+  if (existing) return existing;
+
+  const clientId = runtime.addClient();
+  runtime.setClientRole(clientId, "peer");
+  peerRuntimeClientByPeerId.set(peerId, clientId);
+  peerIdByRuntimeClient.set(clientId, peerId);
+  return clientId;
+}
+
+function closePeer(peerId: string): void {
+  const runtimeClientId = peerRuntimeClientByPeerId.get(peerId);
+  if (!runtimeClientId) return;
+  peerRuntimeClientByPeerId.delete(peerId);
+  peerIdByRuntimeClient.delete(runtimeClientId);
+  peerTermByPeerId.delete(peerId);
+}
+
+function flushWalBestEffort(): void {
+  if (!runtime || !initComplete) return;
+  try {
+    runtime.flushWal();
+  } catch (error) {
+    console.warn("[worker] flushWal on lifecycle hint failed:", error);
+  }
+}
+
+function nudgeReconnectAfterResume(): void {
+  if (!activeServerUrl || isShuttingDown) return;
+  if (streamAttached || streamConnecting) return;
+  if (reconnectTimer) return;
+  reconnectAttempt = 0;
+  scheduleReconnect();
+}
+
+// ============================================================================
+// Message handler
+// ============================================================================
+
+self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
+  const msg = event.data;
+
+  switch (msg.type) {
+    case "init":
+      await handleInit(msg);
+      break;
+
+    case "sync": {
+      const payloads = msg.payload;
+      if (runtime && mainClientId && initComplete) {
+        for (const payload of payloads) {
+          runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
+        }
+      } else {
+        pendingSyncMessages.push(...payloads);
+      }
+      break;
+    }
+
+    case "peer-open":
+      if (runtime && initComplete) {
+        ensurePeerClient(msg.peerId);
+      }
+      break;
+
+    case "peer-sync": {
+      if (!runtime || !mainClientId || !initComplete) {
+        pendingPeerSyncMessages.push({
+          peerId: msg.peerId,
+          term: msg.term,
+          payload: msg.payload,
+        });
+        break;
+      }
+
+      const peerClientId = ensurePeerClient(msg.peerId);
+      if (!peerClientId) break;
+      peerTermByPeerId.set(msg.peerId, msg.term);
+      for (const payload of msg.payload) {
+        runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
+      }
+      break;
+    }
+
+    case "peer-close":
+      closePeer(msg.peerId);
+      break;
+
+    case "lifecycle-hint":
+      if (msg.event === "visibility-hidden" || msg.event === "pagehide" || msg.event === "freeze") {
+        flushWalBestEffort();
+      } else if (msg.event === "visibility-visible" || msg.event === "resume") {
+        nudgeReconnectAfterResume();
+      }
+      break;
+
+    case "update-auth":
+      jwtToken = msg.jwtToken;
+      localAuthMode = msg.localAuthMode;
+      localAuthToken = msg.localAuthToken;
+      // Reconnect stream to bind the new token.
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
+      detachServer();
+      if (activeServerUrl && !isShuttingDown) {
+        scheduleReconnect();
+      }
+      break;
+
+    case "shutdown":
+      isShuttingDown = true;
+      initComplete = false;
+      activeServerUrl = null;
+      activeServerPathPrefix = undefined;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
+      if (runtime) {
+        detachServer();
+        runtime.flush();
+        runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
+        runtime = null;
+      }
+      peerRuntimeClientByPeerId.clear();
+      peerIdByRuntimeClient.clear();
+      peerTermByPeerId.clear();
+      pendingPeerSyncMessages = [];
+      post({ type: "shutdown-ok" });
+      self.close();
+      break;
+
+    case "simulate-crash":
+      // Flush WAL buffer to OPFS but do NOT write snapshot.
+      // This simulates a crash where writes reached the WAL but no
+      // clean checkpoint happened. Recovery must replay the WAL.
+      isShuttingDown = true;
+      initComplete = false;
+      activeServerUrl = null;
+      activeServerPathPrefix = undefined;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
+      if (runtime) {
+        detachServer();
+        runtime.flushWal(); // WAL buffer → OPFS, but no snapshot
+        runtime.free(); // Drop → releases OPFS exclusive handles
+        runtime = null;
+      }
+      peerRuntimeClientByPeerId.clear();
+      peerIdByRuntimeClient.clear();
+      peerTermByPeerId.clear();
+      pendingPeerSyncMessages = [];
+      post({ type: "shutdown-ok" });
+      self.close();
+      break;
+
+    case "debug-schema-state":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "debug-schema-state requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        const state = runtime.__debugSchemaState();
+        post({ type: "debug-schema-state-ok", state });
+      } catch (error: any) {
+        post({ type: "error", message: `debug-schema-state failed: ${error?.message ?? error}` });
+      }
+      break;
+
+    case "debug-seed-live-schema":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "debug-seed-live-schema requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        runtime.__debugSeedLiveSchema(msg.schemaJson);
+        post({ type: "debug-seed-live-schema-ok" });
+      } catch (error: any) {
+        post({
+          type: "error",
+          message: `debug-seed-live-schema failed: ${error?.message ?? error}`,
+        });
+      }
+      break;
+  }
 };
-void runtime.startup();
+
+// Start loading WASM immediately
+startup();

@@ -340,7 +340,6 @@ export class WorkerBridge {
       case "INIT_FAILED":
         if (this.state.phase !== "initializing") return;
         this.state.phase = "failed";
-        this.state.pendingSyncPayloadsForWorker = [];
         this.state.syncBatchFlushQueued = false;
         return;
       case "SHUTDOWN_CALLED":
