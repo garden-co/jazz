@@ -27,7 +27,7 @@ JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
 
 ## Package versioning
 
-`jazz-tools`, `jazz-wasm`, and `jazz-napi` are configured as a Changesets fixed group for lock-stepped releases. Keep workspace links in source (`workspace:*`) and let pack/publish resolve concrete versions.
+`jazz-tools`, `jazz-wasm`, `jazz-napi`, and `jazz-rn` are configured as a Changesets fixed group for lock-stepped releases. Keep workspace links in source (`workspace:*`) and let pack/publish resolve concrete versions.
 
 Releases are currently locked to the alpha prerelease channel via `.changeset/pre.json` (`tag: alpha`).
 The `Changesets Release PR` workflow uses `changesets/action` to auto-create/update a `Version Packages (alpha)` PR on `main`.
