@@ -145,6 +145,9 @@ function formatDefaultValue(value: unknown): string {
   if (typeof value === "boolean") {
     return value ? "TRUE" : "FALSE";
   }
+  if (value instanceof Date) {
+    return String(value.getTime());
+  }
   if (typeof value === "number") {
     return String(value);
   }

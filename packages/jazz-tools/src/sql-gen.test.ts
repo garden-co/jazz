@@ -370,6 +370,32 @@ describe("lensToSql", () => {
     );
   });
 
+  it("serializes Date defaults for add timestamp lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      created_at: col.add().timestamp({ default: new Date("2025-01-01T00:00:00.000Z") }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN created_at TIMESTAMP DEFAULT 1735689600000;
+`,
+    );
+  });
+
+  it("serializes Date backwards defaults for drop timestamp lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      created_at: col.drop().timestamp({ backwardsDefault: new Date("2025-01-01T00:00:00.000Z") }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN created_at TIMESTAMP DEFAULT 1735689600000;
+`,
+    );
+  });
+
   it("supports array defaults in migration SQL generation", () => {
     resetCollectedState();
     migrate("projects", {
