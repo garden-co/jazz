@@ -1096,6 +1096,61 @@ mod tests {
     }
 
     #[test]
+    fn memory_storage_catalogue_manifest_roundtrip() {
+        let mut storage = MemoryStorage::new();
+        let app_id = ObjectId::new();
+        let schema_object_id = ObjectId::new();
+        let lens_object_id = ObjectId::new();
+        let schema_hash = SchemaHash::from_bytes([0x11; 32]);
+        let source_hash = SchemaHash::from_bytes([0x22; 32]);
+        let target_hash = SchemaHash::from_bytes([0x33; 32]);
+
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::LensSeen {
+                    object_id: lens_object_id,
+                    source_hash,
+                    target_hash,
+                },
+            )
+            .unwrap();
+
+        // Idempotent append for the same object/op.
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+
+        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
+        assert_eq!(
+            manifest.schema_seen.get(&schema_object_id),
+            Some(&schema_hash)
+        );
+        assert_eq!(
+            manifest.lens_seen.get(&lens_object_id),
+            Some(&CatalogueLensSeen {
+                source_hash,
+                target_hash,
+            })
+        );
+    }
+
+    #[test]
     fn real_encode_value_ordering() {
         let neg_inf = encode_value(&Value::Double(f64::NEG_INFINITY));
         let neg_big = encode_value(&Value::Double(-1000.0));
@@ -1254,61 +1309,6 @@ mod tests {
             "< 0.0 should exclude -0.0"
         );
         assert!(results.contains(&row_negative), "< 0.0 should include -1.0");
-    }
-
-    #[test]
-    fn memory_storage_catalogue_manifest_roundtrip() {
-        let mut storage = MemoryStorage::new();
-        let app_id = ObjectId::new();
-        let schema_object_id = ObjectId::new();
-        let lens_object_id = ObjectId::new();
-        let schema_hash = SchemaHash::from_bytes([0x11; 32]);
-        let source_hash = SchemaHash::from_bytes([0x22; 32]);
-        let target_hash = SchemaHash::from_bytes([0x33; 32]);
-
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::LensSeen {
-                    object_id: lens_object_id,
-                    source_hash,
-                    target_hash,
-                },
-            )
-            .unwrap();
-
-        // Idempotent append for the same object/op.
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-
-        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-        assert_eq!(
-            manifest.schema_seen.get(&schema_object_id),
-            Some(&schema_hash)
-        );
-        assert_eq!(
-            manifest.lens_seen.get(&lens_object_id),
-            Some(&CatalogueLensSeen {
-                source_hash,
-                target_hash,
-            })
-        );
     }
 
     #[test]
