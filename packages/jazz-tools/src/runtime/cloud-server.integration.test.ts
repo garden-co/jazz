@@ -1367,11 +1367,11 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
         "edge",
       );
 
-      // Wait for all data to sync.
-      await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 3);
+      // Establish sync by fetching data without session first.
+      await aliceClient.queryInternal(queryAllItems, undefined, "edge");
 
       // query() should only return alice's row.
-      const queryRows = await aliceClient.query(queryAllItems);
+      const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 1);
       const queryTitles = queryRows
         .map((row) => (row.values[0] as { type: "Text"; value: string }).value)
         .sort();

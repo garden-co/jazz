@@ -11,6 +11,7 @@
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
+import type { Session } from "./context.js";
 import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
@@ -1067,6 +1068,7 @@ export class Db {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     settledTier?: PersistenceTier,
+    session?: Session,
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
@@ -1083,12 +1085,13 @@ export class Db {
       return transformRows<T>([row], query._schema, outputTable, outputIncludes)[0];
     };
 
-    const subId = client.subscribe(
+    const subId = client.subscribeInternal(
       wasmQuery,
       (delta) => {
         const typedDelta = manager.handleDelta(delta, transform);
         callback(typedDelta);
       },
+      session,
       settledTier,
     );
 
