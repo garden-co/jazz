@@ -1054,13 +1054,13 @@ fn rc_subscribe_settled_tier() {
             Query::new("users"),
             move |delta| {
                 let rows: Vec<(ObjectId, Vec<Value>)> = delta
-                    .delta
+                    .ordered_delta
                     .added
                     .iter()
                     .filter_map(|row| {
-                        decode_row(&delta.descriptor, &row.data)
+                        decode_row(&delta.descriptor, &row.row.data)
                             .ok()
-                            .map(|vals| (row.id, vals))
+                            .map(|vals| (row.row.id, vals))
                     })
                     .collect();
                 received_clone.lock().unwrap().push(rows);
@@ -1114,7 +1114,7 @@ fn test_sync_edit_fires_callback_synchronously() {
         .subscribe(
             query,
             move |delta| {
-                if !delta.delta.added.is_empty() {
+                if !delta.ordered_delta.added.is_empty() {
                     *count_clone.lock().unwrap() += 1;
                 }
             },

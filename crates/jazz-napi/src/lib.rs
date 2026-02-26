@@ -44,6 +44,7 @@ use jazz_tools::sync_manager::{
 enum NapiValue {
     Integer(i32),
     BigInt(i64),
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
@@ -58,6 +59,7 @@ impl From<Value> for NapiValue {
         match v {
             Value::Integer(i) => NapiValue::Integer(i),
             Value::BigInt(i) => NapiValue::BigInt(i),
+            Value::Double(f) => NapiValue::Double(f),
             Value::Boolean(b) => NapiValue::Boolean(b),
             Value::Text(s) => NapiValue::Text(s),
             Value::Timestamp(t) => NapiValue::Timestamp(t),
@@ -73,6 +75,7 @@ fn napi_value_to_groove(v: NapiValue) -> Result<Value, String> {
     Ok(match v {
         NapiValue::Integer(i) => Value::Integer(i),
         NapiValue::BigInt(i) => Value::BigInt(i),
+        NapiValue::Double(f) => Value::Double(f),
         NapiValue::Boolean(b) => Value::Boolean(b),
         NapiValue::Text(s) => Value::Text(s),
         NapiValue::Timestamp(t) => Value::Timestamp(t),
@@ -186,6 +189,13 @@ enum JsPolicyExpr {
     },
     Inherits {
         operation: JsPolicyOperation,
+        via_column: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
+    },
+    InheritsReferencing {
+        operation: JsPolicyOperation,
+        source_table: String,
         via_column: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_depth: Option<usize>,
@@ -335,6 +345,22 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                 via_column,
                 max_depth,
             },
+            JsPolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => PolicyExpr::InheritsReferencing {
+                operation: match operation {
+                    JsPolicyOperation::Select => Operation::Select,
+                    JsPolicyOperation::Insert => Operation::Insert,
+                    JsPolicyOperation::Update => Operation::Update,
+                    JsPolicyOperation::Delete => Operation::Delete,
+                },
+                source_table,
+                via_column,
+                max_depth,
+            },
             JsPolicyExpr::And { exprs } => {
                 PolicyExpr::And(exprs.into_iter().map(js_policy_expr_to_groove).collect())
             }
@@ -423,6 +449,12 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             },
             ColumnType::BigInt => JsColumnType {
                 type_name: "BigInt".into(),
+                element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Double => JsColumnType {
+                type_name: "Double".into(),
                 element: None,
                 variants: None,
                 columns: None,
@@ -536,6 +568,22 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     Operation::Update => JsPolicyOperation::Update,
                     Operation::Delete => JsPolicyOperation::Delete,
                 },
+                via_column: via_column.clone(),
+                max_depth: *max_depth,
+            },
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => JsPolicyExpr::InheritsReferencing {
+                operation: match operation {
+                    Operation::Select => JsPolicyOperation::Select,
+                    Operation::Insert => JsPolicyOperation::Insert,
+                    Operation::Update => JsPolicyOperation::Update,
+                    Operation::Delete => JsPolicyOperation::Delete,
+                },
+                source_table: source_table.clone(),
                 via_column: via_column.clone(),
                 max_depth: *max_depth,
             },
@@ -999,20 +1047,39 @@ impl NapiRuntime {
             };
 
             let descriptor = &delta.descriptor;
+            let delta_obj = delta
+                .ordered_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    serde_json::json!({
+                        "kind": 1,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index
+                    })
+                })
+                .chain(delta.ordered_delta.updated.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 2,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.new_index,
+                        "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
+                    })
+                }))
+                .chain(delta.ordered_delta.added.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 0,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index,
+                        "row": row_to_json(&change.row, descriptor)
+                    })
+                }))
+                .collect::<Vec<_>>();
 
-            let delta_obj = serde_json::json!({
-                "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
-                    .collect::<Vec<_>>()
-            });
-
-            tsfn.call(Ok(delta_obj), ThreadsafeFunctionCallMode::NonBlocking);
+            tsfn.call(
+                Ok(serde_json::Value::Array(delta_obj)),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
         };
 
         let mut core = self
@@ -1427,5 +1494,30 @@ mod tests {
         );
         assert!(status.column_type.element.is_none());
         assert!(status.column_type.columns.is_none());
+    }
+
+    #[test]
+    fn js_schema_roundtrip_preserves_fk_references() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("name", ColumnType::Text))
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .fk_column("image", "files"),
+            )
+            .build();
+
+        let js_schema = groove_schema_to_js(&schema);
+        let image = &js_schema.tables["todos"].columns[1];
+        assert_eq!(image.references.as_deref(), Some("files"));
+
+        let decoded = js_schema_to_groove(js_schema);
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
     }
 }
