@@ -29,6 +29,8 @@ function columnTypeToTs(type: ColumnType): string {
       return "Date";
     case "Uuid":
       return "string";
+    case "Bytea":
+      return "Uint8Array";
     case "Enum":
       return type.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
@@ -68,6 +70,8 @@ function columnToWhereInputType(col: {
           : "string | { eq?: string; ne?: string }";
       }
       return "string | { eq?: string; ne?: string; in?: string[] }";
+    case "Bytea":
+      return "Uint8Array | { eq?: Uint8Array; ne?: Uint8Array }";
     case "Enum": {
       const variants = col.column_type.variants
         .map((variant: string) => JSON.stringify(variant))

@@ -28,6 +28,8 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "Date";
     case "Uuid":
       return "string";
+    case "Bytea":
+      return "Uint8Array";
     case "Enum":
       return colType.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":

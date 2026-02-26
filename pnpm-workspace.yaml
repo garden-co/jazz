@@ -2,11 +2,13 @@ packages:
   - docs
   - packages/*
   - examples/*
+  - "!examples/rn-jazz-nitro"
   - examples/docs/*
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
   - crates/jazz-rn
+  - crates/jazz-nitro
 
 ignoredBuiltDependencies:
   - blake3

@@ -24,7 +24,7 @@ use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
 use jazz_tools::runtime_tokio::TokioRuntime;
-use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
@@ -892,11 +892,13 @@ impl AppRuntime {
         })?;
 
         let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
-        let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
+        let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
         let db_path = data_dir.join("jazz.surrealkv");
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
+
+        rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;
 
         let sync_tx_clone = sync_broadcast.clone();
         let send_seq_by_client_clone = send_seq_by_client.clone();
