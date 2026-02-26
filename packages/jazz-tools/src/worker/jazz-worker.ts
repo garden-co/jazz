@@ -13,6 +13,7 @@ import {
   generateClientId,
   buildEventsUrl,
   applyUserAuthHeaders,
+  isCataloguePayload,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -43,6 +44,7 @@ let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: stri
 let pendingSyncPayloadsForMain: string[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
+let bootstrapCatalogueForwarding = false;
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
@@ -155,6 +157,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
           payload: [JSON.stringify(parsed.payload)],
         });
       } else if (parsed.destination && "Server" in parsed.destination) {
+        if (bootstrapCatalogueForwarding) {
+          if (isCataloguePayload(parsed.payload)) {
+            enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+          }
+          return;
+        }
+
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
           void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
@@ -185,6 +194,17 @@ async function handleInit(msg: InitMessage): Promise<void> {
       for (const payload of buffered.payload) {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
+    }
+
+    // Bootstrap catalogue-only sync from worker to main runtime.
+    // This sends persisted schema/lens objects (including rehydrated ones)
+    // without syncing user data rows.
+    bootstrapCatalogueForwarding = true;
+    try {
+      runtime.addServer();
+      runtime.removeServer();
+    } finally {
+      bootstrapCatalogueForwarding = false;
     }
 
     post({ type: "init-ok", clientId: mainClientId! });
@@ -477,6 +497,41 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
+      break;
+
+    case "debug-schema-state":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "debug-schema-state requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        const state = runtime.__debugSchemaState();
+        post({ type: "debug-schema-state-ok", state });
+      } catch (error: any) {
+        post({ type: "error", message: `debug-schema-state failed: ${error?.message ?? error}` });
+      }
+      break;
+
+    case "debug-seed-live-schema":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "debug-seed-live-schema requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        runtime.__debugSeedLiveSchema(msg.schemaJson);
+        post({ type: "debug-seed-live-schema-ok" });
+      } catch (error: any) {
+        post({
+          type: "error",
+          message: `debug-seed-live-schema failed: ${error?.message ?? error}`,
+        });
+      }
       break;
   }
 };

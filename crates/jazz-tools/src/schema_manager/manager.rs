@@ -335,6 +335,21 @@ impl SchemaManager {
         self.context.all_live_hashes()
     }
 
+    /// Get all known schema hashes (current + any learned via catalogue).
+    pub fn known_schema_hashes(&self) -> Vec<SchemaHash> {
+        self.known_schemas.keys().copied().collect()
+    }
+
+    /// Get all pending schema hashes awaiting lens-path activation.
+    pub fn pending_schema_hashes(&self) -> Vec<SchemaHash> {
+        self.context.pending_schemas.keys().copied().collect()
+    }
+
+    /// Get all registered lens edges as (source, target) hash pairs.
+    pub fn lens_edges(&self) -> Vec<(SchemaHash, SchemaHash)> {
+        self.context.lenses.keys().copied().collect()
+    }
+
     /// Get access to the underlying context.
     pub fn context(&self) -> &SchemaContext {
         &self.context
@@ -439,6 +454,26 @@ impl SchemaManager {
         object_id
     }
 
+    /// Persist any schema to the catalogue as an Object.
+    ///
+    /// Used when seeding or syncing historical schema versions.
+    pub fn persist_schema_object<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        schema: &Schema,
+    ) -> ObjectId {
+        let schema_hash = SchemaHash::compute(schema);
+        let object_id = schema_hash.to_object_id();
+        let content = encode_schema(schema);
+
+        let metadata = self.schema_metadata(&schema_hash);
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(storage, object_id, metadata, content);
+
+        object_id
+    }
+
     /// Persist a lens to the catalogue as an Object.
     ///
     /// The lens is stored on the "main" branch with metadata identifying it
@@ -456,6 +491,34 @@ impl SchemaManager {
             .create_object_with_content(storage, object_id, metadata, content);
 
         object_id
+    }
+
+    /// Materialize known schema/lens catalogue objects into object storage for sync replay.
+    ///
+    /// Rehydration restores schema/lens knowledge into memory, but downstream sync replay
+    /// needs the corresponding catalogue objects present in ObjectManager.
+    pub fn materialize_catalogue_objects<H: Storage>(&mut self, storage: &mut H) {
+        let current_hash = self.context.current_hash;
+        let historical_schemas: Vec<Schema> = self
+            .known_schemas
+            .iter()
+            .filter_map(|(hash, schema)| {
+                if *hash == current_hash {
+                    None
+                } else {
+                    Some(schema.clone())
+                }
+            })
+            .collect();
+
+        for schema in historical_schemas {
+            self.persist_schema_object(storage, &schema);
+        }
+
+        let lenses: Vec<Lens> = self.context.lenses.values().cloned().collect();
+        for lens in lenses {
+            self.persist_lens(storage, &lens);
+        }
     }
 
     /// Build metadata for a schema catalogue object.
