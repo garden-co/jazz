@@ -282,7 +282,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "done" },
         op: "Ne",
-        right: { type: "Literal", value: true },
+        right: { type: "Literal", value: { Boolean: true } },
       });
     });
 
@@ -299,7 +299,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Gt",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -316,7 +316,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Ge",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -333,7 +333,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Lt",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -350,7 +350,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Le",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -394,7 +394,7 @@ describe("translateQuery", () => {
             type: "Cmp",
             left: { scope: "todos", column: "priority" },
             op: "Gt",
-            right: { type: "Literal", value: 3 },
+            right: { type: "Literal", value: { Integer: 3 } },
           },
         ],
       });

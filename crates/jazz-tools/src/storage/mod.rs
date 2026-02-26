@@ -535,6 +535,13 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             bytes
         }
 
+        Value::Bytea(bytes_value) => {
+            // Raw bytes for exact-match index semantics.
+            let mut bytes = vec![0x09];
+            bytes.extend_from_slice(bytes_value);
+            bytes
+        }
+
         Value::Array(_) => {
             // Arrays not typically indexed; use hash for equality only
             let mut bytes = vec![0x07];

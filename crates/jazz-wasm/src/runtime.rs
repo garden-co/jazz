@@ -47,7 +47,9 @@ use jazz_tools::sync_manager::{
 };
 
 use crate::query::parse_query;
-use crate::types::{WasmSchema, WasmValue};
+#[cfg(target_arch = "wasm32")]
+use crate::types::{WasmAdded, WasmRemoved, WasmRowChange, WasmRowDelta, WasmUpdated};
+use crate::types::{WasmRow, WasmSchema, WasmValue};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,10 +425,10 @@ impl WasmRuntime {
                 .into_iter()
                 .map(|(id, values)| {
                     let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
-                    serde_json::json!({
-                        "id": id.uuid().to_string(),
-                        "values": wasm_values
-                    })
+                    WasmRow {
+                        id: id.uuid().to_string(),
+                        values: wasm_values,
+                    }
                 })
                 .collect();
 
@@ -619,49 +621,51 @@ impl WasmRuntime {
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
+            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> WasmRow {
                 let values = decode_row(descriptor, &row.data)
                     .map(|vals| vals.into_iter().map(WasmValue::from).collect::<Vec<_>>())
                     .unwrap_or_default();
-                serde_json::json!({
-                    "id": row.id.uuid().to_string(),
-                    "values": values
-                })
+                WasmRow {
+                    id: row.id.uuid().to_string(),
+                    values,
+                }
             };
 
             let descriptor = &delta.descriptor;
-            let mut delta_json = delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    serde_json::json!({
-                        "kind": 1,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index
+            let wasm_delta = WasmRowDelta(
+                delta
+                    .ordered_delta
+                    .removed
+                    .iter()
+                    .map(|change| {
+                        WasmRowChange::Removed(WasmRemoved {
+                            kind: 1,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                        })
                     })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    let row = change.row.as_ref().map(|row| row_to_json(row, descriptor));
-                    serde_json::json!({
-                        "kind": 2,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.new_index,
-                        "row": row
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    serde_json::json!({
-                        "kind": 0,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index,
-                        "row": row_to_json(&change.row, descriptor)
-                    })
-                }))
-                .collect::<Vec<_>>();
+                    .chain(delta.ordered_delta.updated.iter().map(|change| {
+                        WasmRowChange::Updated(WasmUpdated {
+                            kind: 2,
+                            id: change.id.uuid().to_string(),
+                            index: change.new_index,
+                            row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
+                        })
+                    }))
+                    .chain(delta.ordered_delta.added.iter().map(|change| {
+                        WasmRowChange::Added(WasmAdded {
+                            kind: 0,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                            row: row_to_wasm(&change.row, descriptor),
+                        })
+                    }))
+                    .collect::<Vec<_>>(),
+            );
 
-            if let Ok(json_str) = serde_json::to_string(&delta_json) {
-                let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+                let _ = on_update.call1(&JsValue::NULL, &delta_value);
             }
         };
 

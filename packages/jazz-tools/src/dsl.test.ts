@@ -29,6 +29,14 @@ describe("enum DSL invariants", () => {
   });
 });
 
+describe("bytes DSL API", () => {
+  it("supports bytes as the primary BYTEA builder name", () => {
+    expect(col.bytes()._sqlType).toBe("BYTEA");
+    expect(col.add().bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(col.drop().bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+  });
+});
+
 describe("ref DSL", () => {
   it("stores references on ref columns", () => {
     resetCollectedState();

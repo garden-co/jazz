@@ -2,24 +2,10 @@
  * Transform WASM row results to typed TypeScript objects.
  */
 
-import type { WasmRow, WasmSchema } from "../drivers/types.js";
+import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 
-/**
- * WasmValue union type - matches the tsify output from Rust.
- * Each variant has a type discriminator and optional value.
- */
-export type WasmValue =
-  | { type: "Text"; value: string }
-  | { type: "Uuid"; value: string }
-  | { type: "Boolean"; value: boolean }
-  | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
-  | { type: "Double"; value: number }
-  | { type: "Timestamp"; value: number }
-  | { type: "Null" }
-  | { type: "Array"; value: WasmValue[] }
-  | { type: "Row"; value: WasmValue[] };
+export type { WasmValue };
 
 export interface IncludeSpec {
   [relationName: string]: boolean | IncludeSpec;
@@ -121,6 +107,8 @@ export function unwrapValue(v: WasmValue): unknown {
     case "BigInt":
     case "Double":
     case "Timestamp":
+      return v.value;
+    case "Bytea":
       return v.value;
     case "Null":
       return undefined;
