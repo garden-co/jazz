@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::Once;
 
 use js_sys::Function;
 use serde::Serialize;
@@ -24,7 +25,15 @@ use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
 /// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
-fn init_tracing() {}
+fn init_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let config = wasm_tracing::WasmLayerConfig::new()
+            .with_max_level(tracing::Level::TRACE)
+            .with_console_group_spans();
+        let _ = wasm_tracing::set_as_global_default_with_config(config);
+    });
+}
 
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
