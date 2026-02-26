@@ -20,53 +20,10 @@ function defaultConfig(
   };
 }
 
+const client = createJazzClient(defaultConfig());
+
 // #region context-setup-react
-export function App({
-  config,
-  fallback,
-}: {
-  config?: Partial<JazzProviderClientConfig>;
-  fallback?: React.ReactNode;
-} = {}) {
-  const resolvedConfig = defaultConfig(config);
-  const configKey = JSON.stringify(resolvedConfig);
-  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
-    null,
-  );
-  const [error, setError] = React.useState<unknown>(null);
-
-  React.useEffect(() => {
-    let active = true;
-    const pending = createJazzClient(resolvedConfig);
-
-    void pending.then(
-      (resolved) => {
-        if (!active) {
-          void resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-  }, [configKey]);
-
-  if (error) {
-    throw error;
-  }
-
-  if (!client) {
-    return <>{fallback ?? <p>Loading...</p>}</>;
-  }
-
+export function App() {
   return (
     <JazzProvider client={client}>
       <h1>Todos</h1>
