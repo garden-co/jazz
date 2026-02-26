@@ -1,5 +1,3 @@
----
-"jazz-tools": minor
----
+## "jazz-tools": patch
 
 Add Expo support.
