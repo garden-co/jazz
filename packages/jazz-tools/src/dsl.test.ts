@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { col } from "./dsl.js";
+import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -34,5 +34,31 @@ describe("bytes DSL API", () => {
     expect(col.bytes()._sqlType).toBe("BYTEA");
     expect(col.add().bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
     expect(col.drop().bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+  });
+});
+
+describe("ref DSL", () => {
+  it("stores references on ref columns", () => {
+    resetCollectedState();
+    table("todos", {
+      image: col.ref("files"),
+    });
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns[0]).toMatchObject({
+      name: "image",
+      references: "files",
+    });
+  });
+
+  it("stores references on array(ref(...)) columns", () => {
+    resetCollectedState();
+    table("files", {
+      parts: col.array(col.ref("file_parts")),
+    });
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns[0]).toMatchObject({
+      name: "parts",
+      references: "file_parts",
+    });
   });
 });

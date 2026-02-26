@@ -13,7 +13,7 @@ use crate::schema_manager::{SchemaContext, translate_column_for_index};
 use crate::storage::Storage;
 
 use super::graph_nodes::alias::AliasNode;
-use super::graph_nodes::array_subquery::ArraySubqueryNode;
+use super::graph_nodes::array_subquery::{ArraySubqueryNode, Correlate};
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::IndexScanNode;
@@ -436,12 +436,17 @@ impl QueryGraph {
 
         // Policy filter node (if session provided and table has SELECT policy)
         if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let policy_node = PolicyFilterNode::new(
+            let branch_for_policy = branches
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
+            let policy_node = PolicyFilterNode::new_with_branch(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
+                branch_for_policy,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -683,12 +688,17 @@ impl QueryGraph {
 
         // Policy filter node (if session provided and table has SELECT policy)
         if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let policy_node = PolicyFilterNode::new(
+            let branch_for_policy = branches
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
+            let policy_node = PolicyFilterNode::new_with_branch(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
+                branch_for_policy,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -921,7 +931,11 @@ impl QueryGraph {
             .split('.')
             .next_back()
             .unwrap_or(&spec.outer_column);
-        let outer_correlation_col = outer_descriptor.column_index(outer_col_name)?;
+        let outer_correlation = match outer_descriptor.column_index(outer_col_name) {
+            Some(index) => Correlate::Col(index),
+            None if outer_col_name == "id" || outer_col_name == "_id" => Correlate::Id,
+            None => return None,
+        };
 
         // Build base query for subgraph, inheriting branches from outer query.
         let mut base_builder = QueryBuilder::new(spec.table);
@@ -1010,7 +1024,7 @@ impl QueryGraph {
         let node = ArraySubqueryNode::new(
             outer_tuple_descriptor,
             subgraph_template,
-            outer_correlation_col,
+            outer_correlation,
             spec.column_name.clone(),
             schema.clone(),
         );
@@ -1243,12 +1257,17 @@ impl QueryGraph {
         if let (Some(session), Some(policy)) =
             (&session, base_table_schema.policies.select.using.clone())
         {
-            let policy_node = PolicyFilterNode::new(
+            let branch_for_policy = branches
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
+            let policy_node = PolicyFilterNode::new_with_branch(
                 base_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
+                branch_for_policy,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1330,12 +1349,17 @@ impl QueryGraph {
             if let (Some(session), Some(policy)) =
                 (&session, right_table_schema.policies.select.using.clone())
             {
-                let policy_node = PolicyFilterNode::new(
+                let branch_for_policy = branches
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string());
+                let policy_node = PolicyFilterNode::new_with_branch(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
+                    branch_for_policy,
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()

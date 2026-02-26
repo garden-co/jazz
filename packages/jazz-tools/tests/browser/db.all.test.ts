@@ -39,6 +39,20 @@ const schema: WasmSchema = {
         { name: "payload", column_type: { type: "Bytea" }, nullable: true },
       ],
     },
+    file_parts: {
+      columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+    },
+    files: {
+      columns: [
+        { name: "name", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "parts",
+          column_type: { type: "Array", element: { type: "Uuid" } },
+          nullable: false,
+          references: "file_parts",
+        },
+      ],
+    },
   },
 };
 
@@ -72,6 +86,17 @@ interface Todo {
   owner?: User;
 }
 
+interface FilePart {
+  id: string;
+  label: string;
+}
+
+interface File {
+  id: string;
+  name: string;
+  parts: string[];
+}
+
 const orgs: TableProxy<Org, Omit<Org, "id">> = {
   _table: "orgs",
   _schema: schema,
@@ -98,6 +123,20 @@ const todos: TableProxy<Todo, Omit<Todo, "id" | "owner">> = {
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as Omit<Todo, "id" | "owner">,
+};
+
+const fileParts: TableProxy<FilePart, Omit<FilePart, "id">> = {
+  _table: "file_parts",
+  _schema: schema,
+  _rowType: {} as FilePart,
+  _initType: {} as Omit<FilePart, "id">,
+};
+
+const files: TableProxy<File, Omit<File, "id">> = {
+  _table: "files",
+  _schema: schema,
+  _rowType: {} as File,
+  _initType: {} as Omit<File, "id">,
 };
 
 function uniqueDbName(label: string): string {
@@ -362,7 +401,13 @@ describe("db.all browser integration", () => {
       id: ownerId,
       name: "Owner",
     });
-    expect(rows[0].todosViaOwner).toBeUndefined();
+    expect(rows[0].todosViaOwner).toHaveLength(2);
+    expect(rows[0].todosViaOwner).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "with-owner-1", owner_id: ownerId }),
+        expect.objectContaining({ title: "with-owner-2", owner_id: ownerId }),
+      ]),
+    );
   });
 
   it("supports multi-hop queries", async () => {
@@ -381,6 +426,36 @@ describe("db.all browser integration", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({ id: orgId, name: "Org A" });
+  });
+
+  it("supports one-off all queries across scalar and UUID[] foreign-key hops", async () => {
+    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("fk-hops") }));
+
+    const orgId = db.insert(orgs, { name: "FK Org" });
+    const teamId = db.insert(teams, { name: "FK Team", org_id: orgId, parent_id: undefined });
+    const userId = db.insert(users, { name: "FK User", team_id: teamId });
+
+    const partAId = db.insert(fileParts, { label: "A" });
+    const partBId = db.insert(fileParts, { label: "B" });
+    const fileId = db.insert(files, { name: "File 1", parts: [partBId, partAId] });
+
+    const teamRows = await db.all<Team>(
+      makeQuery<Team>("users", {
+        conditions: [{ column: "id", op: "eq", value: userId }],
+        hops: ["team"],
+      }),
+    );
+    expect(teamRows).toHaveLength(1);
+    expect(teamRows[0]).toMatchObject({ id: teamId, name: "FK Team" });
+
+    const partRows = await db.all<FilePart>(
+      makeQuery<FilePart>("files", {
+        conditions: [{ column: "id", op: "eq", value: fileId }],
+        hops: ["parts"],
+      }),
+    );
+    expect(partRows).toHaveLength(2);
+    expect(partRows.map((row) => row.label).sort()).toEqual(["A", "B"]);
   });
 
   it("supports gather queries", async () => {

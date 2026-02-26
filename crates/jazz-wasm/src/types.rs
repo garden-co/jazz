@@ -233,6 +233,13 @@ pub enum WasmPolicyExpr {
         #[tsify(optional)]
         max_depth: Option<u32>,
     },
+    InheritsReferencing {
+        operation: WasmPolicyOperation,
+        source_table: String,
+        via_column: String,
+        #[tsify(optional)]
+        max_depth: Option<u32>,
+    },
     And {
         exprs: Vec<WasmPolicyExpr>,
     },
@@ -441,6 +448,17 @@ impl From<jazz_tools::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
                 via_column,
                 max_depth: max_depth.map(|v| v as u32),
             },
+            jazz_tools::query_manager::policy::PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => WasmPolicyExpr::InheritsReferencing {
+                operation: operation.into(),
+                source_table,
+                via_column,
+                max_depth: max_depth.map(|v| v as u32),
+            },
             jazz_tools::query_manager::policy::PolicyExpr::And(exprs) => WasmPolicyExpr::And {
                 exprs: exprs.into_iter().map(Into::into).collect(),
             },
@@ -499,6 +517,17 @@ impl TryFrom<WasmPolicyExpr> for jazz_tools::query_manager::policy::PolicyExpr {
                 max_depth,
             } => jazz_tools::query_manager::policy::PolicyExpr::Inherits {
                 operation: operation.into(),
+                via_column,
+                max_depth: max_depth.map(|v| v as usize),
+            },
+            WasmPolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => jazz_tools::query_manager::policy::PolicyExpr::InheritsReferencing {
+                operation: operation.into(),
+                source_table,
                 via_column,
                 max_depth: max_depth.map(|v| v as usize),
             },
@@ -736,5 +765,30 @@ mod tests {
         let json = serde_json::to_value(&value).unwrap();
         let decoded: WasmValue = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn wasm_schema_fk_reference_roundtrip() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("name", ColumnType::Text))
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .fk_column("image", "files"),
+            )
+            .build();
+
+        let wasm_schema = WasmSchema::from(&schema);
+        let wasm_col = &wasm_schema.tables["todos"].columns[1];
+        assert_eq!(wasm_col.references.as_deref(), Some("files"));
+
+        let decoded = Schema::try_from(wasm_schema).unwrap();
+        let image = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image.references, Some(TableName::new("files")));
     }
 }
