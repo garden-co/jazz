@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from "vitest/config";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { builtinModules } from "node:module";
 
 // sqlite was added in Node.js 22.5 and isn't in the standard builtins list
@@ -33,7 +34,7 @@ function nodeSqlitePlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [nodeSqlitePlugin()],
+  plugins: [nodeSqlitePlugin(), svelte({ hot: false })],
   test: {
     // Use Node environment for node:sqlite support
     environment: "node",

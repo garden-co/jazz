@@ -32,6 +32,7 @@ type AppProps = {
   fallback?: React.ReactNode;
 };
 
+// #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(config);
   const configKey = JSON.stringify(resolvedConfig);
@@ -73,11 +74,10 @@ export function App({ config, fallback }: AppProps = {}) {
   }
 
   return (
-    <>
-      <JazzProvider client={client}>
-        <h1>Todos</h1>
-        <TodoList />
-      </JazzProvider>
-    </>
+    <JazzProvider client={client}>
+      <h1>Todos</h1>
+      <TodoList />
+    </JazzProvider>
   );
 }
+// #endregion context-setup-react

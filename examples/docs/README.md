@@ -14,5 +14,6 @@ These examples are intentionally allowed to optimize for documentation clarity a
 
 - `todo-client-localfirst-ts`
 - `todo-client-localfirst-react`
+- `todo-client-localfirst-svelte`
 - `todo-server-ts`
 - `todo-server-rs`
