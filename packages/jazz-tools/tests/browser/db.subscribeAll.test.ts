@@ -447,12 +447,12 @@ describe("db.subscribeAll browser integration", () => {
     });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.added.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 0, id)),
       4000,
       "expected bytea add delta",
     );
 
-    const added = deltas.flatMap((delta) => delta.added).find((row) => row.id === id);
+    const added = deltas.flatMap((delta) => delta.all).find((row) => row.id === id);
     expect(added?.payload).toBeInstanceOf(Uint8Array);
     expect(Array.from(added?.payload ?? [])).toEqual([9, 8, 7, 0]);
 
