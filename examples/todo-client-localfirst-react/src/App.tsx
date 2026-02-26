@@ -13,17 +13,16 @@ function readEnvAppId(): string | undefined {
 function defaultConfig(
   overrides: Partial<JazzProviderClientConfig> = {},
 ): JazzProviderClientConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "todo-react-example";
+  const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
-    appId: "6316f08d-d5d1-41df-82b8-8c16aa26db84",
+    appId,
     env: "dev",
     userBranch: "main",
     localAuthMode: active.localAuthMode,
     localAuthToken: active.localAuthToken,
-    serverUrl: "http://localhost:1625",
-    adminSecret: "d0a2f110-36a8-45b9-8632-ecbc09128e2a",
+    ...overrides,
   };
 }
 // #endregion context-setup-react
