@@ -20,6 +20,7 @@ pub enum Value {
     Text(String),
     Timestamp(u64),
     Uuid(ObjectId),
+    Bytea(Vec<u8>),
     /// Homogeneous array of values.
     Array(Vec<Value>),
     /// Heterogeneous row/tuple of values (for nested rows in arrays).
@@ -38,6 +39,7 @@ impl PartialEq for Value {
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
+            (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Row(a), Value::Row(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -60,6 +62,7 @@ impl Value {
             Value::Text(_) => Some(ColumnType::Text),
             Value::Timestamp(_) => Some(ColumnType::Timestamp),
             Value::Uuid(_) => Some(ColumnType::Uuid),
+            Value::Bytea(_) => Some(ColumnType::Bytea),
             Value::Array(elements) => {
                 // Infer element type from first element; empty arrays have no inferable type
                 elements

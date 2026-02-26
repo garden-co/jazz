@@ -168,12 +168,20 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
+  timestamp(opts: { default: MaybeOptional<Date | number, Optional> }): AddOp {
+    return { _type: "add", sqlType: "TIMESTAMP", default: opts.default };
+  }
+
   boolean(opts: { default: MaybeOptional<boolean, Optional> }): AddOp {
     return { _type: "add", sqlType: "BOOLEAN", default: opts.default };
   }
 
   float(opts: { default: MaybeOptional<number, Optional> }): AddOp {
     return { _type: "add", sqlType: "REAL", default: opts.default };
+  }
+
+  bytes(opts: { default: MaybeOptional<Uint8Array, Optional> }): AddOp {
+    return { _type: "add", sqlType: "BYTEA", default: opts.default };
   }
 
   enum<const Variants extends readonly [string, ...string[]]>(
@@ -217,12 +225,20 @@ class DropBuilder {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
+  timestamp(opts: { backwardsDefault: Date | number }): DropOp {
+    return { _type: "drop", sqlType: "TIMESTAMP", backwardsDefault: opts.backwardsDefault };
+  }
+
   boolean(opts: { backwardsDefault: boolean }): DropOp {
     return { _type: "drop", sqlType: "BOOLEAN", backwardsDefault: opts.backwardsDefault };
   }
 
   float(opts: { backwardsDefault: number }): DropOp {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
+  }
+
+  bytes(opts: { backwardsDefault: Uint8Array }): DropOp {
+    return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
   }
 
   enum<const Variants extends readonly [string, ...string[]]>(
@@ -255,7 +271,9 @@ export const col = {
   string: () => new ScalarBuilder("TEXT"),
   boolean: () => new ScalarBuilder("BOOLEAN"),
   int: () => new ScalarBuilder("INTEGER"),
+  timestamp: () => new ScalarBuilder("TIMESTAMP"),
   float: () => new ScalarBuilder("REAL"),
+  bytes: () => new ScalarBuilder("BYTEA"),
   enum: (...variants: string[]) => new EnumBuilder(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
   array: (element: ColumnBuilder) => new ArrayBuilder(element),

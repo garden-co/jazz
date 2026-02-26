@@ -46,6 +46,18 @@ describe("schemaToWasm", () => {
     });
   });
 
+  it("converts TIMESTAMP to Timestamp", () => {
+    table("items", { created_at: col.timestamp() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "created_at",
+      column_type: { type: "Timestamp" },
+      nullable: false,
+    });
+  });
+
   it("converts REAL to Double", () => {
     table("items", { price: col.float() });
     const schema = getCollectedSchema();
@@ -347,6 +359,15 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("  count: number;");
+  });
+
+  it("maps timestamp columns to Date type", () => {
+    table("items", { created_at: col.timestamp() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("  created_at: Date;");
   });
 
   it("maps ref columns to string type", () => {
@@ -751,6 +772,17 @@ describe("generateWhereInputTypes", () => {
     expect(output).toContain("done?: boolean;");
     expect(output).toContain(
       "priority?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };",
+    );
+  });
+
+  it("generates Date-oriented WhereInput for timestamp columns", () => {
+    table("todos", { created_at: col.timestamp() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      "created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };",
     );
   });
 

@@ -24,10 +24,13 @@ function columnTypeToTs(type: ColumnType): string {
     case "Integer":
     case "BigInt":
     case "Double":
-    case "Timestamp":
       return "number";
+    case "Timestamp":
+      return "Date";
     case "Uuid":
       return "string";
+    case "Bytea":
+      return "Uint8Array";
     case "Enum":
       return type.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
@@ -58,7 +61,7 @@ function columnToWhereInputType(col: {
     case "Double":
       return "number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
     case "Timestamp":
-      return "number | { eq?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
+      return "Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number }";
     case "Uuid":
       if (col.references) {
         // FK - add isNull for optional refs
@@ -67,6 +70,8 @@ function columnToWhereInputType(col: {
           : "string | { eq?: string; ne?: string }";
       }
       return "string | { eq?: string; ne?: string; in?: string[] }";
+    case "Bytea":
+      return "Uint8Array | { eq?: Uint8Array; ne?: Uint8Array }";
     case "Enum": {
       const variants = col.column_type.variants
         .map((variant: string) => JSON.stringify(variant))

@@ -6,7 +6,7 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
-use crate::storage::Storage;
+use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
@@ -855,6 +855,52 @@ impl QueryManager {
         self.load_row_from_object_on_branch(object_id, "main")
             .map(|(content, _)| content)
     }
+
+    fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(SchemaHash::from_bytes(arr))
+    }
+
+    fn catalogue_manifest_append(
+        metadata: &HashMap<String, String>,
+        object_id: ObjectId,
+    ) -> Option<(ObjectId, CatalogueManifestOp)> {
+        let app_id_str = metadata.get(MetadataKey::AppId.as_str())?;
+        let app_uuid = uuid::Uuid::parse_str(app_id_str).ok()?;
+        let app_id = ObjectId::from_uuid(app_uuid);
+
+        let type_str = metadata.get(MetadataKey::Type.as_str())?;
+        let op = match type_str.as_str() {
+            t if t == ObjectType::CatalogueSchema.as_str() => {
+                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
+                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                CatalogueManifestOp::SchemaSeen {
+                    object_id,
+                    schema_hash,
+                }
+            }
+            t if t == ObjectType::CatalogueLens.as_str() => {
+                let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
+                let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
+                let source_hash = Self::parse_schema_hash_hex(source_hex)?;
+                let target_hash = Self::parse_schema_hash_hex(target_hex)?;
+                CatalogueManifestOp::LensSeen {
+                    object_id,
+                    source_hash,
+                    target_hash,
+                }
+            }
+            _ => return None,
+        };
+
+        Some((app_id, op))
+    }
+
     /// Handle an object update from the global subscription.
     pub(super) fn handle_object_update(
         &mut self,
@@ -866,6 +912,18 @@ impl QueryManager {
             && (type_str == ObjectType::CatalogueSchema.as_str()
                 || type_str == ObjectType::CatalogueLens.as_str())
         {
+            if let Some((app_id, op)) =
+                Self::catalogue_manifest_append(&update.metadata, update.object_id)
+                && let Err(error) = storage.append_catalogue_manifest_op(app_id, op)
+            {
+                tracing::warn!(
+                    object_id = %update.object_id,
+                    app_id = %app_id,
+                    ?error,
+                    "failed to persist catalogue manifest op"
+                );
+            }
+
             // Queue for SchemaManager processing
             // Load content from the object's latest commit
             if let Some(content) = self.load_object_content(update.object_id) {
