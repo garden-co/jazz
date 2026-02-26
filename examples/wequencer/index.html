@@ -211,6 +211,7 @@
         padding: 1rem;
       }
       .sequencer {
+        overflow: hidden;
         background: #2a2420;
         border: 2px solid #3d3530;
         border-radius: 0.5rem;
@@ -261,6 +262,8 @@
         font-family: 'Space Grotesk', system-ui, sans-serif;
         font-weight: 700;
         font-size: 0.85rem;
+        width: 5.5rem;
+        flex-shrink: 0;
         padding: 0.2rem 0.25rem;
         white-space: nowrap;
         overflow: hidden;
@@ -273,21 +276,23 @@
         cursor: pointer;
         text-align: left;
       }
-      .instrument-name::before {
+      .instrument-name::after {
         content: '\25B8';
         font-size: 0.65rem;
-        margin-right: 0.2rem;
+        margin-left: 0.2rem;
         color: #6b5f55;
+        display: inline-block;
+        transition: transform 0.15s ease;
       }
-      .instrument-name.mixer-open::before {
-        content: '\25BE';
+      .instrument-name.mixer-open::after {
+        transform: rotate(90deg);
       }
       .instrument-name:hover,
       .instrument-name.mixer-open {
         color: #f0a030;
       }
-      .instrument-name:hover::before,
-      .instrument-name.mixer-open::before {
+      .instrument-name:hover::after,
+      .instrument-name.mixer-open::after {
         color: #f0a030;
       }
       .instrument-mixer {
