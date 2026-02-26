@@ -64,6 +64,38 @@ export interface RuntimeSyncStreamControllerOptions {
   setClientId(clientId: string): void;
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && typeof error.message === "string") {
+    return error.message;
+  }
+  if (typeof error === "string") return error;
+  return String(error);
+}
+
+function isExpectedStreamAbortError(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+
+  if (error && typeof error === "object") {
+    const maybeName = (error as { name?: unknown }).name;
+    if (maybeName === "AbortError") return true;
+  }
+
+  const message = errorMessage(error).toLowerCase();
+  if (message.includes("fetch request has been canceled")) return true;
+  if (message.includes("fetch request has been cancelled")) return true;
+  if (message.includes("the operation was aborted")) return true;
+
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  if (cause !== undefined) {
+    const causeMessage = errorMessage(cause).toLowerCase();
+    if (causeMessage.includes("fetch request has been canceled")) return true;
+    if (causeMessage.includes("fetch request has been cancelled")) return true;
+    if (causeMessage.includes("the operation was aborted")) return true;
+  }
+
+  return false;
+}
+
 /**
  * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
  *
@@ -177,14 +209,15 @@ export class SyncStreamController {
     };
     applyUserAuthHeaders(headers, this.options.getAuth());
 
-    this.streamAbortController = new AbortController();
+    const abortController = new AbortController();
+    this.streamAbortController = abortController;
 
     try {
       const eventsUrl = buildEventsUrl(serverUrl, this.options.getClientId(), serverPathPrefix);
 
       const response = await fetch(eventsUrl, {
         headers,
-        signal: this.streamAbortController.signal,
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -216,13 +249,16 @@ export class SyncStreamController {
         this.logPrefix,
       );
     } catch (e: any) {
-      if (e?.name === "AbortError") return;
+      if (isExpectedStreamAbortError(e, abortController.signal)) return;
       console.error(`${this.logPrefix}Stream connect error:`, e);
     } finally {
+      if (this.streamAbortController === abortController) {
+        this.streamAbortController = null;
+      }
       this.streamConnecting = false;
     }
 
-    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
+    if (!abortController.signal.aborted && !this.stopped) {
       this.detachServer();
       this.scheduleReconnect();
     }
@@ -542,15 +578,23 @@ export async function readBinaryFrames(
       if (buffer.length < 4 + len) break;
       const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
       buffer = buffer.slice(4 + len);
+
+      let event: any;
       try {
-        const event = JSON.parse(json);
+        event = JSON.parse(json);
+      } catch (error) {
+        console.error(`${logPrefix}Stream parse error:`, error);
+        continue;
+      }
+
+      try {
         if (event.type === "Connected" && event.client_id) {
           callbacks.onConnected?.(event.client_id);
         } else if (event.type === "SyncUpdate") {
           callbacks.onSyncMessage(JSON.stringify(event.payload));
         }
-      } catch (e) {
-        console.error(`${logPrefix}Stream parse error:`, e);
+      } catch (error) {
+        console.error(`${logPrefix}Stream callback error:`, error);
       }
     }
   }

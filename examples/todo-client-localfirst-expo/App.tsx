@@ -1,13 +1,7 @@
 import * as React from "react";
-import {
-  createJazzClient,
-  getActiveSyntheticAuth,
-  JazzProvider,
-  type StorageLike,
-} from "jazz-tools/react-native";
+import { createJazzClient, getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react-native";
 import {
   ActivityIndicator,
-  NativeModules,
   Platform,
   SafeAreaView,
   StatusBar,
@@ -37,21 +31,36 @@ const envAdminSecret = envVars?.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
 const envLocalMode = envVars?.EXPO_PUBLIC_JAZZ_LOCAL_MODE;
 const envLocalToken = envVars?.EXPO_PUBLIC_JAZZ_LOCAL_TOKEN;
 
+const syntheticAuthCache = new Map<string, ReturnType<typeof getActiveSyntheticAuth>>();
+
+function parseLocalAuthMode(mode: string | undefined): LocalAuthMode | undefined {
+  if (mode === "anonymous" || mode === "demo") return mode;
+  return undefined;
+}
+
+function getStableSyntheticAuth(appId: string) {
+  const cached = syntheticAuthCache.get(appId);
+  if (cached) return cached;
+  const created = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+  syntheticAuthCache.set(appId, created);
+  return created;
+}
+
 function defaultConfig(
   overrides: Partial<JazzProviderClientConfig> = {},
 ): JazzProviderClientConfig {
   const appId = overrides.appId ?? envAppId ?? defaultAppId;
-  const modeFromEnv = envLocalMode ?? "demo";
-  const tokenFromEnv = envLocalToken ?? 'device-token-123';
+  const syntheticAuth = getStableSyntheticAuth(appId);
+  const envMode = parseLocalAuthMode(envLocalMode);
 
   return {
     appId,
-    env: "dev",
-    userBranch: "main",
-    serverUrl: envServerUrl ?? defaultServerUrl,
-    localAuthMode: modeFromEnv as LocalAuthMode,
-    localAuthToken: tokenFromEnv,
-    adminSecret: envAdminSecret,
+    env: overrides.env ?? "dev",
+    userBranch: overrides.userBranch ?? "main",
+    serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
+    localAuthMode: overrides.localAuthMode ?? envMode ?? syntheticAuth.localAuthMode,
+    localAuthToken: overrides.localAuthToken ?? envLocalToken ?? syntheticAuth.localAuthToken,
+    adminSecret: overrides.adminSecret ?? envAdminSecret,
     ...overrides,
   };
 }
@@ -99,8 +108,8 @@ type AppProps = {
 };
 
 export default function App({ config, fallback }: AppProps = {}) {
-  const resolvedConfig = defaultConfig(config);
-  const configKey = JSON.stringify(resolvedConfig);
+  const configKey = JSON.stringify(config ?? {});
+  const resolvedConfig = React.useMemo(() => defaultConfig(config), [configKey]);
   const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
     null,
   );
