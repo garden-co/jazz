@@ -251,6 +251,7 @@ export interface SyncOutboxRouterOptions {
   onServerPayload(payload: unknown): void | Promise<void>;
   onClientPayload?(payloadJson: string): void;
   onServerPayloadError?(error: unknown): void;
+  retryServerPayloads?: boolean;
 }
 
 /**
@@ -260,6 +261,66 @@ export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
 ): (envelope: string) => void {
   const logPrefix = options.logPrefix ?? "";
+  const retryServerPayloads = options.retryServerPayloads ?? false;
+  const pendingServerPayloads: unknown[] = [];
+  let serverFlushQueued = false;
+  let serverFlushInFlight = false;
+  let serverRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryAttempt = 0;
+
+  const scheduleServerFlush = (): void => {
+    if (serverFlushQueued || serverFlushInFlight || serverRetryTimer) return;
+    serverFlushQueued = true;
+    queueMicrotask(() => {
+      serverFlushQueued = false;
+      void flushServerPayloads();
+    });
+  };
+
+  const scheduleServerRetry = (delayMs: number): void => {
+    if (serverRetryTimer) return;
+    serverRetryTimer = setTimeout(() => {
+      serverRetryTimer = null;
+      void flushServerPayloads();
+    }, delayMs);
+  };
+
+  const handleServerPayloadError = (error: unknown): void => {
+    if (options.onServerPayloadError) {
+      options.onServerPayloadError(error);
+      return;
+    }
+    console.error(`${logPrefix}Sync POST error:`, error);
+  };
+
+  const flushServerPayloads = async (): Promise<void> => {
+    if (serverFlushInFlight) return;
+    serverFlushInFlight = true;
+
+    while (pendingServerPayloads.length > 0) {
+      const payload = pendingServerPayloads[0];
+      try {
+        await options.onServerPayload(payload);
+        pendingServerPayloads.shift();
+        retryAttempt = 0;
+      } catch (error) {
+        handleServerPayloadError(error);
+        if (!retryServerPayloads) {
+          pendingServerPayloads.shift();
+          continue;
+        }
+        const baseMs = 300;
+        const maxMs = 10_000;
+        const jitterMs = Math.floor(Math.random() * 200);
+        const delayMs = Math.min(maxMs, baseMs * 2 ** retryAttempt) + jitterMs;
+        retryAttempt += 1;
+        scheduleServerRetry(delayMs);
+        break;
+      }
+    }
+
+    serverFlushInFlight = false;
+  };
 
   return (envelope: string) => {
     let parsed: { destination?: unknown; payload?: unknown };
@@ -283,13 +344,8 @@ export function createSyncOutboxRouter(
     }
 
     if (isObjectDestination && "Server" in destination) {
-      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
-        if (options.onServerPayloadError) {
-          options.onServerPayloadError(error);
-          return;
-        }
-        console.error(`${logPrefix}Sync POST error:`, error);
-      });
+      pendingServerPayloads.push(payload);
+      scheduleServerFlush();
     }
   };
 }

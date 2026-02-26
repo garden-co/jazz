@@ -7,6 +7,7 @@ import {
   generateClientId,
   linkExternalIdentity,
   normalizePathPrefix,
+  readBinaryFrames,
   sendSyncPayload,
   SyncStreamController,
 } from "./sync-transport.js";
@@ -361,5 +362,34 @@ describe("sync-transport", () => {
     router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
+  });
+
+  it("sync outbox router retries failed server payloads in-order when enabled", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const onServerPayload = vi
+      .fn<(...args: [unknown]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+    const onServerPayloadError = vi.fn();
+    const router = createSyncOutboxRouter({
+      onServerPayload,
+      onServerPayloadError,
+      retryServerPayloads: true,
+    });
+
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 1 } }));
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 2 } }));
+
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledTimes(1));
+    expect(onServerPayload.mock.calls[0][0]).toEqual({ seq: 1 });
+    expect(onServerPayloadError).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledTimes(3));
+    expect(onServerPayload.mock.calls[1][0]).toEqual({ seq: 1 });
+    expect(onServerPayload.mock.calls[2][0]).toEqual({ seq: 2 });
   });
 });

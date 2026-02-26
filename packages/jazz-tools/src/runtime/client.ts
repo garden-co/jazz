@@ -730,6 +730,7 @@ export class JazzClient {
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
+        retryServerPayloads: true,
         onServerPayload: (payload) => this.sendSyncMessage(payload),
         onServerPayloadError: (error) => {
           console.error("Sync POST error:", error);
