@@ -11,8 +11,18 @@ export interface WequencerAudio {
   readonly isPlaying: boolean;
   readonly isContextActive: boolean;
   readonly countdownMs: number;
+  readonly bpm: number;
+  setBpm: (bpm: number) => void;
   readonly syncAlignment: boolean;
   setSyncAlignment: (enabled: boolean) => void;
+  readonly beatCount: number;
+  setBeatCount: (count: number) => void;
+  readonly masterVolume: number;
+  setMasterVolume: (db: number) => void;
+  getInstrumentVolume: (instrumentId: string) => number;
+  setInstrumentVolume: (instrumentId: string, db: number) => void;
+  getInstrumentPan: (instrumentId: string) => number;
+  setInstrumentPan: (instrumentId: string, pan: number) => void;
 }
 
 export function getAudioContext(): WequencerAudio {
