@@ -12,6 +12,16 @@ describe("unwrapValue", () => {
     expect(unwrapValue(v)).toBe("hello");
   });
 
+  it("unwraps Json text to parsed values when column type is Json", () => {
+    const v: WasmValue = { type: "Text", value: '{"name":"Ada","active":true}' };
+    expect(unwrapValue(v, { type: "Json" })).toEqual({ name: "Ada", active: true });
+  });
+
+  it("throws on invalid stored Json text when column type is Json", () => {
+    const v: WasmValue = { type: "Text", value: "{broken" };
+    expect(() => unwrapValue(v, { type: "Json" })).toThrow("Invalid stored JSON value");
+  });
+
   it("unwraps Uuid to string", () => {
     const v: WasmValue = { type: "Uuid", value: "abc-123" };
     expect(unwrapValue(v)).toBe("abc-123");
@@ -241,6 +251,29 @@ describe("transformRows", () => {
     const result = transformRows<{ id: string; created_at: Date }>(rows, timestampSchema, "events");
     expect(result[0]?.created_at).toBeInstanceOf(Date);
     expect(result[0]?.created_at.getTime()).toBe(ts);
+  });
+
+  it("transforms Json columns to parsed values", () => {
+    const jsonSchema: WasmSchema = {
+      tables: {
+        documents: {
+          columns: [{ name: "payload", column_type: { type: "Json" }, nullable: false }],
+        },
+      },
+    };
+    const rows: WasmRow[] = [
+      {
+        id: "doc-1",
+        values: [{ type: "Text", value: '{"name":"Ada"}' }],
+      },
+    ];
+
+    const result = transformRows<{ id: string; payload: { name: string } }>(
+      rows,
+      jsonSchema,
+      "documents",
+    );
+    expect(result).toEqual([{ id: "doc-1", payload: { name: "Ada" } }]);
   });
 
   it("follows schema column order", () => {

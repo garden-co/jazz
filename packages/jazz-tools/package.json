@@ -65,7 +65,9 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@standard-schema/spec": "^1.1.0",
     "jazz-wasm": "workspace:*",
+    "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
     "tsx": "^4.0.0"
   },
@@ -84,7 +86,8 @@
     "typescript": "^5.3.0",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
-    "vitest": "catalog:default"
+    "vitest": "catalog:default",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
     "react": "^18 || ^19",

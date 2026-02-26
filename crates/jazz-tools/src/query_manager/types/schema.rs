@@ -91,6 +91,8 @@ pub enum ColumnType {
     Uuid,
     /// Variable-length binary payload.
     Bytea,
+    /// JSON payload stored as UTF-8 text, optionally constrained by JSON Schema.
+    Json(Option<serde_json::Value>),
     /// Homogeneous array of values.
     Array(Box<ColumnType>),
     /// Heterogeneous row/tuple of values with a known schema.
@@ -110,6 +112,7 @@ impl ColumnType {
             ColumnType::Uuid => Some(16),
             ColumnType::Text => None,
             ColumnType::Bytea => None,
+            ColumnType::Json(_) => None,
             ColumnType::Enum(_) => None,
             ColumnType::Array(_) => None, // Arrays are variable-length
             ColumnType::Row(_) => None,   // Rows are variable-length
