@@ -82,6 +82,19 @@ fn get_branch(qm: &QueryManager) -> String {
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 
+fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
+    let mut out = Schema::new();
+    out.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "payload",
+            ColumnType::Json(schema),
+        )])
+        .into(),
+    );
+    out
+}
+
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
 /// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
 fn execute_query(
@@ -94,6 +107,111 @@ fn execute_query(
     let results = qm.get_subscription_results(sub_id);
     qm.unsubscribe_with_sync(sub_id);
     Ok(results)
+}
+
+#[test]
+fn insert_json_preserves_original_text() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let raw = "{\n  \"name\": \"Ada\",\n  \"active\": true\n}";
+    qm.insert(&mut storage, "documents", &[Value::Text(raw.to_string())])
+        .expect("insert valid json");
+
+    let query = qm.query("documents").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query inserted row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, vec![Value::Text(raw.to_string())]);
+}
+
+#[test]
+fn insert_rejects_invalid_json_text() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let err = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":true".to_string())],
+        )
+        .expect_err("invalid JSON must be rejected");
+
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("invalid JSON for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn insert_rejects_json_schema_violation() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(Some(json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })));
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let err = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":123}".to_string())],
+        )
+        .expect_err("schema-invalid JSON must be rejected");
+
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("JSON schema validation failed for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn update_rejects_json_schema_violation() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(Some(json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })));
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":\"ok\"}".to_string())],
+        )
+        .expect("insert valid row first");
+
+    let err = qm
+        .update(
+            &mut storage,
+            inserted.row_id,
+            &[Value::Text("{\"name\":42}".to_string())],
+        )
+        .expect_err("invalid update payload must be rejected");
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("JSON schema validation failed for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+
+    let query = qm.query("documents").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query existing row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("{\"name\":\"ok\"}".to_string())]
+    );
 }
 
 #[test]

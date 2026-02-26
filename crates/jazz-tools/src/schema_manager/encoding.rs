@@ -322,6 +322,7 @@ const TYPE_ROW: u8 = 8;
 const TYPE_ENUM: u8 = 9;
 const TYPE_DOUBLE: u8 = 10;
 const TYPE_BYTEA: u8 = 11;
+const TYPE_JSON: u8 = 12;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
@@ -333,6 +334,21 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
         ColumnType::Bytea => buf.push(TYPE_BYTEA),
+        ColumnType::Json(schema) => {
+            buf.push(TYPE_JSON);
+            match schema {
+                Some(schema) => {
+                    buf.push(1);
+                    if let Ok(encoded) = serde_json::to_vec(schema) {
+                        write_u32(buf, encoded.len() as u32);
+                        buf.extend_from_slice(&encoded);
+                    } else {
+                        write_u32(buf, 0);
+                    }
+                }
+                None => buf.push(0),
+            }
+        }
         ColumnType::Enum(variants) => {
             buf.push(TYPE_ENUM);
             write_u32(buf, variants.len() as u32);
@@ -365,6 +381,21 @@ fn decode_column_type(
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
         TYPE_UUID => Ok(ColumnType::Uuid),
         TYPE_BYTEA => Ok(ColumnType::Bytea),
+        TYPE_JSON => {
+            let has_schema = read_u8(data, offset)? != 0;
+            if has_schema {
+                let len = read_u32(data, offset)? as usize;
+                let bytes = read_bytes(data, offset, len)?;
+                let schema = serde_json::from_slice(bytes).map_err(|err| {
+                    CatalogueEncodingError::DecodeError {
+                        message: format!("invalid json schema payload: {err}"),
+                    }
+                })?;
+                Ok(ColumnType::Json(Some(schema)))
+            } else {
+                Ok(ColumnType::Json(None))
+            }
+        }
         TYPE_ENUM => {
             let variant_count = read_u32(data, offset)? as usize;
             let mut variants = Vec::with_capacity(variant_count);
@@ -1195,6 +1226,7 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::SchemaBuilder;
+    use serde_json::json;
 
     #[test]
     fn schema_roundtrip_simple() {
@@ -1283,6 +1315,38 @@ mod tests {
         assert_eq!(
             chunks.descriptor.column("payload").unwrap().column_type,
             ColumnType::Bytea
+        );
+    }
+
+    #[test]
+    fn schema_roundtrip_with_json() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("documents")
+                    .column(
+                        "payload",
+                        ColumnType::Json(Some(json!({
+                            "type": "object",
+                            "required": ["name"]
+                        }))),
+                    )
+                    .column("raw_payload", ColumnType::Json(None)),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let docs = decoded.get(&TableName::new("documents")).unwrap();
+        assert_eq!(
+            docs.descriptor.column("payload").unwrap().column_type,
+            ColumnType::Json(Some(json!({
+                "type": "object",
+                "required": ["name"]
+            })))
+        );
+        assert_eq!(
+            docs.descriptor.column("raw_payload").unwrap().column_type,
+            ColumnType::Json(None)
         );
     }
 

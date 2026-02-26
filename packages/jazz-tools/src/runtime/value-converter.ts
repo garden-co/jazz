@@ -54,6 +54,23 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       }
       throw new Error("Expected Uint8Array or byte array for Bytea column type");
     }
+    case "Json": {
+      if (typeof value === "string") {
+        return { type: "Text", value };
+      }
+      let encoded: string | undefined;
+      try {
+        encoded = JSON.stringify(value);
+      } catch (error) {
+        throw new Error(
+          `JSON values must be serializable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (encoded === undefined) {
+        throw new Error("JSON values must be serializable");
+      }
+      return { type: "Text", value: encoded };
+    }
     case "Enum": {
       const enumValue = String(value);
       if (!columnType.variants.includes(enumValue)) {

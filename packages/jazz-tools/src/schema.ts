@@ -9,6 +9,11 @@ export type ScalarSqlType =
   | "TIMESTAMP"
   | "UUID"
   | "BYTEA";
+
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | { [key: string]: JsonValue } | JsonValue[];
+export type JsonSchema = Record<string, unknown>;
+
 export interface EnumSqlType {
   kind: "ENUM";
   variants: string[];
@@ -17,7 +22,16 @@ export interface ArraySqlType {
   kind: "ARRAY";
   element: SqlType;
 }
-export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType;
+export interface JsonSqlType<Output = JsonValue> {
+  kind: "JSON";
+  schema?: JsonSchema;
+  /**
+   * Phantom field for compile-time output inference.
+   * This property is never populated at runtime.
+   */
+  __output?: Output;
+}
+export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
 
 export function sqlTypeToString(sqlType: SqlType): string {
   if (typeof sqlType === "string") {
@@ -26,6 +40,12 @@ export function sqlTypeToString(sqlType: SqlType): string {
   if (sqlType.kind === "ENUM") {
     const variants = sqlType.variants.map((variant) => `'${variant.replace(/'/g, "''")}'`);
     return `ENUM(${variants.join(",")})`;
+  }
+  if (sqlType.kind === "JSON") {
+    if (!sqlType.schema) {
+      return "JSON";
+    }
+    return `JSON('${JSON.stringify(sqlType.schema).replace(/'/g, "''")}')`;
   }
   return `${sqlTypeToString(sqlType.element)}[]`;
 }
@@ -52,7 +72,9 @@ export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
     ? TSTypeFromSqlType<T["element"]>[]
     : T extends EnumSqlType
       ? T["variants"][number]
-      : never;
+      : T extends JsonSqlType<infer Output>
+        ? Output
+        : never;
 
 export interface Column {
   name: string;

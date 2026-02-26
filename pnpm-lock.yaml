@@ -430,6 +430,9 @@ importers:
 
   packages/jazz-tools:
     dependencies:
+      '@standard-schema/spec':
+        specifier: ^1.1.0
+        version: 1.1.0
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm
@@ -479,6 +482,9 @@ importers:
       vitest:
         specifier: catalog:default
         version: 4.0.18(@types/node@20.19.30)(@vitest/browser-playwright@4.0.18)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
     optionalDependencies:
       jazz-napi:
         specifier: workspace:*
@@ -12286,9 +12292,7 @@ snapshots:
       metro-runtime: 0.83.4
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
     optional: true
 
   '@react-native/normalize-colors@0.81.5': {}

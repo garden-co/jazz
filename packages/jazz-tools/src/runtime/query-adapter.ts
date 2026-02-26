@@ -107,12 +107,33 @@ function toTimestampMs(value: unknown): number {
   throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
 }
 
+function toJsonText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(value);
+  } catch (error) {
+    throw new Error(
+      `JSON values must be serializable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (encoded === undefined) {
+    throw new Error("JSON values must be serializable");
+  }
+  return encoded;
+}
+
 /**
  * Translate a JavaScript value to WasmValue format.
  */
 function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { Null: null };
+  }
+  if (columnType.type === "Json") {
+    return { Text: toJsonText(value) };
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
     return { Timestamp: toTimestampMs(value) };
@@ -261,6 +282,9 @@ function conditionToRelPredicate(
   }
   if (columnType.type === "Bytea" && cond.op === "contains") {
     throw new Error(`BYTEA column "${column}" does not support contains filters.`);
+  }
+  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
+    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
   }
   switch (cond.op) {
     case "eq":
@@ -529,6 +553,9 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
       const columnType = getColumnType(schema, builder.table, stripQualifier(column));
       if (columnType?.type === "Bytea") {
         throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+      }
+      if (columnType?.type === "Json") {
+        throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
       }
     }
     relation = {

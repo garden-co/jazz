@@ -4,6 +4,7 @@ import { schemaToWasm } from "./schema-reader.js";
 import { generateTypes } from "./type-generator.js";
 import { generateClient, analyzeRelations } from "./index.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { z } from "zod/v4";
 
 describe("schemaToWasm", () => {
   beforeEach(() => {
@@ -158,6 +159,68 @@ describe("schemaToWasm", () => {
       column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
       nullable: false,
     });
+  });
+
+  it("converts JSON to Json without schema metadata", () => {
+    table("documents", { payload: col.json() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.documents.columns[0]).toEqual({
+      name: "payload",
+      column_type: { type: "Json", schema: undefined },
+      nullable: false,
+    });
+  });
+
+  it("converts JSON with plain schema object metadata", () => {
+    table("documents", {
+      payload: col.json({
+        type: "object",
+        properties: {
+          name: { type: "string" },
+        },
+        required: ["name"],
+      }),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.documents.columns[0]).toEqual({
+      name: "payload",
+      column_type: {
+        type: "Json",
+        schema: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+          },
+          required: ["name"],
+        },
+      },
+      nullable: false,
+    });
+  });
+
+  it("accepts zod v4 standard json-schema providers for JSON columns", () => {
+    const payloadSchema = z.object({
+      name: z.string(),
+      age: z.number().int().optional(),
+    });
+    table("documents", { payload: col.json(payloadSchema) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    const column = wasm.tables.documents.columns[0];
+    expect(column?.column_type.type).toBe("Json");
+    if (column?.column_type.type !== "Json") {
+      throw new Error("expected Json column type");
+    }
+    expect(column.column_type.schema).toBeTruthy();
+    const jsonSchema = column.column_type.schema as Record<string, unknown>;
+    expect(jsonSchema.type).toBe("object");
+    expect(jsonSchema.properties).toBeTruthy();
+    expect((jsonSchema.properties as Record<string, unknown>).name).toBeTruthy();
   });
 
   it("converts multiple tables", () => {
@@ -400,6 +463,16 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain('  status: "done" | "in_progress" | "todo";');
+  });
+
+  it("maps JSON columns to JsonValue type", () => {
+    table("documents", { payload: col.json() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export type JsonValue =");
+    expect(output).toContain("  payload: JsonValue;");
   });
 
   it("exports wasmSchema constant", () => {

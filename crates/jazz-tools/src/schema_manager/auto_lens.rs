@@ -198,6 +198,7 @@ fn default_for_type(column_type: &ColumnType, nullable: bool) -> Value {
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
         ColumnType::Bytea => Value::Bytea(Vec::new()),
+        ColumnType::Json(_) => Value::Null, // Requires user-provided JSON that matches optional schema
         ColumnType::Array(_) => Value::Array(Vec::new()),
         ColumnType::Row(_) => Value::Null, // Can't generate without schema
     }
