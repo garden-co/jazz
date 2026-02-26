@@ -83,8 +83,13 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    subscriptionCallback.onUpdate("[]");
-    expect(onUpdate).toHaveBeenCalledWith("[]");
+    subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
