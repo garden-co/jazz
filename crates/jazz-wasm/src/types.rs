@@ -215,9 +215,17 @@ pub enum WasmPolicyExpr {
     IsNotNull {
         column: String,
     },
+    Contains {
+        column: String,
+        value: WasmPolicyValue,
+    },
     In {
         column: String,
         session_path: Vec<String>,
+    },
+    InList {
+        column: String,
+        values: Vec<WasmPolicyValue>,
     },
     Exists {
         table: String,
@@ -421,6 +429,12 @@ impl From<jazz_tools::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
             jazz_tools::query_manager::policy::PolicyExpr::IsNotNull { column } => {
                 WasmPolicyExpr::IsNotNull { column }
             }
+            jazz_tools::query_manager::policy::PolicyExpr::Contains { column, value } => {
+                WasmPolicyExpr::Contains {
+                    column,
+                    value: value.into(),
+                }
+            }
             jazz_tools::query_manager::policy::PolicyExpr::In {
                 column,
                 session_path,
@@ -428,6 +442,12 @@ impl From<jazz_tools::query_manager::policy::PolicyExpr> for WasmPolicyExpr {
                 column,
                 session_path,
             },
+            jazz_tools::query_manager::policy::PolicyExpr::InList { column, values } => {
+                WasmPolicyExpr::InList {
+                    column,
+                    values: values.into_iter().map(Into::into).collect(),
+                }
+            }
             jazz_tools::query_manager::policy::PolicyExpr::Exists { table, condition } => {
                 WasmPolicyExpr::Exists {
                     table,
@@ -492,6 +512,12 @@ impl TryFrom<WasmPolicyExpr> for jazz_tools::query_manager::policy::PolicyExpr {
             WasmPolicyExpr::IsNotNull { column } => {
                 jazz_tools::query_manager::policy::PolicyExpr::IsNotNull { column }
             }
+            WasmPolicyExpr::Contains { column, value } => {
+                jazz_tools::query_manager::policy::PolicyExpr::Contains {
+                    column,
+                    value: value.try_into()?,
+                }
+            }
             WasmPolicyExpr::In {
                 column,
                 session_path,
@@ -499,6 +525,15 @@ impl TryFrom<WasmPolicyExpr> for jazz_tools::query_manager::policy::PolicyExpr {
                 column,
                 session_path,
             },
+            WasmPolicyExpr::InList { column, values } => {
+                jazz_tools::query_manager::policy::PolicyExpr::InList {
+                    column,
+                    values: values
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<Vec<_>, _>>()?,
+                }
+            }
             WasmPolicyExpr::Exists { table, condition } => {
                 jazz_tools::query_manager::policy::PolicyExpr::Exists {
                     table,
