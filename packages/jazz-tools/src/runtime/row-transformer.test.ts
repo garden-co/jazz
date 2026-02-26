@@ -32,9 +32,11 @@ describe("unwrapValue", () => {
     expect(unwrapValue(v)).toBe(9007199254740991);
   });
 
-  it("unwraps Timestamp to number", () => {
+  it("unwraps Timestamp to Date", () => {
     const v: WasmValue = { type: "Timestamp", value: 1704067200000 };
-    expect(unwrapValue(v)).toBe(1704067200000);
+    const result = unwrapValue(v);
+    expect(result).toBeInstanceOf(Date);
+    expect((result as Date).getTime()).toBe(1704067200000);
   });
 
   it("unwraps Bytea to Uint8Array", () => {
@@ -218,6 +220,27 @@ describe("transformRows", () => {
   it("handles empty rows array", () => {
     const result = transformRows([], schema, "todos");
     expect(result).toEqual([]);
+  });
+
+  it("transforms timestamp values to Date objects", () => {
+    const timestampSchema: WasmSchema = {
+      tables: {
+        events: {
+          columns: [{ name: "created_at", column_type: { type: "Timestamp" }, nullable: false }],
+        },
+      },
+    };
+    const ts = 1704067200000;
+    const rows: WasmRow[] = [
+      {
+        id: "event-1",
+        values: [{ type: "Timestamp", value: ts }],
+      },
+    ];
+
+    const result = transformRows<{ id: string; created_at: Date }>(rows, timestampSchema, "events");
+    expect(result[0]?.created_at).toBeInstanceOf(Date);
+    expect(result[0]?.created_at.getTime()).toBe(ts);
   });
 
   it("follows schema column order", () => {
