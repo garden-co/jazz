@@ -10,6 +10,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import type { InitMessage, WorkerToMainMessage } from "../../src/worker/worker-protocol.js";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 interface DebugLensEdgeState {
@@ -431,6 +432,68 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
   });
 
+  it("retries OPFS init contention and succeeds when lock is released in time", async () => {
+    const dbName = uniqueDbName("opfs-retry-success");
+    const workerA = await spawnRawJazzWorker();
+    const workerB = await spawnRawJazzWorker();
+
+    try {
+      const initA = await initRawWorker(workerA, dbName, 5_000);
+      expect(initA.type).toBe("init-ok");
+
+      const initBPromise = initRawWorker(workerB, dbName, 16_000);
+
+      await sleep(1_000);
+      workerA.postMessage({ type: "shutdown" });
+      await waitForWorkerMessageType(workerA, "shutdown-ok", 5_000, "raw shutdown");
+      workerA.terminate();
+
+      const initB = await initBPromise;
+      expect(initB.type).toBe("init-ok");
+    } finally {
+      try {
+        workerB.postMessage({ type: "shutdown" });
+        await waitForWorkerMessageType(workerB, "shutdown-ok", 5_000, "raw shutdown");
+      } catch {
+        // Best effort
+      }
+      workerB.terminate();
+    }
+  }, 35_000);
+
+  it("fails init deterministically after OPFS contention timeout budget", async () => {
+    const dbName = uniqueDbName("opfs-retry-timeout");
+    const workerA = await spawnRawJazzWorker();
+    const workerB = await spawnRawJazzWorker();
+
+    try {
+      const initA = await initRawWorker(workerA, dbName, 5_000);
+      expect(initA.type).toBe("init-ok");
+
+      const initB = await initRawWorker(workerB, dbName, 18_000);
+      expect(initB.type).toBe("error");
+      if (initB.type === "error") {
+        expect(initB.message).toContain("retry timeout");
+        expect(initB.message).toContain("attempt");
+      }
+    } finally {
+      try {
+        workerA.postMessage({ type: "shutdown" });
+        await waitForWorkerMessageType(workerA, "shutdown-ok", 5_000, "raw shutdown");
+      } catch {
+        // Best effort
+      }
+      try {
+        workerB.postMessage({ type: "shutdown" });
+        await waitForWorkerMessageType(workerB, "shutdown-ok", 5_000, "raw shutdown");
+      } catch {
+        // Best effort
+      }
+      workerA.terminate();
+      workerB.terminate();
+    }
+  }, 40_000);
+
   it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
     const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
     const seeded = track(await createDb({ appId: "test-app", dbName }));
@@ -780,6 +843,58 @@ async function waitForWorkerMessageType(
     };
 
     worker.addEventListener("message", handler);
+  });
+}
+
+async function spawnRawJazzWorker(): Promise<Worker> {
+  const worker = new Worker(new URL("../../src/worker/jazz-worker.js", import.meta.url), {
+    type: "module",
+  });
+  await waitForWorkerMessageType(worker, "ready", 15_000, "raw worker ready");
+  return worker;
+}
+
+async function initRawWorker(
+  worker: Worker,
+  dbName: string,
+  timeoutMs: number,
+): Promise<{ type: "init-ok"; clientId: string } | { type: "error"; message: string }> {
+  const initMessage: InitMessage = {
+    type: "init",
+    schemaJson: JSON.stringify(schema),
+    appId: "test-app",
+    env: "dev",
+    userBranch: "main",
+    dbName,
+    clientId: "",
+  };
+
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`raw init: no init response within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as WorkerToMainMessage;
+      if (data.type === "init-ok") {
+        cleanup();
+        resolve({ type: "init-ok", clientId: data.clientId });
+        return;
+      }
+      if (data.type === "error") {
+        cleanup();
+        resolve({ type: "error", message: data.message });
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+    worker.postMessage(initMessage);
   });
 }
 
