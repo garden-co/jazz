@@ -279,7 +279,7 @@ describe("WorkerBridge race harness", () => {
     await expect(initPromiseB).resolves.toBe("worker-client-5");
   });
 
-  it("WB-U06 init failure transitions state and clears queued sync", async () => {
+  it("WB-U06 init failure transitions state and preserves queued sync", async () => {
     const worker = new FakeWorker();
     const { runtime, emitServerPayload } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
@@ -292,7 +292,10 @@ describe("WorkerBridge race harness", () => {
     await expect(initPromise).rejects.toThrow("Worker init failed: boom");
 
     expect((bridge as any).state.phase).toBe("failed");
-    expect((bridge as any).state.pendingSyncPayloadsForWorker).toEqual([]);
+    expect((bridge as any).state.pendingSyncPayloadsForWorker).toEqual([
+      JSON.stringify({ kind: "sub", seq: 1 }),
+      JSON.stringify({ kind: "sub", seq: 2 }),
+    ]);
     expect(worker.script.receivedSyncPayloads).toEqual([]);
   });
 
