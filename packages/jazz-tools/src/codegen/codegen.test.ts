@@ -475,6 +475,28 @@ describe("generateTypes", () => {
     expect(output).toContain("  payload: JsonValue;");
   });
 
+  it("narrows JSON columns using schema-derived type aliases", () => {
+    table("documents", {
+      payload: col.json(
+        z.object({
+          name: z.string(),
+          done: z.boolean().optional(),
+        }),
+      ),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      'import type { WasmSchema, QueryBuilder, JsonSchemaToTs } from "jazz-tools";',
+    );
+    expect(output).toContain("const __jsonSchema1 =");
+    expect(output).toContain("type __JsonType1 = JsonSchemaToTs<typeof __jsonSchema1>;");
+    expect(output).toContain("  payload: __JsonType1;");
+    expect(output).toContain("payload?: __JsonType1 | { eq?: __JsonType1; ne?: __JsonType1;");
+  });
+
   it("exports wasmSchema constant", () => {
     table("todos", { title: col.string() });
     const schema = getCollectedSchema();
