@@ -1,16 +1,31 @@
 // Schema type definitions
 import type { RelExpr } from "./ir.js";
 
-export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export type ScalarSqlType =
+  | "TEXT"
+  | "BOOLEAN"
+  | "INTEGER"
+  | "REAL"
+  | "TIMESTAMP"
+  | "UUID"
+  | "BYTEA";
+export interface EnumSqlType {
+  kind: "ENUM";
+  variants: string[];
+}
 export interface ArraySqlType {
   kind: "ARRAY";
   element: SqlType;
 }
-export type SqlType = ScalarSqlType | ArraySqlType;
+export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType;
 
 export function sqlTypeToString(sqlType: SqlType): string {
   if (typeof sqlType === "string") {
     return sqlType;
+  }
+  if (sqlType.kind === "ENUM") {
+    const variants = sqlType.variants.map((variant) => `'${variant.replace(/'/g, "''")}'`);
+    return `ENUM(${variants.join(",")})`;
   }
   return `${sqlTypeToString(sqlType.element)}[]`;
 }
@@ -23,15 +38,21 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
       ? number
       : T extends "REAL"
         ? number
-        : T extends "UUID"
-          ? string
-          : never;
+        : T extends "TIMESTAMP"
+          ? Date | number
+          : T extends "UUID"
+            ? string
+            : T extends "BYTEA"
+              ? Uint8Array
+              : never;
 
 export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
   ? TSTypeFromScalarSqlType<T>
   : T extends ArraySqlType
     ? TSTypeFromSqlType<T["element"]>[]
-    : never;
+    : T extends EnumSqlType
+      ? T["variants"][number]
+      : never;
 
 export interface Column {
   name: string;
@@ -69,9 +90,19 @@ export type PolicyExpr =
       column: string;
     }
   | {
+      type: "Contains";
+      column: string;
+      value: PolicyValue;
+    }
+  | {
       type: "In";
       column: string;
       session_path: string[];
+    }
+  | {
+      type: "InList";
+      column: string;
+      values: PolicyValue[];
     }
   | {
       type: "Exists";
@@ -85,6 +116,13 @@ export type PolicyExpr =
   | {
       type: "Inherits";
       operation: PolicyOperation;
+      via_column: string;
+      max_depth?: number;
+    }
+  | {
+      type: "InheritsReferencing";
+      operation: PolicyOperation;
+      source_table: string;
       via_column: string;
       max_depth?: number;
     }

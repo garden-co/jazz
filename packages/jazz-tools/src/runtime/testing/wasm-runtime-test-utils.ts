@@ -10,12 +10,39 @@ export type TestRuntime = Runtime & { free?(): void };
 
 let wasmModulePromise: Promise<any> | null = null;
 
-type GrooveWasmPaths = {
+async function freeRuntimeSafely(runtime: TestRuntime): Promise<void> {
+  if (!runtime.free) return;
+
+  // Allow pending microtasks (scheduled ticks / callbacks) to release borrows
+  // before freeing the WASM runtime.
+  const maxAttempts = 5;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      runtime.free();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const borrowConflict =
+        message.includes("while it was borrowed") ||
+        message.includes("already borrowed") ||
+        message.includes("unreachable");
+      if (!borrowConflict) {
+        throw error;
+      }
+      if (attempt === maxAttempts - 1) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+}
+
+type JazzWasmPaths = {
   modulePath: string;
   wasmPath: string;
 };
 
-function resolveGrooveWasmPaths(): GrooveWasmPaths | null {
+function resolveJazzWasmPaths(): JazzWasmPaths | null {
   const require = createRequire(import.meta.url);
   let packageJsonPath: string;
   try {
@@ -35,14 +62,14 @@ function resolveGrooveWasmPaths(): GrooveWasmPaths | null {
   return { modulePath, wasmPath };
 }
 
-export function hasGrooveWasmBuild(): boolean {
-  return resolveGrooveWasmPaths() !== null;
+export function hasJazzWasmBuild(): boolean {
+  return resolveJazzWasmPaths() !== null;
 }
 
 function loadWasmModule(): Promise<any> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
-      const paths = resolveGrooveWasmPaths();
+      const paths = resolveJazzWasmPaths();
       if (!paths) {
         throw new Error(
           "jazz-wasm build artifacts not found. Run `pnpm --filter @jazz/rust build:crates` first.",
@@ -71,7 +98,7 @@ export async function createWasmRuntime(
   );
 
   onTestFinished(async () => {
-    await runtime.free();
+    await freeRuntimeSafely(runtime);
   });
 
   return runtime;

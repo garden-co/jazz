@@ -4,17 +4,19 @@
 //! - Simple session comparisons (`owner_id = @session.user_id`)
 //! - INHERITS chains (documents → folders → teams)
 
-use groove::object::ObjectId;
-use groove::query_manager::policy::{Operation, PolicyExpr};
-use groove::query_manager::session::Session;
-use groove::query_manager::types::TablePolicies;
-use groove::query_manager::types::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
-use groove::runtime_core::RuntimeCore;
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::MemoryStorage;
-use groove::sync_manager::SyncManager;
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::MemoryStorage;
+use jazz_tools::sync_manager::SyncManager;
+
+pub type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
 
 /// Create the benchmark schema with teams, folders, and documents.
 ///
@@ -109,11 +111,7 @@ pub struct BenchmarkData {
 /// - 100_000 documents: 1000 teams, 10000 folders
 ///
 /// The session user owns 10% of teams and authors 50% of documents.
-pub fn setup_data(
-    core: &mut RuntimeCore<MemoryStorage>,
-    scale: usize,
-    user_id: &str,
-) -> BenchmarkData {
+pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> BenchmarkData {
     let (num_teams, num_folders) = match scale {
         10_000 => (100, 1000),
         100_000 => (1000, 10000),
@@ -254,7 +252,7 @@ pub fn create_session(user_id: &str) -> Session {
 ///
 /// Uses MemoryStorage which drops all storage requests, allowing
 /// benchmarks to measure pure in-memory performance without storage overhead.
-pub fn create_runtime() -> RuntimeCore<MemoryStorage> {
+pub fn create_runtime() -> BenchRuntime {
     let sync_manager = SyncManager::new();
     let schema = create_schema();
     let schema_manager = SchemaManager::new(
@@ -265,7 +263,12 @@ pub fn create_runtime() -> RuntimeCore<MemoryStorage> {
         "main",
     )
     .expect("schema manager");
-    RuntimeCore::new(schema_manager, MemoryStorage)
+    RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    )
 }
 
 /// Get the current timestamp in microseconds.

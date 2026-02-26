@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": ["Cargo.lock", "**/Cargo.toml"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -16,6 +17,10 @@
     },
     "jazz-napi#build": {
       "outputs": ["jazz-napi.node", "index.d.ts"]
+    },
+    "jazz-wasm#build": {
+      "dependsOn": ["@jazz/rust#build:crates"],
+      "outputs": ["pkg/**"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],

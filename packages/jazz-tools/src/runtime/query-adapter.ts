@@ -4,8 +4,8 @@
  * QueryBuilder produces a compact JSON structure:
  * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
  *
- * Runtime semantics are driven by `relation_ir`. Legacy top-level query fields
- * are still populated in minimal form to satisfy the wire/query schema.
+ * Runtime semantics are driven by `relation_ir`. The wire payload keeps only
+ * fields required for execution (`table`, `relation_ir`, and `array_subqueries`).
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
@@ -77,12 +77,34 @@ function stripQualifier(column: string): string {
   return parts[parts.length - 1] ?? column;
 }
 
-/**
- * Map public QueryBuilder columns to runtime/internal column names.
- */
-function toRuntimeColumn(column: string): string {
-  // Runtime indices use "_id" for the implicit row id column.
-  return column === "id" ? "_id" : column;
+function toTimestampMs(value: unknown): number {
+  if (value instanceof Date) {
+    const ts = value.getTime();
+    if (!Number.isFinite(ts)) {
+      throw new Error("Invalid Date value for timestamp condition");
+    }
+    return ts;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error("Invalid number value for timestamp condition");
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const fromNumber = Number(trimmed);
+      if (Number.isFinite(fromNumber)) {
+        return fromNumber;
+      }
+    }
+    const fromIso = Date.parse(trimmed);
+    if (Number.isFinite(fromIso)) {
+      return fromIso;
+    }
+  }
+  throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
 }
 
 /**
@@ -91,6 +113,25 @@ function toRuntimeColumn(column: string): string {
 function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { Null: null };
+  }
+  if (columnType.type === "Timestamp" && value instanceof Date) {
+    return { Timestamp: toTimestampMs(value) };
+  }
+  if (columnType.type === "Bytea") {
+    if (value instanceof Uint8Array) {
+      return { Bytea: [...value] };
+    }
+    if (Array.isArray(value)) {
+      const bytes = value.map((entry) => {
+        const n = Number(entry);
+        if (!Number.isInteger(n) || n < 0 || n > 255) {
+          throw new Error("Bytea values must contain integers in range 0..255");
+        }
+        return n;
+      });
+      return { Bytea: bytes };
+    }
+    throw new Error("Bytea values must be Uint8Array or byte arrays");
   }
   if (Array.isArray(value)) {
     if (columnType.type !== "Array") {
@@ -105,66 +146,26 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
   }
   if (typeof value === "number") {
     if (columnType?.type === "Timestamp") {
-      return { Timestamp: value };
+      return { Timestamp: toTimestampMs(value) };
     }
     // Use Integer for all numbers - WASM will handle type coercion
     return { Integer: value };
   }
   if (typeof value === "string") {
+    if (columnType?.type === "Timestamp") {
+      return { Timestamp: toTimestampMs(value) };
+    }
     if (columnType?.type === "Uuid") {
       return { Uuid: value };
+    }
+    if (columnType?.type === "Enum" && !columnType.variants.includes(value)) {
+      throw new Error(
+        `Invalid enum value "${value}". Expected one of: ${columnType.variants.join(", ")}`,
+      );
     }
     return { Text: value };
   }
   throw new Error(`Unsupported value type: ${typeof value}`);
-}
-
-/**
- * Translate operator string to Condition enum variant.
- */
-function toCondition(
-  cond: { column: string; op: string; value: unknown },
-  schema: WasmSchema,
-  table: string,
-): object {
-  const column = stripQualifier(cond.column);
-  const columnType = getColumnType(schema, table, column);
-  if (!columnType) {
-    throw new Error(`Unknown column "${column}" in table "${table}"`);
-  }
-  const valueTypeForCondition =
-    cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const value = toWasmValue(cond.value, valueTypeForCondition);
-  const runtimeColumn = toRuntimeColumn(column);
-
-  switch (cond.op) {
-    case "eq":
-      return { Eq: { column: runtimeColumn, value } };
-    case "ne":
-      return { Ne: { column: runtimeColumn, value } };
-    case "gt":
-      return { Gt: { column: runtimeColumn, value } };
-    case "gte":
-      return { Ge: { column: runtimeColumn, value } };
-    case "lt":
-      return { Lt: { column: runtimeColumn, value } };
-    case "lte":
-      return { Le: { column: runtimeColumn, value } };
-    case "isNull":
-      return { IsNull: { column: runtimeColumn } };
-    case "contains":
-      return { Contains: { column: runtimeColumn, value } };
-    case "in":
-      // Handle IN operator with array of values
-      if (Array.isArray(cond.value)) {
-        return {
-          In: { column: runtimeColumn, values: cond.value.map((v) => toWasmValue(v, columnType)) },
-        };
-      }
-      throw new Error(`"in" operator requires an array value`);
-    default:
-      throw new Error(`Unknown operator: ${cond.op}`);
-  }
 }
 
 /**
@@ -255,6 +256,12 @@ function conditionToRelPredicate(
           type: "Literal" as const,
           value: toWasmValue(cond.value, valueTypeForCondition),
         };
+  if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
+    throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
+  }
+  if (columnType.type === "Bytea" && cond.op === "contains") {
+    throw new Error(`BYTEA column "${column}" does not support contains filters.`);
+  }
   switch (cond.op) {
     case "eq":
       return { type: "Cmp", left: columnRef, op: "Eq", right: rightLiteral };
@@ -263,35 +270,35 @@ function conditionToRelPredicate(
         type: "Cmp",
         left: columnRef,
         op: "Ne",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "gt":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Gt",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "gte":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Ge",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "lt":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Lt",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "lte":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Le",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "isNull":
       return { type: "IsNull", column: columnRef };
@@ -518,6 +525,12 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   relation = lowerHopsToRelExpr(relation, builder.table, hops, relations, schema);
 
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
+    for (const [column] of builder.orderBy) {
+      const columnType = getColumnType(schema, builder.table, stripQualifier(column));
+      if (columnType?.type === "Bytea") {
+        throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+      }
+    }
     relation = {
       type: "OrderBy",
       input: relation,
@@ -559,23 +572,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const relation = translateBuilderToRelationIr(builderJson, schema);
   const query = {
     table: builder.table,
-    branches: [],
-    disjuncts: [
-      {
-        conditions: (builder.conditions ?? []).map((cond) =>
-          toCondition(cond, schema, builder.table),
-        ),
-      },
-    ],
-    order_by: (builder.orderBy ?? []).map(([column, direction]) => [
-      column,
-      direction === "desc" ? "Descending" : "Ascending",
-    ]),
-    offset: typeof builder.offset === "number" ? builder.offset : 0,
-    limit: typeof builder.limit === "number" ? builder.limit : null,
-    include_deleted: false,
     array_subqueries: toArraySubqueries(builder.includes ?? {}, builder.table, relations),
-    joins: [],
     relation_ir: relation,
   };
 

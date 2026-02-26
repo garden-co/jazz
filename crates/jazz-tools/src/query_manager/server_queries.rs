@@ -5,7 +5,7 @@ use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, PendingPermissionCheck, QueryId};
+use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
 
 use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
@@ -14,6 +14,62 @@ use super::session::Session;
 use super::types::{ComposedBranchName, RowDescriptor, Schema, TableName, TableSchema, Value};
 
 impl QueryManager {
+    fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
+        self.sync_manager
+            .get_client(client_id)
+            .map(|client| matches!(client.role, ClientRole::Peer | ClientRole::Admin))
+            .unwrap_or(false)
+    }
+
+    fn scope_with_policy_context_rows_from_object_manager(
+        base_scope: &HashSet<(ObjectId, BranchName)>,
+        graph: &super::graph::QueryGraph,
+        branches: &[String],
+        object_manager: &crate::object_manager::ObjectManager,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        let mut scope = base_scope.clone();
+
+        let policy_tables: HashSet<TableName> = graph
+            .policy_filter_tables
+            .iter()
+            .map(|(_, table)| *table)
+            .collect();
+        if policy_tables.is_empty() {
+            return scope;
+        }
+
+        let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
+        for (object_id, object) in &object_manager.objects {
+            let Some(table_name) = object.metadata.get(MetadataKey::Table.as_str()) else {
+                continue;
+            };
+            if !policy_tables
+                .iter()
+                .any(|table| table.as_str() == table_name)
+            {
+                continue;
+            }
+
+            for branch_name in &branch_names {
+                let Some(branch) = object.branches.get(branch_name) else {
+                    continue;
+                };
+                let has_live_tip = branch.tips.iter().any(|tip_id| {
+                    branch
+                        .commits
+                        .get(tip_id)
+                        .map(|commit| !commit.content.is_empty())
+                        .unwrap_or(false)
+                });
+                if has_live_tip {
+                    scope.insert((*object_id, *branch_name));
+                }
+            }
+        }
+
+        scope
+    }
+
     /// Process pending query subscriptions from downstream clients.
     ///
     /// For each pending subscription:
@@ -77,6 +133,8 @@ impl QueryManager {
                 continue;
             };
 
+            let sync_policy_context_rows = self.should_sync_policy_context_rows(sub.client_id);
+
             // Initial settle to populate the graph
             let om = &mut self.sync_manager.object_manager;
             let storage_ref: &dyn Storage = storage;
@@ -127,8 +185,19 @@ impl QueryManager {
 
             let _delta = graph.settle(storage_ref, row_loader);
 
-            // Get contributing ObjectIds
-            let scope = graph.contributing_object_ids();
+            // Query result-set scope is always synced.
+            let result_scope = graph.contributing_object_ids();
+            // Trusted clients (Peer/Admin) also need policy context rows.
+            let scope = if sync_policy_context_rows {
+                Self::scope_with_policy_context_rows_from_object_manager(
+                    &result_scope,
+                    &graph,
+                    &branches,
+                    om,
+                )
+            } else {
+                result_scope
+            };
 
             // Set scope in SyncManager (triggers initial sync)
             self.sync_manager.set_client_query_scope(
@@ -202,6 +271,19 @@ impl QueryManager {
         )> = Vec::new();
         let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
 
+        let trusted_clients: HashSet<ClientId> = self
+            .sync_manager
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                if matches!(client.role, ClientRole::Peer | ClientRole::Admin) {
+                    Some(*client_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let om = &mut self.sync_manager.object_manager;
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
@@ -240,17 +322,29 @@ impl QueryManager {
                     .map(|(_, content, commit_id)| (content, commit_id))
             };
 
-            // Settle the graph
-            let _delta = sub.graph.settle(storage, row_loader);
+            let new_scope = {
+                // Settle the graph
+                let _delta = sub.graph.settle(storage, row_loader);
 
-            // Emit QuerySettled on first settlement
-            if !sub.settled_once {
-                sub.settled_once = true;
-                settled_notifications.push((*client_id, *query_id));
-            }
+                // Emit QuerySettled on first settlement
+                if !sub.settled_once {
+                    sub.settled_once = true;
+                    settled_notifications.push((*client_id, *query_id));
+                }
 
-            // Check if scope changed
-            let new_scope = sub.graph.contributing_object_ids();
+                // Check if scope changed
+                let result_scope = sub.graph.contributing_object_ids();
+                if trusted_clients.contains(client_id) {
+                    Self::scope_with_policy_context_rows_from_object_manager(
+                        &result_scope,
+                        &sub.graph,
+                        branches,
+                        om,
+                    )
+                } else {
+                    result_scope
+                }
+            };
             if new_scope != sub.last_scope {
                 scope_updates.push((
                     *client_id,
@@ -297,6 +391,12 @@ impl QueryManager {
         storage: &mut H,
         check: PendingPermissionCheck,
     ) {
+        let branch = match &check.payload {
+            SyncPayload::ObjectUpdated { branch_name, .. }
+            | SyncPayload::ObjectTruncated { branch_name, .. } => branch_name.as_str().to_string(),
+            _ => self.current_branch(),
+        };
+
         // Get table name from metadata
         let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => TableName::new(t),
@@ -317,9 +417,24 @@ impl QueryManager {
             }
         };
 
+        if check.operation == Operation::Insert
+            && let Some(new_content) = check.new_content.as_ref()
+            && let Err(err) = self.validate_foreign_keys_for_content(
+                storage,
+                &table_name,
+                &table_schema.descriptor,
+                new_content,
+                &branch,
+            )
+        {
+            self.sync_manager
+                .reject_permission_check(check, err.to_string());
+            return;
+        }
+
         // Handle UPDATE specially - needs both USING and WITH CHECK
         if check.operation == Operation::Update {
-            self.evaluate_update_permission(storage, check, table_name, table_schema);
+            self.evaluate_update_permission(storage, check, table_name, table_schema, &branch);
             return;
         }
 
@@ -384,9 +499,62 @@ impl QueryManager {
             return;
         }
 
-        // Has complex clauses - create policy graphs for them
+        let mut graph_clauses = Vec::new();
+        for clause in result.complex_clauses {
+            match clause {
+                ComplexClause::InheritsReferencing {
+                    operation,
+                    source_table,
+                    via_column,
+                    max_depth,
+                } => {
+                    let (object_id, branch_name) = match &check.payload {
+                        SyncPayload::ObjectUpdated {
+                            object_id,
+                            branch_name,
+                            ..
+                        } => (*object_id, branch_name.as_str()),
+                        _ => {
+                            let reason = format!(
+                                "{:?} denied by policy on table {} (missing row context for INHERITS REFERENCING)",
+                                check.operation, table_name.0
+                            );
+                            self.sync_manager.reject_permission_check(check, reason);
+                            return;
+                        }
+                    };
+
+                    if !self.evaluate_referencing_inherited_access(
+                        storage,
+                        table_name,
+                        object_id,
+                        operation,
+                        &source_table,
+                        &via_column,
+                        max_depth,
+                        &check.session,
+                        branch_name,
+                    ) {
+                        let reason = format!(
+                            "{:?} denied by policy on table {} (INHERITS REFERENCING failed)",
+                            check.operation, table_name.0
+                        );
+                        self.sync_manager.reject_permission_check(check, reason);
+                        return;
+                    }
+                }
+                other => graph_clauses.push(other),
+            }
+        }
+
+        if graph_clauses.is_empty() {
+            self.sync_manager.approve_permission_check(storage, check);
+            return;
+        }
+
+        // Remaining complex clauses use policy graphs.
         let graphs = self.create_policy_graphs_for_complex_clauses(
-            &result.complex_clauses,
+            &graph_clauses,
             content,
             &table_schema.descriptor,
             &table_name,
@@ -424,7 +592,22 @@ impl QueryManager {
         check: PendingPermissionCheck,
         table_name: TableName,
         table_schema: TableSchema,
+        branch: &str,
     ) {
+        if let Some(new_content) = check.new_content.as_ref()
+            && let Err(err) = self.validate_foreign_keys_for_content(
+                storage,
+                &table_name,
+                &table_schema.descriptor,
+                new_content,
+                branch,
+            )
+        {
+            self.sync_manager
+                .reject_permission_check(check, err.to_string());
+            return;
+        }
+
         let using_policy = table_schema.policies.update.using.as_ref();
         let check_policy = table_schema.policies.update.with_check.as_ref();
 
@@ -511,9 +694,63 @@ impl QueryManager {
             return;
         }
 
-        // Create policy graphs for all complex clauses
+        let row_context = match &check.payload {
+            SyncPayload::ObjectUpdated {
+                object_id,
+                branch_name,
+                ..
+            } => Some((*object_id, branch_name.as_str())),
+            _ => None,
+        };
+
+        let mut graph_inputs: Vec<(ComplexClause, Vec<u8>)> = Vec::new();
+        for (clause, content) in all_complex_clauses {
+            match clause {
+                ComplexClause::InheritsReferencing {
+                    operation,
+                    source_table,
+                    via_column,
+                    max_depth,
+                } => {
+                    let Some((object_id, branch_name)) = row_context else {
+                        let reason = format!(
+                            "Update denied by policy on table {} (missing row context for INHERITS REFERENCING)",
+                            table_name.0
+                        );
+                        self.sync_manager.reject_permission_check(check, reason);
+                        return;
+                    };
+                    if !self.evaluate_referencing_inherited_access(
+                        storage,
+                        table_name,
+                        object_id,
+                        operation,
+                        &source_table,
+                        &via_column,
+                        max_depth,
+                        &check.session,
+                        branch_name,
+                    ) {
+                        let reason = format!(
+                            "Update denied by policy on table {} (INHERITS REFERENCING failed)",
+                            table_name.0
+                        );
+                        self.sync_manager.reject_permission_check(check, reason);
+                        return;
+                    }
+                }
+                other => graph_inputs.push((other, content)),
+            }
+        }
+
+        if graph_inputs.is_empty() {
+            self.sync_manager.approve_permission_check(storage, check);
+            return;
+        }
+
+        // Create policy graphs for remaining complex clauses
         let mut graphs = Vec::new();
-        for (clause, content) in &all_complex_clauses {
+        for (clause, content) in &graph_inputs {
             let clause_graphs = self.create_policy_graphs_for_complex_clauses(
                 std::slice::from_ref(clause),
                 content,
@@ -635,6 +872,9 @@ impl QueryManager {
                     if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
                         graphs.push(graph);
                     }
+                }
+                ComplexClause::InheritsReferencing { .. } => {
+                    // Evaluated directly in write permission checks (needs target row context).
                 }
             }
         }

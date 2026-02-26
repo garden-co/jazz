@@ -149,7 +149,7 @@ The TS runtime intentionally treats upstream attachment as replay boundary for s
 - Backoff uses exponential delay with jitter (`300ms * 2^attempt`, capped at `10s`, plus `0-199ms` jitter).
 
 > `packages/jazz-tools/src/runtime/client.ts:572-663`
-> `packages/jazz-tools/src/worker/groove-worker.ts:152-241`
+> `packages/jazz-tools/src/worker/jazz-worker.ts:152-241`
 
 ## Part 7: React Bindings
 

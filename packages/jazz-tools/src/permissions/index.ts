@@ -377,6 +377,26 @@ export interface AllowedToContext {
   insert(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
   update(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
   delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
+  readReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
+  insertReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
+  updateReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
+  deleteReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
 }
 
 interface ExistsBuilder<WhereInput> {
@@ -441,25 +461,32 @@ type PermissionWhereInput<T> =
 class UpdateRuleBuilder<WhereInput, Row> {
   private oldCondition?: Condition;
   private newCondition?: Condition;
+  private isRegistered = false;
 
-  constructor(private readonly table: string) {}
+  constructor(
+    private readonly table: string,
+    private readonly registerRule?: (ruleLike: RuleLike) => void,
+  ) {}
 
   where(
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): Rule {
     const condition = resolveWhereInput(input);
-    return {
+    const rule: Rule = {
       table: this.table,
       action: "update",
       using: condition,
       withCheck: condition,
     };
+    this.registerRule?.(rule);
+    return rule;
   }
 
   whereOld(
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): this {
     this.oldCondition = resolveWhereInput(input);
+    this.registerBuilder();
     return this;
   }
 
@@ -467,7 +494,16 @@ class UpdateRuleBuilder<WhereInput, Row> {
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): this {
     this.newCondition = resolveWhereInput(input);
+    this.registerBuilder();
     return this;
+  }
+
+  private registerBuilder(): void {
+    if (this.isRegistered) {
+      return;
+    }
+    this.isRegistered = true;
+    this.registerRule?.(this as unknown as RuleLike);
   }
 
   toRule(): Rule {
@@ -485,25 +521,33 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
 export function definePermissions<TApp extends AppLike>(
   app: TApp,
-  factory: (ctx: PolicyContext<TApp>) => RuleLike[] | RuleLike,
+  factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
-  const fkColumnsByTable = collectFkColumnsByTable(app);
+  const fkReferencesByTable = collectFkReferencesByTable(app);
   const relationsByTable = collectRelationsByTable(app);
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
+  const rules: RuleLike[] = [];
+  const seenRules = new Set<RuleLike>();
+  const collectRule = (ruleLike: RuleLike): void => {
+    if (seenRules.has(ruleLike)) {
+      return;
+    }
+    seenRules.add(ruleLike);
+    rules.push(ruleLike);
+  };
   const ctx = {
-    policy: buildPolicyContext(tableNames, relationsByTable),
+    policy: buildPolicyContext(tableNames, relationsByTable, collectRule),
     anyOf,
     allOf,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
-  const output = factory(ctx);
-  const rules = Array.isArray(output) ? output : [output];
-  return compileRules(rules, fkColumnsByTable);
+  factory(ctx);
+  return compileRules(rules, fkReferencesByTable);
 }
 
-function collectFkColumnsByTable(app: AppLike): Map<string, Set<string>> {
-  const result = new Map<string, Set<string>>();
+function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
+  const result = new Map<string, Map<string, string>>();
   const schema = (app as { wasmSchema?: unknown }).wasmSchema;
   if (!schema || typeof schema !== "object") {
     return result;
@@ -515,10 +559,10 @@ function collectFkColumnsByTable(app: AppLike): Map<string, Set<string>> {
   }
 
   for (const [tableName, table] of Object.entries(typedSchema.tables)) {
-    const fkColumns = new Set<string>();
+    const fkColumns = new Map<string, string>();
     for (const column of table.columns ?? []) {
       if (column.references) {
-        fkColumns.add(column.name);
+        fkColumns.set(column.name, column.references);
       }
     }
     result.set(tableName, fkColumns);
@@ -550,10 +594,11 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
 function buildPolicyContext(
   tableNames: string[],
   relationsByTable: Map<string, Relation[]>,
+  collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
-    context[table] = buildTablePolicyBuilder(table, relationsByTable);
+    context[table] = buildTablePolicyBuilder(table, relationsByTable, collectRule);
   }
   context.exists = (relation: PermissionRelation): ExistsRelationCondition => ({
     __jazzPermissionKind: "exists-relation",
@@ -565,17 +610,24 @@ function buildPolicyContext(
 function buildTablePolicyBuilder(
   table: string,
   relationsByTable: Map<string, Relation[]>,
+  collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
+  const registerRule = (rule: Rule): Rule => {
+    collectRule(rule);
+    return rule;
+  };
   const read: ActionBuilder<unknown, unknown> = {
-    where: (input) => ({ table, action: "read", using: resolveWhereInput(input) }),
+    where: (input) => registerRule({ table, action: "read", using: resolveWhereInput(input) }),
   };
   const insert: ActionBuilder<unknown, unknown> = {
-    where: (input) => ({ table, action: "insert", withCheck: resolveWhereInput(input) }),
+    where: (input) =>
+      registerRule({ table, action: "insert", withCheck: resolveWhereInput(input) }),
   };
   const del: ActionBuilder<unknown, unknown> = {
-    where: (input) => ({ table, action: "delete", using: resolveWhereInput(input) }),
+    where: (input) => registerRule({ table, action: "delete", using: resolveWhereInput(input) }),
   };
-  const updateFactory = (): UpdateRuleBuilder<unknown, unknown> => new UpdateRuleBuilder(table);
+  const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
+    new UpdateRuleBuilder(table, collectRule);
   const exists: ExistsBuilder<unknown> = {
     where: (input) => ({
       __jazzPermissionKind: "exists",
@@ -1075,6 +1127,32 @@ function createAllowedToContext(): AllowedToContext {
     return expr;
   };
 
+  const inheritsReferencingExpr = (
+    operation: "Select" | "Insert" | "Update" | "Delete",
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr => {
+    const maxDepth = options?.maxDepth;
+    if (maxDepth !== undefined) {
+      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+        throw new Error(
+          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a positive integer.`,
+        );
+      }
+    }
+    const expr: PolicyExpr = {
+      type: "InheritsReferencing",
+      operation,
+      source_table: relationJoinTargetToTable(sourceTable),
+      via_column: fkColumn,
+    };
+    if (maxDepth !== undefined) {
+      expr.max_depth = maxDepth;
+    }
+    return expr;
+  };
+
   return {
     read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
       return inheritsExpr("Select", fkColumn, options);
@@ -1087,6 +1165,34 @@ function createAllowedToContext(): AllowedToContext {
     },
     delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
       return inheritsExpr("Delete", fkColumn, options);
+    },
+    readReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Select", sourceTable, fkColumn, options);
+    },
+    insertReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Insert", sourceTable, fkColumn, options);
+    },
+    updateReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Update", sourceTable, fkColumn, options);
+    },
+    deleteReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Delete", sourceTable, fkColumn, options);
     },
   };
 }
@@ -1211,10 +1317,34 @@ function columnFilterToExprs(
           exprs.push(value ? { type: "IsNull", column } : { type: "IsNotNull", column });
           break;
         case "contains":
+          exprs.push({
+            type: "Contains",
+            column,
+            value: toPolicyValue(value, options),
+          });
+          break;
         case "in":
-          throw new Error(
-            `Where operator "${op}" is not yet supported in permissions DSL for "${column}".`,
-          );
+          if (isSessionRefValue(value)) {
+            exprs.push({
+              type: "In",
+              column,
+              session_path: value.path,
+            });
+            break;
+          }
+          if (!Array.isArray(value)) {
+            throw new Error(`"${column}.in" expects an array or session reference.`);
+          }
+          if (value.length === 0) {
+            exprs.push({ type: "False" });
+            break;
+          }
+          exprs.push({
+            type: "InList",
+            column,
+            values: value.map((entry) => toPolicyValue(entry, options)),
+          });
+          break;
         default:
           throw new Error(`Unsupported where operator "${op}" in permissions DSL.`);
       }
@@ -1287,7 +1417,7 @@ function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): Compou
 
 function compileRules(
   rules: RuleLike[],
-  fkColumnsByTable: Map<string, Set<string>>,
+  fkReferencesByTable: Map<string, Map<string, string>>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
   for (const ruleLike of rules) {
@@ -1299,23 +1429,23 @@ function compileRules(
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
-          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
         });
         break;
       case "insert":
         tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
-          with_check: compileCondition(rule.withCheck, rule.table, fkColumnsByTable),
+          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
         });
         break;
       case "update":
         tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
-          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
-          with_check: compileCondition(rule.withCheck, rule.table, fkColumnsByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
+          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
         });
         break;
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
-          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
         });
         break;
       default:
@@ -1359,13 +1489,13 @@ function mergeExprWithOr(left?: PolicyExpr, right?: PolicyExpr): PolicyExpr | un
 function compileCondition(
   condition: Condition | undefined,
   table: string,
-  fkColumnsByTable: Map<string, Set<string>>,
+  fkReferencesByTable: Map<string, Map<string, string>>,
 ): PolicyExpr | undefined {
   if (!condition) {
     return undefined;
   }
   if (isPolicyExpr(condition)) {
-    assertInheritsColumns(condition, table, fkColumnsByTable);
+    assertInheritsColumns(condition, table, fkReferencesByTable);
     return condition;
   }
   if (isExistsRelationCondition(condition)) {
@@ -1376,7 +1506,7 @@ function compileCondition(
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
-    assertInheritsColumns(compiledCondition, table, fkColumnsByTable);
+    assertInheritsColumns(compiledCondition, table, fkReferencesByTable);
     if (!compiledCondition) {
       throw new Error(
         `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
@@ -1390,7 +1520,7 @@ function compileCondition(
   }
   if (isCompoundCondition(condition)) {
     const compiledChildren = condition.conditions.map((child) =>
-      compileCondition(child, table, fkColumnsByTable),
+      compileCondition(child, table, fkReferencesByTable),
     );
     const exprs = compiledChildren.filter((expr): expr is PolicyExpr => Boolean(expr));
     if (exprs.length === 0) {
@@ -1407,12 +1537,12 @@ function compileCondition(
 function assertInheritsColumns(
   expr: PolicyExpr,
   table: string,
-  fkColumnsByTable: Map<string, Set<string>>,
+  fkReferencesByTable: Map<string, Map<string, string>>,
 ): void {
   const check = (node: PolicyExpr, currentTable: string): void => {
     switch (node.type) {
       case "Inherits": {
-        const fkColumns = fkColumnsByTable.get(currentTable);
+        const fkColumns = fkReferencesByTable.get(currentTable);
         if (!fkColumns) {
           throw new Error(
             `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${currentTable}": ` +
@@ -1420,11 +1550,36 @@ function assertInheritsColumns(
           );
         }
         if (!fkColumns.has(node.via_column)) {
-          const fkList = [...fkColumns].sort();
+          const fkList = [...fkColumns.keys()].sort();
           const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
           throw new Error(
             `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${currentTable}": ` +
               `column is not a foreign key reference. Available FK columns: ${available}.`,
+          );
+        }
+        break;
+      }
+      case "InheritsReferencing": {
+        const sourceFks = fkReferencesByTable.get(node.source_table);
+        if (!sourceFks) {
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+              `source table metadata is missing in app.wasmSchema.`,
+          );
+        }
+        const referenced = sourceFks.get(node.via_column);
+        if (!referenced) {
+          const fkList = [...sourceFks.keys()].sort();
+          const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+              `column is not a foreign key reference on source table. Available FK columns: ${available}.`,
+          );
+        }
+        if (referenced !== currentTable) {
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+              `source FK references "${referenced}" but this rule is for "${currentTable}".`,
           );
         }
         break;

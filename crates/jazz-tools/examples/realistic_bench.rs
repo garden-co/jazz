@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use groove::{
+use jazz_tools::{
     AppContext, AppId, ColumnType, JazzClient, ObjectId, PersistenceTier, QueryBuilder, Schema,
     SchemaBuilder, TableSchema, Value,
 };

@@ -15,8 +15,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use groove::schema_manager::{AppId, SchemaManager};
-//! use groove::query_manager::types::{SchemaBuilder, TableSchema, ColumnType};
+//! use crate::schema_manager::{AppId, SchemaManager};
+//! use crate::query_manager::types::{SchemaBuilder, TableSchema, ColumnType};
 //!
 //! let app_id = AppId::from_name("my-app");
 //! let schema = SchemaBuilder::new()
@@ -45,6 +45,7 @@ pub mod encoding;
 pub mod files;
 pub mod lens;
 pub mod manager;
+pub mod rehydrate;
 pub mod sql;
 pub mod transformer;
 pub mod types;
@@ -68,6 +69,7 @@ pub use files::{
 };
 pub use lens::{Direction, Lens, LensOp, LensTransform};
 pub use manager::SchemaManager;
+pub use rehydrate::rehydrate_schema_manager_from_manifest;
 pub use sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};
 pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,

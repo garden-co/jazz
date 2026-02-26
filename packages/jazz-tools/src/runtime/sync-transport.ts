@@ -1,7 +1,7 @@
 /**
  * Shared sync transport utilities.
  *
- * Used by both `client.ts` (main thread) and `groove-worker.ts` (worker)
+ * Used by both `client.ts` (main thread) and `jazz-worker.ts` (worker)
  * to avoid duplicating binary frame parsing, sync POST logic, and
  * catalogue payload detection.
  */
@@ -35,6 +35,263 @@ export interface LinkExternalResponse {
 export interface StreamCallbacks {
   onSyncMessage(payloadJson: string): void;
   onConnected?(clientId: string): void;
+}
+
+export interface SyncStreamControllerOptions {
+  logPrefix?: string;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getClientId(): string;
+  setClientId(clientId: string): void;
+  onConnected(): void;
+  onDisconnected(): void;
+  onSyncMessage(payloadJson: string): void;
+}
+
+/**
+ * Minimal runtime surface required for sync stream lifecycle wiring.
+ */
+export interface RuntimeSyncTarget {
+  addServer(): void;
+  removeServer(): void;
+  onSyncMessageReceived(messageJson: string): void;
+}
+
+export interface RuntimeSyncStreamControllerOptions {
+  logPrefix?: string;
+  getRuntime(): RuntimeSyncTarget | null | undefined;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getClientId(): string;
+  setClientId(clientId: string): void;
+}
+
+/**
+ * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
+ *
+ * Keeps stream state and backoff policy in one place so both main-thread and
+ * worker runtimes follow the same behavior.
+ */
+export class SyncStreamController {
+  private readonly logPrefix: string;
+  private streamAbortController: AbortController | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private streamConnecting = false;
+  private streamAttached = false;
+  private activeServerUrl: string | null = null;
+  private activeServerPathPrefix: string | undefined;
+  private stopped = true;
+
+  constructor(private readonly options: SyncStreamControllerOptions) {
+    this.logPrefix = options.logPrefix ?? "";
+  }
+
+  start(serverUrl: string, pathPrefix?: string): void {
+    this.stop();
+    this.stopped = false;
+    this.activeServerUrl = serverUrl;
+    this.activeServerPathPrefix = pathPrefix;
+    this.connectStream();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.activeServerUrl = null;
+    this.activeServerPathPrefix = undefined;
+    this.clearReconnectTimer();
+    this.abortStream();
+    this.detachServer();
+  }
+
+  updateAuth(): void {
+    this.abortStream();
+    this.detachServer();
+    if (this.activeServerUrl && !this.stopped) {
+      this.scheduleReconnect();
+    }
+  }
+
+  notifyTransportFailure(): void {
+    this.detachServer();
+    this.scheduleReconnect();
+  }
+
+  getServerUrl(): string | null {
+    return this.activeServerUrl;
+  }
+
+  getPathPrefix(): string | undefined {
+    return this.activeServerPathPrefix;
+  }
+
+  private attachServer(): void {
+    if (this.streamAttached) {
+      this.options.onDisconnected();
+    }
+    this.options.onConnected();
+    this.streamAttached = true;
+    this.reconnectAttempt = 0;
+  }
+
+  private detachServer(): void {
+    if (!this.streamAttached) return;
+    this.options.onDisconnected();
+    this.streamAttached = false;
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private abortStream(): void {
+    if (!this.streamAbortController) return;
+    this.streamAbortController.abort();
+    this.streamAbortController = null;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || !this.activeServerUrl) return;
+    if (this.reconnectTimer) return;
+
+    const baseMs = 300;
+    const maxMs = 10_000;
+    const jitterMs = Math.floor(Math.random() * 200);
+    const delayMs = Math.min(maxMs, baseMs * 2 ** this.reconnectAttempt) + jitterMs;
+    this.reconnectAttempt += 1;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connectStream();
+    }, delayMs);
+  }
+
+  private async connectStream(): Promise<void> {
+    if (this.streamConnecting || this.stopped || !this.activeServerUrl) return;
+    this.streamConnecting = true;
+
+    const serverUrl = this.activeServerUrl;
+    const serverPathPrefix = this.activeServerPathPrefix;
+    const headers: Record<string, string> = {
+      Accept: "application/octet-stream",
+    };
+    applyUserAuthHeaders(headers, this.options.getAuth());
+
+    this.streamAbortController = new AbortController();
+
+    try {
+      const eventsUrl = buildEventsUrl(serverUrl, this.options.getClientId(), serverPathPrefix);
+
+      const response = await fetch(eventsUrl, {
+        headers,
+        signal: this.streamAbortController.signal,
+      });
+
+      if (!response.ok) {
+        console.error(`${this.logPrefix}Stream connect failed: ${response.status}`);
+        this.detachServer();
+        this.streamConnecting = false;
+        this.scheduleReconnect();
+        return;
+      }
+
+      if (!response.body) {
+        throw new Error("Stream response did not include a body");
+      }
+
+      const reader = response.body.getReader();
+      let connected = false;
+      await readBinaryFrames(
+        reader,
+        {
+          onSyncMessage: this.options.onSyncMessage,
+          onConnected: (clientId) => {
+            this.options.setClientId(clientId);
+            if (!connected) {
+              connected = true;
+              this.attachServer();
+            }
+          },
+        },
+        this.logPrefix,
+      );
+    } catch (e: any) {
+      if (e?.name === "AbortError") return;
+      console.error(`${this.logPrefix}Stream connect error:`, e);
+    } finally {
+      this.streamConnecting = false;
+    }
+
+    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
+      this.detachServer();
+      this.scheduleReconnect();
+    }
+  }
+}
+
+/**
+ * Build a stream controller bound to a runtime's server/sync hooks.
+ */
+export function createRuntimeSyncStreamController(
+  options: RuntimeSyncStreamControllerOptions,
+): SyncStreamController {
+  return new SyncStreamController({
+    logPrefix: options.logPrefix,
+    getAuth: options.getAuth,
+    getClientId: options.getClientId,
+    setClientId: options.setClientId,
+    onConnected: () => options.getRuntime()?.addServer(),
+    onDisconnected: () => options.getRuntime()?.removeServer(),
+    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+  });
+}
+
+export interface SyncOutboxRouterOptions {
+  logPrefix?: string;
+  onServerPayload(payload: unknown): void | Promise<void>;
+  onClientPayload?(payloadJson: string): void;
+  onServerPayloadError?(error: unknown): void;
+}
+
+/**
+ * Create a shared runtime outbox router for server/client destinations.
+ */
+export function createSyncOutboxRouter(
+  options: SyncOutboxRouterOptions,
+): (envelope: string) => void {
+  const logPrefix = options.logPrefix ?? "";
+
+  return (envelope: string) => {
+    let parsed: { destination?: unknown; payload?: unknown };
+    try {
+      parsed = JSON.parse(envelope) as { destination?: unknown; payload?: unknown };
+    } catch (error) {
+      console.error(`${logPrefix}Sync envelope parse error:`, error);
+      return;
+    }
+
+    const destination = parsed.destination;
+    const payload = parsed.payload;
+    const isObjectDestination = destination !== null && typeof destination === "object";
+
+    if (isObjectDestination && "Client" in destination) {
+      const payloadJson = JSON.stringify(payload);
+      if (payloadJson !== undefined) {
+        options.onClientPayload?.(payloadJson);
+      }
+      return;
+    }
+
+    if (isObjectDestination && "Server" in destination) {
+      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
+        if (options.onServerPayloadError) {
+          options.onServerPayloadError(error);
+          return;
+        }
+        console.error(`${logPrefix}Sync POST error:`, error);
+      });
+    }
+  };
 }
 
 /**
@@ -131,11 +388,16 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
+  const cataloguePayload = isCataloguePayload(payload);
+  if (cataloguePayload && !auth.adminSecret) {
+    return;
+  }
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
-  if (isCataloguePayload(payload)) {
+  if (cataloguePayload) {
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }

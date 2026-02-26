@@ -7,96 +7,60 @@
  */
 
 import type {
-  WasmColumnDescriptor as GrooveWasmColumnDescriptor,
-  WasmColumnType as GrooveWasmColumnType,
-  WasmRow as GrooveWasmRow,
-  WasmRowDelta as GrooveWasmRowDelta,
-  WasmTableSchema as GrooveWasmTableSchema,
-  WasmValue as GrooveWasmValue,
+  WasmColumnDescriptor as JazzWasmColumnDescriptor,
+  WasmColumnType as JazzWasmColumnType,
+  WasmCmpOp as JazzWasmCmpOp,
+  WasmOperationPolicy as JazzWasmOperationPolicy,
+  WasmPolicyExpr as JazzWasmPolicyExpr,
+  WasmPolicyOperation as JazzWasmPolicyOperation,
+  WasmPolicyValue as JazzWasmPolicyValue,
+  WasmRow as JazzWasmRow,
+  WasmTableSchema as JazzWasmTableSchema,
+  WasmTablePolicies as JazzWasmTablePolicies,
+  WasmValue as JazzWasmValue,
 } from "jazz-wasm";
 
-export type Value = GrooveWasmValue;
-export type WasmRow = GrooveWasmRow;
-export type RowDelta = GrooveWasmRowDelta;
-export type ColumnType = GrooveWasmColumnType;
-export type ColumnDescriptor = GrooveWasmColumnDescriptor;
+export type Value = JazzWasmValue;
+export type WasmRow = JazzWasmRow;
+export type RowAdded = 0;
+export type RowRemoved = 1;
+export type RowUpdated = 2;
+export type RowChangeKind = RowAdded | RowRemoved | RowUpdated;
 
-export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
-export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
-
-export type PolicyValue =
-  | {
-      type: "Literal";
-      value: Value;
-    }
-  | {
-      type: "SessionRef";
-      path: string[];
-    };
-
-export type PolicyExpr =
-  | {
-      type: "Cmp";
-      column: string;
-      op: PolicyCmpOp;
-      value: PolicyValue;
-    }
-  | {
-      type: "IsNull";
-      column: string;
-    }
-  | {
-      type: "IsNotNull";
-      column: string;
-    }
-  | {
-      type: "In";
-      column: string;
-      session_path: string[];
-    }
-  | {
-      type: "Exists";
-      table: string;
-      condition: PolicyExpr;
-    }
-  | {
-      type: "Inherits";
-      operation: PolicyOperation;
-      via_column: string;
-      max_depth?: number;
-    }
-  | {
-      type: "And";
-      exprs: PolicyExpr[];
-    }
-  | {
-      type: "Or";
-      exprs: PolicyExpr[];
-    }
-  | {
-      type: "Not";
-      expr: PolicyExpr;
-    }
-  | {
-      type: "True";
-    }
-  | {
-      type: "False";
-    };
-
-export interface OperationPolicy {
-  using?: PolicyExpr;
-  with_check?: PolicyExpr;
+export interface WireRowDeltaAdded {
+  kind: RowAdded;
+  id: string;
+  index: number;
+  row: JazzWasmRow;
 }
 
-export interface TablePolicies {
-  select?: OperationPolicy;
-  insert?: OperationPolicy;
-  update?: OperationPolicy;
-  delete?: OperationPolicy;
+export interface WireRowDeltaRemoved {
+  kind: RowRemoved;
+  id: string;
+  index: number;
 }
 
-export interface TableSchema extends GrooveWasmTableSchema {
+export interface WireRowDeltaUpdated {
+  kind: RowUpdated;
+  id: string;
+  index: number;
+  row?: JazzWasmRow | null;
+}
+
+export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDeltaUpdated;
+
+export type RowDelta = WireRowChange[];
+export type ColumnType = JazzWasmColumnType;
+export type ColumnDescriptor = JazzWasmColumnDescriptor;
+
+export type PolicyOperation = JazzWasmPolicyOperation;
+export type PolicyCmpOp = JazzWasmCmpOp;
+export type PolicyValue = JazzWasmPolicyValue;
+export type PolicyExpr = JazzWasmPolicyExpr;
+export type OperationPolicy = JazzWasmOperationPolicy;
+export type TablePolicies = JazzWasmTablePolicies;
+
+export interface TableSchema extends JazzWasmTableSchema {
   policies?: TablePolicies;
 }
 

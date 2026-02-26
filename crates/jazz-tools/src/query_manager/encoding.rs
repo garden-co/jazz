@@ -4,6 +4,9 @@ use crate::object::ObjectId;
 
 use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
+/// Maximum payload size allowed for a single BYTEA value (1 MiB).
+pub const BYTEA_MAX_BYTES: usize = 1_048_576;
+
 /// Encoding error types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodingError {
@@ -19,6 +22,18 @@ pub enum EncodingError {
     NullNotAllowed { column: String },
     /// Binary data is malformed or too short.
     MalformedData { message: String },
+    /// BYTEA payload exceeds the configured per-cell limit.
+    ByteaTooLarge {
+        column: String,
+        actual: usize,
+        max: usize,
+    },
+    /// Requested comparison is unsupported for this column type.
+    UnsupportedComparison {
+        column: String,
+        column_type: ColumnType,
+        operation: String,
+    },
     /// Column index out of bounds.
     ColumnIndexOutOfBounds { index: usize, max: usize },
 }
@@ -47,6 +62,26 @@ impl std::fmt::Display for EncodingError {
             }
             EncodingError::MalformedData { message } => {
                 write!(f, "malformed data: {message}")
+            }
+            EncodingError::ByteaTooLarge {
+                column,
+                actual,
+                max,
+            } => {
+                write!(
+                    f,
+                    "bytea payload too large for column '{column}': {actual} bytes exceeds limit {max}"
+                )
+            }
+            EncodingError::UnsupportedComparison {
+                column,
+                column_type,
+                operation,
+            } => {
+                write!(
+                    f,
+                    "unsupported {operation} comparison for column '{column}' with type {column_type:?}"
+                )
             }
             EncodingError::ColumnIndexOutOfBounds { index, max } => {
                 write!(f, "column index {index} out of bounds (max {max})")
@@ -86,7 +121,7 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
 
     for (i, (col, val)) in descriptor.columns.iter().zip(values.iter()).enumerate() {
         // Validate type match
-        if !val.is_null() && val.column_type().is_some_and(|t| t != col.column_type) {
+        if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
             return Err(EncodingError::TypeMismatch {
                 column: col.name.to_string(),
                 expected: col.column_type.clone(),
@@ -99,6 +134,11 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
             return Err(EncodingError::NullNotAllowed {
                 column: col.name.to_string(),
             });
+        }
+
+        // Enforce BYTEA payload limits (including nested bytea in arrays/rows).
+        if !val.is_null() {
+            validate_value_size(val, &col.column_type, col.name_str())?;
         }
 
         if col.column_type.is_variable() {
@@ -128,6 +168,80 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
     Ok(result)
 }
 
+fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
+    match column_type {
+        ColumnType::Integer => matches!(value, Value::Integer(_)),
+        ColumnType::BigInt => matches!(value, Value::BigInt(_)),
+        ColumnType::Double => matches!(value, Value::Double(_)),
+        ColumnType::Boolean => matches!(value, Value::Boolean(_)),
+        ColumnType::Timestamp => matches!(value, Value::Timestamp(_)),
+        ColumnType::Uuid => matches!(value, Value::Uuid(_)),
+        ColumnType::Text => matches!(value, Value::Text(_)),
+        ColumnType::Bytea => matches!(value, Value::Bytea(_)),
+        ColumnType::Enum(variants) => match value {
+            Value::Text(s) => variants.contains(s),
+            _ => false,
+        },
+        ColumnType::Array(element_type) => match value {
+            Value::Array(elements) => elements.iter().all(|element| {
+                !element.is_null() && value_matches_column_type(element, element_type)
+            }),
+            _ => false,
+        },
+        ColumnType::Row(row_descriptor) => match value {
+            Value::Row(values) if values.len() == row_descriptor.columns.len() => values
+                .iter()
+                .zip(row_descriptor.columns.iter())
+                .all(|(inner_value, inner_column)| {
+                    if inner_value.is_null() {
+                        inner_column.nullable
+                    } else {
+                        value_matches_column_type(inner_value, &inner_column.column_type)
+                    }
+                }),
+            _ => false,
+        },
+    }
+}
+
+fn validate_bytea_size(column: &str, bytes: &[u8]) -> Result<(), EncodingError> {
+    if bytes.len() > BYTEA_MAX_BYTES {
+        return Err(EncodingError::ByteaTooLarge {
+            column: column.to_string(),
+            actual: bytes.len(),
+            max: BYTEA_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_value_size(
+    value: &Value,
+    column_type: &ColumnType,
+    column: &str,
+) -> Result<(), EncodingError> {
+    match (value, column_type) {
+        (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
+        (Value::Array(values), ColumnType::Array(element_type)) => {
+            for element in values {
+                validate_value_size(element, element_type, column)?;
+            }
+            Ok(())
+        }
+        (Value::Row(values), ColumnType::Row(row_descriptor)) => {
+            for (inner_value, inner_column) in values.iter().zip(row_descriptor.columns.iter()) {
+                validate_value_size(
+                    inner_value,
+                    &inner_column.column_type,
+                    inner_column.name_str(),
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Encode a fixed-size value to the buffer.
 fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
     if col.nullable {
@@ -145,6 +259,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
     match val {
         Value::Integer(n) => buf.extend_from_slice(&n.to_le_bytes()),
         Value::BigInt(n) => buf.extend_from_slice(&n.to_le_bytes()),
+        Value::Double(f) => buf.extend_from_slice(&f.to_le_bytes()),
         Value::Boolean(b) => buf.push(if *b { 1 } else { 0 }),
         Value::Timestamp(t) => buf.extend_from_slice(&t.to_le_bytes()),
         Value::Uuid(id) => buf.extend_from_slice(id.uuid().as_bytes()),
@@ -154,6 +269,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
             buf.extend(std::iter::repeat_n(0, size));
         }
         Value::Text(_) => unreachable!("Text is not fixed-size"),
+        Value::Bytea(_) => unreachable!("Bytea is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
         Value::Row(_) => unreachable!("Row is not fixed-size"),
     }
@@ -172,6 +288,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
 
     match val {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
+        Value::Bytea(bytes) => buf.extend_from_slice(bytes),
         Value::Array(elements) => buf.extend(encode_array(elements, &col.column_type)),
         Value::Row(values) => {
             // Encode row using its descriptor from the column type
@@ -181,7 +298,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
             }
         }
         Value::Null => {} // Already handled above for nullable
-        _ => unreachable!("Non-text/array/row types are fixed-size"),
+        _ => unreachable!("Non-text/bytea/array/row types are fixed-size"),
     }
 }
 
@@ -238,6 +355,15 @@ pub fn decode_column(
             let n = i64::from_le_bytes(bytes[..8].try_into().unwrap());
             Ok(Value::BigInt(n))
         }
+        ColumnType::Double => {
+            if bytes.len() < 8 {
+                return Err(EncodingError::MalformedData {
+                    message: "double too short".into(),
+                });
+            }
+            let f = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+            Ok(Value::Double(f))
+        }
         ColumnType::Boolean => {
             if bytes.is_empty() {
                 return Err(EncodingError::MalformedData {
@@ -267,10 +393,22 @@ pub fn decode_column(
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
+        ColumnType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         ColumnType::Text => {
             let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
             })?;
+            Ok(Value::Text(s.to_string()))
+        }
+        ColumnType::Enum(variants) => {
+            let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
+                message: format!("invalid utf8: {e}"),
+            })?;
+            if !variants.iter().any(|variant| variant == s) {
+                return Err(EncodingError::MalformedData {
+                    message: format!("invalid enum variant: {s}"),
+                });
+            }
             Ok(Value::Text(s.to_string()))
         }
         ColumnType::Array(element_type) => {
@@ -360,7 +498,18 @@ fn variable_column_bytes<'a>(
         0
     };
 
-    let var_data_start = fixed_size + offset_table_size;
+    let var_data_start =
+        fixed_size
+            .checked_add(offset_table_size)
+            .ok_or(EncodingError::MalformedData {
+                message: "variable data start offset overflowed".into(),
+            })?;
+
+    if var_data_start > data.len() {
+        return Err(EncodingError::MalformedData {
+            message: "data too short for variable section".into(),
+        });
+    }
 
     // Find which variable column index this is
     let mut var_index = 0;
@@ -399,8 +548,32 @@ fn variable_column_bytes<'a>(
         data.len() - var_data_start
     };
 
+    if start_offset > end_offset {
+        return Err(EncodingError::MalformedData {
+            message: "variable column offsets out of order".into(),
+        });
+    }
+
+    let var_section_len = data.len() - var_data_start;
+    if end_offset > var_section_len {
+        return Err(EncodingError::MalformedData {
+            message: "variable column offset out of bounds".into(),
+        });
+    }
+
+    let start = var_data_start
+        .checked_add(start_offset)
+        .ok_or(EncodingError::MalformedData {
+            message: "variable column start overflowed".into(),
+        })?;
+    let end = var_data_start
+        .checked_add(end_offset)
+        .ok_or(EncodingError::MalformedData {
+            message: "variable column end overflowed".into(),
+        })?;
+
     let col = &descriptor.columns[col_index];
-    let bytes = &data[var_data_start + start_offset..var_data_start + end_offset];
+    let bytes = &data[start..end];
 
     if col.nullable {
         if bytes.is_empty() {
@@ -473,6 +646,11 @@ pub fn compare_column(
             let n2 = i64::from_le_bytes(bytes2[..8].try_into().unwrap());
             Ok(n1.cmp(&n2))
         }
+        ColumnType::Double => {
+            let f1 = f64::from_le_bytes(bytes1[..8].try_into().unwrap());
+            let f2 = f64::from_le_bytes(bytes2[..8].try_into().unwrap());
+            Ok(f1.total_cmp(&f2))
+        }
         ColumnType::Boolean => {
             let b1 = bytes1[0] != 0;
             let b2 = bytes2[0] != 0;
@@ -487,7 +665,12 @@ pub fn compare_column(
             // Compare as bytes (UUIDs have natural byte ordering)
             Ok(bytes1.cmp(bytes2))
         }
-        ColumnType::Text | ColumnType::Array(_) | ColumnType::Row(_) => {
+        ColumnType::Bytea => Err(EncodingError::UnsupportedComparison {
+            column: col.name_str().to_string(),
+            column_type: col.column_type.clone(),
+            operation: "ordering".to_string(),
+        }),
+        ColumnType::Text | ColumnType::Enum(_) | ColumnType::Array(_) | ColumnType::Row(_) => {
             // Lexicographic comparison of bytes
             Ok(bytes1.cmp(bytes2))
         }
@@ -521,6 +704,11 @@ pub fn compare_column_to_value(
             let n2 = i64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(n1.cmp(&n2))
         }
+        ColumnType::Double => {
+            let f1 = f64::from_le_bytes(bytes[..8].try_into().unwrap());
+            let f2 = f64::from_le_bytes(value[..8].try_into().unwrap());
+            Ok(f1.total_cmp(&f2))
+        }
         ColumnType::Boolean => {
             let b1 = bytes[0] != 0;
             let b2 = value[0] != 0;
@@ -531,9 +719,16 @@ pub fn compare_column_to_value(
             let t2 = u64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(t1.cmp(&t2))
         }
-        ColumnType::Uuid | ColumnType::Text | ColumnType::Array(_) | ColumnType::Row(_) => {
-            Ok(bytes.cmp(value))
-        }
+        ColumnType::Bytea => Err(EncodingError::UnsupportedComparison {
+            column: col.name_str().to_string(),
+            column_type: col.column_type.clone(),
+            operation: "ordering".to_string(),
+        }),
+        ColumnType::Uuid
+        | ColumnType::Text
+        | ColumnType::Enum(_)
+        | ColumnType::Array(_)
+        | ColumnType::Row(_) => Ok(bytes.cmp(value)),
     }
 }
 
@@ -569,10 +764,12 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
     match value {
         Value::Integer(n) => n.to_le_bytes().to_vec(),
         Value::BigInt(n) => n.to_le_bytes().to_vec(),
+        Value::Double(f) => f.to_le_bytes().to_vec(),
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
         Value::Timestamp(t) => t.to_le_bytes().to_vec(),
         Value::Uuid(id) => id.uuid().as_bytes().to_vec(),
         Value::Text(s) => s.as_bytes().to_vec(),
+        Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
         Value::Row(_) => panic!("Row values require a descriptor - use encode_value_with_type"),
         Value::Null => vec![],
@@ -781,6 +978,16 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
                 data[..8].try_into().unwrap(),
             )))
         }
+        ColumnType::Double => {
+            if data.len() < 8 {
+                return Err(EncodingError::MalformedData {
+                    message: "double element too short".into(),
+                });
+            }
+            Ok(Value::Double(f64::from_le_bytes(
+                data[..8].try_into().unwrap(),
+            )))
+        }
         ColumnType::Boolean => {
             if data.is_empty() {
                 return Err(EncodingError::MalformedData {
@@ -811,10 +1018,22 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
+        ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
         ColumnType::Text => {
             let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
             })?;
+            Ok(Value::Text(s.to_string()))
+        }
+        ColumnType::Enum(variants) => {
+            let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
+                message: format!("invalid utf8: {e}"),
+            })?;
+            if !variants.iter().any(|variant| variant == s) {
+                return Err(EncodingError::MalformedData {
+                    message: format!("invalid enum variant: {s}"),
+                });
+            }
             Ok(Value::Text(s.to_string()))
         }
         ColumnType::Array(inner_type) => {
@@ -1825,5 +2044,153 @@ mod tests {
 
         let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
         assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn encode_decode_bytea_roundtrip_with_nul_bytes() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("payload", ColumnType::Bytea),
+        ]);
+        let values = vec![
+            Value::Integer(1),
+            Value::Bytea(vec![0x00, 0x11, 0x00, 0x22, 0xFF]),
+        ];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn encode_row_rejects_oversized_bytea() {
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("payload", ColumnType::Bytea)]);
+        let over_limit = vec![7u8; BYTEA_MAX_BYTES + 1];
+
+        let err = encode_row(&descriptor, &[Value::Bytea(over_limit)]).unwrap_err();
+        assert!(matches!(err, EncodingError::ByteaTooLarge { .. }));
+    }
+
+    #[test]
+    fn compare_column_to_value_rejects_ordering_on_bytea() {
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("payload", ColumnType::Bytea)]);
+        let encoded = encode_row(&descriptor, &[Value::Bytea(vec![1, 2, 3])]).unwrap();
+
+        let err = compare_column_to_value(&descriptor, &encoded, 0, &[1, 2, 4]).unwrap_err();
+        assert!(matches!(err, EncodingError::UnsupportedComparison { .. }));
+    }
+
+    #[test]
+    fn encode_row_rejects_invalid_enum_variant() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "status",
+            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+        )]);
+
+        let err = encode_row(&descriptor, &[Value::Text("invalid".to_string())]).unwrap_err();
+        assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn decode_row_rejects_invalid_enum_variant() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "status",
+            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+        )]);
+
+        let mut encoded = encode_row(&descriptor, &[Value::Text("todo".to_string())]).unwrap();
+        encoded.as_mut_slice().clone_from_slice(b"nope");
+
+        let err = decode_row(&descriptor, &encoded).unwrap_err();
+        assert!(matches!(err, EncodingError::MalformedData { .. }));
+    }
+
+    #[test]
+    fn real_encode_decode_roundtrip() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("temperature", ColumnType::Double),
+            ColumnDescriptor::new("pressure", ColumnType::Double),
+        ]);
+
+        let values = vec![
+            Value::Text("sensor-1".into()),
+            Value::Double(23.456),
+            Value::Double(-101.325),
+        ];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+
+        assert_eq!(values, decoded);
+    }
+
+    #[test]
+    fn real_encode_decode_special_values() {
+        // Exercise: zero, negative zero, infinity, negative infinity, NaN, subnormal
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("val", ColumnType::Double)]);
+
+        let cases: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE, // smallest normal
+            5e-324,            // smallest subnormal
+            -5e-324,           // negative subnormal
+            f64::MAX,
+            f64::MIN,
+        ];
+
+        for val in cases {
+            let values = vec![Value::Double(val)];
+            let encoded = encode_row(&descriptor, &values).unwrap();
+            let decoded = decode_row(&descriptor, &encoded).unwrap();
+
+            match &decoded[0] {
+                Value::Double(decoded_val) => {
+                    // Bitwise comparison handles NaN and negative zero
+                    assert_eq!(
+                        val.to_bits(),
+                        decoded_val.to_bits(),
+                        "round-trip failed for {val}"
+                    );
+                }
+                other => panic!("expected Value::Double, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn real_nullable_encode_decode() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("score", ColumnType::Double).nullable(),
+        ]);
+
+        // With value
+        let values = vec![Value::Double(99.5)];
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(values, decoded);
+
+        // With null
+        let nulls = vec![Value::Null];
+        let encoded = encode_row(&descriptor, &nulls).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(nulls, decoded);
+    }
+
+    #[test]
+    fn real_type_mismatch_rejected() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "temperature",
+            ColumnType::Double,
+        )]);
+
+        let err = encode_row(&descriptor, &[Value::Integer(42)]).unwrap_err();
+        assert!(matches!(err, EncodingError::TypeMismatch { .. }));
     }
 }

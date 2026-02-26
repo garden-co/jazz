@@ -46,14 +46,26 @@ describe("schemaToWasm", () => {
     });
   });
 
-  it("converts REAL to Integer (no Float in WASM)", () => {
+  it("converts TIMESTAMP to Timestamp", () => {
+    table("items", { created_at: col.timestamp() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.items.columns[0]).toEqual({
+      name: "created_at",
+      column_type: { type: "Timestamp" },
+      nullable: false,
+    });
+  });
+
+  it("converts REAL to Double", () => {
     table("items", { price: col.float() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
     expect(wasm.tables.items.columns[0]).toEqual({
       name: "price",
-      column_type: { type: "Integer" },
+      column_type: { type: "Double" },
       nullable: false,
     });
   });
@@ -136,6 +148,18 @@ describe("schemaToWasm", () => {
     });
   });
 
+  it("converts enum to Enum with normalized variants", () => {
+    table("tasks", { status: col.enum("in_progress", "todo", "done") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.tasks.columns[0]).toEqual({
+      name: "status",
+      column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
+      nullable: false,
+    });
+  });
+
   it("converts multiple tables", () => {
     table("users", { name: col.string() });
     table("todos", { title: col.string(), user_id: col.ref("users") });
@@ -207,6 +231,33 @@ describe("schemaToWasm", () => {
       },
     });
   });
+
+  it("carries InheritsReferencing policies into wasm schema", () => {
+    table("files", { owner_id: col.string() });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
+        },
+      },
+    };
+
+    const wasm = schemaToWasm(schema);
+    expect(wasm.tables.files.policies).toEqual({
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
+        },
+      },
+    });
+  });
 });
 
 describe("generateTypes", () => {
@@ -262,7 +313,7 @@ describe("generateTypes", () => {
     expect(output).toContain("export interface UserProfileInit {");
   });
 
-  it("removes trailing s for plurals", () => {
+  it("singularises plural table names", () => {
     table("categories", { name: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -270,6 +321,26 @@ describe("generateTypes", () => {
 
     expect(output).toContain("export interface Category {");
     expect(output).toContain("export interface CategoryInit {");
+  });
+
+  it.each([
+    ["canvases", "Canvas"],
+    ["statuses", "Status"],
+    ["buses", "Bus"],
+    ["processes", "Process"],
+    ["heroes", "Hero"],
+    ["vertices", "Vertex"],
+    ["people", "Person"],
+    ["matrices", "Matrix"],
+    ["addresses", "Address"],
+  ])("singularises %s to %s", (tableName, expected) => {
+    table(tableName, { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(`export interface ${expected} {`);
+    expect(output).toContain(`export interface ${expected}Init {`);
   });
 
   it("maps boolean columns to boolean type", () => {
@@ -288,6 +359,15 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("  count: number;");
+  });
+
+  it("maps timestamp columns to Date type", () => {
+    table("items", { created_at: col.timestamp() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("  created_at: Date;");
   });
 
   it("maps ref columns to string type", () => {
@@ -311,6 +391,15 @@ describe("generateTypes", () => {
 
     expect(output).toContain("  tags: string[];");
     expect(output).toContain("  matrix: number[][];");
+  });
+
+  it("maps enum columns to string literal unions", () => {
+    table("tasks", { status: col.enum("in_progress", "todo", "done") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain('  status: "done" | "in_progress" | "todo";');
   });
 
   it("exports wasmSchema constant", () => {
@@ -445,6 +534,36 @@ describe("analyzeRelations", () => {
     );
   });
 
+  it("marks forward UUID[] references as array relations", () => {
+    const schema: WasmSchema = {
+      tables: {
+        files: {
+          columns: [
+            {
+              name: "parts",
+              column_type: { type: "Array", element: { type: "Uuid" } },
+              nullable: false,
+              references: "file_parts",
+            },
+          ],
+        },
+        file_parts: { columns: [] },
+      },
+    };
+
+    const relations = analyzeRelations(schema);
+    const fileRels = relations.get("files")!;
+
+    expect(fileRels).toContainEqual(
+      expect.objectContaining({
+        name: "parts",
+        type: "forward",
+        toTable: "file_parts",
+        isArray: true,
+      }),
+    );
+  });
+
   it("handles self-referential relations", () => {
     const schema: WasmSchema = {
       tables: {
@@ -529,6 +648,28 @@ describe("analyzeRelations", () => {
 
     expect(() => analyzeRelations(schema)).toThrow(
       'Table "todos" references unknown table "users" via column "owner_id"',
+    );
+  });
+
+  it("throws for non-UUID references", () => {
+    const schema: WasmSchema = {
+      tables: {
+        files: {
+          columns: [
+            {
+              name: "parts",
+              column_type: { type: "Array", element: { type: "Text" } },
+              nullable: false,
+              references: "file_parts",
+            },
+          ],
+        },
+        file_parts: { columns: [] },
+      },
+    };
+
+    expect(() => analyzeRelations(schema)).toThrow(
+      'Column "files.parts" uses references but is not UUID or UUID[]',
     );
   });
 });
@@ -634,6 +775,17 @@ describe("generateWhereInputTypes", () => {
     );
   });
 
+  it("generates Date-oriented WhereInput for timestamp columns", () => {
+    table("todos", { created_at: col.timestamp() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      "created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };",
+    );
+  });
+
   it("generates id filter with in operator", () => {
     table("todos", { title: col.string() });
     const schema = getCollectedSchema();
@@ -670,6 +822,17 @@ describe("generateWhereInputTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("tags?: string[] | { eq?: string[]; contains?: string };");
+  });
+
+  it("generates enum filters with eq/ne/in", () => {
+    table("tasks", { status: col.enum("in_progress", "todo", "done") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      'status?: "done" | "in_progress" | "todo" | { eq?: "done" | "in_progress" | "todo"; ne?: "done" | "in_progress" | "todo"; in?: ("done" | "in_progress" | "todo")[] };',
+    );
   });
 });
 

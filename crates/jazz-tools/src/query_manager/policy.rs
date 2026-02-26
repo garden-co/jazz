@@ -90,11 +90,23 @@ pub enum PolicyExpr {
     /// Check if a column is NOT NULL.
     IsNotNull { column: String },
 
+    /// Check if a column contains a value.
+    ///
+    /// - For TEXT columns this means substring containment.
+    /// - For ARRAY columns this means element membership.
+    Contains { column: String, value: PolicyValue },
+
     /// Check if a column value is in a session array.
     /// The session_path must point to an array in the session claims.
     In {
         column: String,
         session_path: Vec<String>,
+    },
+
+    /// Check if a column value is contained in a list of values.
+    InList {
+        column: String,
+        values: Vec<PolicyValue>,
     },
 
     /// Check if a subquery returns any rows.
@@ -114,6 +126,21 @@ pub enum PolicyExpr {
     /// if that row passes the specified operation's policy.
     Inherits {
         operation: Operation,
+        via_column: String,
+        /// Optional recursion depth override for recursive INHERITS evaluation.
+        ///
+        /// If omitted, runtime uses [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        max_depth: Option<usize>,
+    },
+
+    /// Inherit permission from rows in `source_table` that reference the current row.
+    ///
+    /// This is the reverse direction of `Inherits`: it scans source rows where
+    /// `source_table.via_column` points at the current row id, then checks whether
+    /// any such source row passes `operation` policy.
+    InheritsReferencing {
+        operation: Operation,
+        source_table: String,
         via_column: String,
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
@@ -181,6 +208,35 @@ impl PolicyExpr {
     ) -> Self {
         PolicyExpr::Inherits {
             operation,
+            via_column: via_column.into(),
+            max_depth: Some(max_depth),
+        }
+    }
+
+    /// Create an INHERITS REFERENCING expression.
+    pub fn inherits_referencing(
+        operation: Operation,
+        source_table: impl Into<String>,
+        via_column: impl Into<String>,
+    ) -> Self {
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table: source_table.into(),
+            via_column: via_column.into(),
+            max_depth: None,
+        }
+    }
+
+    /// Create an INHERITS REFERENCING expression with an explicit recursion depth.
+    pub fn inherits_referencing_with_depth(
+        operation: Operation,
+        source_table: impl Into<String>,
+        via_column: impl Into<String>,
+        max_depth: usize,
+    ) -> Self {
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table: source_table.into(),
             via_column: via_column.into(),
             max_depth: Some(max_depth),
         }
@@ -312,10 +368,18 @@ where
             }
         }
 
+        PolicyExpr::Contains { column, value } => {
+            evaluate_contains(column, value, content, descriptor, ctx.session)
+        }
+
         PolicyExpr::In {
             column,
             session_path,
         } => evaluate_in(column, session_path, content, descriptor, ctx.session),
+
+        PolicyExpr::InList { column, values } => {
+            evaluate_in_list(column, values, content, descriptor, ctx.session)
+        }
 
         PolicyExpr::And(exprs) => exprs
             .iter()
@@ -343,6 +407,10 @@ where
         } => evaluate_inherits(
             *operation, via_column, *max_depth, content, descriptor, ctx, depth,
         ),
+        PolicyExpr::InheritsReferencing { .. } => {
+            // Requires table/index context not available in EvalContext.
+            false
+        }
     }
 }
 
@@ -468,10 +536,16 @@ fn evaluate_expr_simple(
             .column_index(column)
             .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
             .unwrap_or(false),
+        PolicyExpr::Contains { column, value } => {
+            evaluate_contains(column, value, content, descriptor, session)
+        }
         PolicyExpr::In {
             column,
             session_path,
         } => evaluate_in(column, session_path, content, descriptor, session),
+        PolicyExpr::InList { column, values } => {
+            evaluate_in_list(column, values, content, descriptor, session)
+        }
         PolicyExpr::And(exprs) => exprs
             .iter()
             .all(|e| evaluate_expr_simple(e, content, descriptor, session, depth)),
@@ -482,6 +556,7 @@ fn evaluate_expr_simple(
         PolicyExpr::Exists { .. } => true,
         PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::Inherits { .. } => true, // No row loader - permissive
+        PolicyExpr::InheritsReferencing { .. } => true, // Requires table/index context
     }
 }
 
@@ -511,12 +586,9 @@ pub fn evaluate_cmp(
     };
 
     // Get the comparison value (either literal or from session)
-    let cmp_value = match value {
-        PolicyValue::Literal(v) => v.clone(),
-        PolicyValue::SessionRef(path) => match resolve_session_value(path, session) {
-            Some(v) => v,
-            None => return false,
-        },
+    let cmp_value = match resolve_policy_value(value, session) {
+        Some(v) => v,
+        None => return false,
     };
 
     // Encode the comparison value to bytes
@@ -559,6 +631,13 @@ pub fn evaluate_cmp(
     }
 }
 
+fn resolve_policy_value(value: &PolicyValue, session: &Session) -> Option<Value> {
+    match value {
+        PolicyValue::Literal(v) => Some(v.clone()),
+        PolicyValue::SessionRef(path) => resolve_session_value(path, session),
+    }
+}
+
 /// Bind outer-row references encoded as `@session.__jazz_outer_row.<column>` to literals.
 ///
 /// Returns `None` if a referenced outer column cannot be resolved.
@@ -595,6 +674,25 @@ pub fn bind_outer_row_refs(
         PolicyExpr::IsNotNull { column } => Some(PolicyExpr::IsNotNull {
             column: column.clone(),
         }),
+        PolicyExpr::Contains { column, value } => {
+            let bound_value = match value {
+                PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
+                PolicyValue::SessionRef(path) => {
+                    if let Some(outer_col) = outer_row_ref_column(path) {
+                        let col_index = outer_descriptor.column_index(outer_col)?;
+                        let resolved =
+                            decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                        PolicyValue::Literal(resolved)
+                    } else {
+                        PolicyValue::SessionRef(path.clone())
+                    }
+                }
+            };
+            Some(PolicyExpr::Contains {
+                column: column.clone(),
+                value: bound_value,
+            })
+        }
         PolicyExpr::In {
             column,
             session_path,
@@ -605,6 +703,28 @@ pub fn bind_outer_row_refs(
             Some(PolicyExpr::In {
                 column: column.clone(),
                 session_path: session_path.clone(),
+            })
+        }
+        PolicyExpr::InList { column, values } => {
+            let bound_values = values
+                .iter()
+                .map(|value| match value {
+                    PolicyValue::Literal(v) => Some(PolicyValue::Literal(v.clone())),
+                    PolicyValue::SessionRef(path) => {
+                        if let Some(outer_col) = outer_row_ref_column(path) {
+                            let col_index = outer_descriptor.column_index(outer_col)?;
+                            let resolved =
+                                decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                            Some(PolicyValue::Literal(resolved))
+                        } else {
+                            Some(PolicyValue::SessionRef(path.clone()))
+                        }
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(PolicyExpr::InList {
+                column: column.clone(),
+                values: bound_values,
             })
         }
         PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
@@ -620,6 +740,17 @@ pub fn bind_outer_row_refs(
             max_depth,
         } => Some(PolicyExpr::Inherits {
             operation: *operation,
+            via_column: via_column.clone(),
+            max_depth: *max_depth,
+        }),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => Some(PolicyExpr::InheritsReferencing {
+            operation: *operation,
+            source_table: source_table.clone(),
             via_column: via_column.clone(),
             max_depth: *max_depth,
         }),
@@ -942,6 +1073,68 @@ pub fn evaluate_in(
     }
 }
 
+/// Evaluate a CONTAINS expression.
+pub fn evaluate_contains(
+    column: &str,
+    value: &PolicyValue,
+    content: &[u8],
+    descriptor: &RowDescriptor,
+    session: &Session,
+) -> bool {
+    let col_index = match descriptor.column_index(column) {
+        Some(idx) => idx,
+        None => return false,
+    };
+
+    let right_value = match resolve_policy_value(value, session) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let column_value = match decode_column(descriptor, content, col_index) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    match column_value {
+        Value::Array(elements) => elements.iter().any(|element| element == &right_value),
+        Value::Text(text) => match right_value {
+            Value::Text(substr) => text.contains(&substr),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Evaluate an IN-list expression.
+pub fn evaluate_in_list(
+    column: &str,
+    values: &[PolicyValue],
+    content: &[u8],
+    descriptor: &RowDescriptor,
+    session: &Session,
+) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+
+    let col_index = match descriptor.column_index(column) {
+        Some(idx) => idx,
+        None => return false,
+    };
+
+    let column_value = match decode_column(descriptor, content, col_index) {
+        Ok(v) if !matches!(v, Value::Null) => v,
+        _ => return false,
+    };
+
+    values.iter().any(|candidate| {
+        resolve_policy_value(candidate, session)
+            .map(|resolved| resolved == column_value)
+            .unwrap_or(false)
+    })
+}
+
 /// Resolve a session path to a Value. Public for use by PolicyFilterNode.
 pub fn resolve_session_value(path: &[String], session: &Session) -> Option<Value> {
     if path.is_empty() {
@@ -987,6 +1180,13 @@ pub enum ComplexClause {
     /// INHERITS clause - check parent row's policy.
     Inherits {
         operation: Operation,
+        via_column: String,
+        max_depth: Option<usize>,
+    },
+    /// INHERITS REFERENCING clause - check policies on source rows that reference this row.
+    InheritsReferencing {
+        operation: Operation,
+        source_table: String,
         via_column: String,
         max_depth: Option<usize>,
     },
@@ -1102,11 +1302,27 @@ fn evaluate_simple_recursive(
             }
         }
 
+        PolicyExpr::Contains { column, value } => {
+            if evaluate_contains(column, value, content, descriptor, session) {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+
         PolicyExpr::In {
             column,
             session_path,
         } => {
             if evaluate_in(column, session_path, content, descriptor, session) {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+
+        PolicyExpr::InList { column, values } => {
+            if evaluate_in_list(column, values, content, descriptor, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1187,6 +1403,17 @@ fn evaluate_simple_recursive(
             max_depth,
         } => SimpleEvalResult::with_complex(ComplexClause::Inherits {
             operation: *operation,
+            via_column: via_column.clone(),
+            max_depth: *max_depth,
+        }),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => SimpleEvalResult::with_complex(ComplexClause::InheritsReferencing {
+            operation: *operation,
+            source_table: source_table.clone(),
             via_column: via_column.clone(),
             max_depth: *max_depth,
         }),
@@ -1527,6 +1754,142 @@ mod tests {
         let content2 = make_row_content("user2", "eng", "active");
         let result = evaluate_simple_parts(&expr, &content2, &desc, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_simple_parts_contains_text_and_array() {
+        let desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+        ]);
+        let content = encode_row(
+            &desc,
+            &[
+                Value::Text("hello world".into()),
+                Value::Array(vec![
+                    Value::Text("admin".into()),
+                    Value::Text("editor".into()),
+                ]),
+            ],
+        )
+        .unwrap();
+        let session = Session::new("user1");
+
+        let title_contains = PolicyExpr::Contains {
+            column: "title".into(),
+            value: PolicyValue::Literal(Value::Text("world".into())),
+        };
+        let result = evaluate_simple_parts(&title_contains, &content, &desc, &session);
+        assert!(result.passed);
+
+        let tags_contains = PolicyExpr::Contains {
+            column: "tags".into(),
+            value: PolicyValue::Literal(Value::Text("admin".into())),
+        };
+        let result = evaluate_simple_parts(&tags_contains, &content, &desc, &session);
+        assert!(result.passed);
+
+        let missing = PolicyExpr::Contains {
+            column: "tags".into(),
+            value: PolicyValue::Literal(Value::Text("viewer".into())),
+        };
+        let result = evaluate_simple_parts(&missing, &content, &desc, &session);
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_simple_parts_in_list_literals_and_session_refs() {
+        let desc = test_descriptor();
+        let content = make_row_content("user1", "eng", "active");
+        let session = Session::new("user1");
+
+        let literal_in_list = PolicyExpr::InList {
+            column: "status".into(),
+            values: vec![
+                PolicyValue::Literal(Value::Text("inactive".into())),
+                PolicyValue::Literal(Value::Text("active".into())),
+            ],
+        };
+        let result = evaluate_simple_parts(&literal_in_list, &content, &desc, &session);
+        assert!(result.passed);
+
+        let session_ref_in_list = PolicyExpr::InList {
+            column: "owner_id".into(),
+            values: vec![PolicyValue::SessionRef(vec!["user_id".into()])],
+        };
+        let result = evaluate_simple_parts(&session_ref_in_list, &content, &desc, &session);
+        assert!(result.passed);
+
+        let empty_in_list = PolicyExpr::InList {
+            column: "owner_id".into(),
+            values: vec![],
+        };
+        let result = evaluate_simple_parts(&empty_in_list, &content, &desc, &session);
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_exists_outer_row_refs_bind_for_contains_and_in_list() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Text),
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ]);
+        let content = encode_row(
+            &descriptor,
+            &[Value::Text("todo-1".into()), Value::Text("user-1".into())],
+        )
+        .unwrap();
+        let session = Session::new("user-1");
+
+        let expr = PolicyExpr::Exists {
+            table: "todo_shares".into(),
+            condition: Box::new(PolicyExpr::And(vec![
+                PolicyExpr::Contains {
+                    column: "todo_id".into(),
+                    value: PolicyValue::SessionRef(vec![
+                        OUTER_ROW_SESSION_PREFIX.into(),
+                        "id".into(),
+                    ]),
+                },
+                PolicyExpr::InList {
+                    column: "user_id".into(),
+                    values: vec![
+                        PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            "owner_id".into(),
+                        ]),
+                        PolicyValue::Literal(Value::Text("fallback".into())),
+                    ],
+                },
+            ])),
+        };
+
+        let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
+        assert!(result.passed);
+        assert_eq!(result.complex_clauses.len(), 1);
+        let ComplexClause::Exists { condition, .. } = &result.complex_clauses[0] else {
+            panic!("expected EXISTS complex clause");
+        };
+        let PolicyExpr::And(exprs) = condition.as_ref() else {
+            panic!("expected bound EXISTS condition to be an AND");
+        };
+        assert!(matches!(
+            &exprs[0],
+            PolicyExpr::Contains {
+                column,
+                value: PolicyValue::Literal(Value::Text(value))
+            } if column == "todo_id" && value == "todo-1"
+        ));
+        assert!(matches!(
+            &exprs[1],
+            PolicyExpr::InList { column, values }
+                if column == "user_id"
+                    && values
+                        == &vec![
+                            PolicyValue::Literal(Value::Text("user-1".into())),
+                            PolicyValue::Literal(Value::Text("fallback".into())),
+                        ]
+        ));
     }
 
     #[test]

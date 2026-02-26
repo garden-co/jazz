@@ -18,19 +18,8 @@ pub mod subscriptions;
 pub mod types;
 pub mod writes;
 
-pub use encoding::*;
-pub use graph::*;
-pub use graph_nodes::*;
-pub use index::*;
-pub use manager::*;
-pub use policy::*;
-pub use policy_graph::*;
-pub use policy_ir::*;
-pub use query::*;
-pub use query_wire::*;
-pub use relation_ir::*;
-pub use session::*;
-pub use types::*;
+pub use graph_nodes::output::QuerySubscriptionId;
+pub use query_wire::{parse_query_json, parse_query_value};
 
 #[cfg(test)]
 mod manager_tests;

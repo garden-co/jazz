@@ -10,20 +10,21 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
-use groove::object::ObjectId;
-use groove::query_manager::query::QueryBuilder;
-use groove::query_manager::types::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
+use jazz_tools::query_manager::query::QueryBuilder;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
 };
-use groove::query_manager::{Operation as PolicyOperation, PolicyExpr, Session};
-use groove::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::MemoryStorage;
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::MemoryStorage;
 #[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-use groove::storage::Storage;
+use jazz_tools::storage::Storage;
 #[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-use groove::storage::SurrealKvStorage;
-use groove::sync_manager::{
+use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
 use serde::Deserialize;

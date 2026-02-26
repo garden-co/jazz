@@ -3,8 +3,8 @@
 //! Measures the performance of projecting rows with different column configurations.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use groove::query_manager::encoding::{encode_row, project_row};
-use groove::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use jazz_tools::query_manager::encoding::{encode_row, project_row};
+use jazz_tools::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
 /// Mixed columns: 3 fixed + 2 variable
 fn project_mixed_5cols(c: &mut Criterion) {
