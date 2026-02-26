@@ -12,10 +12,12 @@ use crate::query_manager::{
 pub enum CatalogueWasmValue {
     Integer(i32),
     BigInt(i64),
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
     Uuid(String),
+    Bytea(Vec<u8>),
     Array(Vec<CatalogueWasmValue>),
     Row(Vec<CatalogueWasmValue>),
     Null,
@@ -26,10 +28,12 @@ impl From<Value> for CatalogueWasmValue {
         match value {
             Value::Integer(v) => Self::Integer(v),
             Value::BigInt(v) => Self::BigInt(v),
+            Value::Double(v) => Self::Double(v),
             Value::Boolean(v) => Self::Boolean(v),
             Value::Text(v) => Self::Text(v),
             Value::Timestamp(v) => Self::Timestamp(v),
             Value::Uuid(v) => Self::Uuid(v.uuid().to_string()),
+            Value::Bytea(v) => Self::Bytea(v),
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Row(values) => Self::Row(values.into_iter().map(Into::into).collect()),
             Value::Null => Self::Null,
@@ -42,6 +46,7 @@ impl From<Value> for CatalogueWasmValue {
 pub enum CatalogueColumnType {
     Integer,
     BigInt,
+    Double,
     Boolean,
     Text,
     Enum {
@@ -49,6 +54,7 @@ pub enum CatalogueColumnType {
     },
     Timestamp,
     Uuid,
+    Bytea,
     Array {
         element: Box<CatalogueColumnType>,
     },
@@ -71,11 +77,13 @@ impl From<ColumnType> for CatalogueColumnType {
         match column_type {
             ColumnType::Integer => Self::Integer,
             ColumnType::BigInt => Self::BigInt,
+            ColumnType::Double => Self::Double,
             ColumnType::Boolean => Self::Boolean,
             ColumnType::Text => Self::Text,
             ColumnType::Enum(variants) => Self::Enum { variants },
             ColumnType::Timestamp => Self::Timestamp,
             ColumnType::Uuid => Self::Uuid,
+            ColumnType::Bytea => Self::Bytea,
             ColumnType::Array(element) => Self::Array {
                 element: Box::new((*element).into()),
             },
@@ -169,9 +177,17 @@ pub enum CataloguePolicyExpr {
     IsNotNull {
         column: String,
     },
+    Contains {
+        column: String,
+        value: CataloguePolicyValue,
+    },
     In {
         column: String,
         session_path: Vec<String>,
+    },
+    InList {
+        column: String,
+        values: Vec<CataloguePolicyValue>,
     },
     Exists {
         table: String,
@@ -182,6 +198,12 @@ pub enum CataloguePolicyExpr {
     },
     Inherits {
         operation: CataloguePolicyOperation,
+        via_column: String,
+        max_depth: Option<u32>,
+    },
+    InheritsReferencing {
+        operation: CataloguePolicyOperation,
+        source_table: String,
         via_column: String,
         max_depth: Option<u32>,
     },
@@ -208,12 +230,20 @@ impl From<PolicyExpr> for CataloguePolicyExpr {
             },
             PolicyExpr::IsNull { column } => Self::IsNull { column },
             PolicyExpr::IsNotNull { column } => Self::IsNotNull { column },
+            PolicyExpr::Contains { column, value } => Self::Contains {
+                column,
+                value: value.into(),
+            },
             PolicyExpr::In {
                 column,
                 session_path,
             } => Self::In {
                 column,
                 session_path,
+            },
+            PolicyExpr::InList { column, values } => Self::InList {
+                column,
+                values: values.into_iter().map(Into::into).collect(),
             },
             PolicyExpr::Exists { table, condition } => Self::Exists {
                 table,
@@ -228,6 +258,17 @@ impl From<PolicyExpr> for CataloguePolicyExpr {
                 max_depth,
             } => Self::Inherits {
                 operation: operation.into(),
+                via_column,
+                max_depth: max_depth.map(|value| value as u32),
+            },
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => Self::InheritsReferencing {
+                operation: operation.into(),
+                source_table,
                 via_column,
                 max_depth: max_depth.map(|value| value as u32),
             },
