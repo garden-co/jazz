@@ -83,8 +83,13 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    subscriptionCallback.onUpdate("[]");
-    expect(onUpdate).toHaveBeenCalledWith("[]");
+    subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
@@ -108,6 +113,42 @@ describe("JazzRnRuntimeAdapter", () => {
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
+  });
+
+  it("passes canonical subscription tuple updates through unchanged", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    const onUpdate = vi.fn();
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+
+    subscriptionCallback.onUpdate(
+      JSON.stringify({
+        added: [],
+        removed: [],
+        updated: [
+          [
+            { id: "row-u", values: [{ type: "Text", value: "before" }] },
+            { id: "row-u", values: [{ type: "Text", value: "after" }] },
+          ],
+        ],
+        pending: false,
+      }),
+    );
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [
+        [
+          { id: "row-u", values: [{ type: "Text", value: "before" }] },
+          { id: "row-u", values: [{ type: "Text", value: "after" }] },
+        ],
+      ],
+      pending: false,
+    });
   });
 
   it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
@@ -143,5 +184,21 @@ describe("JazzRnRuntimeAdapter", () => {
 
     expect(() => adapter.update("row-1", { done: true })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
+  });
+
+  it("no-ops sync hooks after close", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+
+    adapter.close();
+    adapter.addServer();
+    adapter.removeServer();
+    adapter.onSyncMessageReceived('{"Ping":{}}');
+    adapter.onSyncMessageReceivedFromClient("client-1", '{"Ping":{}}');
+
+    expect(binding.addServer).not.toHaveBeenCalled();
+    expect(binding.removeServer).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
   });
 });

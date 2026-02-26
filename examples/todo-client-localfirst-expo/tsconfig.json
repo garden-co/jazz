@@ -11,5 +11,6 @@
     "typeRoots": ["./node_modules/@types"]
   },
   "include": ["App.tsx", "src/**/*", "schema/**/*"],
+  "exclude": ["schema/**/*.test.ts"],
   "extends": "expo/tsconfig.base"
 }

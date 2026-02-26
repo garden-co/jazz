@@ -4,12 +4,15 @@ import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
+  useSession,
 } from "../react-core/provider.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import type { Session } from "../runtime/context.js";
 
 interface JazzClientContextValue {
   db: Db;
   manager: CreatedJazzClient["manager"];
+  session: Session | null;
   shutdown: CreatedJazzClient["shutdown"];
 }
 
@@ -33,3 +36,4 @@ export function useDb(): Db {
 }
 
 export type { JazzClientContextValue };
+export { useSession };
