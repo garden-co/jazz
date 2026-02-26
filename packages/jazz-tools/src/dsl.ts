@@ -168,7 +168,7 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
-  timestamp(opts: { default: MaybeOptional<number, Optional> }): AddOp {
+  timestamp(opts: { default: MaybeOptional<Date | number, Optional> }): AddOp {
     return { _type: "add", sqlType: "TIMESTAMP", default: opts.default };
   }
 
@@ -221,7 +221,7 @@ class DropBuilder {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
-  timestamp(opts: { backwardsDefault: number }): DropOp {
+  timestamp(opts: { backwardsDefault: Date | number }): DropOp {
     return { _type: "drop", sqlType: "TIMESTAMP", backwardsDefault: opts.backwardsDefault };
   }
 
