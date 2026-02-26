@@ -30,6 +30,8 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "string";
     case "Bytea":
       return "Uint8Array";
+    case "Json":
+      return "JsonValue";
     case "Enum":
       return colType.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
@@ -206,6 +208,7 @@ export function generateTypes(schema: WasmSchema): string {
   const lines: string[] = [
     "// AUTO-GENERATED FILE - DO NOT EDIT",
     'import type { WasmSchema, QueryBuilder } from "jazz-tools";',
+    "export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];",
     "",
   ];
 

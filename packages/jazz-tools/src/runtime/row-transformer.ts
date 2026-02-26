@@ -3,6 +3,7 @@
  */
 
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
+import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 
 export type { WasmValue };
@@ -79,7 +80,7 @@ function transformRowValues(
     const col = table.columns[i];
     const value = values[i];
     if (value !== undefined) {
-      obj[col.name] = unwrapValue(value);
+      obj[col.name] = unwrapValue(value, col.column_type);
     }
   }
 
@@ -93,12 +94,19 @@ function transformRowValues(
   return obj;
 }
 
-/**
- * Unwrap a WasmValue to its JavaScript equivalent.
- */
-export function unwrapValue(v: WasmValue): unknown {
+export function unwrapValue(v: WasmValue, columnType?: ColumnType): unknown {
   switch (v.type) {
     case "Text":
+      if (columnType?.type === "Json") {
+        try {
+          return JSON.parse(v.value);
+        } catch (error) {
+          throw new Error(
+            `Invalid stored JSON value: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      return v.value;
     case "Uuid":
       return v.value;
     case "Boolean":
@@ -114,9 +122,17 @@ export function unwrapValue(v: WasmValue): unknown {
     case "Null":
       return undefined;
     case "Array":
-      return v.value.map(unwrapValue);
+      if (columnType?.type === "Array") {
+        return v.value.map((entry) => unwrapValue(entry, columnType.element));
+      }
+      return v.value.map((entry) => unwrapValue(entry));
     case "Row":
-      return v.value.map(unwrapValue);
+      if (columnType?.type === "Row") {
+        return v.value.map((entry, index) =>
+          unwrapValue(entry, columnType.columns[index]?.column_type),
+        );
+      }
+      return v.value.map((entry) => unwrapValue(entry));
   }
 }
 

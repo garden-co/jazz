@@ -153,12 +153,23 @@ pub enum WasmColumnType {
     Double,
     Boolean,
     Text,
-    Enum { variants: Vec<String> },
+    Json {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[tsify(optional, type = "Record<string, unknown>")]
+        schema: Option<serde_json::Value>,
+    },
+    Enum {
+        variants: Vec<String>,
+    },
     Timestamp,
     Uuid,
     Bytea,
-    Array { element: Box<WasmColumnType> },
-    Row { columns: Vec<WasmColumnDescriptor> },
+    Array {
+        element: Box<WasmColumnType>,
+    },
+    Row {
+        columns: Vec<WasmColumnDescriptor>,
+    },
 }
 
 /// Serializable column descriptor for WASM boundary.
@@ -310,6 +321,7 @@ impl From<jazz_tools::query_manager::types::ColumnType> for WasmColumnType {
             ColumnType::Double => WasmColumnType::Double,
             ColumnType::Boolean => WasmColumnType::Boolean,
             ColumnType::Text => WasmColumnType::Text,
+            ColumnType::Json(schema) => WasmColumnType::Json { schema },
             ColumnType::Enum(variants) => WasmColumnType::Enum { variants },
             ColumnType::Timestamp => WasmColumnType::Timestamp,
             ColumnType::Uuid => WasmColumnType::Uuid,
@@ -687,6 +699,7 @@ impl TryFrom<WasmSchema> for jazz_tools::query_manager::types::Schema {
                 WasmColumnType::Double => ColumnType::Double,
                 WasmColumnType::Boolean => ColumnType::Boolean,
                 WasmColumnType::Text => ColumnType::Text,
+                WasmColumnType::Json { schema } => ColumnType::Json(schema),
                 WasmColumnType::Enum { variants } => ColumnType::Enum(variants),
                 WasmColumnType::Timestamp => ColumnType::Timestamp,
                 WasmColumnType::Uuid => ColumnType::Uuid,
@@ -772,6 +785,41 @@ mod tests {
     }
 
     #[test]
+    fn wasm_column_type_json_roundtrip() {
+        let json_type = WasmColumnType::Json {
+            schema: Some(json!({
+                "type": "object",
+                "required": ["name"]
+            })),
+        };
+        let value = serde_json::to_value(&json_type).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type": "Json",
+                "schema": {
+                    "type": "object",
+                    "required": ["name"]
+                }
+            })
+        );
+
+        let decoded: WasmColumnType = serde_json::from_value(value).unwrap();
+        match decoded {
+            WasmColumnType::Json { schema } => {
+                assert_eq!(
+                    schema,
+                    Some(json!({
+                        "type": "object",
+                        "required": ["name"]
+                    }))
+                );
+            }
+            other => panic!("expected json type, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn wasm_schema_enum_roundtrip() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column(
@@ -792,6 +840,48 @@ mod tests {
             status.column_type,
             ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
         );
+    }
+
+    #[test]
+    fn wasm_schema_json_roundtrip() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("documents")
+                    .column(
+                        "payload",
+                        ColumnType::Json(Some(json!({
+                            "type": "object",
+                            "required": ["name"]
+                        }))),
+                    )
+                    .column("raw_payload", ColumnType::Json(None)),
+            )
+            .build();
+
+        let wasm_schema = WasmSchema::from(&schema);
+        let decoded = Schema::try_from(wasm_schema).unwrap();
+
+        let payload = decoded
+            .get(&TableName::new("documents"))
+            .unwrap()
+            .descriptor
+            .column("payload")
+            .unwrap();
+        assert_eq!(
+            payload.column_type,
+            ColumnType::Json(Some(json!({
+                "type": "object",
+                "required": ["name"]
+            })))
+        );
+
+        let raw_payload = decoded
+            .get(&TableName::new("documents"))
+            .unwrap()
+            .descriptor
+            .column("raw_payload")
+            .unwrap();
+        assert_eq!(raw_payload.column_type, ColumnType::Json(None));
     }
 
     #[test]

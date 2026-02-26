@@ -178,6 +178,7 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
         ColumnType::Text => matches!(value, Value::Text(_)),
         ColumnType::Bytea => matches!(value, Value::Bytea(_)),
+        ColumnType::Json(_) => matches!(value, Value::Text(_)),
         ColumnType::Enum(variants) => match value {
             Value::Text(s) => variants.contains(s),
             _ => false,
@@ -395,6 +396,12 @@ pub fn decode_column(
         }
         ColumnType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         ColumnType::Text => {
+            let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
+                message: format!("invalid utf8: {e}"),
+            })?;
+            Ok(Value::Text(s.to_string()))
+        }
+        ColumnType::Json(_) => {
             let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
             })?;
@@ -670,7 +677,11 @@ pub fn compare_column(
             column_type: col.column_type.clone(),
             operation: "ordering".to_string(),
         }),
-        ColumnType::Text | ColumnType::Enum(_) | ColumnType::Array(_) | ColumnType::Row(_) => {
+        ColumnType::Text
+        | ColumnType::Json(_)
+        | ColumnType::Enum(_)
+        | ColumnType::Array(_)
+        | ColumnType::Row(_) => {
             // Lexicographic comparison of bytes
             Ok(bytes1.cmp(bytes2))
         }
@@ -726,6 +737,7 @@ pub fn compare_column_to_value(
         }),
         ColumnType::Uuid
         | ColumnType::Text
+        | ColumnType::Json(_)
         | ColumnType::Enum(_)
         | ColumnType::Array(_)
         | ColumnType::Row(_) => Ok(bytes.cmp(value)),
@@ -1020,6 +1032,12 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
         }
         ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
         ColumnType::Text => {
+            let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
+                message: format!("invalid utf8: {e}"),
+            })?;
+            Ok(Value::Text(s.to_string()))
+        }
+        ColumnType::Json(_) => {
             let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
                 message: format!("invalid utf8: {e}"),
             })?;
