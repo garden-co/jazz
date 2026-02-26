@@ -1509,6 +1509,7 @@ mod tests {
                             element: None,
                             variants: Some(vec!["done".to_string(), "todo".to_string()]),
                             columns: None,
+                            schema: None,
                         },
                         nullable: false,
                         references: None,
