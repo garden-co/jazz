@@ -1,0 +1,19 @@
+{
+  "mode": "pre",
+  "tag": "alpha",
+  "initialVersions": {
+    "jazz-napi": "0.1.0",
+    "jazz-rn": "0.1.0",
+    "jazz-wasm": "0.1.0",
+    "docs": "0.0.0",
+    "todo-client-localfirst-react-docs": "0.1.0",
+    "todo-client-localfirst-ts-docs": "0.1.0",
+    "todo-server-ts-docs": "0.1.0",
+    "todo-client-localfirst-expo": "0.1.0",
+    "todo-client-localfirst-react": "0.1.0",
+    "todo-client-localfirst-ts": "0.1.0",
+    "todo-server-ts": "0.1.0",
+    "jazz-tools": "2.0.0-alpha.0"
+  },
+  "changesets": []
+}
