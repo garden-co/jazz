@@ -12,7 +12,7 @@
 //! - `JazzRuntimeImpl` wraps `Mutex<Option<RuntimeCore<...>>>`
 //!   (Option for two-step init: factory creates empty, `open()` initializes)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -42,10 +42,12 @@ use groove::sync_manager::{
 enum NitroValue {
     Integer(i32),
     BigInt(i64),
+    Double(f64),
     Boolean(bool),
     Text(String),
     Timestamp(u64),
     Uuid(String),
+    Bytea(Vec<u8>),
     Array(Vec<NitroValue>),
     Row(Vec<NitroValue>),
     Null,
@@ -56,10 +58,12 @@ impl From<Value> for NitroValue {
         match v {
             Value::Integer(i) => NitroValue::Integer(i),
             Value::BigInt(i) => NitroValue::BigInt(i),
+            Value::Double(f) => NitroValue::Double(f),
             Value::Boolean(b) => NitroValue::Boolean(b),
             Value::Text(s) => NitroValue::Text(s),
             Value::Timestamp(t) => NitroValue::Timestamp(t),
             Value::Uuid(id) => NitroValue::Uuid(id.uuid().to_string()),
+            Value::Bytea(bytes) => NitroValue::Bytea(bytes),
             Value::Array(arr) => NitroValue::Array(arr.into_iter().map(Into::into).collect()),
             Value::Row(row) => NitroValue::Row(row.into_iter().map(Into::into).collect()),
             Value::Null => NitroValue::Null,
@@ -71,6 +75,7 @@ fn nitro_value_to_groove(v: NitroValue) -> Result<Value, String> {
     Ok(match v {
         NitroValue::Integer(i) => Value::Integer(i),
         NitroValue::BigInt(i) => Value::BigInt(i),
+        NitroValue::Double(f) => Value::Double(f),
         NitroValue::Boolean(b) => Value::Boolean(b),
         NitroValue::Text(s) => Value::Text(s),
         NitroValue::Timestamp(t) => Value::Timestamp(t),
@@ -78,6 +83,7 @@ fn nitro_value_to_groove(v: NitroValue) -> Result<Value, String> {
             let uuid = uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {e}"))?;
             Value::Uuid(ObjectId::from_uuid(uuid))
         }
+        NitroValue::Bytea(bytes) => Value::Bytea(bytes),
         NitroValue::Array(arr) => Value::Array(
             arr.into_iter()
                 .map(nitro_value_to_groove)
@@ -117,6 +123,8 @@ struct JsColumnType {
     type_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     element: Option<Box<JsColumnType>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     columns: Option<Vec<JsColumnDescriptor>>,
 }
@@ -186,6 +194,13 @@ enum JsPolicyExpr {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_depth: Option<usize>,
     },
+    InheritsReferencing {
+        operation: JsPolicyOperation,
+        source_table: String,
+        via_column: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
+    },
     And {
         exprs: Vec<JsPolicyExpr>,
     },
@@ -237,10 +252,19 @@ fn js_column_type_to_groove(ct: JsColumnType) -> groove::query_manager::types::C
     match ct.type_name.as_str() {
         "Integer" => ColumnType::Integer,
         "BigInt" => ColumnType::BigInt,
+        "Double" => ColumnType::Double,
         "Boolean" => ColumnType::Boolean,
         "Text" => ColumnType::Text,
+        "Enum" => {
+            let Some(variants) = ct.variants else {
+                log::error!("Enum type missing variants, defaulting to Text");
+                return ColumnType::Text;
+            };
+            ColumnType::Enum(variants)
+        }
         "Timestamp" => ColumnType::Timestamp,
         "Uuid" => ColumnType::Uuid,
+        "Bytea" => ColumnType::Bytea,
         "Array" => {
             let Some(elem) = ct.element else {
                 log::error!("Array type missing element, defaulting to Text");
@@ -340,6 +364,22 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
                 via_column,
                 max_depth,
             },
+            JsPolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => PolicyExpr::InheritsReferencing {
+                operation: match operation {
+                    JsPolicyOperation::Select => Operation::Select,
+                    JsPolicyOperation::Insert => Operation::Insert,
+                    JsPolicyOperation::Update => Operation::Update,
+                    JsPolicyOperation::Delete => Operation::Delete,
+                },
+                source_table,
+                via_column,
+                max_depth,
+            },
             JsPolicyExpr::And { exprs } => {
                 PolicyExpr::And(exprs.into_iter().map(js_policy_expr_to_groove).collect())
             }
@@ -422,41 +462,67 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             ColumnType::Integer => JsColumnType {
                 type_name: "Integer".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::BigInt => JsColumnType {
                 type_name: "BigInt".into(),
                 element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Double => JsColumnType {
+                type_name: "Double".into(),
+                element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Boolean => JsColumnType {
                 type_name: "Boolean".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Text => JsColumnType {
                 type_name: "Text".into(),
                 element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Enum(variants) => JsColumnType {
+                type_name: "Enum".into(),
+                element: None,
+                variants: Some(variants.clone()),
                 columns: None,
             },
             ColumnType::Timestamp => JsColumnType {
                 type_name: "Timestamp".into(),
                 element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Uuid => JsColumnType {
                 type_name: "Uuid".into(),
                 element: None,
+                variants: None,
+                columns: None,
+            },
+            ColumnType::Bytea => JsColumnType {
+                type_name: "Bytea".into(),
+                element: None,
+                variants: None,
                 columns: None,
             },
             ColumnType::Array(elem) => JsColumnType {
                 type_name: "Array".into(),
                 element: Some(Box::new(ct_to_js(elem))),
+                variants: None,
                 columns: None,
             },
             ColumnType::Row(desc) => JsColumnType {
                 type_name: "Row".into(),
                 element: None,
+                variants: None,
                 columns: Some(
                     desc.columns
                         .iter()
@@ -526,6 +592,22 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                     Operation::Update => JsPolicyOperation::Update,
                     Operation::Delete => JsPolicyOperation::Delete,
                 },
+                via_column: via_column.clone(),
+                max_depth: *max_depth,
+            },
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => JsPolicyExpr::InheritsReferencing {
+                operation: match operation {
+                    Operation::Select => JsPolicyOperation::Select,
+                    Operation::Insert => JsPolicyOperation::Insert,
+                    Operation::Update => JsPolicyOperation::Update,
+                    Operation::Delete => JsPolicyOperation::Delete,
+                },
+                source_table: source_table.clone(),
                 via_column: via_column.clone(),
                 max_depth: *max_depth,
             },
@@ -621,127 +703,89 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, String> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct IndexedRowState {
-    pre_index_by_id: HashMap<ObjectId, usize>,
-    post_index_by_id: HashMap<ObjectId, usize>,
-    post_ids: Vec<ObjectId>,
+fn row_to_json(
+    descriptor: &groove::query_manager::types::RowDescriptor,
+    row: &groove::query_manager::types::Row,
+) -> serde_json::Value {
+    let values = decode_row(descriptor, &row.data)
+        .map(|vals| vals.into_iter().map(NitroValue::from).collect::<Vec<_>>())
+        .unwrap_or_default();
+    serde_json::json!({
+        "id": row.id.uuid().to_string(),
+        "values": values,
+    })
 }
 
-fn index_row_delta(
-    current_ids: &[ObjectId],
-    delta: &groove::query_manager::types::RowDelta,
-) -> IndexedRowState {
-    let pre_index_by_id: HashMap<_, _> = current_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (*id, index))
-        .collect();
-
-    let mut ids_to_detach = HashSet::new();
-    for row in &delta.removed {
-        ids_to_detach.insert(row.id);
-    }
-    for (old, _) in &delta.updated {
-        ids_to_detach.insert(old.id);
-    }
-
-    let mut post_ids = Vec::with_capacity(current_ids.len() + delta.added.len());
-    let mut post_index_by_id = HashMap::new();
-
-    for id in current_ids {
-        if !ids_to_detach.contains(id) {
-            post_index_by_id.insert(*id, post_ids.len());
-            post_ids.push(*id);
-        }
-    }
-
-    let mut append_if_missing = |id: ObjectId| {
-        if let std::collections::hash_map::Entry::Vacant(entry) = post_index_by_id.entry(id) {
-            entry.insert(post_ids.len());
-            post_ids.push(id);
-        }
-    };
-
-    for row in &delta.added {
-        append_if_missing(row.id);
-    }
-
-    for (_, new) in &delta.updated {
-        append_if_missing(new.id);
-    }
-
-    IndexedRowState {
-        pre_index_by_id,
-        post_index_by_id,
-        post_ids,
-    }
+fn fallback_row_json(id: ObjectId) -> serde_json::Value {
+    serde_json::json!({
+        "id": id.uuid().to_string(),
+        "values": [],
+    })
 }
 
 fn build_delta_json(
     delta: &SubscriptionDelta,
-    current_ids: &mut Vec<ObjectId>,
+    rows_by_id: &mut HashMap<ObjectId, groove::query_manager::types::Row>,
 ) -> serde_json::Value {
-    let row_to_json = |row: &groove::query_manager::types::Row| -> serde_json::Value {
-        let values = decode_row(&delta.descriptor, &row.data)
-            .map(|vals| vals.into_iter().map(NitroValue::from).collect::<Vec<_>>())
-            .unwrap_or_default();
-        serde_json::json!({
-            "id": row.id.uuid().to_string(),
-            "values": values,
-        })
-    };
+    let mut removed = Vec::with_capacity(delta.ordered_delta.removed.len());
+    for change in &delta.ordered_delta.removed {
+        let row_json = rows_by_id
+            .remove(&change.id)
+            .map(|row| row_to_json(&delta.descriptor, &row))
+            .unwrap_or_else(|| fallback_row_json(change.id));
+        removed.push(serde_json::json!({ "row": row_json, "index": change.index }));
+    }
 
-    let indexed = index_row_delta(current_ids, &delta.delta);
+    let mut updated = Vec::with_capacity(delta.ordered_delta.updated.len());
+    for change in &delta.ordered_delta.updated {
+        let old_row_json = rows_by_id
+            .get(&change.id)
+            .map(|row| row_to_json(&delta.descriptor, row))
+            .unwrap_or_else(|| {
+                change
+                    .row
+                    .as_ref()
+                    .map(|row| row_to_json(&delta.descriptor, row))
+                    .unwrap_or_else(|| fallback_row_json(change.id))
+            });
 
-    let added: Vec<_> = delta
-        .delta
-        .added
-        .iter()
-        .map(|row| {
-            let index = indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0);
-            serde_json::json!({ "row": row_to_json(row), "index": index })
-        })
-        .collect();
+        let new_row_json = match &change.row {
+            Some(row) => {
+                rows_by_id.insert(change.id, row.clone());
+                row_to_json(&delta.descriptor, row)
+            }
+            None => rows_by_id
+                .get(&change.id)
+                .map(|row| row_to_json(&delta.descriptor, row))
+                .unwrap_or_else(|| fallback_row_json(change.id)),
+        };
 
-    let removed: Vec<_> = delta
-        .delta
-        .removed
-        .iter()
-        .map(|row| {
-            let index = indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0);
-            serde_json::json!({ "row": row_to_json(row), "index": index })
-        })
-        .collect();
+        updated.push(serde_json::json!({
+            "old_row": old_row_json,
+            "new_row": new_row_json,
+            "old_index": change.old_index,
+            "new_index": change.new_index,
+        }));
+    }
 
-    let updated: Vec<_> = delta
-        .delta
-        .updated
-        .iter()
-        .map(|(old, new)| {
-            let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
-            let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
-            serde_json::json!({
-                "old_row": row_to_json(old),
-                "new_row": row_to_json(new),
-                "old_index": old_index,
-                "new_index": new_index,
-            })
-        })
-        .collect();
-
-    *current_ids = indexed.post_ids;
+    let mut added = Vec::with_capacity(delta.ordered_delta.added.len());
+    for change in &delta.ordered_delta.added {
+        rows_by_id.insert(change.id, change.row.clone());
+        let row_json = row_to_json(&delta.descriptor, &change.row);
+        added.push(serde_json::json!({ "row": row_json, "index": change.index }));
+    }
 
     serde_json::json!({
         "added": added,
         "removed": removed,
         "updated": updated,
-        "pending": false,
+        "pending": delta.ordered_delta.pending,
     })
 }
 
 // ============================================================================
 // NitroScheduler
+
 // ============================================================================
 
 type NitroCoreType = RuntimeCore<SurrealKvStorage, NitroScheduler, NitroSyncSender>;
@@ -1049,18 +1093,21 @@ impl JazzRuntimeImpl {
             std::mem::transmute::<Box<dyn Fn(String)>, Box<dyn Fn(String) + Send + Sync>>(on_update)
         };
 
-        let ids = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
+        let rows_by_id = Arc::new(Mutex::new(HashMap::<
+            ObjectId,
+            groove::query_manager::types::Row,
+        >::new()));
 
         let handle = self.with_core("subscribe", |core| {
             core.subscribe_with_settled_tier(
                 query,
                 {
-                    let ids = Arc::clone(&ids);
+                    let rows_by_id = Arc::clone(&rows_by_id);
                     move |delta: SubscriptionDelta| {
-                        let Ok(mut current_ids) = ids.lock() else {
+                        let Ok(mut cached_rows) = rows_by_id.lock() else {
                             return;
                         };
-                        let payload = build_delta_json(&delta, &mut current_ids);
+                        let payload = build_delta_json(&delta, &mut cached_rows);
                         if let Ok(json) = serde_json::to_string(&payload) {
                             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 on_update(json);
