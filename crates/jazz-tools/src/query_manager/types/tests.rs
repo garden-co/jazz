@@ -10,6 +10,7 @@ fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Timestamp.fixed_size(), Some(8));
     assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
     assert_eq!(ColumnType::Text.fixed_size(), None);
+    assert_eq!(ColumnType::Bytea.fixed_size(), None);
     assert_eq!(ColumnType::Enum(vec!["a".to_string()]).fixed_size(), None);
 }
 
@@ -61,6 +62,10 @@ fn value_column_type() {
     assert_eq!(
         Value::Uuid(crate::object::ObjectId::from_uuid(Uuid::nil())).column_type(),
         Some(ColumnType::Uuid)
+    );
+    assert_eq!(
+        Value::Bytea(vec![0, 1, 2, 3]).column_type(),
+        Some(ColumnType::Bytea)
     );
     assert_eq!(Value::Null.column_type(), None);
 }
