@@ -11,11 +11,13 @@ import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { tableNameToInterface } from "./type-generator.js";
 import type { Relation } from "./relation-analyzer.js";
 
+type ColumnTypeToTsMapper = (type: ColumnType) => string;
+
 function arrayType(elementTs: string): string {
   return elementTs.includes("|") ? `(${elementTs})[]` : `${elementTs}[]`;
 }
 
-function columnTypeToTs(type: ColumnType): string {
+function defaultColumnTypeToTs(type: ColumnType): string {
   switch (type.type) {
     case "Text":
       return "string";
@@ -45,12 +47,15 @@ function columnTypeToTs(type: ColumnType): string {
 /**
  * Generate WhereInput type for a column based on its type.
  */
-function columnToWhereInputType(col: {
-  name: string;
-  column_type: ColumnType;
-  nullable: boolean;
-  references?: string;
-}): string {
+function columnToWhereInputType(
+  col: {
+    name: string;
+    column_type: ColumnType;
+    nullable: boolean;
+    references?: string;
+  },
+  columnTypeToTs: ColumnTypeToTsMapper,
+): string {
   const baseType = col.column_type.type;
 
   switch (baseType) {
@@ -74,8 +79,10 @@ function columnToWhereInputType(col: {
       return "string | { eq?: string; ne?: string; in?: string[] }";
     case "Bytea":
       return "Uint8Array | { eq?: Uint8Array; ne?: Uint8Array }";
-    case "Json":
-      return "JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] }";
+    case "Json": {
+      const jsonType = columnTypeToTs(col.column_type);
+      return `${jsonType} | { eq?: ${jsonType}; ne?: ${jsonType}; in?: ${jsonType}[] }`;
+    }
     case "Enum": {
       const variants = col.column_type.variants
         .map((variant: string) => JSON.stringify(variant))
@@ -96,6 +103,13 @@ function columnToWhereInputType(col: {
  * Generate WhereInput interfaces for all tables.
  */
 export function generateWhereInputTypes(schema: WasmSchema): string[] {
+  return generateWhereInputTypesWithMapper(schema, defaultColumnTypeToTs);
+}
+
+export function generateWhereInputTypesWithMapper(
+  schema: WasmSchema,
+  columnTypeToTs: ColumnTypeToTsMapper,
+): string[] {
   const lines: string[] = [];
 
   for (const [tableName, table] of Object.entries(schema.tables)) {
@@ -106,7 +120,7 @@ export function generateWhereInputTypes(schema: WasmSchema): string[] {
     lines.push(`  id?: string | { eq?: string; ne?: string; in?: string[] };`);
 
     for (const col of table.columns) {
-      const type = columnToWhereInputType(col);
+      const type = columnToWhereInputType(col, columnTypeToTs);
       lines.push(`  ${col.name}?: ${type};`);
     }
     lines.push(`}`);
