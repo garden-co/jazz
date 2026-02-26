@@ -252,11 +252,21 @@ export interface SyncOutboxRouterOptions {
   onClientPayload?(payloadJson: string): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
+  maxPendingServerPayloads?: number;
 }
 
 type SyncPostErrorDetails = {
   retryable?: unknown;
 };
+
+type SyncQueueOverflowError = Error & {
+  code: "SYNC_SERVER_PAYLOAD_QUEUE_OVERFLOW";
+  retryable: false;
+  queueLength: number;
+  maxPendingServerPayloads: number;
+};
+
+const defaultMaxPendingServerPayloads = 2_000;
 
 const offlineErrorPatterns = [
   /network/i,
@@ -297,6 +307,28 @@ function isRetryableSyncPostError(error: unknown): boolean {
   return isOfflineTransportError(error);
 }
 
+function normalizePositiveIntegerLimit(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
+    return fallback;
+  }
+  return Math.floor(value);
+}
+
+function createQueueOverflowError(details: {
+  queueLength: number;
+  maxPendingServerPayloads: number;
+  logPrefix: string;
+}): SyncQueueOverflowError {
+  const error = new Error(
+    `${details.logPrefix}Sync server payload queue overflow`,
+  ) as SyncQueueOverflowError;
+  error.code = "SYNC_SERVER_PAYLOAD_QUEUE_OVERFLOW";
+  error.retryable = false;
+  error.queueLength = details.queueLength;
+  error.maxPendingServerPayloads = details.maxPendingServerPayloads;
+  return error;
+}
+
 /**
  * Create a shared runtime outbox router for server/client destinations.
  */
@@ -305,6 +337,10 @@ export function createSyncOutboxRouter(
 ): (envelope: string) => void {
   const logPrefix = options.logPrefix ?? "";
   const retryServerPayloads = options.retryServerPayloads ?? false;
+  const maxPendingServerPayloads = normalizePositiveIntegerLimit(
+    options.maxPendingServerPayloads,
+    defaultMaxPendingServerPayloads,
+  );
   const pendingServerPayloads: unknown[] = [];
   let serverFlushQueued = false;
   let serverFlushInFlight = false;
@@ -388,6 +424,17 @@ export function createSyncOutboxRouter(
     }
 
     if (isObjectDestination && "Server" in destination) {
+      if (pendingServerPayloads.length >= maxPendingServerPayloads) {
+        handleServerPayloadError(
+          createQueueOverflowError({
+            queueLength: pendingServerPayloads.length,
+            maxPendingServerPayloads,
+            logPrefix,
+          }),
+        );
+        return;
+      }
+
       pendingServerPayloads.push(payload);
       scheduleServerFlush();
     }

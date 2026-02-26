@@ -396,6 +396,51 @@ describe("sync-transport", () => {
     expect(onServerPayload.mock.calls[2][0]).toEqual({ seq: 2 });
   });
 
+  it("sync outbox router drops newest payloads when pending count limit is reached", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const onServerPayload = vi
+      .fn<(...args: [unknown]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+    const onServerPayloadError = vi.fn();
+    const router = createSyncOutboxRouter({
+      onServerPayload,
+      onServerPayloadError,
+      retryServerPayloads: true,
+      maxPendingServerPayloads: 2,
+    });
+
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 1 } }));
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 2 } }));
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 3 } }));
+
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(onServerPayloadError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "SYNC_SERVER_PAYLOAD_QUEUE_OVERFLOW" }),
+      ),
+    );
+
+    const overflowError = onServerPayloadError.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((error) => error.code === "SYNC_SERVER_PAYLOAD_QUEUE_OVERFLOW");
+    expect(overflowError).toMatchObject({
+      code: "SYNC_SERVER_PAYLOAD_QUEUE_OVERFLOW",
+      retryable: false,
+      queueLength: 2,
+      maxPendingServerPayloads: 2,
+    });
+
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledTimes(3));
+    expect(onServerPayload.mock.calls[0][0]).toEqual({ seq: 1 });
+    expect(onServerPayload.mock.calls[1][0]).toEqual({ seq: 1 });
+    expect(onServerPayload.mock.calls[2][0]).toEqual({ seq: 2 });
+  });
+
   it("sync outbox router drops non-offline server payload errors and keeps draining", async () => {
     vi.useFakeTimers();
 
