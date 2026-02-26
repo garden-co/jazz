@@ -24,7 +24,9 @@ use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
 use jazz_tools::runtime_tokio::TokioRuntime;
-use jazz_tools::schema_manager::{AppId, CatalogueSchemaResponse, SchemaManager, rehydrate_schema_manager_from_manifest};
+use jazz_tools::schema_manager::{
+    AppId, CatalogueSchemaResponse, SchemaManager, rehydrate_schema_manager_from_manifest,
+};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
@@ -142,7 +144,7 @@ enum WorkerCommand {
     },
     GetCatalogueSchema {
         app_id: AppId,
-        schema_hash: Option<SchemaHash>,
+        schema_hash: SchemaHash,
         response: tokio::sync::oneshot::Sender<Result<Option<CatalogueSchemaResponse>, String>>,
     },
     GetSchemaHashes {
@@ -363,7 +365,7 @@ impl WorkerPool {
     async fn get_catalogue_schema(
         &self,
         app_id: AppId,
-        schema_hash: Option<SchemaHash>,
+        schema_hash: SchemaHash,
     ) -> Result<Option<CatalogueSchemaResponse>, WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::GetCatalogueSchema {
@@ -1159,16 +1161,10 @@ async fn run_worker_loop(
                         .get(&app_id)
                         .ok_or_else(|| format!("missing runtime for app {app_id}"))
                         .and_then(|runtime| {
-                            let maybe_schema = match schema_hash {
-                                Some(requested_schema_hash) => runtime
-                                    .runtime
-                                    .known_schema(&requested_schema_hash)
-                                    .map_err(|err| err.to_string())?,
-                                None => runtime
-                                    .runtime
-                                    .any_known_schema()
-                                    .map_err(|err| err.to_string())?,
-                            };
+                            let maybe_schema = runtime
+                                .runtime
+                                .known_schema(&schema_hash)
+                                .map_err(|err| err.to_string())?;
                             Ok(maybe_schema.as_ref().map(CatalogueSchemaResponse::from))
                         });
                     if response.send(result).is_err() {
@@ -2288,7 +2284,7 @@ async fn schema_catalogue_handler(
 
     match state
         .workers
-        .get_catalogue_schema(app_id, Some(schema_hash))
+        .get_catalogue_schema(app_id, schema_hash)
         .await
     {
         Ok(Some(schema)) => Json(schema).into_response(),
