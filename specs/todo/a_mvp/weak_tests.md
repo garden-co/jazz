@@ -17,11 +17,6 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## Missing Schema/Catalogue Negative Paths
 
-## 5. Catalogue metadata filtering
-
-- Add tests that non-matching `app_id` catalogue objects are ignored without side effects.
-- Add tests that unknown catalogue `type` is ignored without side effects.
-
 ## 6. Malformed payload handling
 
 - Add malformed schema-content test for `process_catalogue_update(... CatalogueSchema ...)` decode failure path.
