@@ -168,7 +168,7 @@ describe("JazzClient.forRequest", () => {
     expect(subscribeCalls[0][0]).toBe(builder._build());
   });
 
-  it("normalizes RN indexed delta payloads for subscription callbacks", () => {
+  it("forwards structured RN delta payloads to subscription callbacks", () => {
     const { client, subscribeCallbacks } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
@@ -191,14 +191,21 @@ describe("JazzClient.forRequest", () => {
 
     expect(callback).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledWith({
-      added: [{ id: "row-a", values: [] }],
-      removed: [{ id: "row-r", values: [] }],
-      updated: [[{ id: "row-u", values: [] }, { id: "row-u", values: [] }]],
+      added: [{ row: { id: "row-a", values: [] }, index: 0 }],
+      removed: [{ row: { id: "row-r", values: [] }, index: 1 }],
+      updated: [
+        {
+          old_row: { id: "row-u", values: [] },
+          new_row: { id: "row-u", values: [] },
+          old_index: 0,
+          new_index: 0,
+        },
+      ],
       pending: false,
     });
   });
 
-  it("handles malformed subscription deltas by normalizing to empty arrays", () => {
+  it("forwards partial structured deltas without throwing", () => {
     const { client, subscribeCallbacks } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
@@ -212,9 +219,6 @@ describe("JazzClient.forRequest", () => {
     ).not.toThrow();
 
     expect(callback).toHaveBeenCalledWith({
-      added: [],
-      removed: [],
-      updated: [],
       pending: true,
     });
   });
