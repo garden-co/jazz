@@ -291,9 +291,30 @@ describe("WorkerBridge race harness", () => {
     worker.script.failInit("boom");
     await expect(initPromise).rejects.toThrow("Worker init failed: boom");
 
-    expect((bridge as any).initState).toBe("failed");
-    expect((bridge as any).pendingSyncPayloadsForWorker).toEqual([]);
+    expect((bridge as any).state.phase).toBe("failed");
+    expect((bridge as any).state.pendingSyncPayloadsForWorker).toEqual([]);
     expect(worker.script.receivedSyncPayloads).toEqual([]);
+  });
+
+  it("WB-U09 init times out after the bridge timeout window", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeWorker({ initAckMode: "manual" });
+      const { runtime } = createRuntimeHarness();
+      const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+      const initErrorPromise = bridge.init(makeBridgeOptions()).then(
+        () => new Error("Expected init to timeout"),
+        (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+      );
+      await vi.advanceTimersByTimeAsync(12_001);
+
+      const initError = await initErrorPromise;
+      expect(initError.message).toContain("Worker init timeout");
+      expect((bridge as any).state.phase).toBe("failed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("WB-U07 handles synchronous shutdown-ok acknowledgements", async () => {
