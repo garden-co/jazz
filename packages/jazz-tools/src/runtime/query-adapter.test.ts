@@ -563,6 +563,78 @@ describe("translateQuery", () => {
       ]);
     });
 
+    it("translates UUID[] forward and reverse includes using membership columns", () => {
+      const arrayFkSchema: WasmSchema = {
+        tables: {
+          files: {
+            columns: [
+              {
+                name: "parts",
+                column_type: { type: "Array", element: { type: "Uuid" } },
+                nullable: false,
+                references: "file_parts",
+              },
+            ],
+          },
+          file_parts: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+        },
+      };
+
+      const forward = JSON.parse(
+        translateQuery(
+          JSON.stringify({
+            table: "files",
+            conditions: [],
+            includes: { parts: true },
+            orderBy: [],
+          }),
+          arrayFkSchema,
+        ),
+      );
+      expect(forward.array_subqueries).toEqual([
+        {
+          column_name: "parts",
+          table: "file_parts",
+          inner_column: "id",
+          outer_column: "files.parts",
+          filters: [],
+          joins: [],
+          select_columns: null,
+          order_by: [],
+          limit: null,
+          nested_arrays: [],
+        },
+      ]);
+
+      const reverse = JSON.parse(
+        translateQuery(
+          JSON.stringify({
+            table: "file_parts",
+            conditions: [],
+            includes: { filesViaParts: true },
+            orderBy: [],
+          }),
+          arrayFkSchema,
+        ),
+      );
+      expect(reverse.array_subqueries).toEqual([
+        {
+          column_name: "filesViaParts",
+          table: "files",
+          inner_column: "parts",
+          outer_column: "file_parts.id",
+          filters: [],
+          joins: [],
+          select_columns: null,
+          order_by: [],
+          limit: null,
+          nested_arrays: [],
+        },
+      ]);
+    });
+
     it("skips false includes", () => {
       const builderJson = JSON.stringify({
         table: "todos",

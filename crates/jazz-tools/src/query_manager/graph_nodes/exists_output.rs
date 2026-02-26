@@ -125,6 +125,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![make_tuple(id)],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -145,6 +146,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(node.exists());
@@ -153,6 +155,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![],
             removed: vec![tuple],
+            moved: vec![],
             updated: vec![],
         });
         assert!(!node.exists());
@@ -169,6 +172,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![make_tuple(id1), make_tuple(id2)],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -179,6 +183,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![],
             removed: vec![make_tuple(id1)],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -195,6 +200,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![],
             removed: vec![make_tuple(id)],
+            moved: vec![],
             updated: vec![],
         });
 

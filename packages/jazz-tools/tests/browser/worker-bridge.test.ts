@@ -51,11 +51,27 @@ interface TodoInit {
   tags?: string[];
 }
 
+interface Project {
+  id: string;
+  name: string;
+}
+
+interface ProjectInit {
+  name: string;
+}
+
 const todos: TableProxy<Todo, TodoInit> = {
   _table: "todos",
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as TodoInit,
+};
+
+const projects: TableProxy<Project, ProjectInit> = {
+  _table: "projects",
+  _schema: schema,
+  _rowType: {} as Project,
+  _initType: {} as ProjectInit,
 };
 
 /** QueryBuilder that selects all todos. */
@@ -411,7 +427,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const projectId = "00000000-0000-0000-0000-000000000123";
+    const projectId = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
@@ -419,7 +435,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     db.insert(todos, { title: "Observed", done: false, project: projectId });
-    const anotherProjectId = "00000000-0000-0000-0000-000000000456";
+    const anotherProjectId = db.insert(projects, { name: "Ignored Project" });
     db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
 
     // Wait for subscription to fire
