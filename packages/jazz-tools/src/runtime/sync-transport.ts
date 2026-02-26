@@ -388,11 +388,16 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
+  const cataloguePayload = isCataloguePayload(payload);
+  if (cataloguePayload && !auth.adminSecret) {
+    return;
+  }
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
-  if (isCataloguePayload(payload)) {
+  if (cataloguePayload) {
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }

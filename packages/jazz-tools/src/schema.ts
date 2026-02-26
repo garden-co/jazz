@@ -99,6 +99,13 @@ export type PolicyExpr =
       max_depth?: number;
     }
   | {
+      type: "InheritsReferencing";
+      operation: PolicyOperation;
+      source_table: string;
+      via_column: string;
+      max_depth?: number;
+    }
+  | {
       type: "And";
       exprs: PolicyExpr[];
     }
