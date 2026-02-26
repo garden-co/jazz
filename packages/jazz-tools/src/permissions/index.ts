@@ -461,25 +461,32 @@ type PermissionWhereInput<T> =
 class UpdateRuleBuilder<WhereInput, Row> {
   private oldCondition?: Condition;
   private newCondition?: Condition;
+  private isRegistered = false;
 
-  constructor(private readonly table: string) {}
+  constructor(
+    private readonly table: string,
+    private readonly registerRule?: (ruleLike: RuleLike) => void,
+  ) {}
 
   where(
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): Rule {
     const condition = resolveWhereInput(input);
-    return {
+    const rule: Rule = {
       table: this.table,
       action: "update",
       using: condition,
       withCheck: condition,
     };
+    this.registerRule?.(rule);
+    return rule;
   }
 
   whereOld(
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): this {
     this.oldCondition = resolveWhereInput(input);
+    this.registerBuilder();
     return this;
   }
 
@@ -487,7 +494,16 @@ class UpdateRuleBuilder<WhereInput, Row> {
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): this {
     this.newCondition = resolveWhereInput(input);
+    this.registerBuilder();
     return this;
+  }
+
+  private registerBuilder(): void {
+    if (this.isRegistered) {
+      return;
+    }
+    this.isRegistered = true;
+    this.registerRule?.(this as unknown as RuleLike);
   }
 
   toRule(): Rule {
@@ -505,20 +521,28 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
 export function definePermissions<TApp extends AppLike>(
   app: TApp,
-  factory: (ctx: PolicyContext<TApp>) => RuleLike[] | RuleLike,
+  factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
   const fkReferencesByTable = collectFkReferencesByTable(app);
   const relationsByTable = collectRelationsByTable(app);
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
+  const rules: RuleLike[] = [];
+  const seenRules = new Set<RuleLike>();
+  const collectRule = (ruleLike: RuleLike): void => {
+    if (seenRules.has(ruleLike)) {
+      return;
+    }
+    seenRules.add(ruleLike);
+    rules.push(ruleLike);
+  };
   const ctx = {
-    policy: buildPolicyContext(tableNames, relationsByTable),
+    policy: buildPolicyContext(tableNames, relationsByTable, collectRule),
     anyOf,
     allOf,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
-  const output = factory(ctx);
-  const rules = Array.isArray(output) ? output : [output];
+  factory(ctx);
   return compileRules(rules, fkReferencesByTable);
 }
 
@@ -570,10 +594,11 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
 function buildPolicyContext(
   tableNames: string[],
   relationsByTable: Map<string, Relation[]>,
+  collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
-    context[table] = buildTablePolicyBuilder(table, relationsByTable);
+    context[table] = buildTablePolicyBuilder(table, relationsByTable, collectRule);
   }
   context.exists = (relation: PermissionRelation): ExistsRelationCondition => ({
     __jazzPermissionKind: "exists-relation",
@@ -585,17 +610,24 @@ function buildPolicyContext(
 function buildTablePolicyBuilder(
   table: string,
   relationsByTable: Map<string, Relation[]>,
+  collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
+  const registerRule = (rule: Rule): Rule => {
+    collectRule(rule);
+    return rule;
+  };
   const read: ActionBuilder<unknown, unknown> = {
-    where: (input) => ({ table, action: "read", using: resolveWhereInput(input) }),
+    where: (input) => registerRule({ table, action: "read", using: resolveWhereInput(input) }),
   };
   const insert: ActionBuilder<unknown, unknown> = {
-    where: (input) => ({ table, action: "insert", withCheck: resolveWhereInput(input) }),
+    where: (input) =>
+      registerRule({ table, action: "insert", withCheck: resolveWhereInput(input) }),
   };
   const del: ActionBuilder<unknown, unknown> = {
-    where: (input) => ({ table, action: "delete", using: resolveWhereInput(input) }),
+    where: (input) => registerRule({ table, action: "delete", using: resolveWhereInput(input) }),
   };
-  const updateFactory = (): UpdateRuleBuilder<unknown, unknown> => new UpdateRuleBuilder(table);
+  const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
+    new UpdateRuleBuilder(table, collectRule);
   const exists: ExistsBuilder<unknown> = {
     where: (input) => ({
       __jazzPermissionKind: "exists",

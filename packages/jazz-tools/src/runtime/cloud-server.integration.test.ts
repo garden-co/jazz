@@ -743,66 +743,62 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
       const sessionPersonId = session.user_id;
 
       if (style === "split") {
-        return [
-          policy.people.allowRead.where((person) =>
-            anyOf([
-              policy.exists(
-                policy.friendships.where({
-                  personAPrincipal: sessionPersonId,
-                  personBPrincipal: person.principalId,
-                }),
-              ),
-              policy.exists(
-                policy.friendships.where({
-                  personBPrincipal: sessionPersonId,
-                  personAPrincipal: person.principalId,
-                }),
-              ),
-            ]),
-          ),
-          policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId")),
-        ];
+        policy.people.allowRead.where((person) =>
+          anyOf([
+            policy.exists(
+              policy.friendships.where({
+                personAPrincipal: sessionPersonId,
+                personBPrincipal: person.principalId,
+              }),
+            ),
+            policy.exists(
+              policy.friendships.where({
+                personBPrincipal: sessionPersonId,
+                personAPrincipal: person.principalId,
+              }),
+            ),
+          ]),
+        );
+        policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId"));
+        return;
       }
 
       if (style === "join") {
-        return [
-          policy.profiles.allowRead.where((profile) =>
-            anyOf([
-              policy.exists(
-                policy.people
-                  .where({ principalId: profile.principalId })
-                  .join(policy.friendships, { left: "id", right: "personAId" })
-                  .where({ personBPrincipal: sessionPersonId }),
-              ),
-              policy.exists(
-                policy.people
-                  .where({ principalId: profile.principalId })
-                  .join(policy.friendships, { left: "id", right: "personBId" })
-                  .where({ personAPrincipal: sessionPersonId }),
-              ),
-            ]),
-          ),
-        ];
-      }
-
-      return [
         policy.profiles.allowRead.where((profile) =>
           anyOf([
             policy.exists(
               policy.people
                 .where({ principalId: profile.principalId })
-                .hopTo("friendshipsViaPersonAId")
+                .join(policy.friendships, { left: "id", right: "personAId" })
                 .where({ personBPrincipal: sessionPersonId }),
             ),
             policy.exists(
               policy.people
                 .where({ principalId: profile.principalId })
-                .hopTo("friendshipsViaPersonBId")
+                .join(policy.friendships, { left: "id", right: "personBId" })
                 .where({ personAPrincipal: sessionPersonId }),
             ),
           ]),
-        ),
-      ];
+        );
+        return;
+      }
+
+      policy.profiles.allowRead.where((profile) =>
+        anyOf([
+          policy.exists(
+            policy.people
+              .where({ principalId: profile.principalId })
+              .hopTo("friendshipsViaPersonAId")
+              .where({ personBPrincipal: sessionPersonId }),
+          ),
+          policy.exists(
+            policy.people
+              .where({ principalId: profile.principalId })
+              .hopTo("friendshipsViaPersonBId")
+              .where({ personAPrincipal: sessionPersonId }),
+          ),
+        ]),
+      );
     }),
   );
 
