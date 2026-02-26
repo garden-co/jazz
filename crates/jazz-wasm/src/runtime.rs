@@ -95,21 +95,42 @@ impl WasmScheduler {
     }
 }
 
+fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
+    wasm_bindgen_futures::spawn_local(async move {
+        *flag.borrow_mut() = false;
+
+        let Some(core_rc) = core_ref.upgrade() else {
+            return;
+        };
+
+        let needs_retry = if let Ok(mut core) = core_rc.try_borrow_mut() {
+            core.batched_tick();
+            false
+        } else {
+            true
+        };
+
+        if needs_retry {
+            // Runtime is currently borrowed (e.g. during query/subscription setup).
+            // Keep one retry queued rather than panicking on RefCell reborrow.
+            let mut scheduled = flag.borrow_mut();
+            if *scheduled {
+                return;
+            }
+            *scheduled = true;
+            drop(scheduled);
+            schedule_batched_tick_task(core_ref.clone(), flag.clone());
+        }
+    });
+}
+
 impl Scheduler for WasmScheduler {
     fn schedule_batched_tick(&self) {
         let mut scheduled = self.scheduled.borrow_mut();
         if !*scheduled {
             *scheduled = true;
-
-            let core_ref = self.core_ref.clone();
-            let flag = self.scheduled.clone();
-
-            wasm_bindgen_futures::spawn_local(async move {
-                *flag.borrow_mut() = false;
-                if let Some(core_rc) = core_ref.upgrade() {
-                    core_rc.borrow_mut().batched_tick();
-                }
-            });
+            drop(scheduled);
+            schedule_batched_tick_task(self.core_ref.clone(), self.scheduled.clone());
         }
     }
 }

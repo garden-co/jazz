@@ -377,6 +377,26 @@ export interface AllowedToContext {
   insert(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
   update(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
   delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
+  readReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
+  insertReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
+  updateReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
+  deleteReferencing(
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr;
 }
 
 interface ExistsBuilder<WhereInput> {
@@ -487,7 +507,7 @@ export function definePermissions<TApp extends AppLike>(
   app: TApp,
   factory: (ctx: PolicyContext<TApp>) => RuleLike[] | RuleLike,
 ): CompiledPermissions {
-  const fkColumnsByTable = collectFkColumnsByTable(app);
+  const fkReferencesByTable = collectFkReferencesByTable(app);
   const relationsByTable = collectRelationsByTable(app);
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
   const ctx = {
@@ -499,11 +519,11 @@ export function definePermissions<TApp extends AppLike>(
   } as unknown as PolicyContext<TApp>;
   const output = factory(ctx);
   const rules = Array.isArray(output) ? output : [output];
-  return compileRules(rules, fkColumnsByTable);
+  return compileRules(rules, fkReferencesByTable);
 }
 
-function collectFkColumnsByTable(app: AppLike): Map<string, Set<string>> {
-  const result = new Map<string, Set<string>>();
+function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
+  const result = new Map<string, Map<string, string>>();
   const schema = (app as { wasmSchema?: unknown }).wasmSchema;
   if (!schema || typeof schema !== "object") {
     return result;
@@ -515,10 +535,10 @@ function collectFkColumnsByTable(app: AppLike): Map<string, Set<string>> {
   }
 
   for (const [tableName, table] of Object.entries(typedSchema.tables)) {
-    const fkColumns = new Set<string>();
+    const fkColumns = new Map<string, string>();
     for (const column of table.columns ?? []) {
       if (column.references) {
-        fkColumns.add(column.name);
+        fkColumns.set(column.name, column.references);
       }
     }
     result.set(tableName, fkColumns);
@@ -1075,6 +1095,32 @@ function createAllowedToContext(): AllowedToContext {
     return expr;
   };
 
+  const inheritsReferencingExpr = (
+    operation: "Select" | "Insert" | "Update" | "Delete",
+    sourceTable: RelationJoinTarget,
+    fkColumn: string,
+    options?: RecursiveDepthOptions,
+  ): PolicyExpr => {
+    const maxDepth = options?.maxDepth;
+    if (maxDepth !== undefined) {
+      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+        throw new Error(
+          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a positive integer.`,
+        );
+      }
+    }
+    const expr: PolicyExpr = {
+      type: "InheritsReferencing",
+      operation,
+      source_table: relationJoinTargetToTable(sourceTable),
+      via_column: fkColumn,
+    };
+    if (maxDepth !== undefined) {
+      expr.max_depth = maxDepth;
+    }
+    return expr;
+  };
+
   return {
     read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
       return inheritsExpr("Select", fkColumn, options);
@@ -1087,6 +1133,34 @@ function createAllowedToContext(): AllowedToContext {
     },
     delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
       return inheritsExpr("Delete", fkColumn, options);
+    },
+    readReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Select", sourceTable, fkColumn, options);
+    },
+    insertReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Insert", sourceTable, fkColumn, options);
+    },
+    updateReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Update", sourceTable, fkColumn, options);
+    },
+    deleteReferencing(
+      sourceTable: RelationJoinTarget,
+      fkColumn: string,
+      options?: RecursiveDepthOptions,
+    ): PolicyExpr {
+      return inheritsReferencingExpr("Delete", sourceTable, fkColumn, options);
     },
   };
 }
@@ -1287,7 +1361,7 @@ function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): Compou
 
 function compileRules(
   rules: RuleLike[],
-  fkColumnsByTable: Map<string, Set<string>>,
+  fkReferencesByTable: Map<string, Map<string, string>>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
   for (const ruleLike of rules) {
@@ -1299,23 +1373,23 @@ function compileRules(
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
-          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
         });
         break;
       case "insert":
         tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
-          with_check: compileCondition(rule.withCheck, rule.table, fkColumnsByTable),
+          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
         });
         break;
       case "update":
         tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
-          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
-          with_check: compileCondition(rule.withCheck, rule.table, fkColumnsByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
+          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
         });
         break;
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
-          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
         });
         break;
       default:
@@ -1359,13 +1433,13 @@ function mergeExprWithOr(left?: PolicyExpr, right?: PolicyExpr): PolicyExpr | un
 function compileCondition(
   condition: Condition | undefined,
   table: string,
-  fkColumnsByTable: Map<string, Set<string>>,
+  fkReferencesByTable: Map<string, Map<string, string>>,
 ): PolicyExpr | undefined {
   if (!condition) {
     return undefined;
   }
   if (isPolicyExpr(condition)) {
-    assertInheritsColumns(condition, table, fkColumnsByTable);
+    assertInheritsColumns(condition, table, fkReferencesByTable);
     return condition;
   }
   if (isExistsRelationCondition(condition)) {
@@ -1376,7 +1450,7 @@ function compileCondition(
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
-    assertInheritsColumns(compiledCondition, table, fkColumnsByTable);
+    assertInheritsColumns(compiledCondition, table, fkReferencesByTable);
     if (!compiledCondition) {
       throw new Error(
         `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
@@ -1390,7 +1464,7 @@ function compileCondition(
   }
   if (isCompoundCondition(condition)) {
     const compiledChildren = condition.conditions.map((child) =>
-      compileCondition(child, table, fkColumnsByTable),
+      compileCondition(child, table, fkReferencesByTable),
     );
     const exprs = compiledChildren.filter((expr): expr is PolicyExpr => Boolean(expr));
     if (exprs.length === 0) {
@@ -1407,12 +1481,12 @@ function compileCondition(
 function assertInheritsColumns(
   expr: PolicyExpr,
   table: string,
-  fkColumnsByTable: Map<string, Set<string>>,
+  fkReferencesByTable: Map<string, Map<string, string>>,
 ): void {
   const check = (node: PolicyExpr, currentTable: string): void => {
     switch (node.type) {
       case "Inherits": {
-        const fkColumns = fkColumnsByTable.get(currentTable);
+        const fkColumns = fkReferencesByTable.get(currentTable);
         if (!fkColumns) {
           throw new Error(
             `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${currentTable}": ` +
@@ -1420,11 +1494,36 @@ function assertInheritsColumns(
           );
         }
         if (!fkColumns.has(node.via_column)) {
-          const fkList = [...fkColumns].sort();
+          const fkList = [...fkColumns.keys()].sort();
           const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
           throw new Error(
             `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${currentTable}": ` +
               `column is not a foreign key reference. Available FK columns: ${available}.`,
+          );
+        }
+        break;
+      }
+      case "InheritsReferencing": {
+        const sourceFks = fkReferencesByTable.get(node.source_table);
+        if (!sourceFks) {
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+              `source table metadata is missing in app.wasmSchema.`,
+          );
+        }
+        const referenced = sourceFks.get(node.via_column);
+        if (!referenced) {
+          const fkList = [...sourceFks.keys()].sort();
+          const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+              `column is not a foreign key reference on source table. Available FK columns: ${available}.`,
+          );
+        }
+        if (referenced !== currentTable) {
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+              `source FK references "${referenced}" but this rule is for "${currentTable}".`,
           );
         }
         break;
