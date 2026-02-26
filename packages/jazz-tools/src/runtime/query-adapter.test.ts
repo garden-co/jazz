@@ -219,6 +219,54 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates eq condition with ISO string for Timestamp columns", () => {
+      const iso = "2024-01-01T00:00:00.000Z";
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: iso }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: Date.parse(iso) } },
+      });
+    });
+
+    it("throws for invalid timestamp string condition", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: "not-a-date" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => parseTranslatedQuery(builderJson, basicSchema)).toThrow(
+        "Invalid timestamp condition",
+      );
+    });
+
+    it("translates numeric string for Timestamp columns as epoch number", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: "1712345678" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: 1712345678 } },
+      });
+    });
+
     it("translates eq condition with array value", () => {
       const builderJson = JSON.stringify({
         table: "todos",

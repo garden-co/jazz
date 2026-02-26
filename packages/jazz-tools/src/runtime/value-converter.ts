@@ -7,6 +7,14 @@
 
 import type { WasmSchema, ColumnType, Value as WasmValue } from "../drivers/types.js";
 
+function toTimestampMs(value: unknown): number {
+  const numeric = value instanceof Date ? value.getTime() : Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new Error("Invalid timestamp value. Expected Date or finite number.");
+  }
+  return numeric;
+}
+
 /**
  * Convert a JS value to WasmValue based on column type.
  */
@@ -27,7 +35,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
     case "Double":
       return { type: "Double", value: Number(value) };
     case "Timestamp":
-      return { type: "Timestamp", value: Number(value) };
+      return { type: "Timestamp", value: toTimestampMs(value) };
     case "Uuid":
       return { type: "Uuid", value: String(value) };
     case "Bytea": {

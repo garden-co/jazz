@@ -106,8 +106,9 @@ export function unwrapValue(v: WasmValue): unknown {
     case "Integer":
     case "BigInt":
     case "Double":
-    case "Timestamp":
       return v.value;
+    case "Timestamp":
+      return new Date(v.value);
     case "Bytea":
       return v.value;
     case "Null":
