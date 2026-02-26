@@ -12,7 +12,6 @@ interface TestItem {
   count: number;
 }
 
-// Helper to create a WasmRow
 function makeRow(id: string, name: string, count: number): WasmRow {
   return {
     id,
@@ -23,7 +22,6 @@ function makeRow(id: string, name: string, count: number): WasmRow {
   };
 }
 
-// Simple transform function for tests
 function transform(row: WasmRow): TestItem {
   return {
     id: row.id,
@@ -32,307 +30,165 @@ function transform(row: WasmRow): TestItem {
   };
 }
 
+function makeDelta(changes: RowDelta = []): RowDelta {
+  return changes;
+}
+
 describe("SubscriptionManager", () => {
-  describe("handleDelta with additions", () => {
-    it("tracks added items", () => {
-      const manager = new SubscriptionManager<TestItem>();
+  it("passes delta by reference (zero-copy)", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const input = makeDelta([{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }]);
 
-      const delta: RowDelta = {
-        added: [makeRow("1", "item1", 10), makeRow("2", "item2", 20)],
-        removed: [],
-        updated: [],
-        pending: false,
-      };
+    const result = manager.handleDelta(input, transform);
 
-      const result = manager.handleDelta(delta, transform);
-
-      expect(result.added).toHaveLength(2);
-      expect(result.added[0]).toEqual({ id: "1", name: "item1", count: 10 });
-      expect(result.added[1]).toEqual({ id: "2", name: "item2", count: 20 });
-
-      expect(result.updated).toHaveLength(0);
-      expect(result.removed).toHaveLength(0);
-
-      expect(result.all).toHaveLength(2);
-      expect(manager.size).toBe(2);
-    });
-
-    it("accumulates items across multiple deltas", () => {
-      const manager = new SubscriptionManager<TestItem>();
-
-      // First delta
-      manager.handleDelta(
-        {
-          added: [makeRow("1", "item1", 10)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
-
-      // Second delta
-      const result = manager.handleDelta(
-        {
-          added: [makeRow("2", "item2", 20)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
-
-      expect(result.added).toHaveLength(1); // Only new item
-      expect(result.all).toHaveLength(2); // Full state
-      expect(manager.size).toBe(2);
-    });
+    expect(result.delta).toBe(input);
+    expect(result.all.map((item) => item.id)).toEqual(["1"]);
   });
 
-  describe("handleDelta with updates", () => {
-    it("tracks updated items", () => {
-      const manager = new SubscriptionManager<TestItem>();
+  it("tracks additions", () => {
+    const manager = new SubscriptionManager<TestItem>();
 
-      // First add an item
-      manager.handleDelta(
-        {
-          added: [makeRow("1", "item1", 10)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    const result = manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) },
+        { kind: 0, id: "2", index: 1, row: makeRow("2", "item2", 20) },
+      ]),
+      transform,
+    );
 
-      // Then update it
-      const oldRow = makeRow("1", "item1", 10);
-      const newRow = makeRow("1", "item1", 15);
-      const result = manager.handleDelta(
-        {
-          added: [],
-          removed: [],
-          updated: [[oldRow, newRow]],
-          pending: false,
-        },
-        transform,
-      );
-
-      expect(result.updated).toHaveLength(1);
-      expect(result.updated[0]).toEqual({ id: "1", name: "item1", count: 15 });
-
-      expect(result.added).toHaveLength(0);
-      expect(result.removed).toHaveLength(0);
-
-      expect(result.all).toHaveLength(1);
-      expect(result.all[0].count).toBe(15);
-    });
-
-    it("updates items with new values", () => {
-      const manager = new SubscriptionManager<TestItem>();
-
-      // Add initial item
-      manager.handleDelta(
-        {
-          added: [makeRow("1", "original", 10)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
-
-      // Update with new name
-      const result = manager.handleDelta(
-        {
-          added: [],
-          removed: [],
-          updated: [[makeRow("1", "original", 10), makeRow("1", "updated", 100)]],
-          pending: false,
-        },
-        transform,
-      );
-
-      expect(result.all[0]).toEqual({ id: "1", name: "updated", count: 100 });
-    });
+    expect(result.delta).toHaveLength(2);
+    expect(result.all.map((item) => item.id)).toEqual(["1", "2"]);
+    expect(manager.size).toBe(2);
   });
 
-  describe("handleDelta with removals", () => {
-    it("tracks removed items", () => {
-      const manager = new SubscriptionManager<TestItem>();
+  it("tracks content updates", () => {
+    const manager = new SubscriptionManager<TestItem>();
 
-      // Add items first
-      manager.handleDelta(
-        {
-          added: [makeRow("1", "item1", 10), makeRow("2", "item2", 20)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    manager.handleDelta(
+      makeDelta([{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }]),
+      transform,
+    );
 
-      // Remove one item
-      const result = manager.handleDelta(
-        {
-          added: [],
-          removed: [makeRow("1", "item1", 10)],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    const result = manager.handleDelta(
+      makeDelta([{ kind: 2, id: "1", index: 0, row: makeRow("1", "item1", 15) }]),
+      transform,
+    );
 
-      expect(result.removed).toHaveLength(1);
-      expect(result.removed[0]).toEqual({ id: "1", name: "item1", count: 10 });
-
-      expect(result.added).toHaveLength(0);
-      expect(result.updated).toHaveLength(0);
-
-      expect(result.all).toHaveLength(1);
-      expect(result.all[0].id).toBe("2");
-      expect(manager.size).toBe(1);
-    });
-
-    it("handles removing non-existent items gracefully", () => {
-      const manager = new SubscriptionManager<TestItem>();
-
-      // Try to remove an item that was never added
-      const result = manager.handleDelta(
-        {
-          added: [],
-          removed: [makeRow("nonexistent", "ghost", 0)],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
-
-      expect(result.removed).toHaveLength(0);
-      expect(result.all).toHaveLength(0);
-    });
+    expect(result.delta[0]).toEqual({ kind: 2, id: "1", index: 0, row: makeRow("1", "item1", 15) });
+    expect(result.all[0].count).toBe(15);
   });
 
-  describe("handleDelta with mixed operations", () => {
-    it("handles add, update, and remove in same delta", () => {
-      const manager = new SubscriptionManager<TestItem>();
+  it("handles move-only updates without row payload", () => {
+    const manager = new SubscriptionManager<TestItem>();
 
-      // Add initial items
-      manager.handleDelta(
-        {
-          added: [makeRow("1", "item1", 10), makeRow("2", "item2", 20)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "a", index: 0, row: makeRow("a", "A", 1) },
+        { kind: 0, id: "b", index: 1, row: makeRow("b", "B", 2) },
+        { kind: 0, id: "c", index: 2, row: makeRow("c", "C", 3) },
+      ]),
+      transform,
+    );
 
-      // Mixed delta: add "3", update "2", remove "1"
-      const result = manager.handleDelta(
-        {
-          added: [makeRow("3", "item3", 30)],
-          removed: [makeRow("1", "item1", 10)],
-          updated: [[makeRow("2", "item2", 20), makeRow("2", "item2", 25)]],
-          pending: false,
-        },
-        transform,
-      );
+    const result = manager.handleDelta(makeDelta([{ kind: 2, id: "c", index: 0 }]), transform);
 
-      expect(result.added).toHaveLength(1);
-      expect(result.added[0].id).toBe("3");
-
-      expect(result.updated).toHaveLength(1);
-      expect(result.updated[0].id).toBe("2");
-      expect(result.updated[0].count).toBe(25);
-
-      expect(result.removed).toHaveLength(1);
-      expect(result.removed[0].id).toBe("1");
-
-      expect(result.all).toHaveLength(2);
-      const ids = result.all.map((item) => item.id).sort();
-      expect(ids).toEqual(["2", "3"]);
-    });
+    expect(result.delta).toEqual([{ kind: 2, id: "c", index: 0 }]);
+    expect(result.all.map((item) => item.id)).toEqual(["c", "a", "b"]);
   });
 
-  describe("clear", () => {
-    it("clears all tracked state", () => {
-      const manager = new SubscriptionManager<TestItem>();
+  it("tracks removals and shifts", () => {
+    const manager = new SubscriptionManager<TestItem>();
 
-      // Add items
-      manager.handleDelta(
-        {
-          added: [makeRow("1", "item1", 10), makeRow("2", "item2", 20)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) },
+        { kind: 0, id: "2", index: 1, row: makeRow("2", "item2", 20) },
+        { kind: 0, id: "3", index: 2, row: makeRow("3", "item3", 30) },
+      ]),
+      transform,
+    );
 
-      expect(manager.size).toBe(2);
+    const result = manager.handleDelta(makeDelta([{ kind: 1, id: "2", index: 1 }]), transform);
 
-      manager.clear();
-
-      expect(manager.size).toBe(0);
-
-      // Next delta should start fresh
-      const result = manager.handleDelta(
-        {
-          added: [makeRow("3", "item3", 30)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
-
-      expect(result.all).toHaveLength(1);
-      expect(result.all[0].id).toBe("3");
-    });
+    expect(result.delta).toEqual([{ kind: 1, id: "2", index: 1 }]);
+    expect(result.all.map((item) => item.id)).toEqual(["1", "3"]);
   });
 
-  describe("all array", () => {
-    it("returns current state after delta", () => {
-      const manager = new SubscriptionManager<TestItem>();
+  it("handles mixed remove + update + add in one delta", () => {
+    const manager = new SubscriptionManager<TestItem>();
 
-      const result1 = manager.handleDelta(
-        {
-          added: [makeRow("1", "item1", 10)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
+        { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
+        { kind: 0, id: "C", index: 2, row: makeRow("C", "C", 3) },
+        { kind: 0, id: "D", index: 3, row: makeRow("D", "D", 4) },
+      ]),
+      transform,
+    );
 
-      expect(result1.all).toEqual([{ id: "1", name: "item1", count: 10 }]);
+    const result = manager.handleDelta(
+      makeDelta([
+        { kind: 1, id: "B", index: 1 },
+        { kind: 2, id: "D", index: 1, row: makeRow("D", "D", 44) },
+        { kind: 0, id: "E", index: 3, row: makeRow("E", "E", 5) },
+      ]),
+      transform,
+    );
 
-      const result2 = manager.handleDelta(
-        {
-          added: [makeRow("2", "item2", 20)],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    expect(result.delta.map((change) => change.kind)).toEqual([1, 2, 0]);
+    expect(result.all.map((item) => item.id)).toEqual(["A", "D", "C", "E"]);
+  });
 
-      expect(result2.all).toHaveLength(2);
-    });
+  it("applies index positions correctly for mixed bulk updates", () => {
+    const manager = new SubscriptionManager<TestItem>();
 
-    it("returns empty array initially", () => {
-      const manager = new SubscriptionManager<TestItem>();
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
+        { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
+        { kind: 0, id: "C", index: 2, row: makeRow("C", "C", 3) },
+        { kind: 0, id: "D", index: 3, row: makeRow("D", "D", 4) },
+      ]),
+      transform,
+    );
 
-      const result = manager.handleDelta(
-        {
-          added: [],
-          removed: [],
-          updated: [],
-          pending: false,
-        },
-        transform,
-      );
+    const result = manager.handleDelta(
+      makeDelta([
+        // Bulk mixed change set:
+        // - remove B
+        // - move D to index 1 with payload update
+        // - move C to index 0 (no payload)
+        // - add E at tail
+        { kind: 1, id: "B", index: 1 },
+        { kind: 2, id: "D", index: 1, row: makeRow("D", "D*", 40) },
+        { kind: 2, id: "C", index: 0 },
+        { kind: 0, id: "E", index: 3, row: makeRow("E", "E", 5) },
+      ]),
+      transform,
+    );
 
-      expect(result.all).toEqual([]);
-    });
+    expect(result.all.map((item) => item.id)).toEqual(["C", "D", "A", "E"]);
+    expect(result.all.find((item) => item.id === "D")?.name).toBe("D*");
+  });
+
+  it("clears state", () => {
+    const manager = new SubscriptionManager<TestItem>();
+
+    manager.handleDelta(
+      makeDelta([{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }]),
+      transform,
+    );
+
+    expect(manager.size).toBe(1);
+    manager.clear();
+    expect(manager.size).toBe(0);
+
+    const result = manager.handleDelta(
+      makeDelta([{ kind: 0, id: "2", index: 0, row: makeRow("2", "item2", 20) }]),
+      transform,
+    );
+
+    expect(result.all.map((item) => item.id)).toEqual(["2"]);
   });
 });

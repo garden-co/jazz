@@ -214,6 +214,30 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session
 CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
 `);
   });
+
+  it("generates INHERITS REFERENCING policy expressions", () => {
+    resetCollectedState();
+    table("files", {
+      owner_id: col.string(),
+    });
+    const schema = getCollectedSchema();
+
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "InheritsReferencing",
+          operation: "Select",
+          source_table: "todos",
+          via_column: "image",
+        },
+      },
+    };
+
+    const sql = schemaToSql(schema);
+    expect(sql).toContain(
+      "CREATE POLICY files_select_policy ON files FOR SELECT USING (INHERITS SELECT REFERENCING todos VIA image);",
+    );
+  });
 });
 
 describe("lensToSql", () => {

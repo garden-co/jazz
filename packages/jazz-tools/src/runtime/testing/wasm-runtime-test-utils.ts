@@ -10,6 +10,33 @@ export type TestRuntime = Runtime & { free?(): void };
 
 let wasmModulePromise: Promise<any> | null = null;
 
+async function freeRuntimeSafely(runtime: TestRuntime): Promise<void> {
+  if (!runtime.free) return;
+
+  // Allow pending microtasks (scheduled ticks / callbacks) to release borrows
+  // before freeing the WASM runtime.
+  const maxAttempts = 5;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      runtime.free();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const borrowConflict =
+        message.includes("while it was borrowed") ||
+        message.includes("already borrowed") ||
+        message.includes("unreachable");
+      if (!borrowConflict) {
+        throw error;
+      }
+      if (attempt === maxAttempts - 1) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+}
+
 type JazzWasmPaths = {
   modulePath: string;
   wasmPath: string;
@@ -71,7 +98,7 @@ export async function createWasmRuntime(
   );
 
   onTestFinished(async () => {
-    await runtime.free();
+    await freeRuntimeSafely(runtime);
   });
 
   return runtime;

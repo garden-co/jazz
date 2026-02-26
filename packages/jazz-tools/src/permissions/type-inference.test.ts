@@ -204,6 +204,7 @@ describe("permissions type inference", () => {
         policy.todos.allowUpdate
           .whereOld(allowedTo.update("projectId", { maxDepth: 4 }))
           .whereNew(allowedTo.update("projectId", { maxDepth: 4 })),
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
       ];
     });
   });

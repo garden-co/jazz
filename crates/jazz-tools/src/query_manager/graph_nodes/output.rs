@@ -2,7 +2,7 @@ use ahash::AHashSet;
 
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::types::{
-    Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
+    Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
 };
 
 use super::RowNode;
@@ -93,6 +93,72 @@ impl OutputNode {
             .collect()
     }
 
+    /// Ordered tuples as received from upstream nodes.
+    pub fn ordered_tuples(&self) -> &[Tuple] {
+        &self.ordered_tuples
+    }
+
+    fn compute_tuple_delta(&self, old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
+        let mut delta = TupleDelta::new();
+        let old_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
+            old_tuples.iter().map(|t| t.ids()).collect();
+        let new_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
+            new_tuples.iter().map(|t| t.ids()).collect();
+
+        for old in old_tuples {
+            if !new_ids.contains(&old.ids()) {
+                delta.removed.push(old.clone());
+            }
+        }
+
+        for new in new_tuples {
+            if !old_ids.contains(&new.ids()) {
+                delta.added.push(new.clone());
+            }
+        }
+
+        let old_pos: std::collections::HashMap<Vec<crate::object::ObjectId>, usize> = old_tuples
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| (t.ids(), idx))
+            .collect();
+        for (new_idx, new_tuple) in new_tuples.iter().enumerate() {
+            let ids = new_tuple.ids();
+            if let Some(old_idx) = old_pos.get(&ids)
+                && old_idx != &new_idx
+            {
+                delta.moved.push(tuple_as_id_only(new_tuple));
+            }
+        }
+
+        for old in old_tuples {
+            if let Some(new) = new_tuples
+                .iter()
+                .find(|candidate| candidate.ids() == old.ids())
+                && has_tuple_content_changed(old, new)
+            {
+                delta.updated.push((old.clone(), new.clone()));
+            }
+        }
+
+        delta
+    }
+
+    /// Rebuild ordered output from a full ordered upstream input.
+    pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
+        let delta = self.compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
+
+        self.ordered_tuples = ordered_tuples.to_vec();
+        self.current_tuples = self.ordered_tuples.iter().cloned().collect();
+        self.dirty = false;
+        self.subscriber_initialized = true;
+
+        if !delta.is_empty() {
+            self.pending_tuple_deltas.push(delta.clone());
+        }
+        delta
+    }
+
     /// Decode a delta to Values.
     pub fn decode_delta(&self, delta: &RowDelta) -> DecodedDelta {
         DecodedDelta {
@@ -127,6 +193,24 @@ impl OutputNode {
     }
 }
 
+fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
+    old.iter()
+        .zip(new.iter())
+        .any(|(o, n)| match (o.content(), n.content()) {
+            (Some(oc), Some(nc)) => oc != nc,
+            _ => false,
+        })
+}
+
+fn tuple_as_id_only(tuple: &Tuple) -> Tuple {
+    Tuple::new(
+        tuple
+            .iter()
+            .map(|elem| TupleElement::Id(elem.id()))
+            .collect(),
+    )
+}
+
 /// Decoded delta with Values instead of binary.
 #[derive(Debug, Clone)]
 pub struct DecodedDelta {
@@ -150,6 +234,13 @@ impl RowNode for OutputNode {
         for tuple in &input.added {
             self.current_tuples.insert(tuple.clone());
             self.ordered_tuples.push(tuple.clone());
+        }
+
+        for tuple in &input.moved {
+            if let Some(pos) = self.ordered_tuples.iter().position(|t| t == tuple) {
+                let existing = self.ordered_tuples.remove(pos);
+                self.ordered_tuples.push(existing);
+            }
         }
 
         for (old_tuple, new_tuple) in &input.updated {
@@ -226,6 +317,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -251,6 +343,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -283,6 +376,7 @@ mod tests {
         let delta = RowDelta {
             added: vec![row1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -327,6 +421,7 @@ mod tests {
         let delta1 = TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
         node.process(delta1);
@@ -340,6 +435,7 @@ mod tests {
         let delta2 = TupleDelta {
             added: vec![tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
         node.process(delta2);

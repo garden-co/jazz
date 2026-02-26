@@ -36,7 +36,7 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{RowDelta, Schema, TableName, Value};
+use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
@@ -178,8 +178,8 @@ pub struct TickOutput {
 pub struct SubscriptionDelta {
     /// The subscription handle.
     pub handle: SubscriptionHandle,
-    /// The row changes (binary encoded).
-    pub delta: RowDelta,
+    /// The row changes with position-annotated ordering.
+    pub ordered_delta: OrderedRowDelta,
     /// Output descriptor for decoding the binary row data.
     /// Use with `decode_row(&descriptor, &row.data)` to get `Vec<Value>`.
     pub descriptor: crate::query_manager::types::RowDescriptor,

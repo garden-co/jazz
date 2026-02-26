@@ -1,5 +1,6 @@
 use crate::commit::CommitId;
 use crate::object::ObjectId;
+use std::collections::HashMap;
 
 /// A row with its object ID, binary data, and commit reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,9 @@ impl Row {
 pub struct RowDelta {
     pub added: Vec<Row>,
     pub removed: Vec<Row>,
+    /// Rows that stayed in-window but changed position.
+    /// Semantics: detach these IDs from current order, then append in listed order.
+    pub moved: Vec<ObjectId>,
     /// Updated rows as (old, new) pairs.
     pub updated: Vec<(Row, Row)>,
 }
@@ -36,6 +40,134 @@ impl RowDelta {
     }
 
     pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.moved.is_empty()
+            && self.updated.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedAdded {
+    pub id: ObjectId,
+    pub index: usize,
+    pub row: Row,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedRemoved {
+    pub id: ObjectId,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedUpdated {
+    pub id: ObjectId,
+    pub old_index: usize,
+    pub new_index: usize,
+    pub row: Option<Row>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OrderedRowDelta {
+    pub added: Vec<OrderedAdded>,
+    pub removed: Vec<OrderedRemoved>,
+    pub updated: Vec<OrderedUpdated>,
+    pub pending: bool,
+}
+
+impl OrderedRowDelta {
+    pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedDeltaResult {
+    pub delta: OrderedRowDelta,
+    pub ordered_ids_after: Vec<ObjectId>,
+}
+
+/// Build an ordered, wire-ready delta using an explicit post-order.
+///
+/// This variant avoids reconstructing order from delta semantics and should be used
+/// when the caller already has the exact post-settle ordered IDs.
+pub fn build_ordered_delta_with_post_ids(
+    ordered_ids_before: &[ObjectId],
+    ordered_ids_after: &[ObjectId],
+    delta: &RowDelta,
+    pending: bool,
+) -> OrderedDeltaResult {
+    let pre_index_by_id: HashMap<_, _> = ordered_ids_before
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+    let post_index_by_id: HashMap<_, _> = ordered_ids_after
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+
+    let added = delta
+        .added
+        .iter()
+        .map(|row| OrderedAdded {
+            id: row.id,
+            index: post_index_by_id.get(&row.id).copied().unwrap_or(0),
+            row: row.clone(),
+        })
+        .collect();
+
+    let removed = delta
+        .removed
+        .iter()
+        .map(|row| OrderedRemoved {
+            id: row.id,
+            index: pre_index_by_id.get(&row.id).copied().unwrap_or(0),
+        })
+        .collect();
+
+    let mut updated = delta
+        .moved
+        .iter()
+        .map(|id| OrderedUpdated {
+            id: *id,
+            old_index: pre_index_by_id.get(id).copied().unwrap_or(0),
+            new_index: post_index_by_id.get(id).copied().unwrap_or(0),
+            row: None,
+        })
+        .collect::<Vec<_>>();
+
+    for (old, new) in &delta.updated {
+        let old_index = pre_index_by_id.get(&old.id).copied().unwrap_or(0);
+        let new_index = post_index_by_id.get(&new.id).copied().unwrap_or(0);
+        let row_changed = old.data != new.data || old.commit_id != new.commit_id;
+
+        if row_changed {
+            updated.push(OrderedUpdated {
+                id: new.id,
+                old_index,
+                new_index,
+                row: Some(new.clone()),
+            });
+        } else if old_index != new_index {
+            updated.push(OrderedUpdated {
+                id: new.id,
+                old_index,
+                new_index,
+                row: None,
+            });
+        }
+    }
+
+    OrderedDeltaResult {
+        delta: OrderedRowDelta {
+            added,
+            removed,
+            updated,
+            pending,
+        },
+        ordered_ids_after: ordered_ids_after.to_vec(),
     }
 }
