@@ -266,6 +266,7 @@ fn default_for_type(ct: &ColumnType) -> Value {
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
         ColumnType::Bytea => Value::Bytea(vec![]),
+        ColumnType::Json(_) => Value::Null,
         ColumnType::Array(_) => Value::Array(vec![]),
         ColumnType::Row(_) => Value::Null,
     }

@@ -438,6 +438,27 @@ impl Parser {
                 ));
             }
             ColumnType::Enum(variants)
+        } else if upper == "JSON" {
+            if self.peek() == Some(&Token::LParen) {
+                self.advance();
+                let raw_schema = match self.advance() {
+                    Some(Token::StringLit(value)) => value.clone(),
+                    Some(t) => {
+                        return Err(SqlParseError::Expected(format!(
+                            "JSON schema string literal, got {:?}",
+                            t
+                        )));
+                    }
+                    None => return Err(SqlParseError::UnexpectedEnd),
+                };
+                self.expect(&Token::RParen)?;
+                let parsed_schema = serde_json::from_str(&raw_schema).map_err(|err| {
+                    SqlParseError::SyntaxError(format!("Invalid JSON schema payload: {err}"))
+                })?;
+                ColumnType::Json(Some(parsed_schema))
+            } else {
+                ColumnType::Json(None)
+            }
         } else {
             // Skip optional size like VARCHAR(255)
             if self.peek() == Some(&Token::LParen) {
@@ -1474,6 +1495,13 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         ColumnType::Timestamp => "TIMESTAMP".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
         ColumnType::Bytea => "BYTEA".to_string(),
+        ColumnType::Json(schema) => {
+            if let Some(schema) = schema {
+                format!("JSON('{}')", schema.to_string().replace('\'', "''"))
+            } else {
+                "JSON".to_string()
+            }
+        }
         ColumnType::Array(elem) => format!("{}[]", column_type_to_sql(elem)),
         ColumnType::Row(_) => "TEXT".to_string(),
     }
@@ -1501,6 +1529,7 @@ fn value_to_sql(val: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_simple_create_table() {
@@ -1953,6 +1982,43 @@ mod tests {
         assert_eq!(
             col.column_type,
             ColumnType::Array(Box::new(ColumnType::Bytea))
+        );
+    }
+
+    #[test]
+    fn parse_json_column_types() {
+        let sql = r#"
+            CREATE TABLE docs (
+                payload JSON NOT NULL,
+                typed_payload JSON('{"type":"object","properties":{"name":{"type":"string"}}}') NULL
+            );
+        "#;
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("docs")).unwrap();
+
+        assert_eq!(
+            table.descriptor.columns[0].column_type,
+            ColumnType::Json(None)
+        );
+        assert_eq!(
+            table.descriptor.columns[1].column_type,
+            ColumnType::Json(Some(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            })))
+        );
+        assert!(table.descriptor.columns[1].nullable);
+    }
+
+    #[test]
+    fn reject_invalid_json_schema_payload() {
+        let sql = "CREATE TABLE docs (payload JSON('{not-json}') NOT NULL);";
+        let err = parse_schema(sql).expect_err("invalid schema payload should fail");
+        assert!(
+            err.to_string().contains("Invalid JSON schema payload"),
+            "unexpected error: {err}"
         );
     }
 

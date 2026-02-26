@@ -9,6 +9,7 @@
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
@@ -113,6 +114,9 @@ function toTimestampMs(value: unknown): number {
 function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { Null: null };
+  }
+  if (columnType.type === "Json") {
+    return { Text: toJsonText(value) };
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
     return { Timestamp: toTimestampMs(value) };
@@ -261,6 +265,9 @@ function conditionToRelPredicate(
   }
   if (columnType.type === "Bytea" && cond.op === "contains") {
     throw new Error(`BYTEA column "${column}" does not support contains filters.`);
+  }
+  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
+    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
   }
   switch (cond.op) {
     case "eq":
@@ -529,6 +536,9 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
       const columnType = getColumnType(schema, builder.table, stripQualifier(column));
       if (columnType?.type === "Bytea") {
         throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+      }
+      if (columnType?.type === "Json") {
+        throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
       }
     }
     relation = {
