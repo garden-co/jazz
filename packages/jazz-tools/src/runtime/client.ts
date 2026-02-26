@@ -14,12 +14,12 @@ import {
   applyUserAuthHeaders,
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
+  isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type SyncStreamController,
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
-import { fetchWithTimeout } from "./utils.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -735,10 +735,14 @@ export class JazzClient {
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
+        retryServerPayloads: true,
         onServerPayload: (payload) => this.sendSyncMessage(payload),
         onServerPayloadError: (error) => {
-          console.error("Sync POST error:", error);
-          this.streamController.notifyTransportFailure();
+          const isExpectedAbort = isExpectedFetchAbortError(error);
+          if (!isExpectedAbort) {
+            console.error("Sync POST error:", error);
+            this.streamController.notifyTransportFailure();
+          }
         },
       }),
     );
