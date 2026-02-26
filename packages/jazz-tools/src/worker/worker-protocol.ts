@@ -92,6 +92,17 @@ export interface SimulateCrashMessage {
   type: "simulate-crash";
 }
 
+/** Request worker-side schema/lens debug state for tests. */
+export interface DebugSchemaStateMessage {
+  type: "debug-schema-state";
+}
+
+/** Seed a historical schema and persist its schema/lens catalogue objects. */
+export interface DebugSeedLiveSchemaMessage {
+  type: "debug-seed-live-schema";
+  schemaJson: string;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | SyncToWorkerMessage
@@ -101,7 +112,9 @@ export type MainToWorkerMessage =
   | PeerCloseMessage
   | UpdateAuthMessage
   | ShutdownMessage
-  | SimulateCrashMessage;
+  | SimulateCrashMessage
+  | DebugSchemaStateMessage
+  | DebugSeedLiveSchemaMessage;
 
 // ============================================================================
 // Worker → Main Thread Messages
@@ -143,10 +156,36 @@ export interface ShutdownOkMessage {
   type: "shutdown-ok";
 }
 
+export interface DebugLensEdgeState {
+  sourceHash: string;
+  targetHash: string;
+}
+
+export interface DebugSchemaState {
+  currentSchemaHash: string;
+  liveSchemaHashes: string[];
+  knownSchemaHashes: string[];
+  pendingSchemaHashes: string[];
+  lensEdges: DebugLensEdgeState[];
+}
+
+/** Worker responds with runtime schema/lens debug state. */
+export interface DebugSchemaStateOkMessage {
+  type: "debug-schema-state-ok";
+  state: DebugSchemaState;
+}
+
+/** Worker confirms debug schema seeding completed. */
+export interface DebugSeedLiveSchemaOkMessage {
+  type: "debug-seed-live-schema-ok";
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | InitOkMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
   | ErrorMessage
-  | ShutdownOkMessage;
+  | ShutdownOkMessage
+  | DebugSchemaStateOkMessage
+  | DebugSeedLiveSchemaOkMessage;
