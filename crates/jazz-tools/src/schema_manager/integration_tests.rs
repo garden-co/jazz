@@ -1584,6 +1584,128 @@ mod tests {
         assert_eq!(after, before, "same-schema pushes should be idempotent");
     }
 
+    /// Malformed schema payload should fail decode path deterministically.
+    #[test]
+    fn catalogue_schema_malformed_payload_errors_deterministically() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1, test_app_id(), "dev", "main").unwrap();
+
+        let target_hash = SchemaHash::from_bytes([9; 32]);
+        let before_branches = manager.all_branches().len();
+        let before = (
+            manager.context().is_live(&target_hash),
+            manager.context().is_pending(&target_hash),
+            manager.is_schema_known(&target_hash),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SchemaHash.to_string(), target_hash.to_string());
+
+        let err = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("malformed schema payload should return decode-path error");
+        assert_eq!(
+            err,
+            crate::schema_manager::SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32]))
+        );
+        let err_again = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("second malformed schema payload should fail identically");
+        assert_eq!(err_again, err);
+        assert_eq!(
+            manager.all_branches().len(),
+            before_branches,
+            "failed decode must not mutate branch state"
+        );
+        let after = (
+            manager.context().is_live(&target_hash),
+            manager.context().is_pending(&target_hash),
+            manager.is_schema_known(&target_hash),
+        );
+        assert_eq!(
+            after, before,
+            "failed schema decode must not change known/pending/live state"
+        );
+    }
+
+    /// Malformed lens payload should fail decode path deterministically.
+    #[test]
+    fn catalogue_lens_malformed_payload_errors_deterministically() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1, test_app_id(), "dev", "main").unwrap();
+
+        let before_branches = manager.all_branches().len();
+        let source = SchemaHash::from_bytes([1; 32]);
+        let target = SchemaHash::from_bytes([2; 32]);
+        let before = (
+            manager.context().is_live(&target),
+            manager.context().is_pending(&target),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SourceHash.to_string(), source.to_string());
+        metadata.insert(MetadataKey::TargetHash.to_string(), target.to_string());
+
+        let err = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("malformed lens payload should return decode-path error");
+        assert_eq!(
+            err,
+            crate::schema_manager::SchemaError::LensNotFound { source, target }
+        );
+        let err_again = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("second malformed lens payload should fail identically");
+        assert_eq!(err_again, err);
+        assert!(
+            manager.get_lens(&source, &target).is_none(),
+            "failed lens decode must not register any lens"
+        );
+        assert_eq!(
+            manager.all_branches().len(),
+            before_branches,
+            "failed lens decode must not mutate branch state"
+        );
+        let after = (
+            manager.context().is_live(&target),
+            manager.context().is_pending(&target),
+        );
+        assert_eq!(
+            after, before,
+            "failed lens decode must not activate any schema"
+        );
+    }
+
     /// E2E test: Full catalogue sync flow with data query.
     ///
     /// This test simulates the complete flow where:

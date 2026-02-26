@@ -17,11 +17,6 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## Missing Schema/Catalogue Negative Paths
 
-## 6. Malformed payload handling
-
-- Add malformed schema-content test for `process_catalogue_update(... CatalogueSchema ...)` decode failure path.
-- Add malformed lens-content test for `process_catalogue_update(... CatalogueLens ...)` decode failure path.
-
 ## 7. Invalid/missing lens metadata
 
 - Missing `source_hash` or `target_hash` should return deterministic `SchemaError`.
