@@ -1,21 +1,30 @@
 import type { Db, DbConfig } from "./db.js";
 import { createDb } from "./db.js";
+import type { Session } from "../runtime/context.js";
+import { resolveClientSession } from "../runtime/client-session.js";
+import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 
 export interface JazzClient {
   db: Db;
+  session: Session | null;
   manager: SubscriptionsOrchestrator;
   shutdown(): Promise<void>;
 }
 
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
-  const db = await createDb(config);
-  const manager = new SubscriptionsOrchestrator({ appId: config.appId }, db);
+  const resolvedConfig = resolveLocalAuthDefaults(config);
+  const [db, session] = await Promise.all([
+    createDb(resolvedConfig),
+    resolveClientSession(resolvedConfig),
+  ]);
+  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db);
 
   await manager.init();
 
   return {
     db,
+    session,
     manager,
     async shutdown() {
       await manager.shutdown();
