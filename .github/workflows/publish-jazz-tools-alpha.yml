@@ -1,10 +1,20 @@
 name: Publish jazz-tools alpha
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - packages/jazz-tools/package.json
+      - crates/jazz-wasm/package.json
+      - crates/jazz-napi/package.json
+      - packages/jazz-tools/CHANGELOG.md
+      - crates/jazz-wasm/CHANGELOG.md
+      - crates/jazz-napi/CHANGELOG.md
   workflow_dispatch:
     inputs:
       version:
-        description: "Optional npm version override (for example 2.0.0-alpha.1)"
+        description: "Optional exact manual version override (for example 2.0.0-alpha.6)."
         required: false
         type: string
 
@@ -212,6 +222,7 @@ jobs:
           cd crates/jazz-napi
           pnpm exec napi create-npm-dir -t .
           pnpm exec napi artifacts -d artifacts --dist npm
+          node -e 'const fs=require("fs");for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const path=`npm/${entry.name}/package.json`;const p=JSON.parse(fs.readFileSync(path,"utf8"));p.name=`@garden-co/${p.name}`;fs.writeFileSync(path,`${JSON.stringify(p,null,2)}\n`);}'
 
       - name: Verify staged jazz-napi platform artifacts
         run: |
@@ -237,25 +248,35 @@ jobs:
           cp dist/jazz-tools-* packages/jazz-tools/bin/native/
           chmod +x packages/jazz-tools/bin/native/jazz-tools-darwin-* packages/jazz-tools/bin/native/jazz-tools-linux-* || true
 
-      - name: Apply optional version override
-        if: ${{ inputs.version != '' }}
-        run: npm --prefix packages/jazz-tools version "${{ inputs.version }}" --no-git-tag-version
-
-      - name: Lock-step npm package versions
+      - name: Resolve lock-stepped npm package versions
         run: |
-          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
-          npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
-          npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version || '' }}"
+            if [ -n "${VERSION}" ]; then
+              npm --prefix packages/jazz-tools version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+            else
+              pnpm release:version
+              VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+              npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+            fi
+          else
+            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          fi
+
+          echo "Resolved publish version: ${VERSION}"
 
       - name: Sync jazz-napi platform package versions and optional deps
         run: |
           cd crates/jazz-napi
           pnpm exec napi version -p npm
-          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const dirs=fs.readdirSync("npm",{withFileTypes:true}).filter((d)=>d.isDirectory()).map((d)=>d.name).sort();pkg.optionalDependencies=Object.fromEntries(dirs.map((d)=>[`jazz-napi-${d}`,pkg.version]));fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
 
-      - name: Verify lock-stepped prerelease versions
+      - name: Guard alpha-only lock-stepped publish versions
         run: |
-          node -e 'const fs=require("fs");const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(tools.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${tools.version}`);}if(!(tools.version===wasm.version&&tools.version===napi.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}console.log(`Publishing lock-stepped versions at ${tools.version}`);'
+          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="alpha"){throw new Error(`${pkg.name} publishConfig.tag must be alpha, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
 
       - name: Verify packed jazz-wasm payload
         run: |
@@ -273,7 +294,7 @@ jobs:
           TARBALL=$(ls "${TMP_DIR}"/jazz-napi-*.tgz | head -n 1)
           tar -tf "${TARBALL}" | grep -q "package/index.js"
           tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
-          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["jazz-napi-linux-x64-gnu","jazz-napi-win32-x64-msvc","jazz-napi-darwin-x64","jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-win32-x64-msvc","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
 
       - name: Verify packed jazz-tools manifest
         run: |
@@ -310,4 +331,10 @@ jobs:
           fi
 
       - name: Publish jazz-tools (alpha tag)
-        run: pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
+        run: |
+          TOOLS_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          if npm view "jazz-tools@${TOOLS_VERSION}" version >/dev/null 2>&1; then
+            echo "jazz-tools@${TOOLS_VERSION} already exists on npm; skipping publish."
+          else
+            pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
+          fi

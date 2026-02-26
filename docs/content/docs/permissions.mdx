@@ -54,11 +54,11 @@ In TypeScript permissions, combine multiple conditions with array-based combinat
 import { definePermissions } from "jazz-tools/permissions";
 import { app } from "./app.js";
 
-export default definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => [
+export default definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
   policy.todos.allowRead.where(
     anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
-  ),
-]);
+  );
+});
 ```
 
 `allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
@@ -90,15 +90,15 @@ Use depth-bounded `INHERITS` when foreign keys can form recursive chains (for ex
     import { definePermissions } from "jazz-tools/permissions";
     import { app } from "./app.js";
 
-    export default definePermissions(app, ({ policy, allowedTo }) => [
+    export default definePermissions(app, ({ policy, allowedTo }) => {
       // Default recursive depth is 10.
-      policy.folders.allowRead.where(allowedTo.read("parentId")),
+      policy.folders.allowRead.where(allowedTo.read("parentId"));
 
       // Explicit override for recursive/self-referential chains.
       policy.folders.allowUpdate
         .whereOld(allowedTo.update("parentId", { maxDepth: 5 }))
-        .whereNew(allowedTo.update("parentId", { maxDepth: 5 })),
-    ]);
+        .whereNew(allowedTo.update("parentId", { maxDepth: 5 }));
+    });
     ```
 
     `maxDepth` must be a positive integer.
@@ -144,16 +144,14 @@ When simple `allowedTo.*(...)` is not expressive enough, build an explicit recur
         maxDepth: 10,
       });
 
-      return [
-        policy.todos.allowRead.where((todo) =>
-          policy.exists(
-            reachableTeams.hopTo("resource_access_edgesViaTeam").where({
-              "resource_access_edges.resource": todo.id,
-              grant_role: "viewer",
-            }),
-          ),
+      policy.todos.allowRead.where((todo) =>
+        policy.exists(
+          reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+            "resource_access_edges.resource": todo.id,
+            grant_role: "viewer",
+          }),
         ),
-      ];
+      );
     });
     ```
 

@@ -13,7 +13,7 @@ function readEnvAppId(): string | undefined {
 function defaultConfig(
   overrides: Partial<JazzProviderClientConfig> = {},
 ): JazzProviderClientConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "todo-react-example";
+  const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
@@ -32,6 +32,7 @@ type AppProps = {
   fallback?: React.ReactNode;
 };
 
+// #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(config);
   const configKey = JSON.stringify(resolvedConfig);
@@ -73,11 +74,10 @@ export function App({ config, fallback }: AppProps = {}) {
   }
 
   return (
-    <>
-      <JazzProvider client={client}>
-        <h1>Todos</h1>
-        <TodoList />
-      </JazzProvider>
-    </>
+    <JazzProvider client={client}>
+      <h1>Todos</h1>
+      <TodoList />
+    </JazzProvider>
   );
 }
+// #endregion context-setup-react

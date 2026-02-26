@@ -20,14 +20,13 @@ function defaultConfig(
   };
 }
 
-// #region context-setup-react
-export function App({
-  config,
-  fallback,
-}: {
+type AppProps = {
   config?: Partial<JazzProviderClientConfig>;
   fallback?: React.ReactNode;
-} = {}) {
+};
+
+// #region context-setup-react
+export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(config);
   const configKey = JSON.stringify(resolvedConfig);
   const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
