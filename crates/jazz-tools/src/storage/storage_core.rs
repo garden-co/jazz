@@ -299,6 +299,29 @@ pub(super) fn index_scan_all_core(
         .unwrap_or_default()
 }
 
+pub(super) fn index_scan_window_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    offset: usize,
+    limit: usize,
+    descending: bool,
+    mut scan_prefix_window: impl FnMut(&str, usize, usize, bool) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let prefix = index_prefix(table, column, branch);
+    scan_prefix_window(&prefix, offset, limit, descending)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(super) fn index_range_core(
     table: &str,
     column: &str,

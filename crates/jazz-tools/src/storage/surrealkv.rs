@@ -37,9 +37,9 @@ use super::{
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        index_range_core, index_remove_core, index_scan_all_core, index_scan_window_core,
+        load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
+        set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -191,6 +191,59 @@ impl SurrealKvStorage {
             has_more = iter
                 .next()
                 .map_err(|e| StorageError::IoError(format!("surrealkv iter next: {}", e)))?;
+        }
+
+        Ok(out)
+    }
+
+    fn scan_prefix_keys_window(
+        txn: &SurrealTransaction,
+        prefix: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Result<Vec<String>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut end = prefix.as_bytes().to_vec();
+        increment_bytes(&mut end);
+
+        let mut iter = txn
+            .range(prefix.as_bytes(), &end)
+            .map_err(|e| StorageError::IoError(format!("surrealkv range: {}", e)))?;
+
+        let mut out = Vec::with_capacity(limit);
+        let mut skipped = 0usize;
+        let mut has_more = if descending {
+            iter.seek_last()
+                .map_err(|e| StorageError::IoError(format!("surrealkv seek_last: {}", e)))?
+        } else {
+            iter.seek_first()
+                .map_err(|e| StorageError::IoError(format!("surrealkv seek_first: {}", e)))?
+        };
+
+        while has_more && iter.valid() {
+            let key = String::from_utf8(iter.key().user_key().to_vec())
+                .map_err(|e| StorageError::IoError(format!("surrealkv invalid key utf8: {}", e)))?;
+
+            if skipped < offset {
+                skipped += 1;
+            } else {
+                out.push(key);
+                if out.len() == limit {
+                    break;
+                }
+            }
+
+            has_more = if descending {
+                iter.prev()
+                    .map_err(|e| StorageError::IoError(format!("surrealkv iter prev: {}", e)))?
+            } else {
+                iter.next()
+                    .map_err(|e| StorageError::IoError(format!("surrealkv iter next: {}", e)))?
+            };
         }
 
         Ok(out)
@@ -463,6 +516,29 @@ impl Storage for SurrealKvStorage {
         })
     }
 
+    fn index_scan_window(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Vec<ObjectId> {
+        let Ok(txn) = self.begin_read_txn() else {
+            return Vec::new();
+        };
+        index_scan_window_core(
+            table,
+            column,
+            branch,
+            offset,
+            limit,
+            descending,
+            |prefix, off, lim, desc| Self::scan_prefix_keys_window(&txn, prefix, off, lim, desc),
+        )
+    }
+
     fn flush(&self) {
         let _span = tracing::debug_span!("SurrealKvStorage::flush").entered();
         let Ok(mut txn) = self.begin_write_txn(SurrealDurability::Immediate) else {
@@ -621,6 +697,14 @@ mod tests {
 
         let results = storage.index_scan_all("users", "age", "main");
         assert_eq!(results.len(), 4);
+
+        let expected_asc: Vec<_> = results.iter().copied().skip(1).take(2).collect();
+        let asc_window = storage.index_scan_window("users", "age", "main", 1, 2, false);
+        assert_eq!(asc_window, expected_asc);
+
+        let expected_desc: Vec<_> = results.iter().rev().copied().skip(1).take(2).collect();
+        let desc_window = storage.index_scan_window("users", "age", "main", 1, 2, true);
+        assert_eq!(desc_window, expected_desc);
 
         storage
             .index_remove("users", "age", "main", &Value::Integer(25), row2)

@@ -853,6 +853,180 @@ fn offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
 }
 
 #[test]
+fn query_where_applied_before_row_id_window_asc() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut non_matching_ids = Vec::new();
+    for i in 0..10 {
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("F-{i}").into()), Value::Integer(0)],
+            )
+            .unwrap();
+        non_matching_ids.push(handle.row_id);
+    }
+
+    let mut matching_ids = Vec::new();
+    for i in 0..10 {
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("T-{i}").into()), Value::Integer(1)],
+            )
+            .unwrap();
+        matching_ids.push(handle.row_id);
+    }
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(1))
+        .order_by("id")
+        .limit(5)
+        .build();
+    let initial = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    let mut expected_initial: Vec<_> = matching_ids.iter().copied().collect();
+    expected_initial.sort();
+    expected_initial.truncate(5);
+
+    assert_eq!(
+        initial.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        expected_initial
+    );
+    assert!(
+        initial
+            .iter()
+            .all(|(_, values)| values[1] == Value::Integer(1)),
+        "where filter must be applied before row-id windowing"
+    );
+
+    let promoted_id = non_matching_ids[0];
+    qm.update(
+        &mut storage,
+        promoted_id,
+        &[Value::Text("F-0-promoted".into()), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(1))
+        .order_by("id")
+        .limit(5)
+        .build();
+    let after_update = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    matching_ids.push(promoted_id);
+    let mut expected_after: Vec<_> = matching_ids.iter().copied().collect();
+    expected_after.sort();
+    expected_after.truncate(5);
+
+    assert_eq!(
+        after_update.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        expected_after
+    );
+    assert!(
+        after_update
+            .iter()
+            .all(|(_, values)| values[1] == Value::Integer(1)),
+        "updated row should participate in where-filtered window ordering"
+    );
+}
+
+#[test]
+fn query_where_applied_before_row_id_window_desc() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut matching_ids = Vec::new();
+    for i in 0..10 {
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("T-{i}").into()), Value::Integer(1)],
+            )
+            .unwrap();
+        matching_ids.push(handle.row_id);
+    }
+
+    let mut non_matching_ids = Vec::new();
+    for i in 0..10 {
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("F-{i}").into()), Value::Integer(0)],
+            )
+            .unwrap();
+        non_matching_ids.push(handle.row_id);
+    }
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(1))
+        .order_by_desc("id")
+        .limit(5)
+        .build();
+    let initial = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    let mut expected_initial: Vec<_> = matching_ids.iter().copied().collect();
+    expected_initial.sort();
+    expected_initial.reverse();
+    expected_initial.truncate(5);
+
+    assert_eq!(
+        initial.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        expected_initial
+    );
+    assert!(
+        initial
+            .iter()
+            .all(|(_, values)| values[1] == Value::Integer(1)),
+        "where filter must be applied before descending row-id windowing"
+    );
+
+    let promoted_id = non_matching_ids[9];
+    qm.update(
+        &mut storage,
+        promoted_id,
+        &[Value::Text("F-9-promoted".into()), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(1))
+        .order_by_desc("id")
+        .limit(5)
+        .build();
+    let after_update = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    matching_ids.push(promoted_id);
+    let mut expected_after: Vec<_> = matching_ids.iter().copied().collect();
+    expected_after.sort();
+    expected_after.reverse();
+    expected_after.truncate(5);
+
+    assert_eq!(
+        after_update.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        expected_after
+    );
+    assert!(
+        after_update
+            .iter()
+            .all(|(_, values)| values[1] == Value::Integer(1)),
+        "descending where-filtered window should refresh after update"
+    );
+}
+
+#[test]
 fn multiple_inserts_all_visible_in_query() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

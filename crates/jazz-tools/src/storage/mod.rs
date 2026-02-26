@@ -263,6 +263,26 @@ pub trait Storage {
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
 
+    /// Ordered window scan over index entries.
+    ///
+    /// Returns up to `limit` row IDs after skipping `offset` IDs in index key order.
+    /// Default implementation falls back to `index_scan_all`.
+    fn index_scan_window(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Vec<ObjectId> {
+        let mut rows = self.index_scan_all(table, column, branch);
+        if descending {
+            rows.reverse();
+        }
+        rows.into_iter().skip(offset).take(limit).collect()
+    }
+
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}
 
@@ -398,6 +418,18 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         (**self).index_scan_all(table, column, branch)
+    }
+
+    fn index_scan_window(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Vec<ObjectId> {
+        (**self).index_scan_window(table, column, branch, offset, limit, descending)
     }
 
     fn flush(&self) {
@@ -856,6 +888,56 @@ impl Storage for MemoryStorage {
         };
         index.values().flat_map(|ids| ids.iter().copied()).collect()
     }
+
+    fn index_scan_window(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Vec<ObjectId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let Some(index) = self.indices.get(&key) else {
+            return Vec::new();
+        };
+
+        let mut skipped = 0usize;
+        let mut out = Vec::with_capacity(limit);
+        if descending {
+            for ids in index.values().rev() {
+                for &row_id in ids {
+                    if skipped < offset {
+                        skipped += 1;
+                        continue;
+                    }
+                    out.push(row_id);
+                    if out.len() == limit {
+                        return out;
+                    }
+                }
+            }
+        } else {
+            for ids in index.values() {
+                for &row_id in ids {
+                    if skipped < offset {
+                        skipped += 1;
+                        continue;
+                    }
+                    out.push(row_id);
+                    if out.len() == limit {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 // ============================================================================
@@ -1058,6 +1140,42 @@ mod tests {
 
         let results = storage.index_scan_all("users", "age", "main");
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn memory_storage_index_scan_window_matches_slice_of_full_scan() {
+        let mut storage = MemoryStorage::new();
+
+        for _ in 0..20 {
+            let id = ObjectId::new();
+            storage
+                .index_insert("users", "_id", "main", &Value::Uuid(id), id)
+                .unwrap();
+        }
+
+        let all = storage.index_scan_all("users", "_id", "main");
+        let window = storage.index_scan_window("users", "_id", "main", 5, 7, false);
+        let expected: Vec<_> = all.into_iter().skip(5).take(7).collect();
+
+        assert_eq!(window, expected);
+    }
+
+    #[test]
+    fn memory_storage_index_scan_window_desc_matches_reverse_slice_of_full_scan() {
+        let mut storage = MemoryStorage::new();
+
+        for _ in 0..20 {
+            let id = ObjectId::new();
+            storage
+                .index_insert("users", "_id", "main", &Value::Uuid(id), id)
+                .unwrap();
+        }
+
+        let all = storage.index_scan_all("users", "_id", "main");
+        let window = storage.index_scan_window("users", "_id", "main", 3, 6, true);
+        let expected: Vec<_> = all.into_iter().rev().skip(3).take(6).collect();
+
+        assert_eq!(window, expected);
     }
 
     #[test]

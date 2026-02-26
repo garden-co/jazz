@@ -37,9 +37,9 @@ use super::{
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        index_range_core, index_remove_core, index_scan_all_core, index_scan_window_core,
+        load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
+        set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -193,6 +193,44 @@ impl OpfsBTreeStorage {
             .collect())
     }
 
+    fn tree_scan_keys_window(
+        &self,
+        prefix: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Result<Vec<String>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        if descending {
+            return Ok(self
+                .tree_scan_keys(prefix)?
+                .into_iter()
+                .rev()
+                .skip(offset)
+                .take(limit)
+                .collect());
+        }
+
+        let start = prefix.as_bytes();
+        let mut end = start.to_vec();
+        increment_bytes(&mut end);
+
+        let max_entries = offset.saturating_add(limit);
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .tree_scan_range_bytes_limited(start, &end, max_entries)?
+            .into_iter()
+            .skip(offset)
+            .map(|(key, _)| key)
+            .collect())
+    }
+
     fn tree_scan_key_range(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
         Ok(self
             .tree_scan_range_bytes(start.as_bytes(), end.as_bytes())?
@@ -206,13 +244,22 @@ impl OpfsBTreeStorage {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.tree_scan_range_bytes_limited(start, end, usize::MAX)
+    }
+
+    fn tree_scan_range_bytes_limited(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        max_entries: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
         if start >= end {
             return Ok(Vec::new());
         }
 
         self.with_tree_mut(|tree| {
             let entries = tree
-                .range(start, end, usize::MAX)
+                .range(start, end, max_entries)
                 .map_err(map_storage_err)?;
 
             entries
@@ -406,6 +453,26 @@ impl Storage for OpfsBTreeStorage {
         index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
     }
 
+    fn index_scan_window(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+        descending: bool,
+    ) -> Vec<ObjectId> {
+        index_scan_window_core(
+            table,
+            column,
+            branch,
+            offset,
+            limit,
+            descending,
+            |prefix, off, lim, desc| self.tree_scan_keys_window(prefix, off, lim, desc),
+        )
+    }
+
     fn flush(&self) {
         let _span = tracing::debug_span!("OpfsBTreeStorage::flush").entered();
         if let Err(error) = self.with_tree_mut(|tree| tree.checkpoint().map_err(map_storage_err)) {
@@ -566,6 +633,14 @@ mod tests {
 
         let results = storage.index_scan_all("users", "age", "main");
         assert_eq!(results.len(), 4);
+
+        let expected_asc: Vec<_> = results.iter().copied().skip(1).take(2).collect();
+        let asc_window = storage.index_scan_window("users", "age", "main", 1, 2, false);
+        assert_eq!(asc_window, expected_asc);
+
+        let expected_desc: Vec<_> = results.iter().rev().copied().skip(1).take(2).collect();
+        let desc_window = storage.index_scan_window("users", "age", "main", 1, 2, true);
+        assert_eq!(desc_window, expected_desc);
 
         storage
             .index_remove("users", "age", "main", &Value::Integer(25), row2)

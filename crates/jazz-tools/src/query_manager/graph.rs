@@ -356,6 +356,12 @@ impl QueryGraph {
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.descriptor.clone();
         let select_policy = table_schema.policies.select.using.clone();
+        let window_scan_plan = row_id_window_scan_plan(
+            plan,
+            &descriptor,
+            branches.len(),
+            session.is_some() && select_policy.is_some(),
+        );
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
 
         // Phase 1: Build IndexScan nodes (one per disjunct per branch)
@@ -371,6 +377,15 @@ impl QueryGraph {
                         let column = cond.column().to_string();
                         let scan_cond = condition_to_scan(cond);
                         (column, scan_cond)
+                    } else if let Some(plan) = window_scan_plan {
+                        (
+                            "_id".to_string(),
+                            ScanCondition::AllWindow {
+                                offset: plan.offset,
+                                limit: plan.limit,
+                                descending: plan.descending,
+                            },
+                        )
                     } else {
                         // No index condition, use "_id" for full scan
                         ("_id".to_string(), ScanCondition::All)
@@ -503,11 +518,19 @@ impl QueryGraph {
         }
 
         // LimitOffset node (if limit or offset specified)
-        if plan.limit.is_some() || plan.offset > 0 {
+        let effective_offset = if window_scan_plan.is_some() {
+            0
+        } else {
+            plan.offset
+        };
+        if plan.limit.is_some() || effective_offset > 0 {
             let limit_tuple_desc =
                 TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let limit_offset_node =
-                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                limit_tuple_desc,
+                plan.limit,
+                effective_offset,
+            );
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
             phase2_input = limit_offset_id;
@@ -584,6 +607,12 @@ impl QueryGraph {
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.descriptor.clone();
         let select_policy = table_schema.policies.select.using.clone();
+        let window_scan_plan = row_id_window_scan_plan(
+            plan,
+            &descriptor,
+            branches.len(),
+            session.is_some() && select_policy.is_some(),
+        );
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
@@ -604,6 +633,15 @@ impl QueryGraph {
                         let column = cond.column().to_string();
                         let scan_cond = condition_to_scan(cond);
                         (column, scan_cond)
+                    } else if let Some(plan) = window_scan_plan {
+                        (
+                            "_id".to_string(),
+                            ScanCondition::AllWindow {
+                                offset: plan.offset,
+                                limit: plan.limit,
+                                descending: plan.descending,
+                            },
+                        )
                     } else {
                         // No index condition, use "_id" for full scan
                         ("_id".to_string(), ScanCondition::All)
@@ -755,11 +793,19 @@ impl QueryGraph {
         }
 
         // LimitOffset node (if limit or offset specified)
-        if plan.limit.is_some() || plan.offset > 0 {
+        let effective_offset = if window_scan_plan.is_some() {
+            0
+        } else {
+            plan.offset
+        };
+        if plan.limit.is_some() || effective_offset > 0 {
             let limit_tuple_desc =
                 TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let limit_offset_node =
-                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                limit_tuple_desc,
+                plan.limit,
+                effective_offset,
+            );
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
             phase2_input = limit_offset_id;
@@ -2453,6 +2499,59 @@ fn disjuncts_to_predicate(disjuncts: &[Conjunction], descriptor: &RowDescriptor)
     )
 }
 
+fn order_by_row_id_direction(
+    order_by: &[(String, SortDirection)],
+    descriptor: &RowDescriptor,
+) -> Option<SortDirection> {
+    if order_by.is_empty() {
+        return Some(SortDirection::Ascending);
+    }
+
+    let (column, direction) = order_by.first()?;
+    if order_by.len() != 1 {
+        return None;
+    }
+
+    if column == "_id" {
+        return Some(*direction);
+    }
+
+    // "id" maps to row id only when there is no explicit "id" column.
+    (column == "id" && descriptor.column_index("id").is_none()).then_some(*direction)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowIdWindowScan {
+    offset: usize,
+    limit: usize,
+    descending: bool,
+}
+
+fn row_id_window_scan_plan(
+    plan: &ExecutionQueryPlan,
+    descriptor: &RowDescriptor,
+    branch_count: usize,
+    has_policy_filter: bool,
+) -> Option<RowIdWindowScan> {
+    let direction = order_by_row_id_direction(&plan.order_by, descriptor)?;
+    if plan.joins.is_empty()
+        && plan.recursive.is_none()
+        && !plan.include_deleted
+        && !has_policy_filter
+        && branch_count == 1
+        && plan.disjuncts.len() == 1
+        && plan.disjuncts[0].conditions.is_empty()
+    {
+        plan.limit.map(|limit| RowIdWindowScan {
+            offset: plan.offset,
+            limit,
+            descending: direction == SortDirection::Descending,
+        })
+    } else {
+        None
+    }
+}
+
 fn sort_keys_from_order_by(
     order_by: &[(String, SortDirection)],
     descriptor: &RowDescriptor,
@@ -2613,6 +2712,19 @@ mod tests {
         schema
     }
 
+    fn row_id_only_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("score", ColumnType::Integer),
+            ])
+            .into(),
+        );
+        schema
+    }
+
     #[test]
     fn compile_simple_query() {
         let schema = test_schema();
@@ -2657,6 +2769,133 @@ mod tests {
         // Should have: IndexScan -> Materialize -> Sort -> LimitOffset -> Output
         // (no Filter because no WHERE clause)
         assert_eq!(graph.nodes.len(), 5);
+    }
+
+    #[test]
+    fn compile_query_row_id_limit_pushes_window_into_index_scan() {
+        let schema = row_id_only_schema();
+        let query = QueryBuilder::new("users")
+            .order_by("_id")
+            .limit(10)
+            .offset(5)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert_eq!(graph.index_scan_nodes.len(), 1);
+        let scan_node_id = graph.index_scan_nodes[0].0;
+        let scan_node = &graph.nodes[scan_node_id.0 as usize].node;
+        match scan_node {
+            GraphNode::IndexScan(scan) => {
+                assert!(matches!(
+                    scan.condition,
+                    ScanCondition::AllWindow {
+                        offset: 5,
+                        limit: 10,
+                        descending: false
+                    }
+                ));
+            }
+            _ => panic!("expected index scan node"),
+        }
+    }
+
+    #[test]
+    fn compile_query_row_id_desc_limit_pushes_window_into_index_scan() {
+        let schema = row_id_only_schema();
+        let query = QueryBuilder::new("users")
+            .order_by_desc("_id")
+            .limit(10)
+            .offset(5)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert_eq!(graph.index_scan_nodes.len(), 1);
+        let scan_node_id = graph.index_scan_nodes[0].0;
+        let scan_node = &graph.nodes[scan_node_id.0 as usize].node;
+        match scan_node {
+            GraphNode::IndexScan(scan) => {
+                assert!(matches!(
+                    scan.condition,
+                    ScanCondition::AllWindow {
+                        offset: 5,
+                        limit: 10,
+                        descending: true
+                    }
+                ));
+            }
+            _ => panic!("expected index scan node"),
+        }
+    }
+
+    #[test]
+    fn compile_query_explicit_id_column_does_not_push_row_id_window() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .order_by("id")
+            .limit(10)
+            .offset(5)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert_eq!(graph.index_scan_nodes.len(), 1);
+        let scan_node_id = graph.index_scan_nodes[0].0;
+        let scan_node = &graph.nodes[scan_node_id.0 as usize].node;
+        match scan_node {
+            GraphNode::IndexScan(scan) => {
+                assert!(matches!(scan.condition, ScanCondition::All));
+            }
+            _ => panic!("expected index scan node"),
+        }
+    }
+
+    #[test]
+    fn compile_query_row_id_limit_with_filter_does_not_push_window() {
+        let schema = row_id_only_schema();
+        let query = QueryBuilder::new("users")
+            .filter_eq("score", Value::Integer(100))
+            .order_by("_id")
+            .limit(10)
+            .offset(5)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert_eq!(graph.index_scan_nodes.len(), 1);
+        let scan_node_id = graph.index_scan_nodes[0].0;
+        let scan_node = &graph.nodes[scan_node_id.0 as usize].node;
+        match scan_node {
+            GraphNode::IndexScan(scan) => {
+                assert!(matches!(
+                    scan.condition,
+                    ScanCondition::Eq(Value::Integer(100))
+                ));
+            }
+            _ => panic!("expected index scan node"),
+        }
+    }
+
+    #[test]
+    fn compile_query_row_id_desc_limit_with_filter_does_not_push_window() {
+        let schema = row_id_only_schema();
+        let query = QueryBuilder::new("users")
+            .filter_eq("score", Value::Integer(100))
+            .order_by_desc("_id")
+            .limit(10)
+            .offset(5)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+        assert_eq!(graph.index_scan_nodes.len(), 1);
+        let scan_node_id = graph.index_scan_nodes[0].0;
+        let scan_node = &graph.nodes[scan_node_id.0 as usize].node;
+        match scan_node {
+            GraphNode::IndexScan(scan) => {
+                assert!(matches!(
+                    scan.condition,
+                    ScanCondition::Eq(Value::Integer(100))
+                ));
+            }
+            _ => panic!("expected index scan node"),
+        }
     }
 
     #[test]

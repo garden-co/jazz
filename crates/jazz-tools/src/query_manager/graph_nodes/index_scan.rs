@@ -75,6 +75,22 @@ impl SourceNode for IndexScanNode {
                 .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
                 .into_iter()
                 .collect(),
+            ScanCondition::AllWindow {
+                offset,
+                limit,
+                descending,
+            } => ctx
+                .storage
+                .index_scan_window(
+                    self.table.as_str(),
+                    self.column.as_str(),
+                    &self.branch,
+                    *offset,
+                    *limit,
+                    *descending,
+                )
+                .into_iter()
+                .collect(),
             ScanCondition::Eq(value) => ctx
                 .storage
                 .index_lookup(
@@ -199,6 +215,66 @@ mod tests {
         assert!(contains_id(&delta.added, row2));
         assert!(contains_id(&delta.added, row3));
         assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn scan_window_returns_limited_rows() {
+        let mut storage = MemoryStorage::new();
+        for _ in 0..20 {
+            let row = ObjectId::new();
+            storage
+                .index_insert("users", "_id", "main", &Value::Uuid(row), row)
+                .unwrap();
+        }
+
+        let expected = storage.index_scan_window("users", "_id", "main", 3, 5, false);
+        let mut node = IndexScanNode::new(
+            "users",
+            "_id",
+            ScanCondition::AllWindow {
+                offset: 3,
+                limit: 5,
+                descending: false,
+            },
+            test_descriptor(),
+        );
+        let ctx = make_ctx(&storage);
+        let delta = node.scan(&ctx);
+
+        assert_eq!(delta.added.len(), expected.len());
+        for id in expected {
+            assert!(contains_id(&delta.added, id));
+        }
+    }
+
+    #[test]
+    fn scan_window_desc_returns_limited_rows() {
+        let mut storage = MemoryStorage::new();
+        for _ in 0..20 {
+            let row = ObjectId::new();
+            storage
+                .index_insert("users", "_id", "main", &Value::Uuid(row), row)
+                .unwrap();
+        }
+
+        let expected = storage.index_scan_window("users", "_id", "main", 2, 4, true);
+        let mut node = IndexScanNode::new(
+            "users",
+            "_id",
+            ScanCondition::AllWindow {
+                offset: 2,
+                limit: 4,
+                descending: true,
+            },
+            test_descriptor(),
+        );
+        let ctx = make_ctx(&storage);
+        let delta = node.scan(&ctx);
+
+        assert_eq!(delta.added.len(), expected.len());
+        for id in expected {
+            assert!(contains_id(&delta.added, id));
+        }
     }
 
     #[test]
