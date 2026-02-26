@@ -1285,10 +1285,34 @@ function columnFilterToExprs(
           exprs.push(value ? { type: "IsNull", column } : { type: "IsNotNull", column });
           break;
         case "contains":
+          exprs.push({
+            type: "Contains",
+            column,
+            value: toPolicyValue(value, options),
+          });
+          break;
         case "in":
-          throw new Error(
-            `Where operator "${op}" is not yet supported in permissions DSL for "${column}".`,
-          );
+          if (isSessionRefValue(value)) {
+            exprs.push({
+              type: "In",
+              column,
+              session_path: value.path,
+            });
+            break;
+          }
+          if (!Array.isArray(value)) {
+            throw new Error(`"${column}.in" expects an array or session reference.`);
+          }
+          if (value.length === 0) {
+            exprs.push({ type: "False" });
+            break;
+          }
+          exprs.push({
+            type: "InList",
+            column,
+            values: value.map((entry) => toPolicyValue(entry, options)),
+          });
+          break;
         default:
           throw new Error(`Unsupported where operator "${op}" in permissions DSL.`);
       }

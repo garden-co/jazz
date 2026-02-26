@@ -51,8 +51,12 @@ function policyExprToSql(expr: PolicyExpr): string {
       return `${expr.column} IS NULL`;
     case "IsNotNull":
       return `${expr.column} IS NOT NULL`;
+    case "Contains":
+      return `${expr.column} CONTAINS ${policyValueToSql(expr.value)}`;
     case "In":
       return `${expr.column} IN @session.${expr.session_path.join(".")}`;
+    case "InList":
+      return `${expr.column} IN (${expr.values.map(policyValueToSql).join(", ")})`;
     case "Exists":
       return `EXISTS (SELECT FROM ${expr.table} WHERE ${policyExprToSql(expr.condition)})`;
     case "ExistsRel":

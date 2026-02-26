@@ -91,6 +91,7 @@ enum Token {
     And,
     Or,
     In,
+    Contains,
     Is,
     Alter,
     Add,
@@ -315,6 +316,7 @@ impl<'a> Tokenizer<'a> {
                     "AND" => Token::And,
                     "OR" => Token::Or,
                     "IN" => Token::In,
+                    "CONTAINS" => Token::Contains,
                     "IS" => Token::Is,
                     "ALTER" => Token::Alter,
                     "ADD" => Token::Add,
@@ -516,6 +518,24 @@ impl Parser {
         Ok(PolicyValue::Literal(self.parse_value()?))
     }
 
+    fn parse_policy_in_list(&mut self) -> Result<Vec<PolicyValue>, SqlParseError> {
+        self.expect(&Token::LParen)?;
+        if self.peek() == Some(&Token::RParen) {
+            return Err(SqlParseError::Expected(
+                "at least one value in IN (...) policy list".to_string(),
+            ));
+        }
+
+        let mut values = vec![self.parse_policy_value()?];
+        while self.peek() == Some(&Token::Comma) {
+            self.advance();
+            values.push(self.parse_policy_value()?);
+        }
+
+        self.expect(&Token::RParen)?;
+        Ok(values)
+    }
+
     fn parse_policy_expr(&mut self) -> Result<PolicyExpr, SqlParseError> {
         self.parse_policy_or()
     }
@@ -646,12 +666,30 @@ impl Parser {
                             value: self.parse_policy_value()?,
                         })
                     }
+                    Some(Token::Contains) => {
+                        self.advance();
+                        Ok(PolicyExpr::Contains {
+                            column,
+                            value: self.parse_policy_value()?,
+                        })
+                    }
                     Some(Token::In) => {
                         self.advance();
-                        Ok(PolicyExpr::In {
-                            column,
-                            session_path: self.parse_session_path()?,
-                        })
+                        match self.peek() {
+                            Some(Token::At) => Ok(PolicyExpr::In {
+                                column,
+                                session_path: self.parse_session_path()?,
+                            }),
+                            Some(Token::LParen) => Ok(PolicyExpr::InList {
+                                column,
+                                values: self.parse_policy_in_list()?,
+                            }),
+                            Some(t) => Err(SqlParseError::Expected(format!(
+                                "session reference or IN (...) value list after IN, got {:?}",
+                                t
+                            ))),
+                            None => Err(SqlParseError::UnexpectedEnd),
+                        }
                     }
                     Some(Token::Is) => {
                         self.advance();
@@ -1190,10 +1228,22 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         }
         PolicyExpr::IsNull { column } => format!("{} IS NULL", column),
         PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", column),
+        PolicyExpr::Contains { column, value } => {
+            format!("{} CONTAINS {}", column, policy_value_to_sql(value))
+        }
         PolicyExpr::In {
             column,
             session_path,
         } => format!("{} IN @session.{}", column, session_path.join(".")),
+        PolicyExpr::InList { column, values } => format!(
+            "{} IN ({})",
+            column,
+            values
+                .iter()
+                .map(policy_value_to_sql)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         PolicyExpr::Exists { table, condition } => {
             format!(
                 "EXISTS (SELECT FROM {} WHERE {})",
@@ -1541,6 +1591,51 @@ mod tests {
             }
             other => panic!("expected OR policy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_create_policy_with_contains_and_in_list() {
+        let sql = r#"
+            CREATE TABLE todos (
+                owner_id TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
+
+            CREATE POLICY todos_select_policy ON todos FOR SELECT
+                USING (owner_id CONTAINS 'ali' AND status IN ('active', @session.user_id));
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let using = schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .expect("missing select policy");
+
+        let PolicyExpr::And(exprs) = using else {
+            panic!("expected AND policy, got {using:?}");
+        };
+        assert_eq!(exprs.len(), 2);
+        assert!(matches!(
+            &exprs[0],
+            PolicyExpr::Contains {
+                column,
+                value: PolicyValue::Literal(Value::Text(value)),
+            } if column == "owner_id" && value == "ali"
+        ));
+        assert!(matches!(
+            &exprs[1],
+            PolicyExpr::InList { column, values }
+                if column == "status"
+                    && values
+                        == &vec![
+                            PolicyValue::Literal(Value::Text("active".into())),
+                            PolicyValue::SessionRef(vec!["user_id".into()])
+                        ]
+        ));
     }
 
     #[test]
@@ -2005,6 +2100,37 @@ mod tests {
         assert!(sql.contains("CREATE POLICY todos_insert_policy ON todos FOR INSERT"));
         assert!(sql.contains("CREATE POLICY todos_update_policy ON todos FOR UPDATE"));
         assert!(sql.contains("CREATE POLICY todos_delete_policy ON todos FOR DELETE"));
+    }
+
+    #[test]
+    fn schema_to_sql_includes_contains_and_in_list_policies() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::with_policies(
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new(ColumnName::new("owner_id"), ColumnType::Text),
+                    ColumnDescriptor::new(ColumnName::new("status"), ColumnType::Text),
+                ]),
+                TablePolicies::new().with_select(PolicyExpr::And(vec![
+                    PolicyExpr::Contains {
+                        column: "owner_id".into(),
+                        value: PolicyValue::Literal(Value::Text("ali".into())),
+                    },
+                    PolicyExpr::InList {
+                        column: "status".into(),
+                        values: vec![
+                            PolicyValue::Literal(Value::Text("active".into())),
+                            PolicyValue::Literal(Value::Text("trial".into())),
+                        ],
+                    },
+                ])),
+            ),
+        );
+
+        let sql = schema_to_sql(&schema);
+        assert!(sql.contains("owner_id CONTAINS 'ali'"));
+        assert!(sql.contains("status IN ('active', 'trial')"));
     }
 
     #[test]

@@ -901,12 +901,66 @@ describe("permissions DSL", () => {
     expect(newOnly.todos.update?.using).toEqual(newOnly.todos.update?.with_check);
   });
 
+  it("supports contains and in where operators", () => {
+    const containsCompiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ ownerId: { contains: "ali" } } as unknown as TodoWhere),
+    ]);
+    expect(containsCompiled.todos.select?.using).toEqual({
+      type: "Contains",
+      column: "ownerId",
+      value: {
+        type: "Literal",
+        value: "ali",
+      },
+    });
+
+    const inListCompiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ ownerId: { in: ["alice", "bob"] } } as unknown as TodoWhere),
+    ]);
+    expect(inListCompiled.todos.select?.using).toEqual({
+      type: "InList",
+      column: "ownerId",
+      values: [
+        {
+          type: "Literal",
+          value: "alice",
+        },
+        {
+          type: "Literal",
+          value: "bob",
+        },
+      ],
+    });
+
+    const inSessionCompiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({
+        ownerId: { in: session["claims.teamIds"] },
+      } as unknown as TodoWhere),
+    ]);
+    expect(inSessionCompiled.todos.select?.using).toEqual({
+      type: "In",
+      column: "ownerId",
+      session_path: ["claims", "teamIds"],
+    });
+
+    const emptyInCompiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ ownerId: { in: [] } } as unknown as TodoWhere),
+    ]);
+    expect(emptyInCompiled.todos.select?.using).toEqual({ type: "False" });
+  });
+
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {
     expect(() =>
       definePermissions(app, ({ policy }) => [
-        policy.todos.allowRead.where({ done: { contains: true } } as unknown as TodoWhere),
+        policy.todos.allowRead.where({ ownerId: { in: "alice" } } as unknown as TodoWhere),
       ]),
-    ).toThrow(/where operator "contains" is not yet supported/i);
+    ).toThrow(/ownerId\.in.*array or session reference/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where({ done: { startsWith: true } } as unknown as TodoWhere),
+      ]),
+    ).toThrow(/unsupported where operator "startsWith"/i);
 
     expect(() =>
       definePermissions(app, ({ policy, allOf }) => [
