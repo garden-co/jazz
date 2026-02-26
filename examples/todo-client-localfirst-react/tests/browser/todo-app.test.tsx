@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -279,7 +279,6 @@ describe("React Todo App E2E", () => {
       serverUrl,
       localAuthMode: "demo",
       localAuthToken: "react-sync-user-a",
-      adminSecret: ADMIN_SECRET,
     });
     const el2 = await mountApp({
       appId: APP_ID,
@@ -287,7 +286,6 @@ describe("React Todo App E2E", () => {
       serverUrl,
       localAuthMode: "demo",
       localAuthToken: "react-sync-user-b",
-      adminSecret: ADMIN_SECRET,
     });
 
     // Let both app instances finish server/event-stream setup before mutating.

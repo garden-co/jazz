@@ -83,6 +83,7 @@ enum Token {
     Session,
     Inherits,
     Via,
+    Referencing,
     Select,
     Insert,
     Update,
@@ -304,8 +305,9 @@ impl<'a> Tokenizer<'a> {
                     "WITH" => Token::With,
                     "CHECK" => Token::Check,
                     "SESSION" => Token::Session,
-                    "INHERITS" => Token::Inherits,
+                    "INHERITS" | "INHERIT" => Token::Inherits,
                     "VIA" => Token::Via,
+                    "REFERENCING" => Token::Referencing,
                     "SELECT" => Token::Select,
                     "INSERT" => Token::Insert,
                     "UPDATE" => Token::Update,
@@ -451,6 +453,7 @@ impl Parser {
                 "TEXT" | "VARCHAR" | "CHAR" | "STRING" => ColumnType::Text,
                 "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => ColumnType::Integer,
                 "BIGINT" => ColumnType::BigInt,
+                "REAL" | "FLOAT" | "DOUBLE" => ColumnType::Double,
                 "BOOLEAN" | "BOOL" => ColumnType::Boolean,
                 "TIMESTAMP" => ColumnType::Timestamp,
                 "UUID" => ColumnType::Uuid,
@@ -570,13 +573,26 @@ impl Parser {
             Some(Token::Inherits) => {
                 self.advance();
                 let operation = self.parse_policy_operation()?;
-                self.expect(&Token::Via)?;
-                let via_column = self.expect_ident()?;
-                Ok(PolicyExpr::Inherits {
-                    operation,
-                    via_column,
-                    max_depth: None,
-                })
+                if self.peek() == Some(&Token::Referencing) {
+                    self.advance();
+                    let source_table = self.expect_ident()?;
+                    self.expect(&Token::Via)?;
+                    let via_column = self.expect_ident()?;
+                    Ok(PolicyExpr::InheritsReferencing {
+                        operation,
+                        source_table,
+                        via_column,
+                        max_depth: None,
+                    })
+                } else {
+                    self.expect(&Token::Via)?;
+                    let via_column = self.expect_ident()?;
+                    Ok(PolicyExpr::Inherits {
+                        operation,
+                        via_column,
+                        max_depth: None,
+                    })
+                }
             }
             Some(Token::Ident(_)) => {
                 let column = self.expect_ident()?;
@@ -680,7 +696,16 @@ impl Parser {
             Some(Token::True) => Ok(Value::Boolean(true)),
             Some(Token::False) => Ok(Value::Boolean(false)),
             Some(Token::Number(n)) => {
-                if let Ok(i) = n.parse::<i32>() {
+                if n.contains('.') {
+                    if let Ok(f) = n.parse::<f64>() {
+                        Ok(Value::Double(f))
+                    } else {
+                        Err(SqlParseError::InvalidDefaultValue(format!(
+                            "Cannot parse float: {}",
+                            n
+                        )))
+                    }
+                } else if let Ok(i) = n.parse::<i32>() {
                     Ok(Value::Integer(i))
                 } else if let Ok(i) = n.parse::<i64>() {
                     Ok(Value::BigInt(i))
@@ -936,6 +961,37 @@ impl Parser {
 // Public API
 // ============================================================================
 
+fn is_valid_reference_column_type(column_type: &ColumnType) -> bool {
+    match column_type {
+        ColumnType::Uuid => true,
+        ColumnType::Array(element_type) => matches!(element_type.as_ref(), ColumnType::Uuid),
+        _ => false,
+    }
+}
+
+fn validate_schema_references(schema: &Schema) -> Result<(), SqlParseError> {
+    for (table_name, table_schema) in schema {
+        for column in &table_schema.descriptor.columns {
+            let Some(referenced_table) = column.references else {
+                continue;
+            };
+
+            if !is_valid_reference_column_type(&column.column_type) {
+                return Err(SqlParseError::SyntaxError(format!(
+                    "column '{}.{}' declares REFERENCES but has type {:?}; only UUID and UUID[] support REFERENCES",
+                    table_name.as_str(),
+                    column.name.as_str(),
+                    column.column_type
+                )));
+            }
+
+            let _ = referenced_table;
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse a schema SQL file into a Schema.
 pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
     let tokens = Tokenizer::new(sql).tokenize()?;
@@ -997,6 +1053,8 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
             None => break,
         }
     }
+
+    validate_schema_references(&schema)?;
 
     Ok(schema)
 }
@@ -1161,6 +1219,26 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
                 via_column
             ),
         },
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => match max_depth {
+            Some(depth) => format!(
+                "INHERITS {} REFERENCING {} VIA {} MAX DEPTH {}",
+                operation.to_string().to_uppercase(),
+                source_table,
+                via_column,
+                depth
+            ),
+            None => format!(
+                "INHERITS {} REFERENCING {} VIA {}",
+                operation.to_string().to_uppercase(),
+                source_table,
+                via_column
+            ),
+        },
         PolicyExpr::And(exprs) => exprs
             .iter()
             .map(|e| format!("({})", policy_expr_to_sql(e)))
@@ -1278,6 +1356,7 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
     match ct {
         ColumnType::Integer => "INTEGER".to_string(),
         ColumnType::BigInt => "BIGINT".to_string(),
+        ColumnType::Double => "REAL".to_string(),
         ColumnType::Boolean => "BOOLEAN".to_string(),
         ColumnType::Text => "TEXT".to_string(),
         ColumnType::Enum(variants) => {
@@ -1301,6 +1380,10 @@ fn value_to_sql(val: &Value) -> String {
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
+        Value::Double(f) => {
+            assert!(f.is_finite(), "non-finite float in value_to_sql: {f}");
+            format!("{f:?}")
+        }
         Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
         Value::Timestamp(t) => t.to_string(),
         Value::Uuid(id) => format!("'{:?}'", id),
@@ -1416,6 +1499,48 @@ mod tests {
         assert!(table.policies.update.using.is_some());
         assert!(table.policies.update.with_check.is_some());
         assert!(table.policies.delete.using.is_some());
+    }
+
+    #[test]
+    fn parse_create_policy_with_inherits_referencing() {
+        let sql = r#"
+            CREATE TABLE files (
+                owner_id TEXT NOT NULL
+            );
+
+            CREATE TABLE todos (
+                owner_id TEXT NOT NULL,
+                image UUID REFERENCES files
+            );
+
+            CREATE POLICY files_select_policy ON files FOR SELECT
+                USING (owner_id = @session.user_id OR INHERITS SELECT REFERENCING todos VIA image);
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let files = schema.get(&TableName::new("files")).unwrap();
+        let using = files
+            .policies
+            .select
+            .using
+            .as_ref()
+            .expect("missing select policy");
+        match using {
+            PolicyExpr::Or(exprs) => {
+                assert!(exprs.iter().any(|expr| {
+                    matches!(
+                        expr,
+                        PolicyExpr::InheritsReferencing {
+                            operation: Operation::Select,
+                            source_table,
+                            via_column,
+                            max_depth: None,
+                        } if source_table == "todos" && via_column == "image"
+                    )
+                }));
+            }
+            other => panic!("expected OR policy, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1660,6 +1785,32 @@ mod tests {
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
+    }
+
+    #[test]
+    fn reject_non_uuid_array_references() {
+        let sql = "CREATE TABLE files (parts TEXT[] REFERENCES file_parts NOT NULL);";
+        let error = parse_schema(sql).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only UUID and UUID[] support REFERENCES"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn reject_non_uuid_scalar_references() {
+        let sql = "CREATE TABLE files (part TEXT REFERENCES file_parts NOT NULL);";
+        let error = parse_schema(sql).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only UUID and UUID[] support REFERENCES"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1981,5 +2132,141 @@ mod tests {
         assert_eq!(owner.name.as_str(), "owner_id");
         assert_eq!(owner.references, Some(TableName::new("users")));
         assert!(!owner.nullable);
+    }
+
+    #[test]
+    fn parse_real_column_type() {
+        let sql = r#"
+            CREATE TABLE measurements (
+                temperature REAL NOT NULL,
+                humidity REAL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("measurements")).unwrap();
+
+        assert_eq!(table.descriptor.columns.len(), 2);
+
+        let temp = &table.descriptor.columns[0];
+        assert_eq!(temp.name.as_str(), "temperature");
+        assert_eq!(temp.column_type, ColumnType::Double);
+        assert!(!temp.nullable);
+
+        let humidity = &table.descriptor.columns[1];
+        assert_eq!(humidity.name.as_str(), "humidity");
+        assert_eq!(humidity.column_type, ColumnType::Double);
+        assert!(humidity.nullable);
+    }
+
+    #[test]
+    fn parse_float_and_double_as_real_aliases() {
+        let sql = r#"
+            CREATE TABLE sensors (
+                pressure FLOAT NOT NULL,
+                altitude DOUBLE NOT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("sensors")).unwrap();
+
+        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Double);
+        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Double);
+    }
+
+    #[test]
+    fn sql_round_trip_with_real() {
+        let sql = r#"CREATE TABLE measurements (
+    temperature REAL NOT NULL,
+    humidity REAL
+);"#;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let orig = schema.get(&TableName::new("measurements")).unwrap();
+        let round = reparsed.get(&TableName::new("measurements")).unwrap();
+
+        assert_eq!(
+            orig.descriptor.columns.len(),
+            round.descriptor.columns.len()
+        );
+        assert_eq!(
+            orig.descriptor.columns[0].column_type,
+            round.descriptor.columns[0].column_type
+        );
+        assert_eq!(
+            orig.descriptor.columns[1].column_type,
+            round.descriptor.columns[1].column_type
+        );
+        assert_eq!(
+            orig.descriptor.columns[1].nullable,
+            round.descriptor.columns[1].nullable
+        );
+    }
+
+    #[test]
+    fn parse_lens_add_real_column_with_default() {
+        let sql = "ALTER TABLE sensors ADD COLUMN calibration REAL DEFAULT 0.0;";
+
+        let transform = parse_lens(sql).unwrap();
+        assert_eq!(transform.ops.len(), 1);
+
+        match &transform.ops[0] {
+            LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            } => {
+                assert_eq!(table, "sensors");
+                assert_eq!(column, "calibration");
+                assert_eq!(*column_type, ColumnType::Double);
+                assert_eq!(*default, Value::Double(0.0));
+            }
+            _ => panic!("Expected AddColumn"),
+        }
+    }
+
+    #[test]
+    fn parse_non_finite_float_default_rejected() {
+        // The tokeniser treats inf/NaN as identifiers, not numbers, so these
+        // are rejected at parse time before reaching the value constructor.
+        for literal in &["inf", "-inf", "NaN"] {
+            let sql = format!("ALTER TABLE t ADD COLUMN x REAL DEFAULT {literal};");
+            assert!(parse_lens(&sql).is_err(), "should reject {literal}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite float")]
+    fn value_to_sql_rejects_infinity() {
+        value_to_sql(&Value::Double(f64::INFINITY));
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite float")]
+    fn value_to_sql_rejects_nan() {
+        value_to_sql(&Value::Double(f64::NAN));
+    }
+
+    #[test]
+    fn parse_real_array_column() {
+        let sql = "CREATE TABLE timeseries (samples REAL[] NOT NULL);";
+
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("timeseries"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Double))
+        );
+        assert!(!col.nullable);
     }
 }

@@ -74,6 +74,7 @@ impl TransformNode for UnionNode {
         TupleDelta {
             added,
             removed,
+            moved: vec![],
             updated: vec![],
         }
     }

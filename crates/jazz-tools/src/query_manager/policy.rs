@@ -121,6 +121,21 @@ pub enum PolicyExpr {
         max_depth: Option<usize>,
     },
 
+    /// Inherit permission from rows in `source_table` that reference the current row.
+    ///
+    /// This is the reverse direction of `Inherits`: it scans source rows where
+    /// `source_table.via_column` points at the current row id, then checks whether
+    /// any such source row passes `operation` policy.
+    InheritsReferencing {
+        operation: Operation,
+        source_table: String,
+        via_column: String,
+        /// Optional recursion depth override for recursive INHERITS evaluation.
+        ///
+        /// If omitted, runtime uses [`RECURSIVE_POLICY_MAX_DEPTH_DEFAULT`].
+        max_depth: Option<usize>,
+    },
+
     /// Logical AND of multiple expressions.
     And(Vec<PolicyExpr>),
 
@@ -181,6 +196,35 @@ impl PolicyExpr {
     ) -> Self {
         PolicyExpr::Inherits {
             operation,
+            via_column: via_column.into(),
+            max_depth: Some(max_depth),
+        }
+    }
+
+    /// Create an INHERITS REFERENCING expression.
+    pub fn inherits_referencing(
+        operation: Operation,
+        source_table: impl Into<String>,
+        via_column: impl Into<String>,
+    ) -> Self {
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table: source_table.into(),
+            via_column: via_column.into(),
+            max_depth: None,
+        }
+    }
+
+    /// Create an INHERITS REFERENCING expression with an explicit recursion depth.
+    pub fn inherits_referencing_with_depth(
+        operation: Operation,
+        source_table: impl Into<String>,
+        via_column: impl Into<String>,
+        max_depth: usize,
+    ) -> Self {
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table: source_table.into(),
             via_column: via_column.into(),
             max_depth: Some(max_depth),
         }
@@ -343,6 +387,10 @@ where
         } => evaluate_inherits(
             *operation, via_column, *max_depth, content, descriptor, ctx, depth,
         ),
+        PolicyExpr::InheritsReferencing { .. } => {
+            // Requires table/index context not available in EvalContext.
+            false
+        }
     }
 }
 
@@ -482,6 +530,7 @@ fn evaluate_expr_simple(
         PolicyExpr::Exists { .. } => true,
         PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::Inherits { .. } => true, // No row loader - permissive
+        PolicyExpr::InheritsReferencing { .. } => true, // Requires table/index context
     }
 }
 
@@ -620,6 +669,17 @@ pub fn bind_outer_row_refs(
             max_depth,
         } => Some(PolicyExpr::Inherits {
             operation: *operation,
+            via_column: via_column.clone(),
+            max_depth: *max_depth,
+        }),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => Some(PolicyExpr::InheritsReferencing {
+            operation: *operation,
+            source_table: source_table.clone(),
             via_column: via_column.clone(),
             max_depth: *max_depth,
         }),
@@ -990,6 +1050,13 @@ pub enum ComplexClause {
         via_column: String,
         max_depth: Option<usize>,
     },
+    /// INHERITS REFERENCING clause - check policies on source rows that reference this row.
+    InheritsReferencing {
+        operation: Operation,
+        source_table: String,
+        via_column: String,
+        max_depth: Option<usize>,
+    },
     /// EXISTS clause - check if subquery returns rows.
     Exists {
         table: String,
@@ -1187,6 +1254,17 @@ fn evaluate_simple_recursive(
             max_depth,
         } => SimpleEvalResult::with_complex(ComplexClause::Inherits {
             operation: *operation,
+            via_column: via_column.clone(),
+            max_depth: *max_depth,
+        }),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => SimpleEvalResult::with_complex(ComplexClause::InheritsReferencing {
+            operation: *operation,
+            source_table: source_table.clone(),
             via_column: via_column.clone(),
             max_depth: *max_depth,
         }),

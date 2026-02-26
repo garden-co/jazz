@@ -17,8 +17,19 @@ pub enum SortDirection {
 /// Sort specification for a single column.
 #[derive(Debug, Clone)]
 pub struct SortKey {
-    pub col_index: usize,
+    pub target: SortTarget,
     pub direction: SortDirection,
+}
+
+/// Field used by a sort key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortTarget {
+    Column(usize),
+    /// Virtual sort key for object identity (`id`/`_id`).
+    ///
+    /// This is needed because object ID is not part of row payload columns,
+    /// but query semantics allow `ORDER BY id|_id` (including desc and mixed keys).
+    RowId,
 }
 
 /// Sort node for ordering rows.
@@ -63,34 +74,33 @@ impl SortNode {
         let a_content = a.get(0).and_then(|e| e.content());
         let b_content = b.get(0).and_then(|e| e.content());
 
-        match (a_content, b_content) {
-            (Some(a_data), Some(b_data)) => {
-                for key in &self.sort_keys {
-                    let ord = compare_column(
-                        &self.descriptor,
-                        a_data,
-                        key.col_index,
-                        b_data,
-                        key.col_index,
-                    )
-                    .unwrap_or(Ordering::Equal);
-
-                    let ord = match key.direction {
-                        SortDirection::Ascending => ord,
-                        SortDirection::Descending => ord.reverse(),
-                    };
-
-                    if ord != Ordering::Equal {
-                        return ord;
+        for key in &self.sort_keys {
+            let ord = match key.target {
+                SortTarget::Column(col_index) => match (a_content, b_content) {
+                    (Some(a_data), Some(b_data)) => {
+                        compare_column(&self.descriptor, a_data, col_index, b_data, col_index)
+                            .unwrap_or(Ordering::Equal)
                     }
-                }
-                Ordering::Equal
+                    // Unmaterialized tuples sort to the end
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                },
+                SortTarget::RowId => a.ids().cmp(&b.ids()),
+            };
+
+            let ord = match key.direction {
+                SortDirection::Ascending => ord,
+                SortDirection::Descending => ord.reverse(),
+            };
+
+            if ord != Ordering::Equal {
+                return ord;
             }
-            // Unmaterialized tuples sort to the end
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
         }
+
+        // Stable tie-breaker for deterministic ordering.
+        a.ids().cmp(&b.ids())
     }
 
     /// Find the insertion position for a tuple (binary search).
@@ -103,6 +113,11 @@ impl SortNode {
     /// Sync current_tuples HashSet from sorted_tuples Vec.
     fn sync_hashset(&mut self) {
         self.current_tuples = self.sorted_tuples.iter().cloned().collect();
+    }
+
+    /// Full current ordering after sort has been applied.
+    pub fn sorted_tuples(&self) -> &[Tuple] {
+        &self.sorted_tuples
     }
 }
 
@@ -232,7 +247,7 @@ mod tests {
     #[test]
     fn sort_ascending() {
         let sort_keys = vec![SortKey {
-            col_index: 2, // score
+            target: SortTarget::Column(2), // score
             direction: SortDirection::Ascending,
         }];
         let mut node = make_sort_node(sort_keys);
@@ -268,6 +283,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -288,7 +304,7 @@ mod tests {
     #[test]
     fn sort_descending() {
         let sort_keys = vec![SortKey {
-            col_index: 2, // score
+            target: SortTarget::Column(2), // score
             direction: SortDirection::Descending,
         }];
         let mut node = make_sort_node(sort_keys);
@@ -324,6 +340,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -351,11 +368,11 @@ mod tests {
         ]);
         let sort_keys = vec![
             SortKey {
-                col_index: 0, // dept ascending
+                target: SortTarget::Column(0), // dept ascending
                 direction: SortDirection::Ascending,
             },
             SortKey {
-                col_index: 2, // score descending
+                target: SortTarget::Column(2), // score descending
                 direction: SortDirection::Descending,
             },
         ];
@@ -412,6 +429,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3, tuple4],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -436,7 +454,7 @@ mod tests {
     #[test]
     fn sort_maintains_order_on_insert() {
         let sort_keys = vec![SortKey {
-            col_index: 2,
+            target: SortTarget::Column(2),
             direction: SortDirection::Ascending,
         }];
         let mut node = make_sort_node(sort_keys);
@@ -455,6 +473,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -470,11 +489,61 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
         let sorted_ids = get_sorted_ids(&node);
         assert_eq!(sorted_ids[0], id2); // 50 first
         assert_eq!(sorted_ids[1], id1); // 100 second
+    }
+
+    #[test]
+    fn sort_by_row_id() {
+        let sort_keys = vec![SortKey {
+            target: SortTarget::RowId,
+            direction: SortDirection::Ascending,
+        }];
+        let mut node = make_sort_node(sort_keys);
+
+        let id1 = ObjectId::new();
+        let id2 = ObjectId::new();
+        let id3 = ObjectId::new();
+        let tuple1 = make_tuple(
+            id1,
+            &[
+                Value::Integer(1),
+                Value::Text("A".into()),
+                Value::Integer(5),
+            ],
+        );
+        let tuple2 = make_tuple(
+            id2,
+            &[
+                Value::Integer(2),
+                Value::Text("B".into()),
+                Value::Integer(5),
+            ],
+        );
+        let tuple3 = make_tuple(
+            id3,
+            &[
+                Value::Integer(3),
+                Value::Text("C".into()),
+                Value::Integer(5),
+            ],
+        );
+
+        node.process(TupleDelta {
+            added: vec![tuple3, tuple1, tuple2],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+
+        let sorted_ids = get_sorted_ids(&node);
+        let mut expected = vec![id1, id2, id3];
+        expected.sort();
+        assert_eq!(sorted_ids, expected);
     }
 }

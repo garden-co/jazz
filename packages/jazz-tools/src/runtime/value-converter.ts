@@ -33,6 +33,8 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       return { type: "Integer", value: Number(value) };
     case "BigInt":
       return { type: "BigInt", value: Number(value) };
+    case "Double":
+      return { type: "Double", value: Number(value) };
     case "Timestamp":
       return { type: "Timestamp", value: toTimestampMs(value) };
     case "Uuid":

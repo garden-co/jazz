@@ -8,6 +8,7 @@ export { useAll, useAllSuspense } from "./use-all.js";
 export type {
   PersistenceTier,
   QueryBuilder,
+  RowDelta,
   SubscriptionDelta,
   TableProxy,
 } from "../runtime/index.js";

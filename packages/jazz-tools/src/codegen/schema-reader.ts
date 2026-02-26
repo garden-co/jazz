@@ -25,7 +25,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
-  REAL: { type: "Integer" }, // REAL maps to Integer in WASM (no Float type)
+  REAL: { type: "Double" },
   TIMESTAMP: { type: "Timestamp" },
   UUID: { type: "Uuid" },
 };
@@ -112,6 +112,14 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return {
         type: "Inherits",
         operation: expr.operation,
+        via_column: expr.via_column,
+        max_depth: expr.max_depth,
+      };
+    case "InheritsReferencing":
+      return {
+        type: "InheritsReferencing",
+        operation: expr.operation,
+        source_table: expr.source_table,
         via_column: expr.via_column,
         max_depth: expr.max_depth,
       };
