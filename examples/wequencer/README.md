@@ -11,6 +11,14 @@ pnpm build                      # Schema codegen + production build
 pnpm test:e2e                   # Playwright E2E tests (spawns its own jazz server)
 ```
 
+## HTTPS in development
+
+The dev server uses a self-signed TLS certificate (`@vitejs/plugin-basic-ssl`). This is required because the Web Crypto API (`crypto.subtle`, used by jazz for SHA-256 hashing) is only available in [secure contexts](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API#availability). Without HTTPS, the app will fail with "No SHA-256 implementation available in this runtime" on any device that accesses it over the network.
+
+Vite proxies jazz server requests (`/sync`, `/events`, `/health`, `/auth`) so that everything goes through a single HTTPS origin, avoiding mixed content issues.
+
+When accessing from another device (e.g. a phone on the same network), you will need to accept the self-signed certificate warning in the browser.
+
 ## Schema
 
 The relational schema is defined in `schema/current.ts` using jazz2's `table()` and `col.*` DSL. Running `pnpm build` generates the typed client (`schema/app.ts`) and SQL files.

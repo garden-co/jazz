@@ -25,6 +25,8 @@ dist/
 # Test
 coverage/
 __screenshots__
+playwright-report/
+test-results/
 
 # Local data
 data/

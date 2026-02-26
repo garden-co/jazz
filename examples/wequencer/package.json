@@ -18,6 +18,7 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@vitejs/plugin-basic-ssl": "^2.1.4",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "typescript": "^5.8.0",

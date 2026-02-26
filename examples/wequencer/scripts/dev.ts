@@ -29,12 +29,12 @@ async function main() {
 	});
 	console.log("Schema pushed.");
 
-	vite = spawn("npx", ["vite"], {
+	vite = spawn("npx", ["vite", "--host"], {
 		cwd: ROOT,
 		stdio: "inherit",
 		env: {
 			...process.env,
-			VITE_JAZZ_SERVER_URL: server.url,
+			VITE_JAZZ_SERVER_PORT: String(PORT),
 			VITE_JAZZ_APP_ID: APP_ID,
 		},
 	});
