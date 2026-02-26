@@ -44,6 +44,11 @@
       "react-native": "./dist/react-native/index.js",
       "default": "./dist/react-native/index.js"
     },
+    "./svelte": {
+      "svelte": "./dist/svelte/index.js",
+      "types": "./dist/svelte/index.d.ts",
+      "default": "./dist/svelte/index.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -51,7 +56,8 @@
     "tag": "alpha"
   },
   "scripts": {
-    "build": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
+    "build": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts && pnpm build:svelte",
+    "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json",
     "test": "vitest run --config vitest.config.ts",
     "test:build": "node dist/cli.js build --schema-dir tests/ts-dsl/fixtures/basic",
     "test:browser": "vitest run --config vitest.config.browser.ts",
@@ -64,12 +70,15 @@
     "tsx": "^4.0.0"
   },
   "devDependencies": {
+    "@sveltejs/package": "^2.0.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "fake-indexeddb": "^5.0.2",
+    "svelte": "^5.0.0",
     "jazz-rn": "workspace:*",
     "react-dom": "^19.0.0",
     "typescript": "^5.3.0",
@@ -78,7 +87,16 @@
     "vitest": "catalog:default"
   },
   "peerDependencies": {
-    "react": "^18 || ^19"
+    "react": "^18 || ^19",
+    "svelte": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "svelte": {
+      "optional": true
+    }
   },
   "optionalDependencies": {
     "jazz-napi": "workspace:*"
