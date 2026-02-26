@@ -102,18 +102,21 @@ describe("sync-transport", () => {
       .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: 503 Service Unavailable",
-    );
+    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toMatchObject({
+      message: "Sync POST failed: 503 Service Unavailable",
+      status: 503,
+      retryable: false,
+    });
   });
 
   it("throws when fetch rejects", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: network down",
-    );
+    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toMatchObject({
+      message: "Sync POST failed: network down",
+      retryable: true,
+    });
   });
 
   it("posts to path-prefixed sync route when provided", async () => {
@@ -391,5 +394,35 @@ describe("sync-transport", () => {
     await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledTimes(3));
     expect(onServerPayload.mock.calls[1][0]).toEqual({ seq: 1 });
     expect(onServerPayload.mock.calls[2][0]).toEqual({ seq: 2 });
+  });
+
+  it("sync outbox router drops non-offline server payload errors and keeps draining", async () => {
+    vi.useFakeTimers();
+
+    const terminalError = Object.assign(new Error("Sync POST failed: 503 Service Unavailable"), {
+      status: 503,
+      retryable: false,
+    });
+    const onServerPayload = vi
+      .fn<(...args: [unknown]) => Promise<void>>()
+      .mockRejectedValueOnce(terminalError)
+      .mockResolvedValueOnce(undefined);
+    const onServerPayloadError = vi.fn();
+    const router = createSyncOutboxRouter({
+      onServerPayload,
+      onServerPayloadError,
+      retryServerPayloads: true,
+    });
+
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 1 } }));
+    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { seq: 2 } }));
+
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledTimes(2));
+    expect(onServerPayload.mock.calls[0][0]).toEqual({ seq: 1 });
+    expect(onServerPayload.mock.calls[1][0]).toEqual({ seq: 2 });
+    expect(onServerPayloadError).toHaveBeenCalledWith(terminalError);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onServerPayload).toHaveBeenCalledTimes(2);
   });
 });

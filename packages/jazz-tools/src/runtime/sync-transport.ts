@@ -254,6 +254,49 @@ export interface SyncOutboxRouterOptions {
   retryServerPayloads?: boolean;
 }
 
+type SyncPostErrorDetails = {
+  retryable?: unknown;
+};
+
+const offlineErrorPatterns = [
+  /network/i,
+  /offline/i,
+  /failed to fetch/i,
+  /fetch failed/i,
+  /load failed/i,
+  /econnrefused/i,
+  /econnreset/i,
+  /ehostunreach/i,
+  /enetunreach/i,
+  /enotfound/i,
+  /eai_again/i,
+  /etimedout/i,
+  /timed out/i,
+];
+
+function isOfflineTransportError(error: unknown): boolean {
+  const navigatorRef = (globalThis as { navigator?: { onLine?: boolean } }).navigator;
+  if (navigatorRef?.onLine === false) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return offlineErrorPatterns.some((pattern) => pattern.test(message));
+}
+
+function isRetryableSyncPostError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return isOfflineTransportError(error);
+  }
+
+  const details = error as SyncPostErrorDetails;
+  if (typeof details.retryable === "boolean") {
+    return details.retryable;
+  }
+
+  return isOfflineTransportError(error);
+}
+
 /**
  * Create a shared runtime outbox router for server/client destinations.
  */
@@ -305,8 +348,9 @@ export function createSyncOutboxRouter(
         retryAttempt = 0;
       } catch (error) {
         handleServerPayloadError(error);
-        if (!retryServerPayloads) {
+        if (!retryServerPayloads || !isRetryableSyncPostError(error)) {
           pendingServerPayloads.shift();
+          retryAttempt = 0;
           continue;
         }
         const baseMs = 300;
@@ -475,12 +519,24 @@ export async function sendSyncPayload(
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
+    const error = new Error(`${logPrefix}Sync POST failed: ${msg}`) as Error & {
+      retryable: boolean;
+    };
+    error.retryable = isOfflineTransportError(e);
+    throw error;
   }
 
   if (!response.ok) {
     const statusText = response.statusText ? ` ${response.statusText}` : "";
-    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
+    const error = new Error(
+      `${logPrefix}Sync POST failed: ${response.status}${statusText}`,
+    ) as Error & {
+      status: number;
+      retryable: boolean;
+    };
+    error.status = response.status;
+    error.retryable = false;
+    throw error;
   }
 }
 
