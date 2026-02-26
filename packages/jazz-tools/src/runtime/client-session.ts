@@ -125,7 +125,7 @@ export async function deriveLocalPrincipalId(
   return `local:${encoded}`;
 }
 
-function resolveJwtSession(jwtToken: string): Session | null {
+export function resolveJwtSession(jwtToken: string): Session | null {
   const payload = parseJwtPayload(jwtToken);
   if (!payload) return null;
 
