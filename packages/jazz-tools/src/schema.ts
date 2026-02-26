@@ -79,9 +79,19 @@ export type PolicyExpr =
       column: string;
     }
   | {
+      type: "Contains";
+      column: string;
+      value: PolicyValue;
+    }
+  | {
       type: "In";
       column: string;
       session_path: string[];
+    }
+  | {
+      type: "InList";
+      column: string;
+      values: PolicyValue[];
     }
   | {
       type: "Exists";

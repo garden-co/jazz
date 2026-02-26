@@ -238,6 +238,42 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session
       "CREATE POLICY files_select_policy ON files FOR SELECT USING (INHERITS SELECT REFERENCING todos VIA image);",
     );
   });
+
+  it("generates CONTAINS and IN-list policy expressions", () => {
+    resetCollectedState();
+    table("todos", {
+      owner_id: col.string(),
+      status: col.string(),
+    });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "And",
+          exprs: [
+            {
+              type: "Contains",
+              column: "owner_id",
+              value: { type: "Literal", value: "ali" },
+            },
+            {
+              type: "InList",
+              column: "status",
+              values: [
+                { type: "Literal", value: "active" },
+                { type: "Literal", value: "trial" },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const sql = schemaToSql(schema);
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((owner_id CONTAINS 'ali') AND (status IN ('active', 'trial')));",
+    );
+  });
 });
 
 describe("lensToSql", () => {

@@ -91,11 +91,23 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return { type: "IsNull", column: expr.column };
     case "IsNotNull":
       return { type: "IsNotNull", column: expr.column };
+    case "Contains":
+      return {
+        type: "Contains",
+        column: expr.column,
+        value: clonePolicyValue(expr.value),
+      };
     case "In":
       return {
         type: "In",
         column: expr.column,
         session_path: [...expr.session_path],
+      };
+    case "InList":
+      return {
+        type: "InList",
+        column: expr.column,
+        values: expr.values.map(clonePolicyValue),
       };
     case "Exists":
       return {
