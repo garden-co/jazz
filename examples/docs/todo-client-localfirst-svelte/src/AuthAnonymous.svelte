@@ -1,14 +1,14 @@
 <!-- #region auth-anon-svelte -->
 <script lang="ts">
-	import { JazzSvelteProvider } from 'jazz-tools/svelte';
-</script>
+	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
-<JazzSvelteProvider
-	config={{
+	const client = createJazzClient({
 		appId: 'my-app',
 		serverUrl: 'http://127.0.0.1:4200',
-	}}
->
+	});
+</script>
+
+<JazzSvelteProvider {client}>
 	{#snippet children({ db })}
 		<slot />
 	{/snippet}

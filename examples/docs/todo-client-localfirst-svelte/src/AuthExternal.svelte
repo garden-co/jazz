@@ -1,6 +1,6 @@
 <!-- #region auth-external-svelte -->
 <script lang="ts">
-	import { JazzSvelteProvider, useLinkExternalIdentity } from 'jazz-tools/svelte';
+	import { createJazzClient, JazzSvelteProvider, useLinkExternalIdentity } from 'jazz-tools/svelte';
 
 	const appId = 'my-app';
 	const serverUrl = 'http://127.0.0.1:4200';
@@ -18,15 +18,17 @@
 		jwtToken = providerJwt;
 	}
 
-	const config = $derived({
-		appId,
-		serverUrl,
-		jwtToken,
-	});
+	const client = $derived(
+		createJazzClient({
+			appId,
+			serverUrl,
+			jwtToken,
+		}),
+	);
 </script>
 
 {#key jwtToken}
-	<JazzSvelteProvider {config}>
+	<JazzSvelteProvider {client}>
 		{#snippet children({ db })}
 			<button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
 			<slot />
