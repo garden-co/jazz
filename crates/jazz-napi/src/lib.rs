@@ -179,9 +179,17 @@ enum JsPolicyExpr {
     IsNotNull {
         column: String,
     },
+    Contains {
+        column: String,
+        value: JsPolicyValue,
+    },
     In {
         column: String,
         session_path: Vec<String>,
+    },
+    InList {
+        column: String,
+        values: Vec<JsPolicyValue>,
     },
     Exists {
         table: String,
@@ -320,12 +328,20 @@ fn js_schema_to_groove(js: JsSchema) -> Schema {
             },
             JsPolicyExpr::IsNull { column } => PolicyExpr::IsNull { column },
             JsPolicyExpr::IsNotNull { column } => PolicyExpr::IsNotNull { column },
+            JsPolicyExpr::Contains { column, value } => PolicyExpr::Contains {
+                column,
+                value: js_policy_value_to_groove(value),
+            },
             JsPolicyExpr::In {
                 column,
                 session_path,
             } => PolicyExpr::In {
                 column,
                 session_path,
+            },
+            JsPolicyExpr::InList { column, values } => PolicyExpr::InList {
+                column,
+                values: values.into_iter().map(js_policy_value_to_groove).collect(),
             },
             JsPolicyExpr::Exists { table, condition } => PolicyExpr::Exists {
                 table,
@@ -553,12 +569,20 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
             PolicyExpr::IsNotNull { column } => JsPolicyExpr::IsNotNull {
                 column: column.clone(),
             },
+            PolicyExpr::Contains { column, value } => JsPolicyExpr::Contains {
+                column: column.clone(),
+                value: policy_value_to_js(value),
+            },
             PolicyExpr::In {
                 column,
                 session_path,
             } => JsPolicyExpr::In {
                 column: column.clone(),
                 session_path: session_path.clone(),
+            },
+            PolicyExpr::InList { column, values } => JsPolicyExpr::InList {
+                column: column.clone(),
+                values: values.iter().map(policy_value_to_js).collect(),
             },
             PolicyExpr::Exists { table, condition } => JsPolicyExpr::Exists {
                 table: table.clone(),

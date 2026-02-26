@@ -149,6 +149,24 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
             hasher.update(column.as_bytes());
             hasher.update(&[0]);
         }
+        PolicyExpr::Contains { column, value } => {
+            hasher.update(&[14]);
+            hasher.update(column.as_bytes());
+            hasher.update(&[0]);
+            match value {
+                PolicyValue::Literal(v) => {
+                    hasher.update(&[1]);
+                    hash_value(hasher, v);
+                }
+                PolicyValue::SessionRef(path) => {
+                    hasher.update(&[2]);
+                    for part in path {
+                        hasher.update(part.as_bytes());
+                        hasher.update(&[0]);
+                    }
+                }
+            }
+        }
         PolicyExpr::In {
             column,
             session_path,
@@ -159,6 +177,27 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
             for part in session_path {
                 hasher.update(part.as_bytes());
                 hasher.update(&[0]);
+            }
+        }
+        PolicyExpr::InList { column, values } => {
+            hasher.update(&[15]);
+            hasher.update(column.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                match value {
+                    PolicyValue::Literal(v) => {
+                        hasher.update(&[1]);
+                        hash_value(hasher, v);
+                    }
+                    PolicyValue::SessionRef(path) => {
+                        hasher.update(&[2]);
+                        for part in path {
+                            hasher.update(part.as_bytes());
+                            hasher.update(&[0]);
+                        }
+                    }
+                }
             }
         }
         PolicyExpr::Exists { table, condition } => {

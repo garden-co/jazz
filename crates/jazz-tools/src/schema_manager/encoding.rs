@@ -598,6 +598,8 @@ const POLICY_EXPR_FALSE: u8 = 11;
 const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
 const POLICY_EXPR_EXISTS_REL: u8 = 13;
 const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
+const POLICY_EXPR_CONTAINS: u8 = 15;
+const POLICY_EXPR_IN_LIST: u8 = 16;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -677,6 +679,11 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             buf.push(POLICY_EXPR_IS_NOT_NULL);
             write_string(buf, column);
         }
+        PolicyExpr::Contains { column, value } => {
+            buf.push(POLICY_EXPR_CONTAINS);
+            write_string(buf, column);
+            encode_policy_value(buf, value);
+        }
         PolicyExpr::In {
             column,
             session_path,
@@ -686,6 +693,14 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             write_u32(buf, session_path.len() as u32);
             for part in session_path {
                 write_string(buf, part);
+            }
+        }
+        PolicyExpr::InList { column, values } => {
+            buf.push(POLICY_EXPR_IN_LIST);
+            write_string(buf, column);
+            write_u32(buf, values.len() as u32);
+            for value in values {
+                encode_policy_value(buf, value);
             }
         }
         PolicyExpr::Exists { table, condition } => {
@@ -776,6 +791,11 @@ fn decode_policy_expr(
             let column = read_string(data, offset, "policy_is_not_null_column")?;
             Ok(PolicyExpr::IsNotNull { column })
         }
+        POLICY_EXPR_CONTAINS => {
+            let column = read_string(data, offset, "policy_contains_column")?;
+            let value = decode_policy_value(data, offset)?;
+            Ok(PolicyExpr::Contains { column, value })
+        }
         POLICY_EXPR_IN => {
             let column = read_string(data, offset, "policy_in_column")?;
             let count = read_u32(data, offset)? as usize;
@@ -787,6 +807,15 @@ fn decode_policy_expr(
                 column,
                 session_path,
             })
+        }
+        POLICY_EXPR_IN_LIST => {
+            let column = read_string(data, offset, "policy_in_list_column")?;
+            let count = read_u32(data, offset)? as usize;
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                values.push(decode_policy_value(data, offset)?);
+            }
+            Ok(PolicyExpr::InList { column, values })
         }
         POLICY_EXPR_EXISTS => {
             let table = read_string(data, offset, "policy_exists_table")?;
@@ -1406,6 +1435,62 @@ mod tests {
             decoded_todos.policies.select.using.is_some(),
             "Policy should survive roundtrip"
         );
+    }
+
+    #[test]
+    fn schema_roundtrip_with_contains_and_in_list_policy() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("id", ColumnType::Uuid)
+                    .column("owner_id", ColumnType::Text)
+                    .column("status", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::Contains {
+                            column: "owner_id".to_string(),
+                            value: PolicyValue::Literal(Value::Text("ali".to_string())),
+                        },
+                        PolicyExpr::InList {
+                            column: "status".to_string(),
+                            values: vec![
+                                PolicyValue::Literal(Value::Text("active".to_string())),
+                                PolicyValue::SessionRef(vec!["user_id".to_string()]),
+                            ],
+                        },
+                    ]))),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).expect("schema should decode");
+        let using = decoded
+            .get(&TableName::new("todos"))
+            .expect("todos table should exist")
+            .policies
+            .select
+            .using
+            .as_ref()
+            .expect("select policy should exist");
+        assert!(matches!(
+            using,
+            PolicyExpr::And(exprs) if matches!(
+                (&exprs[0], &exprs[1]),
+                (
+                    PolicyExpr::Contains {
+                        column,
+                        value: PolicyValue::Literal(Value::Text(v)),
+                    },
+                    PolicyExpr::InList { column: in_column, values },
+                ) if column == "owner_id"
+                    && v == "ali"
+                    && in_column == "status"
+                    && values
+                        == &vec![
+                            PolicyValue::Literal(Value::Text("active".to_string())),
+                            PolicyValue::SessionRef(vec!["user_id".to_string()]),
+                        ]
+            )
+        ));
     }
 
     #[test]
