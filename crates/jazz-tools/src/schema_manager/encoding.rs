@@ -17,7 +17,7 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 2;
+const SCHEMA_VERSION: u8 = 3;
 const LENS_VERSION: u8 = 1;
 
 /// Encoding errors.
@@ -101,8 +101,10 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     match version {
         // v1 schemas did not encode policies.
         1 => decode_schema_v1(data),
-        // v2 schemas include policies.
-        SCHEMA_VERSION => decode_schema_v2(data),
+        // v2 schemas include policies, but no legacy inherit-policy byte.
+        2 => decode_schema_v2(data),
+        // v3 schemas include policies and a legacy inherit-policy byte.
+        SCHEMA_VERSION => decode_schema_v3(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: SCHEMA_VERSION,
@@ -122,6 +124,23 @@ fn decode_table_entry(
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor(data, offset)?;
+    let policies = decode_table_policies(data, offset)?;
+
+    Ok((
+        TableName::new(name),
+        TableSchema {
+            descriptor,
+            policies,
+        },
+    ))
+}
+
+fn decode_table_entry_v2(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
+    let name = read_string(data, offset, "table_name")?;
+    let descriptor = decode_row_descriptor_v2(data, offset)?;
     let policies = decode_table_policies(data, offset)?;
 
     Ok((
@@ -168,6 +187,19 @@ fn decode_schema_v2(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
 
     let mut schema = HashMap::new();
     for _ in 0..table_count {
+        let (name, table_schema) = decode_table_entry_v2(data, &mut offset)?;
+        schema.insert(name, table_schema);
+    }
+
+    Ok(schema)
+}
+
+fn decode_schema_v3(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+    let mut offset = 1;
+    let table_count = read_u32(data, &mut offset)?;
+
+    let mut schema = HashMap::new();
+    for _ in 0..table_count {
         let (name, table_schema) = decode_table_entry(data, &mut offset)?;
         schema.insert(name, table_schema);
     }
@@ -200,6 +232,20 @@ fn decode_row_descriptor(
     Ok(RowDescriptor::new(columns))
 }
 
+fn decode_row_descriptor_v2(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<RowDescriptor, CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    let mut columns = Vec::with_capacity(count as usize);
+
+    for _ in 0..count {
+        columns.push(decode_column_descriptor_v2(data, offset)?);
+    }
+
+    Ok(RowDescriptor::new(columns))
+}
+
 fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
     write_string(buf, col.name.as_str());
     encode_column_type(buf, &col.column_type);
@@ -215,9 +261,34 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
             buf.push(0);
         }
     }
+    // Legacy reserved byte kept for backward compatibility with v3 encoding.
+    buf.push(0);
 }
 
 fn decode_column_descriptor(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<ColumnDescriptor, CatalogueEncodingError> {
+    let name = read_string(data, offset, "column_name")?;
+    let column_type = decode_column_type(data, offset)?;
+    let nullable = read_u8(data, offset)? != 0;
+    let has_ref = read_u8(data, offset)? != 0;
+    let references = if has_ref {
+        Some(TableName::new(read_string(data, offset, "column_ref")?))
+    } else {
+        None
+    };
+    let _legacy_inherit_policy = read_u8(data, offset)? != 0;
+
+    Ok(ColumnDescriptor {
+        name: ColumnName::new(name),
+        column_type,
+        nullable,
+        references,
+    })
+}
+
+fn decode_column_descriptor_v2(
     data: &[u8],
     offset: &mut usize,
 ) -> Result<ColumnDescriptor, CatalogueEncodingError> {
@@ -249,11 +320,13 @@ const TYPE_UUID: u8 = 6;
 const TYPE_ARRAY: u8 = 7;
 const TYPE_ROW: u8 = 8;
 const TYPE_ENUM: u8 = 9;
+const TYPE_DOUBLE: u8 = 10;
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     match col_type {
         ColumnType::Integer => buf.push(TYPE_INTEGER),
         ColumnType::BigInt => buf.push(TYPE_BIGINT),
+        ColumnType::Double => buf.push(TYPE_DOUBLE),
         ColumnType::Boolean => buf.push(TYPE_BOOLEAN),
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
@@ -284,6 +357,7 @@ fn decode_column_type(
     match tag {
         TYPE_INTEGER => Ok(ColumnType::Integer),
         TYPE_BIGINT => Ok(ColumnType::BigInt),
+        TYPE_DOUBLE => Ok(ColumnType::Double),
         TYPE_BOOLEAN => Ok(ColumnType::Boolean),
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
@@ -520,6 +594,7 @@ const POLICY_EXPR_TRUE: u8 = 10;
 const POLICY_EXPR_FALSE: u8 = 11;
 const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
 const POLICY_EXPR_EXISTS_REL: u8 = 13;
+const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -640,6 +715,21 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
                 write_u32(buf, *depth as u32);
             }
         }
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => {
+            buf.push(POLICY_EXPR_INHERITS_REFERENCING);
+            encode_policy_operation(buf, *operation);
+            write_string(buf, source_table);
+            write_string(buf, via_column);
+            buf.push(if max_depth.is_some() { 1 } else { 0 });
+            if let Some(depth) = max_depth {
+                write_u32(buf, *depth as u32);
+            }
+        }
         PolicyExpr::And(exprs) => {
             buf.push(POLICY_EXPR_AND);
             write_u32(buf, exprs.len() as u32);
@@ -730,6 +820,23 @@ fn decode_policy_expr(
                 operation,
                 via_column,
                 max_depth: Some(max_depth),
+            })
+        }
+        POLICY_EXPR_INHERITS_REFERENCING => {
+            let operation = decode_policy_operation(data, offset)?;
+            let source_table = read_string(data, offset, "policy_inherits_referencing_source")?;
+            let via_column = read_string(data, offset, "policy_inherits_referencing_via_column")?;
+            let has_max_depth = read_u8(data, offset)? != 0;
+            let max_depth = if has_max_depth {
+                Some(read_u32(data, offset)? as usize)
+            } else {
+                None
+            };
+            Ok(PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
             })
         }
         POLICY_EXPR_AND => {
@@ -868,6 +975,9 @@ const VALUE_TIMESTAMP: u8 = 5;
 const VALUE_UUID: u8 = 6;
 const VALUE_ARRAY: u8 = 7;
 const VALUE_ROW: u8 = 8;
+// 9 intentionally skipped: TYPE_ENUM is 9, and Values have no Enum tag
+// (enum values are stored as Text). Keeping Double at 10 aligns with TYPE_DOUBLE.
+const VALUE_DOUBLE: u8 = 10;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -879,6 +989,10 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
         Value::BigInt(n) => {
             buf.push(VALUE_BIGINT);
             buf.extend_from_slice(&n.to_le_bytes());
+        }
+        Value::Double(f) => {
+            buf.push(VALUE_DOUBLE);
+            buf.extend_from_slice(&f.to_le_bytes());
         }
         Value::Boolean(b) => {
             buf.push(VALUE_BOOLEAN);
@@ -926,6 +1040,10 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
         VALUE_BIGINT => {
             let bytes = read_bytes(data, offset, 8)?;
             Ok(Value::BigInt(i64::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        VALUE_DOUBLE => {
+            let bytes = read_bytes(data, offset, 8)?;
+            Ok(Value::Double(f64::from_le_bytes(bytes.try_into().unwrap())))
         }
         VALUE_BOOLEAN => {
             let b = read_u8(data, offset)?;
@@ -1104,6 +1222,97 @@ mod tests {
         let posts = decoded.get(&TableName::new("posts")).unwrap();
         let tags_col = posts.descriptor.column("tags").unwrap();
         assert!(matches!(tags_col.column_type, ColumnType::Array(_)));
+    }
+
+    #[test]
+    fn schema_roundtrip_with_fk_reference() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("image", ColumnType::Uuid).references("files"),
+            ])),
+        );
+        schema.insert(
+            TableName::new("files"),
+            TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "name",
+                ColumnType::Text,
+            )])),
+        );
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
+
+        let decoded = decode_schema(&encoded).unwrap();
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
+    }
+
+    #[test]
+    fn decode_v2_schema_preserves_fk_references() {
+        fn encode_schema_v2_for_test(schema: &Schema) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(2);
+
+            let mut tables: Vec<_> = schema.iter().collect();
+            tables.sort_by_key(|(name, _)| name.as_str());
+            write_u32(&mut buf, tables.len() as u32);
+
+            for (name, table_schema) in tables {
+                write_string(&mut buf, name.as_str());
+
+                let mut columns: Vec<_> = table_schema.descriptor.columns.iter().collect();
+                columns.sort_by_key(|c| c.name.as_str());
+                write_u32(&mut buf, columns.len() as u32);
+                for col in columns {
+                    write_string(&mut buf, col.name.as_str());
+                    encode_column_type(&mut buf, &col.column_type);
+                    buf.push(if col.nullable { 1 } else { 0 });
+                    match &col.references {
+                        Some(table) => {
+                            buf.push(1);
+                            write_string(&mut buf, table.as_str());
+                        }
+                        None => buf.push(0),
+                    }
+                }
+
+                encode_table_policies(&mut buf, &table_schema.policies);
+            }
+
+            buf
+        }
+
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("image", ColumnType::Uuid).references("files"),
+            ])),
+        );
+        schema.insert(
+            TableName::new("files"),
+            TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "name",
+                ColumnType::Text,
+            )])),
+        );
+
+        let encoded_v2 = encode_schema_v2_for_test(&schema);
+        let decoded = decode_schema(&encoded_v2).unwrap();
+        let image_col = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .column("image")
+            .unwrap();
+        assert_eq!(image_col.references, Some(TableName::new("files")));
     }
 
     #[test]

@@ -83,8 +83,8 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    subscriptionCallback.onUpdate('{"handle":7,"added":[],"removed":[],"updated":[]}');
-    expect(onUpdate).toHaveBeenCalledWith('{"handle":7,"added":[],"removed":[],"updated":[]}');
+    subscriptionCallback.onUpdate("[]");
+    expect(onUpdate).toHaveBeenCalledWith("[]");
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
@@ -107,9 +107,7 @@ describe("JazzRnRuntimeAdapter", () => {
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    expect(() =>
-      subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}'),
-    ).not.toThrow();
+    expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
   it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {

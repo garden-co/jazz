@@ -15,7 +15,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::Once;
 
 use js_sys::Function;
 use serde::Serialize;
@@ -23,15 +22,7 @@ use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
 /// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
-fn init_tracing() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::TRACE)
-            .with_console_group_spans();
-        let _ = wasm_tracing::set_as_global_default_with_config(config);
-    });
-}
+fn init_tracing() {}
 
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
@@ -102,21 +93,42 @@ impl WasmScheduler {
     }
 }
 
+fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
+    wasm_bindgen_futures::spawn_local(async move {
+        *flag.borrow_mut() = false;
+
+        let Some(core_rc) = core_ref.upgrade() else {
+            return;
+        };
+
+        let needs_retry = if let Ok(mut core) = core_rc.try_borrow_mut() {
+            core.batched_tick();
+            false
+        } else {
+            true
+        };
+
+        if needs_retry {
+            // Runtime is currently borrowed (e.g. during query/subscription setup).
+            // Keep one retry queued rather than panicking on RefCell reborrow.
+            let mut scheduled = flag.borrow_mut();
+            if *scheduled {
+                return;
+            }
+            *scheduled = true;
+            drop(scheduled);
+            schedule_batched_tick_task(core_ref.clone(), flag.clone());
+        }
+    });
+}
+
 impl Scheduler for WasmScheduler {
     fn schedule_batched_tick(&self) {
         let mut scheduled = self.scheduled.borrow_mut();
         if !*scheduled {
             *scheduled = true;
-
-            let core_ref = self.core_ref.clone();
-            let flag = self.scheduled.clone();
-
-            wasm_bindgen_futures::spawn_local(async move {
-                *flag.borrow_mut() = false;
-                if let Some(core_rc) = core_ref.upgrade() {
-                    core_rc.borrow_mut().batched_tick();
-                }
-            });
+            drop(scheduled);
+            schedule_batched_tick_task(self.core_ref.clone(), self.scheduled.clone());
         }
     }
 }
@@ -601,18 +613,35 @@ impl WasmRuntime {
             };
 
             let descriptor = &delta.descriptor;
-
-            let delta_json = serde_json::json!({
-                "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
-                    .collect::<Vec<_>>()
-            });
+            let mut delta_json = delta
+                .ordered_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    serde_json::json!({
+                        "kind": 1,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index
+                    })
+                })
+                .chain(delta.ordered_delta.updated.iter().map(|change| {
+                    let row = change.row.as_ref().map(|row| row_to_json(row, descriptor));
+                    serde_json::json!({
+                        "kind": 2,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.new_index,
+                        "row": row
+                    })
+                }))
+                .chain(delta.ordered_delta.added.iter().map(|change| {
+                    serde_json::json!({
+                        "kind": 0,
+                        "id": change.id.uuid().to_string(),
+                        "index": change.index,
+                        "row": row_to_json(&change.row, descriptor)
+                    })
+                }))
+                .collect::<Vec<_>>();
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
                 let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));

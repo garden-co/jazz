@@ -41,6 +41,14 @@ use super::subgraph::SubgraphTemplate;
 /// - Memory overhead per instance
 /// - Update cost distribution (how many instances need re-settling on inner change?)
 /// - Common subgraph patterns that could benefit from memoization
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Correlate {
+    /// Correlate using a column value from the outer row.
+    Col(usize),
+    /// Correlate using the outer tuple's object id.
+    Id,
+}
+
 #[derive(Debug)]
 pub struct ArraySubqueryNode {
     /// Descriptor for outer tuples.
@@ -55,8 +63,8 @@ pub struct ArraySubqueryNode {
     /// Schema for compiling subgraphs.
     schema: Schema,
 
-    /// Column index in outer row that provides correlation value.
-    outer_correlation_col: usize,
+    /// Source of the correlation value from the outer tuple.
+    outer_correlation: Correlate,
 
     /// Per-outer-row state: outer_id → (correlation_value, array_result).
     /// We store the array result directly rather than SubgraphInstances
@@ -77,13 +85,13 @@ impl ArraySubqueryNode {
     /// # Arguments
     /// * `outer_descriptor` - Descriptor for incoming outer tuples
     /// * `subgraph_template` - Template for creating inner subgraph instances
-    /// * `outer_correlation_col` - Column index in outer row to use as correlation value
+    /// * `outer_correlation` - Source for correlation value from outer tuple.
     /// * `array_column_name` - Name for the output array column
     /// * `schema` - Schema for compiling subgraphs
     pub fn new(
         outer_descriptor: TupleDescriptor,
         subgraph_template: SubgraphTemplate,
-        outer_correlation_col: usize,
+        outer_correlation: Correlate,
         array_column_name: String,
         schema: Schema,
     ) -> Self {
@@ -113,7 +121,7 @@ impl ArraySubqueryNode {
             output_tuple_descriptor,
             subgraph_template,
             schema,
-            outer_correlation_col,
+            outer_correlation,
             instances: AHashMap::new(),
             current_tuples: AHashSet::new(),
             dirty: true,
@@ -229,11 +237,16 @@ impl ArraySubqueryNode {
 
     /// Extract correlation value from an outer tuple.
     fn extract_correlation_value(&self, tuple: &Tuple) -> Option<Value> {
-        let element = tuple.get(0)?;
-        let content = element.content()?;
-        let outer_row_desc = self.outer_descriptor.combined_descriptor();
-        let values = decode_row(&outer_row_desc, content).ok()?;
-        values.get(self.outer_correlation_col).cloned()
+        match self.outer_correlation {
+            Correlate::Id => tuple.first_id().map(Value::Uuid),
+            Correlate::Col(col_idx) => {
+                let element = tuple.get(0)?;
+                let content = element.content()?;
+                let outer_row_desc = self.outer_descriptor.combined_descriptor();
+                let values = decode_row(&outer_row_desc, content).ok()?;
+                values.get(col_idx).cloned()
+            }
+        }
     }
 
     /// Evaluate the subgraph for a given correlation value.
@@ -244,31 +257,48 @@ impl ArraySubqueryNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> Value {
-        // Create subgraph instance
+        // UUID[] FK forward includes correlate an array of ids to scalar inner ids.
+        // Evaluate each element independently so output preserves source order/duplicates.
+        if let Value::Array(elements) = correlation_value {
+            let mut materialized = Vec::new();
+            for element in elements {
+                let Value::Array(mut nested) =
+                    self.evaluate_subgraph_for_single(element, io, row_loader)
+                else {
+                    continue;
+                };
+                materialized.append(&mut nested);
+            }
+            return Value::Array(materialized);
+        }
+
+        self.evaluate_subgraph_for_single(correlation_value, io, row_loader)
+    }
+
+    fn evaluate_subgraph_for_single(
+        &self,
+        correlation_value: &Value,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+    ) -> Value {
         let instance = self
             .subgraph_template
             .instantiate(correlation_value.clone(), &self.schema);
-
         let mut instance = match instance {
             Some(i) => i,
             None => return Value::Array(vec![]),
         };
 
-        // Settle the subgraph
         let row_delta = instance.graph.settle(io, row_loader);
-
-        // Convert result rows to array of Row values
         let array_elements: Vec<Value> = row_delta
             .added
             .iter()
             .filter_map(|row| {
-                // Decode row to values and wrap as a Row (heterogeneous tuple)
                 let output_desc = self.subgraph_template.output_descriptor();
                 let values = decode_row(output_desc, &row.data).ok()?;
                 Some(Value::Row(values))
             })
             .collect();
-
         Value::Array(array_elements)
     }
 
@@ -452,8 +482,13 @@ mod tests {
             .build(&schema)
             .unwrap();
 
-        let node =
-            ArraySubqueryNode::new(outer_descriptor, template, 0, "posts".to_string(), schema);
+        let node = ArraySubqueryNode::new(
+            outer_descriptor,
+            template,
+            Correlate::Col(0),
+            "posts".to_string(),
+            schema,
+        );
 
         // Output should have: id, name, posts (array)
         assert_eq!(node.output_descriptor().columns.len(), 3);
@@ -484,7 +519,7 @@ mod tests {
         let node = ArraySubqueryNode::new(
             outer_descriptor,
             template,
-            0,
+            Correlate::Col(0),
             "posts".to_string(),
             schema.clone(),
         );
@@ -501,5 +536,46 @@ mod tests {
 
         let correlation = node.extract_correlation_value(&user_tuple);
         assert_eq!(correlation, Some(Value::Integer(42)));
+    }
+
+    #[test]
+    fn array_subquery_extracts_object_id_correlation_value() {
+        let schema = test_schema();
+
+        let outer_descriptor = TupleDescriptor::single_with_materialization(
+            "users",
+            schema
+                .get(&TableName::new("users"))
+                .unwrap()
+                .descriptor
+                .clone(),
+            true,
+        );
+
+        let template = SubgraphBuilder::new("posts")
+            .correlate("author_id")
+            .build(&schema)
+            .unwrap();
+
+        let node = ArraySubqueryNode::new(
+            outer_descriptor,
+            template,
+            Correlate::Id,
+            "posts".to_string(),
+            schema.clone(),
+        );
+
+        let row_id = ObjectId::new();
+        let user_values = vec![Value::Integer(42), Value::Text("Alice".into())];
+        let user_row_desc = &schema.get(&TableName::new("users")).unwrap().descriptor;
+        let user_data = encode_row(user_row_desc, &user_values).unwrap();
+        let user_tuple = Tuple::new(vec![TupleElement::Row {
+            id: row_id,
+            content: user_data,
+            commit_id: CommitId([0; 32]),
+        }]);
+
+        let correlation = node.extract_correlation_value(&user_tuple);
+        assert_eq!(correlation, Some(Value::Uuid(row_id)));
     }
 }

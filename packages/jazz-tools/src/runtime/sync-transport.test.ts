@@ -129,6 +129,55 @@ describe("sync-transport", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
   });
 
+  it("skips catalogue payload sync when admin secret is missing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload(
+      "http://localhost:3000",
+      {
+        ObjectUpdated: {
+          metadata: {
+            metadata: {
+              type: "catalogue_schema",
+            },
+          },
+        },
+      },
+      { jwtToken: "jwt-token" },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("posts catalogue payloads with admin secret header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload(
+      "http://localhost:3000",
+      {
+        ObjectUpdated: {
+          metadata: {
+            metadata: {
+              type: "catalogue_lens",
+            },
+          },
+        },
+      },
+      { adminSecret: "admin-secret", jwtToken: "jwt-token" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Jazz-Admin-Secret": "admin-secret",
+    });
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
+  });
+
   it("posts link-external with bearer and local auth headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

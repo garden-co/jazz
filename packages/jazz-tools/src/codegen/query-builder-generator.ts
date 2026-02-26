@@ -23,6 +23,7 @@ function columnTypeToTs(type: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
+    case "Double":
       return "number";
     case "Timestamp":
       return "Date";
@@ -55,6 +56,7 @@ function columnToWhereInputType(col: {
       return "boolean";
     case "Integer":
     case "BigInt":
+    case "Double":
       return "number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
     case "Timestamp":
       return "Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number }";

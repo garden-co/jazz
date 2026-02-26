@@ -110,7 +110,7 @@ Admin auth (`X-Jazz-Admin-Secret`) required separately for catalogue sync operat
 
 ### Client-Side Auth
 
-Client transports detect catalogue object payloads (`catalogue_schema`, `catalogue_lens`) and send `X-Jazz-Admin-Secret` automatically; regular row/query payloads use JWT/backend auth paths.
+Client transports detect catalogue object payloads (`catalogue_schema`, `catalogue_lens`) and only send them when `X-Jazz-Admin-Secret` is available. If no admin secret is configured, catalogue payloads are dropped client-side and no `/sync` POST is attempted. Regular row/query payloads continue to use JWT/backend auth paths.
 
 > `crates/jazz-tools/src/transport.rs:66-181`
 > `packages/jazz-tools/src/runtime/sync-transport.ts`

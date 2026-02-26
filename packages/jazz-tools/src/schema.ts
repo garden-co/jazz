@@ -33,9 +33,9 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
         ? number
         : T extends "TIMESTAMP"
           ? number
-        : T extends "UUID"
-          ? string
-          : never;
+          : T extends "UUID"
+            ? string
+            : never;
 
 export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
   ? TSTypeFromScalarSqlType<T>
@@ -97,6 +97,13 @@ export type PolicyExpr =
   | {
       type: "Inherits";
       operation: PolicyOperation;
+      via_column: string;
+      max_depth?: number;
+    }
+  | {
+      type: "InheritsReferencing";
+      operation: PolicyOperation;
+      source_table: string;
       via_column: string;
       max_depth?: number;
     }
