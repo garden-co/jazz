@@ -434,15 +434,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.current_schema().clone())
     }
 
-    /// Get any known schema from catalogue state.
-    ///
-    /// This is primarily useful in server mode where no single current schema
-    /// exists, but known schemas are learned through catalogue sync.
-    pub fn any_known_schema(&self) -> Result<Option<Schema>, RuntimeError> {
-        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.schema_manager().any_known_schema().cloned())
-    }
-
     /// Return all known schema hashes (for server mode).
     pub fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
