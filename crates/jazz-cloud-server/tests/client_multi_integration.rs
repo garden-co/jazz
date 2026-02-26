@@ -388,6 +388,19 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     // Warm up auth/JWKS + schema/catalogue sync before first row write.
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
 
+    let client_b_dir = TempDir::new().expect("client b dir");
+    let client_b = JazzClient::connect(make_context(
+        app_id,
+        server.base_url(),
+        client_b_dir.path().to_path_buf(),
+        make_jwt("client-b"),
+    ))
+    .await
+    .expect("connect client b");
+
+    // Ensure query path is fully ready before asserting cross-client sync.
+    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+
     let row_id = client_a
         .create(
             "todos",
@@ -402,34 +415,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     // Ensure local state sees the insert first.
     let _ = wait_for_todos_count(&client_a, 1, Duration::from_secs(10), None).await;
 
-    let _ = wait_for_todos_count(
-        &client_a,
-        1,
-        Duration::from_secs(20),
-        Some(PersistenceTier::EdgeServer),
-    )
-    .await;
-
-    let client_b_dir = TempDir::new().expect("client b dir");
-    let client_b = JazzClient::connect(make_context(
-        app_id,
-        server.base_url(),
-        client_b_dir.path().to_path_buf(),
-        make_jwt("client-b"),
-    ))
-    .await
-    .expect("connect client b");
-
-    // Ensure query path is fully ready before asserting cross-client sync.
-    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
-
-    let rows = wait_for_todos_count(
-        &client_b,
-        1,
-        Duration::from_secs(30),
-        Some(PersistenceTier::EdgeServer),
-    )
-    .await;
+    let rows = wait_for_todos_count(&client_b, 1, Duration::from_secs(30), None).await;
     assert_eq!(rows[0].0, row_id);
     assert_eq!(rows[0].1[0], Value::Text("from-client-a".to_string()));
 
@@ -445,9 +431,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut saw_update = false;
     while tokio::time::Instant::now() < deadline {
-        if let Ok(rows) = client_b
-            .query(query.clone(), Some(PersistenceTier::EdgeServer))
-            .await
+        if let Ok(rows) = client_b.query(query.clone(), None).await
             && rows.len() == 1
             && rows[0].1[1] == Value::Boolean(true)
         {
