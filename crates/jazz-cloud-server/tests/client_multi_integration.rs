@@ -87,6 +87,7 @@ struct ServerProcess {
 
 #[derive(Default)]
 struct ServerProcessOptions {
+    port: Option<u16>,
     delay_server_send_object_updated_ms: Option<String>,
     delay_server_send_object_updated_every: Option<String>,
 }
@@ -97,7 +98,7 @@ impl ServerProcess {
     }
 
     async fn start_with_options(data_root: &Path, options: ServerProcessOptions) -> Self {
-        let port = get_free_port();
+        let port = options.port.unwrap_or_else(get_free_port);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
         cmd.args([
             "--port",
@@ -367,6 +368,42 @@ async fn wait_for_todos_count_on_disk(
     panic!("timed out waiting for on-disk todos count {expected_count}, last_count={last_count}");
 }
 
+async fn wait_for_catalogue_manifest_schema_count_on_disk(
+    app_id: AppId,
+    data_root: &Path,
+    expected_min_count: usize,
+    timeout: Duration,
+) {
+    let db_path = data_root
+        .join("apps")
+        .join(app_id.to_string())
+        .join("jazz.surrealkv");
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_count = 0usize;
+
+    while tokio::time::Instant::now() < deadline {
+        if db_path.exists()
+            && let Ok(storage) = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+        {
+            let manifest = storage
+                .load_catalogue_manifest(app_id.as_object_id())
+                .ok()
+                .flatten();
+            last_count = manifest.map(|m| m.schema_seen.len()).unwrap_or(0);
+            let _ = storage.close();
+            if last_count >= expected_min_count {
+                return;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    panic!(
+        "timed out waiting for schema manifest count >= {expected_min_count}, last_count={last_count}"
+    );
+}
+
 #[tokio::test]
 async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     let jwks_server = JwksServer::start().await;
@@ -512,6 +549,7 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     let delayed_server = ServerProcess::start_with_options(
         server_data.path(),
         ServerProcessOptions {
+            port: None,
             delay_server_send_object_updated_ms: Some("1400-1800".to_string()),
             delay_server_send_object_updated_every: Some("1".to_string()),
         },
@@ -624,4 +662,103 @@ async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data(
 
     drop(restarted);
     wait_for_todos_count_on_disk(app_id, server_data.path(), 1, Duration::from_secs(20)).await;
+}
+
+#[tokio::test]
+async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_catalogue_resync() {
+    let user_id = "restart-no-catalogue-resync";
+    let jwks_server = JwksServer::start().await;
+    let server_data = TempDir::new().expect("temp server dir");
+    let server = ServerProcess::start(server_data.path()).await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+    let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+
+    let client_dir = TempDir::new().expect("client dir");
+    let client = JazzClient::connect(make_context(
+        app_id,
+        server.base_url(),
+        client_dir.path().to_path_buf(),
+        make_jwt(user_id),
+    ))
+    .await
+    .expect("connect client");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    client
+        .create(
+            "todos",
+            vec![
+                Value::Text("before-restart".to_string()),
+                Value::Boolean(false),
+            ],
+        )
+        .await
+        .expect("create before restart");
+
+    let _ = wait_for_todos_count(
+        &client,
+        1,
+        Duration::from_secs(20),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
+
+    let restart_port = server.port;
+    drop(server);
+    wait_for_catalogue_manifest_schema_count_on_disk(
+        app_id,
+        server_data.path(),
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
+    let restarted = ServerProcess::start_with_options(
+        server_data.path(),
+        ServerProcessOptions {
+            port: Some(restart_port),
+            ..ServerProcessOptions::default()
+        },
+    )
+    .await;
+
+    let rows_after_restart = wait_for_todos_count(
+        &client,
+        1,
+        Duration::from_secs(12),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
+    assert_eq!(
+        rows_after_restart.len(),
+        1,
+        "existing client should continue serving Edge-settled queries after server restart"
+    );
+
+    client
+        .create(
+            "todos",
+            vec![
+                Value::Text("after-restart".to_string()),
+                Value::Boolean(false),
+            ],
+        )
+        .await
+        .expect("create after restart");
+
+    let rows_after_create = wait_for_todos_count(
+        &client,
+        2,
+        Duration::from_secs(12),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
+    assert_eq!(
+        rows_after_create.len(),
+        2,
+        "mutations after restart should still settle at Edge without explicit catalogue re-sync"
+    );
+
+    client.shutdown().await.expect("shutdown client");
+    drop(restarted);
 }
