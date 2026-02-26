@@ -1403,6 +1403,187 @@ mod tests {
         assert!(qm.take_pending_catalogue_updates().is_empty());
     }
 
+    /// Non-matching app_id catalogue objects must be ignored for all schema-shape variants.
+    #[test]
+    fn catalogue_non_matching_app_id_is_ignored() {
+        // v1: id, name, birthday(Timestamp)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        // v2: id, name, birthday(Text)
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Text),
+            )
+            .build();
+        // v3: id, name, birthday(nullable Text)
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("birthday", ColumnType::Text),
+            )
+            .build();
+        // v4: id, name, email(Text)
+        let v4 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+
+        for schema in [v1, v2, v3, v4] {
+            let hash = SchemaHash::compute(&schema);
+            let before = (
+                manager.all_branches().len(),
+                manager.context().is_live(&hash),
+                manager.context().is_pending(&hash),
+                manager.is_schema_known(&hash),
+            );
+
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            );
+            metadata.insert(
+                MetadataKey::AppId.to_string(),
+                AppId::from_name("other-app").uuid().to_string(),
+            );
+            metadata.insert(MetadataKey::SchemaHash.to_string(), hash.to_string());
+
+            manager
+                .process_catalogue_update(hash.to_object_id(), &metadata, &encode_schema(&schema))
+                .unwrap();
+
+            let after = (
+                manager.all_branches().len(),
+                manager.context().is_live(&hash),
+                manager.context().is_pending(&hash),
+                manager.is_schema_known(&hash),
+            );
+            assert_eq!(
+                after,
+                before,
+                "mismatched app_id should not mutate schema state for hash {}",
+                hash.short()
+            );
+        }
+    }
+
+    /// Unknown catalogue type must be ignored even for materially different schema payloads.
+    #[test]
+    fn catalogue_unknown_type_is_ignored() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        let before_branches = manager.all_branches().len();
+
+        let mut metadata = HashMap::new();
+        // Unknown type should be ignored
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            "CatalogueBogusType".to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+
+        manager
+            .process_catalogue_update(v2_hash.to_object_id(), &metadata, &encode_schema(&v2))
+            .unwrap();
+
+        assert_eq!(manager.all_branches().len(), before_branches);
+        assert!(!manager.context().is_pending(&v2_hash));
+        assert!(!manager.context().is_live(&v2_hash));
+        assert!(!manager.is_schema_known(&v2_hash));
+    }
+
+    /// Pushing the exact same schema (same hash/content) should be a no-op.
+    #[test]
+    fn catalogue_same_schema_push_is_noop() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+
+        let before = (
+            manager.all_branches().len(),
+            manager.context().is_live(&v1_hash),
+            manager.context().is_pending(&v1_hash),
+            manager.is_schema_known(&v1_hash),
+        );
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SchemaHash.to_string(), v1_hash.to_string());
+
+        manager
+            .process_catalogue_update(v1_hash.to_object_id(), &metadata, &encode_schema(&v1))
+            .unwrap();
+        manager
+            .process_catalogue_update(v1_hash.to_object_id(), &metadata, &encode_schema(&v1))
+            .unwrap();
+
+        let after = (
+            manager.all_branches().len(),
+            manager.context().is_live(&v1_hash),
+            manager.context().is_pending(&v1_hash),
+            manager.is_schema_known(&v1_hash),
+        );
+        assert_eq!(after, before, "same-schema pushes should be idempotent");
+    }
+
     /// E2E test: Full catalogue sync flow with data query.
     ///
     /// This test simulates the complete flow where:
