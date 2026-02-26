@@ -14,6 +14,7 @@ import {
   buildEventsUrl,
   applyUserAuthHeaders,
   isCataloguePayload,
+  isExpectedFetchAbortError,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -168,7 +169,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
           void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
-            console.error("[worker] Sync POST error:", error);
+            if (!isExpectedFetchAbortError(error)) {
+              console.error("[worker] Sync POST error:", error);
+            }
             detachServer();
             scheduleReconnect();
           });

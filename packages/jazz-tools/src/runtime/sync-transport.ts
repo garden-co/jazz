@@ -72,8 +72,8 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-function isExpectedStreamAbortError(error: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return true;
+export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
 
   if (error && typeof error === "object") {
     const maybeName = (error as { name?: unknown }).name;
@@ -249,7 +249,7 @@ export class SyncStreamController {
         this.logPrefix,
       );
     } catch (e: any) {
-      if (isExpectedStreamAbortError(e, abortController.signal)) return;
+      if (isExpectedFetchAbortError(e, abortController.signal)) return;
       console.error(`${this.logPrefix}Stream connect error:`, e);
     } finally {
       if (this.streamAbortController === abortController) {
@@ -287,6 +287,7 @@ export interface SyncOutboxRouterOptions {
   onServerPayload(payload: unknown): void | Promise<void>;
   onClientPayload?(payloadJson: string): void;
   onServerPayloadError?(error: unknown): void;
+  retryServerPayloads?: boolean;
 }
 
 /**
@@ -485,6 +486,10 @@ export async function sendSyncPayload(
       console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
       throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
     }
+    if (isExpectedFetchAbortError(e)) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
+    }
     console.error(`${logPrefix}Sync POST fetch error:`, e);
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
@@ -528,6 +533,10 @@ export async function linkExternalIdentity(
     if ((e as { name?: string })?.name === "AbortError") {
       console.error(`${logPrefix}Link external timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
       throw new Error(`${logPrefix}Link external failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+    }
+    if (isExpectedFetchAbortError(e)) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`${logPrefix}Link external failed: ${msg}`);
     }
     console.error(`${logPrefix}Link external fetch error:`, e);
     const msg = e instanceof Error ? e.message : String(e);

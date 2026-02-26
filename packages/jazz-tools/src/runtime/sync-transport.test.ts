@@ -5,6 +5,7 @@ import {
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
   generateClientId,
+  isExpectedFetchAbortError,
   linkExternalIdentity,
   normalizePathPrefix,
   readBinaryFrames,
@@ -296,6 +297,19 @@ describe("sync-transport", () => {
     expect(clientId).toBe("server-client-2");
 
     controller.stop();
+  });
+
+  it("classifies canceled fetch errors as expected aborts", () => {
+    expect(
+      isExpectedFetchAbortError(new Error("fetch failed: Fetch request has been canceled")),
+    ).toBe(true);
+    expect(
+      isExpectedFetchAbortError({
+        message: "outer",
+        cause: new Error("fetch failed: Fetch request has been cancelled"),
+      }),
+    ).toBe(true);
+    expect(isExpectedFetchAbortError(new Error("network down"))).toBe(false);
   });
 
   it("suppresses expected canceled-fetch errors when stopping an in-flight stream", async () => {
