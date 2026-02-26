@@ -14,7 +14,7 @@ Jazz 2 supports three auth methods:
 Browser clients default to anonymous local auth when no JWT/backend auth is configured.
 On first load, Jazz auto-generates a device token and persists it in `localStorage`.
 
-<Tabs items={["React", "TypeScript"]}>
+<Tabs items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     ```tsx
     import { createJazzClient, JazzProvider } from "jazz-tools/react";
@@ -30,6 +30,26 @@ On first load, Jazz auto-generates a device token and persists it in `localStora
         <JazzProvider
           client={client}><TodoApp /></JazzProvider>;
     }
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte
+    <script lang="ts">
+      import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+
+      const client = createJazzClient({
+        appId: import.meta.env.JAZZ_APP_ID ?? 'my-app',
+        env: 'dev',
+        userBranch: 'main',
+      });
+    </script>
+
+    <JazzSvelteProvider {client}>
+      {#snippet children({ db })}
+        <TodoApp />
+      {/snippet}
+    </JazzSvelteProvider>
     ```
 
   </Tab>
@@ -62,7 +82,7 @@ const db = await createDb({
 
 When you want to test multi-user flows locally, switch to `demo` profiles and expose the switcher UI.
 
-<Tabs items={["React", "TypeScript"]}>
+<Tabs items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     ```tsx
     import {
@@ -93,6 +113,37 @@ When you want to test multi-user flows locally, switch to `demo` profiles and ex
         </>
       );
     }
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte
+    <script lang="ts">
+      import {
+        createJazzClient,
+        JazzSvelteProvider,
+        SyntheticUserSwitcher,
+        getActiveSyntheticAuth,
+      } from 'jazz-tools/svelte';
+
+      const appId = import.meta.env.JAZZ_APP_ID ?? 'my-app';
+      const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
+
+      const client = createJazzClient({
+        appId,
+        env: 'dev',
+        userBranch: 'main',
+        localAuthMode: active.localAuthMode,
+        localAuthToken: active.localAuthToken,
+      });
+    </script>
+
+    <SyntheticUserSwitcher {appId} defaultMode="demo" />
+    <JazzSvelteProvider {client}>
+      {#snippet children({ db })}
+        <TodoApp />
+      {/snippet}
+    </JazzSvelteProvider>
     ```
 
   </Tab>
@@ -131,48 +182,99 @@ Switching profiles persists locally; by default switchers refresh the page after
 
 Once your auth provider is in place, send provider JWTs and link the current local identity to the external identity.
 
-### React Upgrade Hook
+### Framework Upgrade Hook
 
 Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created data:
 
-```tsx
-import { useState } from "react";
-import { createJazzClient, JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
+<Tabs items={["React", "Svelte"]}>
+  <Tab value="React">
+    ```tsx
+    import { useState } from "react";
+    import { createJazzClient, JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
+    const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+    const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
 
-function AuthGate() {
-  const [jwtToken, setJwtToken] = useState<string | undefined>();
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl,
-    defaultMode: "anonymous",
-  });
+    function AuthGate() {
+      const [jwtToken, setJwtToken] = useState<string | undefined>();
+      const linkExternalIdentity = useLinkExternalIdentity({
+        appId,
+        serverUrl,
+        defaultMode: "anonymous",
+      });
 
-  async function onSignedIn(providerJwt: string) {
-    await linkExternalIdentity({ jwtToken: providerJwt });
-    setJwtToken(providerJwt);
-  }
+      async function onSignedIn(providerJwt: string) {
+        await linkExternalIdentity({ jwtToken: providerJwt });
+        setJwtToken(providerJwt);
+      }
 
-  return (
-    <JazzProvider
       // const client = await createJazzClient({
       //   appId,
       //   env: "dev",
       //   userBranch: "main",
       //   jwtToken,
       // });
-      client={client}
-    >
-      <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
-      <TodoApp />
-    </JazzProvider>
-  );
-}
-```
 
-### Non-React Upgrade Path
+      return (
+        <JazzProvider
+          client={client}
+        >
+          <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
+          <TodoApp />
+        </JazzProvider>
+      );
+    }
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte
+    <script lang="ts">
+      import {
+        createJazzClient,
+        JazzSvelteProvider,
+        useLinkExternalIdentity,
+      } from 'jazz-tools/svelte';
+
+      const appId = import.meta.env.JAZZ_APP_ID ?? 'my-app';
+      const serverUrl = import.meta.env.JAZZ_SERVER_URL!;
+
+      const linkExternalIdentity = useLinkExternalIdentity({
+        appId,
+        serverUrl,
+        defaultMode: 'anonymous',
+      });
+
+      let jwtToken = $state<string | undefined>();
+
+      async function onSignedIn(providerJwt: string) {
+        await linkExternalIdentity({ jwtToken: providerJwt });
+        jwtToken = providerJwt;
+      }
+
+      const client = $derived(
+        createJazzClient({
+          appId,
+          serverUrl,
+          jwtToken,
+        }),
+      );
+    </script>
+
+    {#key jwtToken}
+      <JazzSvelteProvider {client}>
+        {#snippet children({ db })}
+          <button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
+          <TodoApp />
+        {/snippet}
+      </JazzSvelteProvider>
+    {/key}
+    ```
+
+  </Tab>
+</Tabs>
+
+### Non-Framework Upgrade Path
 
 Use `JazzClient.linkExternalIdentity(...)` directly:
 
