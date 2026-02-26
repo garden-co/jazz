@@ -75,6 +75,72 @@ Server forwards received `QuerySubscription` to upstream servers. Tracks which c
 > `crates/groove/src/sync_manager.rs:671-704` (forwarding methods)
 > `crates/groove/src/sync_manager.rs:1191-1204` (QuerySettled relay)
 
+## QuerySettled Integration (Detailed)
+
+`QuerySettled` is the integration point between upstream query execution and downstream first-delivery guarantees.
+
+End-to-end path:
+
+1. Local `subscribe_with_sync(query, session, settled_tier)` creates a local subscription and forwards `QuerySubscription` upstream.
+2. Upstream/server `QueryManager` compiles + settles a server-side graph and computes scope.
+3. On first server-side settle, it emits exactly one `QuerySettled { query_id, tier }`.
+4. Any intermediate sync node relays that payload to original downstream clients via `query_origin`.
+5. Receiver stores `(query_id, tier)` in `pending_query_settled`.
+6. In local `QueryManager::process()`, pending `QuerySettled` is consumed before local subscription settle/delivery.
+7. Delivery gate checks `achieved_tiers >= settled_tier`; if satisfied, first delivery is full snapshot, else delivery is held.
+
+> [`query_manager/subscriptions.rs:160`](../../crates/jazz-tools/src/query_manager/subscriptions.rs#L160)
+> [`query_manager/server_queries.rs:23`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L23)
+> [`query_manager/server_queries.rs:246`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L246)
+> [`sync_manager/mod.rs:393`](../../crates/jazz-tools/src/sync_manager/mod.rs#L393)
+> [`sync_manager/inbox.rs:119`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L119)
+> [`sync_manager/inbox.rs:116`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L116)
+> [`query_manager/manager.rs:528`](../../crates/jazz-tools/src/query_manager/manager.rs#L528)
+> [`query_manager/manager.rs:537`](../../crates/jazz-tools/src/query_manager/manager.rs#L537)
+> [`query_manager/manager.rs:640`](../../crates/jazz-tools/src/query_manager/manager.rs#L640)
+> [`query_manager/manager.rs:651`](../../crates/jazz-tools/src/query_manager/manager.rs#L651)
+
+Why this ordering matters:
+
+- `ObjectUpdated` may arrive in the same batch as `QuerySettled`.
+- Because `QuerySettled` is applied before local delivery checks, first delivery can unblock in the same tick once both data and tier condition are true.
+- If tier is not satisfied, query state still settles locally; only delivery is deferred.
+
+## PersistenceAck Integration (Detailed)
+
+`PersistenceAck` is the durability side of the same sync fabric. It does not gate query callbacks; it gates persisted write completion.
+
+End-to-end path:
+
+1. Persisted write API (`insert_persisted`, `update_persisted`, `delete_persisted`) registers an ack watcher keyed by commit ID and requested tier.
+2. Commit is synced upstream via `ObjectUpdated`.
+3. Receiver with `my_tier` set applies the commit and emits `PersistenceAck` for newly persisted commit IDs.
+4. Ack receiver stores tier to storage and in-memory commit ack state, then queues it for runtime.
+5. Runtime consumes received acks and resolves watchers where `acked_tier >= requested_tier`.
+
+> [`runtime_core.rs:752`](../../crates/jazz-tools/src/runtime_core.rs#L752)
+> [`runtime_core.rs:776`](../../crates/jazz-tools/src/runtime_core.rs#L776)
+> [`runtime_core.rs:824`](../../crates/jazz-tools/src/runtime_core.rs#L824)
+> [`sync_manager/inbox.rs:391`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L391)
+> [`sync_manager/inbox.rs:395`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L395)
+> [`sync_manager/inbox.rs:75`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L75)
+> [`sync_manager/inbox.rs:83`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L83)
+> [`runtime_core.rs:389`](../../crates/jazz-tools/src/runtime_core.rs#L389)
+> [`runtime_core.rs:399`](../../crates/jazz-tools/src/runtime_core.rs#L399)
+
+Relay behavior for multi-hop durability:
+
+- Upstream/intermediate nodes keep `commit_interest` so incoming acks can be fanned out to downstream clients that originated the commit.
+
+> [`sync_manager/mod.rs:52`](../../crates/jazz-tools/src/sync_manager/mod.rs#L52)
+> [`sync_manager/inbox.rs:383`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L383)
+> [`sync_manager/inbox.rs:95`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L95)
+
+Practical distinction:
+
+- `QuerySettled`: "is the query result ready at tier T?"
+- `PersistenceAck`: "is this commit durable at tier T?"
+
 ## Reconnect/Resubscribe Convergence
 
 Active subscriptions are treated as desired state, not one-shot network events.

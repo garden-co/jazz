@@ -83,8 +83,8 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    subscriptionCallback.onUpdate('{"handle":7,"added":[],"removed":[],"updated":[]}');
-    expect(onUpdate).toHaveBeenCalledWith('{"handle":7,"added":[],"removed":[],"updated":[]}');
+    subscriptionCallback.onUpdate("[]");
+    expect(onUpdate).toHaveBeenCalledWith("[]");
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
@@ -107,25 +107,21 @@ describe("JazzRnRuntimeAdapter", () => {
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    expect(() =>
-      subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}'),
-    ).not.toThrow();
+    expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
   it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
 
-    await expect(adapter.insertPersisted("todos", [], "worker")).resolves.toBe("row-1");
+    await expect(adapter.insertWithAck("todos", [], "worker")).resolves.toBe("row-1");
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updatePersisted("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deletePersisted("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateWithAck("row-1", {}, "worker")).resolves.toBeUndefined();
+    await expect(adapter.deleteWithAck("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertPersisted("todos", [], "edge")).toThrow(
-      "supports only 'worker' tier",
-    );
+    expect(() => adapter.insertWithAck("todos", [], "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {

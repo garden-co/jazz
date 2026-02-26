@@ -6,7 +6,7 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
-use crate::storage::Storage;
+use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
@@ -18,7 +18,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
+    ComposedBranchName, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash, TableName,
+    TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -44,6 +45,20 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
+    /// UUID reference points at a missing row.
+    UuidForeignKeyViolation {
+        table: TableName,
+        column: String,
+        referenced_table: TableName,
+        missing_id: ObjectId,
+    },
+    /// UUID[] reference points at a missing row.
+    UuidArrayForeignKeyViolation {
+        table: TableName,
+        column: String,
+        referenced_table: TableName,
+        missing_id: ObjectId,
+    },
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
 }
@@ -68,6 +83,26 @@ impl std::fmt::Display for QueryError {
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
             }
+            QueryError::UuidForeignKeyViolation {
+                table,
+                column,
+                referenced_table,
+                missing_id,
+            } => write!(
+                f,
+                "uuid foreign key violation on {}.{}: missing referenced row {} in table {}",
+                table, column, missing_id, referenced_table
+            ),
+            QueryError::UuidArrayForeignKeyViolation {
+                table,
+                column,
+                referenced_table,
+                missing_id,
+            } => write!(
+                f,
+                "uuid[] foreign key violation on {}.{}: missing referenced row {} in table {}",
+                table, column, missing_id, referenced_table
+            ),
             QueryError::UnknownSchema(hash) => {
                 write!(
                     f,
@@ -84,7 +119,7 @@ impl std::error::Error for QueryError {}
 /// Handle to a pending query.
 ///
 /// Used to correlate query results with the original request.
-/// Wrappers (groove-runtime, jazz-wasm) use this to fulfill
+/// Wrappers (jazz-runtime, jazz-wasm) use this to fulfill
 /// platform-specific futures/promises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueryHandle(pub u64);
@@ -146,6 +181,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) settled_tier: Option<PersistenceTier>,
     /// Tiers that have confirmed settlement for this query.
     pub(crate) achieved_tiers: HashSet<PersistenceTier>,
+    /// Current ordered IDs for ordered delta construction.
+    pub(crate) current_ordered_ids: Vec<ObjectId>,
 }
 
 /// Update for a query subscription.
@@ -153,9 +190,17 @@ pub(crate) struct QuerySubscription {
 pub struct QueryUpdate {
     pub subscription_id: QuerySubscriptionId,
     pub delta: RowDelta,
+    pub ordered_delta: OrderedRowDelta,
     /// Output descriptor for decoding the binary row data.
     /// This matches the query's output schema (handles JOINs, projections, etc).
     pub descriptor: RowDescriptor,
+}
+
+/// Terminal failure for a local query subscription.
+#[derive(Debug, Clone)]
+pub struct QuerySubscriptionFailure {
+    pub subscription_id: QuerySubscriptionId,
+    pub reason: String,
 }
 
 /// State for an active policy check (graphs and associated data).
@@ -227,6 +272,9 @@ pub struct QueryManager {
     /// Pending query updates
     pub(super) update_outbox: Vec<QueryUpdate>,
 
+    /// Terminal local subscription failures.
+    pub(super) failed_subscriptions: Vec<QuerySubscriptionFailure>,
+
     /// Active policy checks being evaluated.
     pub(super) active_policy_checks: HashMap<PendingUpdateId, PolicyCheckState>,
 
@@ -251,7 +299,7 @@ pub struct QueryManager {
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
-    pub(super) known_schemas: HashMap<SchemaHash, Schema>,
+    pub(super) known_schemas: Arc<HashMap<SchemaHash, Schema>>,
 }
 
 impl QueryManager {
@@ -273,12 +321,13 @@ impl QueryManager {
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
+            failed_subscriptions: Vec::new(),
             active_policy_checks: HashMap::new(),
             server_subscriptions: HashMap::new(),
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
-            known_schemas: HashMap::new(),
+            known_schemas: Arc::new(HashMap::new()),
         }
     }
 
@@ -384,11 +433,13 @@ impl QueryManager {
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self) {
+        let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
+
         // Recompile local subscriptions
-        for sub in self.subscriptions.values_mut() {
+        for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
-                // Update branches from current schema context
-                sub.branches = self
+                // Resolve next branches from current schema context.
+                let next_branches: Vec<String> = self
                     .schema_context
                     .all_branch_names()
                     .into_iter()
@@ -396,34 +447,86 @@ impl QueryManager {
                     .collect();
 
                 // Recompile the graph
-                let new_graph = Self::compile_graph(
+                match Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                );
-                if let Ok(new_graph) = new_graph {
-                    sub.graph = new_graph;
+                ) {
+                    Ok(new_graph) => {
+                        sub.graph = new_graph;
+                        sub.branches = next_branches;
+                        sub.needs_recompile = false;
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        tracing::error!(
+                            sub_id = sub_id.0,
+                            table = %sub.graph.table,
+                            error = %reason,
+                            "subscription stale recompile failed; dropping subscription"
+                        );
+                        failed_local.push((*sub_id, reason));
+                    }
                 }
-                sub.needs_recompile = false;
             }
         }
 
+        for (sub_id, reason) in failed_local {
+            self.subscriptions.remove(&sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                reason: reason.clone(),
+            });
+            // Keep upstream state in sync for subscriptions created via subscribe_with_sync.
+            self.sync_manager
+                .send_query_unsubscription_to_servers(QueryId(sub_id.0));
+        }
+
+        let mut failed_server: Vec<(ClientId, QueryId, String)> = Vec::new();
+
         // Recompile server-side subscriptions
-        for sub in self.server_subscriptions.values_mut() {
+        for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
                 // Recompile the graph
-                let new_graph = Self::compile_graph(
+                match Self::compile_graph(
                     &sub.query,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
-                );
-                if let Ok(new_graph) = new_graph {
-                    sub.graph = new_graph;
+                ) {
+                    Ok(new_graph) => {
+                        sub.graph = new_graph;
+                        sub.needs_recompile = false;
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        tracing::error!(
+                            %client_id,
+                            query_id = query_id.0,
+                            error = %reason,
+                            "server subscription stale recompile failed; dropping subscription"
+                        );
+                        failed_server.push((*client_id, *query_id, reason));
+                    }
                 }
-                sub.needs_recompile = false;
             }
+        }
+
+        for (client_id, query_id, reason) in failed_server {
+            self.server_subscriptions.remove(&(client_id, query_id));
+            self.sync_manager
+                .drop_client_query_subscription(client_id, query_id);
+            self.sync_manager
+                .send_query_unsubscription_to_servers(query_id);
+            self.sync_manager.emit_query_subscription_rejected(
+                client_id,
+                query_id,
+                format!(
+                    "query recompilation failed for query_id {}: {}",
+                    query_id.0, reason
+                ),
+            );
         }
     }
 
@@ -616,10 +719,18 @@ impl QueryManager {
                         Ok(result) => {
                             return Some((result.data, commit_id));
                         }
-                        Err(_) => {
-                            // Transform failed - return original data
-                            // This allows graceful degradation
-                            return Some((content, commit_id));
+                        Err(err) => {
+                            tracing::warn!(
+                                sub_id = sub_id.0,
+                                row_id = %id,
+                                table = %table,
+                                source_branch = %source_branch,
+                                source_schema = %source_hash.short(),
+                                target_schema = %schema_context.current_hash.short(),
+                                error = %err,
+                                "lens transform failed; dropping row from query result"
+                            );
+                            return None;
                         }
                     }
                 }
@@ -652,6 +763,19 @@ impl QueryManager {
                 // First delivery — full current state snapshot
                 subscription.settled_once = true;
                 let full_result = subscription.graph.current_result_as_delta();
+                let ordered_ids_after: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &full_result,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
                 // Always emit the first snapshot once tier is satisfied, even if empty.
                 // This guarantees one-shot queries can resolve to [] instead of hanging.
                 tracing::debug!(
@@ -662,9 +786,23 @@ impl QueryManager {
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
                     delta: full_result,
+                    ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             } else if !delta.is_empty() {
+                let ordered_ids_after: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
                 tracing::debug!(
                     sub_id = sub_id.0,
                     added = delta.added.len(),
@@ -675,7 +813,8 @@ impl QueryManager {
                 // Incremental delivery
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
-                    delta,
+                    delta: delta.clone(),
+                    ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             }
@@ -716,6 +855,52 @@ impl QueryManager {
         self.load_row_from_object_on_branch(object_id, "main")
             .map(|(content, _)| content)
     }
+
+    fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(SchemaHash::from_bytes(arr))
+    }
+
+    fn catalogue_manifest_append(
+        metadata: &HashMap<String, String>,
+        object_id: ObjectId,
+    ) -> Option<(ObjectId, CatalogueManifestOp)> {
+        let app_id_str = metadata.get(MetadataKey::AppId.as_str())?;
+        let app_uuid = uuid::Uuid::parse_str(app_id_str).ok()?;
+        let app_id = ObjectId::from_uuid(app_uuid);
+
+        let type_str = metadata.get(MetadataKey::Type.as_str())?;
+        let op = match type_str.as_str() {
+            t if t == ObjectType::CatalogueSchema.as_str() => {
+                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
+                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                CatalogueManifestOp::SchemaSeen {
+                    object_id,
+                    schema_hash,
+                }
+            }
+            t if t == ObjectType::CatalogueLens.as_str() => {
+                let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
+                let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
+                let source_hash = Self::parse_schema_hash_hex(source_hex)?;
+                let target_hash = Self::parse_schema_hash_hex(target_hex)?;
+                CatalogueManifestOp::LensSeen {
+                    object_id,
+                    source_hash,
+                    target_hash,
+                }
+            }
+            _ => return None,
+        };
+
+        Some((app_id, op))
+    }
+
     /// Handle an object update from the global subscription.
     pub(super) fn handle_object_update(
         &mut self,
@@ -727,6 +912,18 @@ impl QueryManager {
             && (type_str == ObjectType::CatalogueSchema.as_str()
                 || type_str == ObjectType::CatalogueLens.as_str())
         {
+            if let Some((app_id, op)) =
+                Self::catalogue_manifest_append(&update.metadata, update.object_id)
+                && let Err(error) = storage.append_catalogue_manifest_op(app_id, op)
+            {
+                tracing::warn!(
+                    object_id = %update.object_id,
+                    app_id = %app_id,
+                    ?error,
+                    "failed to persist catalogue manifest op"
+                );
+            }
+
             // Queue for SchemaManager processing
             // Load content from the object's latest commit
             if let Some(content) = self.load_object_content(update.object_id) {
@@ -799,6 +996,7 @@ impl QueryManager {
         };
 
         let descriptor = table_schema.descriptor.clone();
+        let has_prior_history = !update.previous_commit_ids.is_empty();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
         if self.is_hard_deleted(update.object_id) {
@@ -808,8 +1006,21 @@ impl QueryManager {
 
         // Check if incoming update is a hard delete
         if self.is_incoming_hard_delete(update.object_id) {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for historical sync update (hard delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
             // Apply hard delete unconditionally
-            let old_data = update.old_content.as_deref();
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
                 &table,
@@ -825,8 +1036,23 @@ impl QueryManager {
 
         // Check if incoming update is a soft delete
         if self.is_soft_delete_commit(update.object_id) {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for historical sync update (soft delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
+
             // Apply soft delete - remove from _id and column indices, add to _id_deleted
-            if let Some(old_data) = &update.old_content {
+            if let Some(old_data) = old_data {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
                     storage,
                     &table,
@@ -904,8 +1130,16 @@ impl QueryManager {
                 &new_data,
                 &descriptor,
             );
+        } else {
+            panic!(
+                "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                update.object_id,
+                table,
+                branch,
+                update.previous_commit_ids.len(),
+                update.commit_ids.len(),
+            );
         }
-        // If old_content is None with previous_commit_ids: truncated old data, accept staleness
 
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);

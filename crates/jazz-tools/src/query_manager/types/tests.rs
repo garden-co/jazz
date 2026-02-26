@@ -10,6 +10,8 @@ fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Timestamp.fixed_size(), Some(8));
     assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
     assert_eq!(ColumnType::Text.fixed_size(), None);
+    assert_eq!(ColumnType::Bytea.fixed_size(), None);
+    assert_eq!(ColumnType::Enum(vec!["a".to_string()]).fixed_size(), None);
 }
 
 #[test]
@@ -60,6 +62,10 @@ fn value_column_type() {
     assert_eq!(
         Value::Uuid(crate::object::ObjectId::from_uuid(Uuid::nil())).column_type(),
         Some(ColumnType::Uuid)
+    );
+    assert_eq!(
+        Value::Bytea(vec![0, 1, 2, 3]).column_type(),
+        Some(ColumnType::Bytea)
     );
     assert_eq!(Value::Null.column_type(), None);
 }
@@ -196,6 +202,7 @@ fn tuple_delta_to_row_delta() {
     let tuple_delta = TupleDelta {
         added: vec![tuple],
         removed: vec![],
+        moved: vec![],
         updated: vec![],
     };
 
@@ -417,6 +424,35 @@ fn schema_hash_table_order_independent() {
     let hash1 = SchemaHash::compute(&schema1);
     let hash2 = SchemaHash::compute(&schema2);
     assert_eq!(hash1, hash2, "Table order should not affect hash");
+}
+
+#[test]
+fn schema_hash_enum_variant_order_independent() {
+    let schema1 = SchemaBuilder::new()
+        .table(TableSchema::builder("todos").column(
+            "status",
+            ColumnType::Enum(vec![
+                "done".to_string(),
+                "in_progress".to_string(),
+                "todo".to_string(),
+            ]),
+        ))
+        .build();
+
+    let schema2 = SchemaBuilder::new()
+        .table(TableSchema::builder("todos").column(
+            "status",
+            ColumnType::Enum(vec![
+                "todo".to_string(),
+                "done".to_string(),
+                "in_progress".to_string(),
+            ]),
+        ))
+        .build();
+
+    let hash1 = SchemaHash::compute(&schema1);
+    let hash2 = SchemaHash::compute(&schema2);
+    assert_eq!(hash1, hash2, "Enum variant order should not affect hash");
 }
 
 #[test]

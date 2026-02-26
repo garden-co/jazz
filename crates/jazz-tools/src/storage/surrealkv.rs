@@ -1,7 +1,7 @@
 //! SurrealKV-backed Storage implementation.
 //!
 //! Uses a single SurrealKV tree with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, and indices.
+//! objects, commits, ack tiers, catalogue manifest ops, and indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
@@ -10,6 +10,7 @@
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
 //! "ack:{commit_hex}"                                      → JSON HashSet<PersistenceTier>
+//! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
 //! ```
 
@@ -30,7 +31,17 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 use crate::sync_manager::PersistenceTier;
 
-use super::{LoadedBranch, Storage, StorageError, encode_value};
+use super::{
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    key_codec::increment_bytes,
+    storage_core::{
+        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
+        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
+        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
+        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
+        store_ack_tier_core,
+    },
+};
 
 /// Minimum memtable size for SurrealKV.
 const MIN_MEMTABLE_SIZE: usize = 4 * 1024 * 1024;
@@ -41,6 +52,29 @@ const FLUSH_MARKER_KEY: &str = "sys:flush_marker";
 pub struct SurrealKvStorage {
     tree: SurrealTree,
     runtime: &'static TokioRuntime,
+}
+
+trait EventualTxnAdapter {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError>;
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError>;
+    fn delete(&self, key: &str) -> Result<(), StorageError>;
+}
+
+impl EventualTxnAdapter for std::cell::RefCell<SurrealTransaction> {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let txn = self.borrow();
+        SurrealKvStorage::txn_get(&txn, key)
+    }
+
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        let mut txn = self.borrow_mut();
+        SurrealKvStorage::txn_set(&mut txn, key, value)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), StorageError> {
+        let mut txn = self.borrow_mut();
+        SurrealKvStorage::txn_delete(&mut txn, key)
+    }
 }
 
 impl SurrealKvStorage {
@@ -113,6 +147,17 @@ impl SurrealKvStorage {
             .map_err(|e| StorageError::IoError(format!("surrealkv delete: {}", e)))
     }
 
+    fn with_eventual_write<R>(
+        &self,
+        op: impl FnOnce(&dyn EventualTxnAdapter) -> Result<R, StorageError>,
+    ) -> Result<R, StorageError> {
+        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
+        let output = op(&txn)?;
+        let mut txn = txn.into_inner();
+        self.commit_txn(&mut txn)?;
+        Ok(output)
+    }
+
     fn scan_prefix(
         txn: &SurrealTransaction,
         prefix: &str,
@@ -171,69 +216,6 @@ impl SurrealKvStorage {
             .map(|(k, _)| k)
             .collect())
     }
-
-    // ========================================================================
-    // Key encoding helpers
-    // ========================================================================
-
-    fn obj_meta_key(id: ObjectId) -> String {
-        format!("obj:{}:meta", format_uuid(id))
-    }
-
-    fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
-        format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
-    }
-
-    fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
-        format!(
-            "obj:{}:br:{}:c:{}",
-            format_uuid(object_id),
-            branch,
-            hex::encode(commit_id.0)
-        )
-    }
-
-    /// Prefix for scanning all commits of a branch.
-    fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-        format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
-    }
-
-    fn ack_key(commit_id: CommitId) -> String {
-        format!("ack:{}", hex::encode(commit_id.0))
-    }
-
-    fn index_entry_key(
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> String {
-        format!(
-            "idx:{}:{}:{}:{}:{}",
-            table,
-            column,
-            branch,
-            hex::encode(encode_value(value)),
-            format_uuid(row_id)
-        )
-    }
-
-    /// Prefix for scanning all entries with a specific index value.
-    fn index_value_prefix(table: &str, column: &str, branch: &str, value: &Value) -> String {
-        format!(
-            "idx:{}:{}:{}:{}:",
-            table,
-            column,
-            branch,
-            hex::encode(encode_value(value))
-        )
-    }
-
-    /// Prefix for scanning all entries in an index (table/col/branch).
-    fn index_prefix(table: &str, column: &str, branch: &str) -> String {
-        format!("idx:{}:{}:{}:", table, column, branch)
-    }
 }
 
 impl Drop for SurrealKvStorage {
@@ -270,29 +252,17 @@ impl Storage for SurrealKvStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let key = Self::obj_meta_key(id);
-        let json = serde_json::to_vec(&metadata)
-            .map_err(|e| StorageError::IoError(format!("serialize metadata: {}", e)))?;
-
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        Self::txn_set(&mut txn, &key, &json)?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            create_object_core(id, metadata, |key, value| txn.set(key, value))
+        })
     }
 
     fn load_object_metadata(
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let key = Self::obj_meta_key(id);
         let txn = self.begin_read_txn()?;
-        match Self::txn_get(&txn, &key)? {
-            Some(data) => {
-                let meta: HashMap<String, String> = serde_json::from_slice(&data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize metadata: {}", e)))?;
-                Ok(Some(meta))
-            }
-            None => Ok(None),
-        }
+        load_object_metadata_core(id, |key| Self::txn_get(&txn, key))
     }
 
     fn load_branch(
@@ -301,50 +271,12 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         let txn = self.begin_read_txn()?;
-
-        // Check if object exists
-        let meta_key = Self::obj_meta_key(object_id);
-        if Self::txn_get(&txn, &meta_key)?.is_none() {
-            return Ok(None);
-        }
-
-        // Load commits via prefix scan
-        let commit_prefix = Self::commit_prefix(object_id, branch);
-        let commit_entries = Self::scan_prefix(&txn, &commit_prefix)?;
-
-        if commit_entries.is_empty() {
-            // Check if tips exist (branch could exist with only tips set)
-            let tips_key = Self::branch_tips_key(object_id, branch);
-            if Self::txn_get(&txn, &tips_key)?.is_none() {
-                return Ok(None);
-            }
-        }
-
-        let mut commits = Vec::new();
-        for (_key, data) in &commit_entries {
-            let mut commit: Commit = serde_json::from_slice(data)
-                .map_err(|e| StorageError::IoError(format!("deserialize commit: {}", e)))?;
-
-            // Load ack state for this commit
-            let ack_key = Self::ack_key(commit.id());
-            if let Some(ack_data) = Self::txn_get(&txn, &ack_key)? {
-                let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&ack_data)
-                    .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?;
-                commit.ack_state.confirmed_tiers = tiers;
-            }
-
-            commits.push(commit);
-        }
-
-        // Load tips
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        let tails = match Self::txn_get(&txn, &tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        Ok(Some(LoadedBranch { commits, tails }))
+        load_branch_core(
+            object_id,
+            branch,
+            |key| Self::txn_get(&txn, key),
+            |prefix| Self::scan_prefix(&txn, prefix),
+        )
     }
 
     fn append_commit(
@@ -353,35 +285,15 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        let commit_id = commit.id();
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-
-        // Store the commit
-        let commit_key = Self::commit_key(object_id, branch, commit_id);
-        let commit_json = serde_json::to_vec(&commit)
-            .map_err(|e| StorageError::IoError(format!("serialize commit: {}", e)))?;
-        Self::txn_set(&mut txn, &commit_key, &commit_json)?;
-
-        // Read-modify-write tips
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        let mut tips: HashSet<CommitId> = match Self::txn_get(&txn, &tips_key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?,
-            None => HashSet::new(),
-        };
-
-        // Remove parents from tips
-        for parent in &commit.parents {
-            tips.remove(parent);
-        }
-        // Add this commit as a tip
-        tips.insert(commit_id);
-
-        let tips_json = serde_json::to_vec(&tips)
-            .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-        Self::txn_set(&mut txn, &tips_key, &tips_json)?;
-
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            append_commit_core(
+                object_id,
+                branch,
+                commit,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+            )
+        })
     }
 
     fn delete_commit(
@@ -390,24 +302,16 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-
-        // Delete the commit
-        let commit_key = Self::commit_key(object_id, branch, commit_id);
-        Self::txn_delete(&mut txn, &commit_key)?;
-
-        // Remove from tips
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        if let Some(data) = Self::txn_get(&txn, &tips_key)? {
-            let mut tips: HashSet<CommitId> = serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize tips: {}", e)))?;
-            tips.remove(&commit_id);
-            let tips_json = serde_json::to_vec(&tips)
-                .map_err(|e| StorageError::IoError(format!("serialize tips: {}", e)))?;
-            Self::txn_set(&mut txn, &tips_key, &tips_json)?;
-        }
-
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            delete_commit_core(
+                object_id,
+                branch,
+                commit_id,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+                |key| txn.delete(key),
+            )
+        })
     }
 
     fn set_branch_tails(
@@ -416,19 +320,15 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let tips_key = Self::branch_tips_key(object_id, branch);
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        match tails {
-            Some(t) => {
-                let json = serde_json::to_vec(&t)
-                    .map_err(|e| StorageError::IoError(format!("serialize tails: {}", e)))?;
-                Self::txn_set(&mut txn, &tips_key, &json)?;
-            }
-            None => {
-                Self::txn_delete(&mut txn, &tips_key)?;
-            }
-        }
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            set_branch_tails_core(
+                object_id,
+                branch,
+                tails,
+                |key, value| txn.set(key, value),
+                |key| txn.delete(key),
+            )
+        })
     }
 
     // ================================================================
@@ -440,18 +340,52 @@ impl Storage for SurrealKvStorage {
         commit_id: CommitId,
         tier: PersistenceTier,
     ) -> Result<(), StorageError> {
-        let key = Self::ack_key(commit_id);
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        let mut tiers: HashSet<PersistenceTier> = match Self::txn_get(&txn, &key)? {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| StorageError::IoError(format!("deserialize ack: {}", e)))?,
-            None => HashSet::new(),
-        };
-        tiers.insert(tier);
-        let json = serde_json::to_vec(&tiers)
-            .map_err(|e| StorageError::IoError(format!("serialize ack: {}", e)))?;
-        Self::txn_set(&mut txn, &key, &json)?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            store_ack_tier_core(
+                commit_id,
+                tier,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+            )
+        })
+    }
+
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError> {
+        self.with_eventual_write(|txn| {
+            append_catalogue_manifest_op_core(
+                app_id,
+                op,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+            )
+        })
+    }
+
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError> {
+        self.with_eventual_write(|txn| {
+            append_catalogue_manifest_ops_core(
+                app_id,
+                ops,
+                |key| txn.get(key),
+                |key, value| txn.set(key, value),
+            )
+        })
+    }
+
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        let txn = self.begin_read_txn()?;
+        load_catalogue_manifest_core(app_id, |prefix| Self::scan_prefix(&txn, prefix))
     }
 
     // ================================================================
@@ -467,11 +401,11 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        let key = Self::index_entry_key(table, column, branch, value, row_id);
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        // Sentinel byte — existence is the signal.
-        Self::txn_set(&mut txn, &key, &[0x01])?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
+                txn.set(key, bytes)
+            })
+        })
     }
 
     fn index_remove(
@@ -483,10 +417,9 @@ impl Storage for SurrealKvStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        let key = Self::index_entry_key(table, column, branch, value, row_id);
-        let mut txn = self.begin_write_txn(SurrealDurability::Eventual)?;
-        Self::txn_delete(&mut txn, &key)?;
-        self.commit_txn(&mut txn)
+        self.with_eventual_write(|txn| {
+            index_remove_core(table, column, branch, value, row_id, |key| txn.delete(key))
+        })
     }
 
     fn index_lookup(
@@ -497,17 +430,12 @@ impl Storage for SurrealKvStorage {
         value: &Value,
     ) -> Vec<ObjectId> {
         tracing::trace!(table, column, branch, "index_lookup");
-        let prefix = Self::index_value_prefix(table, column, branch, value);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        match Self::scan_prefix_keys(&txn, &prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_lookup_core(table, column, branch, value, |prefix| {
+            Self::scan_prefix_keys(&txn, prefix)
+        })
     }
 
     fn index_range(
@@ -518,70 +446,21 @@ impl Storage for SurrealKvStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let base_prefix = Self::index_prefix(table, column, branch);
-
-        // Compute start key
-        let start_key = match start {
-            Bound::Included(v) => {
-                format!("{}{}", base_prefix, hex::encode(encode_value(v)))
-            }
-            Bound::Excluded(v) => {
-                let encoded = hex::encode(encode_value(v));
-                let mut key = format!("{}{}:", base_prefix, encoded);
-                // After the last possible entry for this value.
-                increment_string(&mut key);
-                key
-            }
-            Bound::Unbounded => base_prefix.clone(),
-        };
-
-        // Compute end key
-        let end_key = match end {
-            Bound::Included(v) => {
-                let encoded = hex::encode(encode_value(v));
-                let mut key = format!("{}{}:", base_prefix, encoded);
-                // Include all entries with this value by going past last UUID.
-                increment_string(&mut key);
-                key
-            }
-            Bound::Excluded(v) => {
-                format!("{}{}", base_prefix, hex::encode(encode_value(v)))
-            }
-            Bound::Unbounded => {
-                let mut end = base_prefix.clone();
-                increment_string(&mut end);
-                end
-            }
-        };
-
-        if start_key >= end_key {
-            return Vec::new();
-        }
-
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        match Self::scan_key_range(&txn, &start_key, &end_key) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_range_core(table, column, branch, start, end, |start_key, end_key| {
+            Self::scan_key_range(&txn, start_key, end_key)
+        })
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let prefix = Self::index_prefix(table, column, branch);
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        match Self::scan_prefix_keys(&txn, &prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        index_scan_all_core(table, column, branch, |prefix| {
+            Self::scan_prefix_keys(&txn, prefix)
+        })
     }
 
     fn flush(&self) {
@@ -598,48 +477,6 @@ impl Storage for SurrealKvStorage {
         let _span = tracing::debug_span!("SurrealKvStorage::flush_wal").entered();
         self.flush();
     }
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Format an ObjectId as a compact hex string (no dashes).
-fn format_uuid(id: ObjectId) -> String {
-    hex::encode(id.uuid().as_bytes())
-}
-
-/// Parse a UUID from the last segment of an index key.
-/// Key format: `idx:{table}:{col}:{branch}:{hex_value}:{uuid_hex}`
-fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
-    let uuid_hex = key.rsplit(':').next()?;
-    let bytes = hex::decode(uuid_hex).ok()?;
-    if bytes.len() != 16 {
-        return None;
-    }
-    let uuid = uuid::Uuid::from_bytes(bytes.try_into().ok()?);
-    Some(ObjectId(internment::Intern::new(uuid)))
-}
-
-/// Increment the last byte of a byte slice to create an exclusive upper bound.
-/// For prefix scans: scanning [prefix, incremented_prefix) captures all keys with that prefix.
-fn increment_bytes(bytes: &mut Vec<u8>) {
-    for i in (0..bytes.len()).rev() {
-        if bytes[i] < 0xFF {
-            bytes[i] += 1;
-            bytes.truncate(i + 1);
-            return;
-        }
-    }
-    // All 0xFF — push a byte
-    bytes.push(0x00);
-}
-
-/// Increment the last character of a string for exclusive upper bound.
-fn increment_string(s: &mut String) {
-    let mut bytes = std::mem::take(s).into_bytes();
-    increment_bytes(&mut bytes);
-    *s = String::from_utf8(bytes).unwrap_or_default();
 }
 
 #[cfg(test)]
@@ -844,5 +681,58 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert!(results.contains(&id));
         }
+    }
+
+    #[test]
+    fn surrealkv_catalogue_manifest_roundtrip() {
+        let (_temp_dir, mut storage) = test_storage();
+        let app_id = ObjectId::new();
+        let schema_object_id = ObjectId::new();
+        let lens_object_id = ObjectId::new();
+        let schema_hash = crate::query_manager::types::SchemaHash::from_bytes([0x11; 32]);
+        let source_hash = crate::query_manager::types::SchemaHash::from_bytes([0x22; 32]);
+        let target_hash = crate::query_manager::types::SchemaHash::from_bytes([0x33; 32]);
+
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                crate::storage::CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                crate::storage::CatalogueManifestOp::LensSeen {
+                    object_id: lens_object_id,
+                    source_hash,
+                    target_hash,
+                },
+            )
+            .unwrap();
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                crate::storage::CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+
+        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
+        assert_eq!(
+            manifest.schema_seen.get(&schema_object_id),
+            Some(&schema_hash)
+        );
+        assert_eq!(
+            manifest.lens_seen.get(&lens_object_id),
+            Some(&crate::storage::CatalogueLensSeen {
+                source_hash,
+                target_hash,
+            })
+        );
     }
 }

@@ -53,25 +53,46 @@ impl LimitOffsetNode {
             Some(limit) => (start + limit).min(self.all_tuples.len()),
             None => self.all_tuples.len(),
         };
-        self.windowed_tuples = self.all_tuples[start..end].to_vec();
+        self.windowed_tuples.clear();
+        self.windowed_tuples
+            .extend_from_slice(&self.all_tuples[start..end]);
         self.current_tuples = self.windowed_tuples.iter().cloned().collect();
     }
 
     /// Compute the delta between old and new tuple window.
     fn compute_tuple_delta(&self, old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
         let mut delta = TupleDelta::new();
+        let old_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
+            old_tuples.iter().map(|t| t.ids()).collect();
+        let new_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
+            new_tuples.iter().map(|t| t.ids()).collect();
 
         // Find removed tuples (in old but not in new)
         for old in old_tuples {
-            if !new_tuples.iter().any(|t| t == old) {
+            if !new_ids.contains(&old.ids()) {
                 delta.removed.push(old.clone());
             }
         }
 
         // Find added tuples (in new but not in old)
         for new in new_tuples {
-            if !old_tuples.iter().any(|t| t == new) {
+            if !old_ids.contains(&new.ids()) {
                 delta.added.push(new.clone());
+            }
+        }
+
+        // Find moved tuples (same IDs, different index)
+        let old_pos: std::collections::HashMap<Vec<crate::object::ObjectId>, usize> = old_tuples
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| (t.ids(), idx))
+            .collect();
+        for (new_idx, new_tuple) in new_tuples.iter().enumerate() {
+            let ids = new_tuple.ids();
+            if let Some(old_idx) = old_pos.get(&ids)
+                && old_idx != &new_idx
+            {
+                delta.moved.push(new_tuple.clone());
             }
         }
 
@@ -86,6 +107,21 @@ impl LimitOffsetNode {
         }
 
         delta
+    }
+
+    /// Rebuild state from a full ordered input (e.g. upstream SortNode output).
+    pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
+        let old_tuples = std::mem::take(&mut self.windowed_tuples);
+        self.all_tuples.clear();
+        self.all_tuples.extend_from_slice(ordered_tuples);
+        self.recompute_tuple_window();
+        self.dirty = false;
+        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples)
+    }
+
+    /// Ordered tuples currently visible after applying offset/limit.
+    pub fn windowed_tuples(&self) -> &[Tuple] {
+        &self.windowed_tuples
     }
 }
 
@@ -105,7 +141,7 @@ impl RowNode for LimitOffsetNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        let old_tuples = self.windowed_tuples.clone();
+        let old_tuples = std::mem::take(&mut self.windowed_tuples);
 
         // Apply changes to all_tuples
         for tuple in input.removed {
@@ -115,6 +151,14 @@ impl RowNode for LimitOffsetNode {
         // For added tuples, maintain order from input (assumed sorted)
         for tuple in input.added {
             self.all_tuples.push(tuple);
+        }
+
+        // For moved tuples, preserve tuple and update relative order by append semantics.
+        for tuple in input.moved {
+            if let Some(pos) = self.all_tuples.iter().position(|t| t == &tuple) {
+                let existing = self.all_tuples.remove(pos);
+                self.all_tuples.push(existing);
+            }
         }
 
         // For updated tuples, update in place
@@ -198,6 +242,7 @@ mod tests {
         let delta = TupleDelta {
             added: tuples,
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -224,6 +269,7 @@ mod tests {
         let delta = TupleDelta {
             added: tuples,
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -251,6 +297,7 @@ mod tests {
         let delta = TupleDelta {
             added: tuples,
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -278,6 +325,7 @@ mod tests {
         node.process(TupleDelta {
             added: tuples.clone(),
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         let windowed_ids = get_windowed_ids(&node);
@@ -288,6 +336,7 @@ mod tests {
         let result = node.process(TupleDelta {
             added: vec![],
             removed: vec![tuples[0].clone()],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -312,6 +361,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 

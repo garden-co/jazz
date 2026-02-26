@@ -11,6 +11,10 @@ import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { tableNameToInterface } from "./type-generator.js";
 import type { Relation } from "./relation-analyzer.js";
 
+function arrayType(elementTs: string): string {
+  return elementTs.includes("|") ? `(${elementTs})[]` : `${elementTs}[]`;
+}
+
 function columnTypeToTs(type: ColumnType): string {
   switch (type.type) {
     case "Text":
@@ -19,12 +23,18 @@ function columnTypeToTs(type: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
-    case "Timestamp":
+    case "Double":
       return "number";
+    case "Timestamp":
+      return "Date";
     case "Uuid":
       return "string";
+    case "Bytea":
+      return "Uint8Array";
+    case "Enum":
+      return type.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
-      return `${columnTypeToTs(type.element)}[]`;
+      return arrayType(columnTypeToTs(type.element));
     default:
       return "unknown";
   }
@@ -48,9 +58,10 @@ function columnToWhereInputType(col: {
       return "boolean";
     case "Integer":
     case "BigInt":
+    case "Double":
       return "number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
     case "Timestamp":
-      return "number | { eq?: number; gt?: number; gte?: number; lt?: number; lte?: number }";
+      return "Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number }";
     case "Uuid":
       if (col.references) {
         // FK - add isNull for optional refs
@@ -59,9 +70,17 @@ function columnToWhereInputType(col: {
           : "string | { eq?: string; ne?: string }";
       }
       return "string | { eq?: string; ne?: string; in?: string[] }";
+    case "Bytea":
+      return "Uint8Array | { eq?: Uint8Array; ne?: Uint8Array }";
+    case "Enum": {
+      const variants = col.column_type.variants
+        .map((variant: string) => JSON.stringify(variant))
+        .join(" | ");
+      return `${variants} | { eq?: ${variants}; ne?: ${variants}; in?: (${variants})[] }`;
+    }
     case "Array": {
       const elementTs = columnTypeToTs(col.column_type.element);
-      const arrayTs = `${elementTs}[]`;
+      const arrayTs = arrayType(elementTs);
       return `${arrayTs} | { eq?: ${arrayTs}; contains?: ${elementTs} }`;
     }
     default:

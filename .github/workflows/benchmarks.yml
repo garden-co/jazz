@@ -63,7 +63,7 @@ jobs:
       - name: Run W1 (interactive)
         run: |
           set -euo pipefail
-          RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+          RUST_LOG=warn cargo run --release -p jazz-tools --features client --example realistic_bench -- \
             --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
             --scenario benchmarks/realistic/scenarios/w1_interactive.json \
             > bench-out/native/w1_interactive.json
@@ -71,7 +71,7 @@ jobs:
       - name: Run W4 (cold start)
         run: |
           set -euo pipefail
-          RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+          RUST_LOG=warn cargo run --release -p jazz-tools --features client --example realistic_bench -- \
             --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
             --scenario benchmarks/realistic/scenarios/w4_cold_start.json \
             > bench-out/native/w4_cold_start.json

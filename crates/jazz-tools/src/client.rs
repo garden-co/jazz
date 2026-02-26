@@ -2,20 +2,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
+use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
+use crate::query_manager::query::Query;
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{OrderedRowDelta, Value};
+use crate::schema_manager::SchemaManager;
+use crate::storage::{Storage, StorageError, SurrealKvStorage};
+use crate::sync_manager::{
+    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+};
 use bytes::BytesMut;
 use futures::StreamExt;
-use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{RowDelta, Value};
-use groove::schema_manager::SchemaManager;
-use groove::storage::{Storage, StorageError, SurrealKvStorage};
-use groove::sync_manager::{
-    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
-};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::transport::{AuthConfig, ServerConnection};
@@ -32,7 +33,7 @@ pub struct JazzClient {
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Subscription delta senders (for routing deltas from callbacks to streams).
-    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<RowDelta>>>>,
+    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
     /// Handle for the stream listener task.
@@ -106,7 +107,7 @@ impl JazzClient {
         //
         // SurrealKV lock release can lag slightly after a close() in the same process.
         // Retry briefly on lock errors so immediate reopen flows remain reliable.
-        let db_path = context.data_dir.join("groove.surrealkv");
+        let db_path = context.data_dir.join("jazz.surrealkv");
         let storage = {
             const MAX_ATTEMPTS: usize = 100;
             const RETRY_DELAY_MS: u64 = 25;
@@ -147,27 +148,26 @@ impl JazzClient {
         // Clone server connection for sync callback
         let server_conn_for_sync = server_connection.clone();
         let client_id_for_sync = client_id;
+        let server_id = ServerId::default();
 
         // Create runtime with sync callback
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             // Send to server if connected and destination is server
-            if let Destination::Server(_) = entry.destination {
-                eprintln!(
-                    "DEBUG [client sync_cb]: Sending to server: {:?}",
-                    entry.payload.variant_name()
-                );
-                if let Some(ref conn) = server_conn_for_sync {
-                    let conn = conn.clone();
-                    let payload = entry.payload.clone();
-                    let cid = client_id_for_sync;
-                    tokio::spawn(async move {
-                        if let Err(e) = conn.push_sync(payload, cid).await {
-                            tracing::warn!("Failed to push sync to server: {}", e);
-                        }
-                    });
-                } else {
-                    eprintln!("DEBUG [client sync_cb]: No server connection!");
-                }
+            if let Destination::Server(_) = entry.destination
+                && let Some(ref conn) = server_conn_for_sync
+            {
+                let conn = conn.clone();
+                let payload = entry.payload.clone();
+                let cid = client_id_for_sync;
+                tokio::spawn(async move {
+                    if let Some(delay) = test_send_delay_for_object_updated(&payload) {
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    if let Err(e) = conn.push_sync(payload, cid).await {
+                        tracing::warn!("Failed to push sync to server: {}", e);
+                    }
+                });
             }
         });
 
@@ -177,16 +177,16 @@ impl JazzClient {
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         // Register server with sync manager if connected
-        if server_connection.is_some() {
-            let server_id = ServerId::default();
-            if let Err(e) = runtime.add_server(server_id) {
-                tracing::warn!("Failed to register server with sync manager: {}", e);
-            }
+        if server_connection.is_some()
+            && let Err(e) = runtime.add_server(server_id)
+        {
+            tracing::warn!("Failed to register server with sync manager: {}", e);
         }
 
         // Create shared subscription senders map
-        let subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<RowDelta>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let subscription_senders: Arc<
+            RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn binary stream listener if connected to server
         let stream_listener_task = if let Some(ref conn) = server_connection {
@@ -194,6 +194,7 @@ impl JazzClient {
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
             let stream_headers = conn.build_stream_headers();
+            let server_id_for_stream = server_id;
 
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
@@ -240,13 +241,10 @@ impl JazzClient {
 
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
-                                                    eprintln!(
-                                                        "DEBUG [client stream]: Parsed event: {:?}",
-                                                        event.variant_name()
-                                                    );
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
+                                                        server_id_for_stream,
                                                     ) {
                                                         tracing::warn!(
                                                             "Error handling server event: {}",
@@ -316,7 +314,7 @@ impl JazzClient {
         );
 
         // Create channel for this subscription's deltas
-        let (tx, rx) = mpsc::channel::<RowDelta>(64);
+        let (tx, rx) = mpsc::channel::<OrderedRowDelta>(64);
 
         // Store sender before subscribing so callback can find it
         let senders = self.subscription_senders.clone();
@@ -333,7 +331,7 @@ impl JazzClient {
                     if let Ok(senders_guard) = senders.try_read()
                         && let Some(sender) = senders_guard.get(&delta.handle)
                     {
-                        let _ = sender.try_send(delta.delta);
+                        let _ = sender.try_send(delta.ordered_delta);
                     }
                 },
                 session,
@@ -407,7 +405,7 @@ impl JazzClient {
     }
 
     /// Get the current schema.
-    pub async fn schema(&self) -> Result<groove::query_manager::types::Schema> {
+    pub async fn schema(&self) -> Result<crate::query_manager::types::Schema> {
         self.runtime
             .current_schema()
             .map_err(|e| JazzError::Query(e.to_string()))
@@ -499,28 +497,83 @@ impl<'a> SessionClient<'a> {
     }
 }
 
+fn parse_delay_ms(raw: &str) -> Option<Duration> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((min_raw, max_raw)) = trimmed.split_once('-') {
+        let min = min_raw.trim().parse::<u64>().ok()?;
+        let max = max_raw.trim().parse::<u64>().ok()?;
+        if min > max {
+            return None;
+        }
+        return Some(Duration::from_millis(min + ((max - min) / 2)));
+    }
+
+    trimmed.parse::<u64>().ok().map(Duration::from_millis)
+}
+
+fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
+    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
+        return None;
+    }
+
+    let delay = parse_delay_ms(&std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_MS").ok()?)?;
+    let every_n = std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2);
+
+    static OBJECT_UPDATED_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
+    let seq = OBJECT_UPDATED_SEND_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if !seq.is_multiple_of(every_n) {
+        return None;
+    }
+
+    Some(delay)
+}
+
 /// Handle incoming server events.
-fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<SurrealKvStorage>) -> Result<()> {
+fn handle_server_event(
+    event: ServerEvent,
+    runtime: &TokioRuntime<SurrealKvStorage>,
+    server_id: ServerId,
+) -> Result<()> {
     match event {
         ServerEvent::Connected {
             connection_id,
             client_id,
+            next_sync_seq,
         } => {
             tracing::info!(
                 "Stream connected with id: {:?}, client_id: {}",
                 connection_id,
                 client_id
             );
+            if let Some(next_sequence) = next_sync_seq {
+                runtime
+                    .set_server_next_sequence(server_id, next_sequence)
+                    .map_err(|e| JazzError::Sync(e.to_string()))?;
+            }
             Ok(())
         }
-        ServerEvent::SyncUpdate { payload } => {
+        ServerEvent::SyncUpdate { seq, payload } => {
             let entry = InboxEntry {
-                source: Source::Server(ServerId::default()),
+                source: Source::Server(server_id),
                 payload: *payload,
             };
-            runtime
-                .push_sync_inbox(entry)
-                .map_err(|e| JazzError::Sync(e.to_string()))?;
+            if let Some(sequence) = seq {
+                runtime
+                    .push_sync_inbox_with_sequence(entry, sequence)
+                    .map_err(|e| JazzError::Sync(e.to_string()))?;
+            } else {
+                runtime
+                    .push_sync_inbox(entry)
+                    .map_err(|e| JazzError::Sync(e.to_string()))?;
+            }
             Ok(())
         }
         ServerEvent::Subscribed { query_id } => {

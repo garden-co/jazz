@@ -56,6 +56,17 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
   for (const [tableName, table] of Object.entries(schema.tables)) {
     for (const col of table.columns) {
       if (col.references) {
+        const isUuidRef =
+          col.column_type.type === "Uuid" ||
+          (col.column_type.type === "Array" && col.column_type.element.type === "Uuid");
+        if (!isUuidRef) {
+          throw new Error(
+            `Column "${tableName}.${col.name}" uses references but is not UUID or UUID[]`,
+          );
+        }
+        const isForwardArray =
+          col.column_type.type === "Array" && col.column_type.element.type === "Uuid";
+
         // Forward relation: parent_id -> parent
         const forwardName = col.name.replace(/_id$/, "");
         const forwardRelation: Relation = {
@@ -65,7 +76,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           toTable: col.references,
           fromColumn: col.name,
           toColumn: "id",
-          isArray: false,
+          isArray: isForwardArray,
           nullable: col.nullable,
         };
         relations.get(tableName)!.push(forwardRelation);

@@ -7,7 +7,11 @@
  */
 
 import type { Runtime } from "./client.js";
-import type { InitMessage, WorkerToMainMessage } from "../worker/worker-protocol.js";
+import type {
+  InitMessage,
+  WorkerLifecycleEvent,
+  WorkerToMainMessage,
+} from "../worker/worker-protocol.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -27,6 +31,12 @@ export interface WorkerBridgeOptions {
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
+export interface PeerSyncBatch {
+  peerId: string;
+  term: number;
+  payload: string[];
+}
+
 /**
  * Bridge between main-thread runtime and dedicated worker.
  *
@@ -39,8 +49,13 @@ export class WorkerBridge {
   private worker: Worker;
   private runtime: Runtime;
   private workerClientId: string | null = null;
+  private initState: "idle" | "pending" | "ready" | "failed" = "idle";
+  private initPromise: Promise<string> | null = null;
   private pendingSyncPayloadsForWorker: string[] = [];
   private syncBatchFlushQueued = false;
+  private disposed = false;
+  private peerSyncListener: ((batch: PeerSyncBatch) => void) | null = null;
+  private serverPayloadForwarder: ((payload: string) => void) | null = null;
 
   constructor(worker: Worker, runtime: Runtime) {
     this.worker = worker;
@@ -54,15 +69,27 @@ export class WorkerBridge {
         for (const payload of msg.payload) {
           this.runtime.onSyncMessageReceived(payload);
         }
+      } else if (msg.type === "peer-sync") {
+        this.peerSyncListener?.({
+          peerId: msg.peerId,
+          term: msg.term,
+          payload: msg.payload,
+        });
       }
     };
 
     // Wire main → worker: outgoing sync messages from runtime
     this.runtime.onSyncMessageToSend((envelope: string) => {
+      if (this.disposed) return;
       const parsed = JSON.parse(envelope);
       // Only forward server-bound messages (worker IS the server)
       if (parsed.destination && "Server" in parsed.destination) {
-        this.enqueueSyncMessageForWorker(JSON.stringify(parsed.payload));
+        const payload = JSON.stringify(parsed.payload);
+        if (this.serverPayloadForwarder) {
+          this.serverPayloadForwarder(payload);
+        } else {
+          this.enqueueSyncMessageForWorker(payload);
+        }
       }
     });
 
@@ -75,7 +102,13 @@ export class WorkerBridge {
    *
    * Waits for the worker to respond with init-ok.
    */
-  async init(options: WorkerBridgeOptions): Promise<string> {
+  init(options: WorkerBridgeOptions): Promise<string> {
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+
+    this.initState = "pending";
+
     const initMsg: InitMessage = {
       type: "init",
       schemaJson: options.schemaJson,
@@ -93,23 +126,34 @@ export class WorkerBridge {
       clientId: "", // Worker generates its own client ID for main thread
     };
 
-    this.worker.postMessage(initMsg);
-
-    const response = await waitForMessage<WorkerToMainMessage>(
+    const responsePromise = waitForMessage<WorkerToMainMessage>(
       this.worker,
       (msg) => msg.type === "init-ok" || msg.type === "error",
     );
+    this.worker.postMessage(initMsg);
 
-    if (response.type === "error") {
-      throw new Error(`Worker init failed: ${response.message}`);
-    }
+    this.initPromise = responsePromise
+      .then((response) => {
+        if (response.type === "error") {
+          throw new Error(`Worker init failed: ${response.message}`);
+        }
 
-    if (response.type === "init-ok") {
-      this.workerClientId = response.clientId;
-      return response.clientId;
-    }
+        if (response.type === "init-ok") {
+          this.workerClientId = response.clientId;
+          this.initState = "ready";
+          this.flushPendingSyncToWorker();
+          return response.clientId;
+        }
 
-    throw new Error("Unexpected worker response");
+        throw new Error("Unexpected worker response");
+      })
+      .catch((error) => {
+        this.initState = "failed";
+        this.pendingSyncPayloadsForWorker = [];
+        throw error;
+      });
+
+    return this.initPromise;
   }
 
   /**
@@ -123,18 +167,43 @@ export class WorkerBridge {
     this.worker.postMessage({ type: "update-auth", ...auth });
   }
 
+  sendLifecycleHint(event: WorkerLifecycleEvent): void {
+    if (this.disposed) return;
+    this.worker.postMessage({
+      type: "lifecycle-hint",
+      event,
+      sentAtMs: Date.now(),
+    });
+  }
+
   /**
    * Shut down the worker and wait for OPFS handles to be released.
    *
    * @param worker The Worker instance (needed for listening to shutdown-ok)
    */
   async shutdown(worker: Worker): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+
+    // Detach upstream edge so the next bridge attach performs a clean replay.
+    this.runtime.removeServer();
+
+    const shutdownAckPromise = waitForMessage<WorkerToMainMessage>(
+      worker,
+      (msg) => msg.type === "shutdown-ok",
+      5000,
+    );
     this.worker.postMessage({ type: "shutdown" });
     try {
-      await waitForMessage<WorkerToMainMessage>(worker, (msg) => msg.type === "shutdown-ok", 5000);
+      await shutdownAckPromise;
     } catch {
       // Timeout — worker may have already closed
     }
+
+    // Drop any buffered payloads and stop forwarding from stale callbacks.
+    this.pendingSyncPayloadsForWorker = [];
+    this.serverPayloadForwarder = null;
+    this.runtime.onSyncMessageToSend(() => undefined);
   }
 
   /**
@@ -144,21 +213,75 @@ export class WorkerBridge {
     return this.workerClientId;
   }
 
+  setServerPayloadForwarder(forwarder: ((payload: string) => void) | null): void {
+    if (this.disposed) return;
+    this.serverPayloadForwarder = forwarder;
+  }
+
+  applyIncomingServerPayload(payload: string): void {
+    if (this.disposed) return;
+    this.runtime.onSyncMessageReceived(payload);
+  }
+
+  replayServerConnection(): void {
+    if (this.disposed) return;
+    this.runtime.removeServer();
+    this.runtime.addServer();
+  }
+
+  onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
+    this.peerSyncListener = listener;
+  }
+
+  openPeer(peerId: string): void {
+    if (this.disposed) return;
+    this.worker.postMessage({ type: "peer-open", peerId });
+  }
+
+  sendPeerSync(peerId: string, term: number, payload: string[]): void {
+    if (this.disposed) return;
+    if (payload.length === 0) return;
+    this.worker.postMessage({
+      type: "peer-sync",
+      peerId,
+      term,
+      payload,
+    });
+  }
+
+  closePeer(peerId: string): void {
+    if (this.disposed) return;
+    this.worker.postMessage({ type: "peer-close", peerId });
+  }
+
   private enqueueSyncMessageForWorker(payload: string): void {
+    if (this.disposed) return;
     this.pendingSyncPayloadsForWorker.push(payload);
     if (this.syncBatchFlushQueued) return;
 
     this.syncBatchFlushQueued = true;
     queueMicrotask(() => {
+      if (this.disposed) {
+        this.syncBatchFlushQueued = false;
+        this.pendingSyncPayloadsForWorker = [];
+        return;
+      }
       this.syncBatchFlushQueued = false;
-      const payloads = this.pendingSyncPayloadsForWorker;
-      this.pendingSyncPayloadsForWorker = [];
-      if (payloads.length === 0) return;
+      this.flushPendingSyncToWorker();
+    });
+  }
 
-      this.worker.postMessage({
-        type: "sync",
-        payload: payloads,
-      });
+  private flushPendingSyncToWorker(): void {
+    if (this.initState !== "ready" || this.pendingSyncPayloadsForWorker.length === 0) {
+      return;
+    }
+
+    const payloads = this.pendingSyncPayloadsForWorker;
+    this.pendingSyncPayloadsForWorker = [];
+
+    this.worker.postMessage({
+      type: "sync",
+      payload: payloads,
     });
   }
 }

@@ -7,9 +7,10 @@ import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { definePermissions } from "../permissions/index.js";
 import { translateQuery } from "./query-adapter.js";
 import { sendSyncPayload } from "./sync-transport.js";
-import { hasGrooveWasmBuild } from "./testing/wasm-runtime-test-utils.js";
+import { hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 type AppContext = import("./context.js").AppContext;
@@ -31,6 +32,77 @@ const TEST_SCHEMA: WasmSchema = {
       ],
     },
   },
+};
+
+type SocialPolicyStyle = "split" | "join" | "hopToWhere";
+
+interface SocialProfile {
+  id: string;
+  displayName: string;
+  principalId: string;
+}
+
+interface SocialProfileWhere {
+  id?: string;
+  displayName?: string;
+  principalId?: string;
+}
+
+interface SocialPerson {
+  id: string;
+  profileId: string;
+  principalId: string;
+}
+
+interface SocialPersonWhere {
+  id?: string;
+  profileId?: string;
+  principalId?: string;
+}
+
+interface SocialFriendship {
+  id: string;
+  personAId: string;
+  personBId: string;
+  personAPrincipal: string;
+  personBPrincipal: string;
+}
+
+interface SocialFriendshipWhere {
+  id?: string;
+  personAId?: string;
+  personBId?: string;
+  personAPrincipal?: string;
+  personBPrincipal?: string;
+}
+
+class SocialProfileQueryBuilder {
+  declare readonly _rowType: SocialProfile;
+  where(_input: SocialProfileWhere): SocialProfileQueryBuilder {
+    return this;
+  }
+}
+
+class SocialPersonQueryBuilder {
+  declare readonly _rowType: SocialPerson;
+  where(_input: SocialPersonWhere): SocialPersonQueryBuilder {
+    return this;
+  }
+}
+
+class SocialFriendshipQueryBuilder {
+  declare readonly _rowType: SocialFriendship;
+  where(_input: SocialFriendshipWhere): SocialFriendshipQueryBuilder {
+    return this;
+  }
+}
+
+type SocialSeed = {
+  alicePrincipal: string;
+  bobProfileId: string;
+  carolPrincipal: string;
+  carolProfileId: string;
+  eveProfileId: string;
 };
 
 type CloudServerConfig = {
@@ -117,14 +189,14 @@ function findCloudServerBinary(): string | null {
 }
 
 function assertIntegrationPrerequisites(): void {
-  const hasWasm = hasGrooveWasmBuild();
+  const hasWasm = hasJazzWasmBuild();
   const targetDir = resolveCargoTargetDir();
   const binaryPath = findCloudServerBinary();
   if (hasWasm && binaryPath) return;
 
   const missing: string[] = [];
   if (!hasWasm) {
-    missing.push("missing Groove WASM runtime artifacts");
+    missing.push("missing Jazz WASM runtime artifacts");
   }
   if (!binaryPath) {
     missing.push(
@@ -339,16 +411,602 @@ class JwksServer {
   }
 }
 
-function makeContext(appId: string, serverUrl: string, jwtToken: string): AppContext {
+function makeSocialBaseSchema(): WasmSchema {
+  return {
+    tables: {
+      profiles: {
+        columns: [
+          { name: "displayName", column_type: { type: "Text" }, nullable: false },
+          { name: "principalId", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+      people: {
+        columns: [
+          {
+            name: "profileId",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "profiles",
+          },
+          {
+            name: "principalId",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+        ],
+      },
+      friendships: {
+        columns: [
+          {
+            name: "personAId",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "people",
+          },
+          {
+            name: "personBId",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "people",
+          },
+          {
+            name: "personAPrincipal",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+          {
+            name: "personBPrincipal",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+        ],
+      },
+    },
+  };
+}
+
+function asRecord(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Expected object for ${context}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeWasmLiteral(value: unknown): unknown {
+  if (value === null) return "Null";
+  if (typeof value === "boolean") return { Boolean: value };
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || !Number.isFinite(value)) {
+      throw new Error("relation literal numbers must be finite integers");
+    }
+    if (value >= -2147483648 && value <= 2147483647) return { Integer: value };
+    return { BigInt: value };
+  }
+  if (typeof value === "string") {
+    const uuidLike =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+    return uuidLike ? { Uuid: value } : { Text: value };
+  }
+  if (Array.isArray(value)) {
+    return { Array: value.map((entry) => normalizeWasmLiteral(entry)) };
+  }
+
+  const object = asRecord(value, "literal");
+  // Already in externally-tagged Value enum form.
+  if (Object.keys(object).length === 1) return object;
+  throw new Error("relation literal object must use typed Value enum representation");
+}
+
+function toSerdeColumnRef(input: unknown): unknown {
+  const record = asRecord(input, "column ref");
+  return {
+    scope: typeof record.scope === "string" ? record.scope : null,
+    column: record.column,
+  };
+}
+
+function toSerdeValueRef(input: unknown): unknown {
+  const record = asRecord(input, "value ref");
+  const type = record.type;
+  if (type === "Literal") return { Literal: normalizeWasmLiteral(record.value) };
+  if (type === "SessionRef") return { SessionRef: record.path };
+  if (type === "OuterColumn") return { OuterColumn: toSerdeColumnRef(record.column) };
+  if (type === "FrontierColumn") return { FrontierColumn: toSerdeColumnRef(record.column) };
+  if (type === "RowId") return { RowId: record.source };
+  throw new Error(`Unsupported value ref type in ExistsRel conversion: ${String(type)}`);
+}
+
+function toSerdePredicate(input: unknown): unknown {
+  const record = asRecord(input, "predicate");
+  const type = record.type;
+  if (type === "Cmp") {
+    return {
+      Cmp: {
+        left: toSerdeColumnRef(record.left),
+        op: record.op,
+        right: toSerdeValueRef(record.right),
+      },
+    };
+  }
+  if (type === "Contains") {
+    return {
+      Contains: {
+        left: toSerdeColumnRef(record.left),
+        right: toSerdeValueRef(record.value),
+      },
+    };
+  }
+  if (type === "IsNull") return { IsNull: { column: toSerdeColumnRef(record.column) } };
+  if (type === "IsNotNull") return { IsNotNull: { column: toSerdeColumnRef(record.column) } };
+  if (type === "In") {
+    const values = Array.isArray(record.values) ? record.values : [];
+    return {
+      In: {
+        left: toSerdeColumnRef(record.left),
+        values: values.map((value) => toSerdeValueRef(value)),
+      },
+    };
+  }
+  if (type === "And") {
+    const exprs = Array.isArray(record.exprs) ? record.exprs : [];
+    return { And: exprs.map((expr) => toSerdePredicate(expr)) };
+  }
+  if (type === "Or") {
+    const exprs = Array.isArray(record.exprs) ? record.exprs : [];
+    return { Or: exprs.map((expr) => toSerdePredicate(expr)) };
+  }
+  if (type === "Not") return { Not: toSerdePredicate(record.expr) };
+  if (type === "True") return "True";
+  if (type === "False") return "False";
+  throw new Error(`Unsupported predicate type in ExistsRel conversion: ${String(type)}`);
+}
+
+function toSerdeKeyRef(input: unknown): unknown {
+  const record = asRecord(input, "key ref");
+  const type = record.type;
+  if (type === "Column") return { Column: toSerdeColumnRef(record.column) };
+  if (type === "RowId") return { RowId: record.source };
+  throw new Error(`Unsupported key ref type in ExistsRel conversion: ${String(type)}`);
+}
+
+function toSerdeProjectExpr(input: unknown): unknown {
+  const record = asRecord(input, "project expr");
+  const type = record.type;
+  if (type === "Column") return { Column: toSerdeColumnRef(record.column) };
+  if (type === "RowId") return { RowId: record.source };
+  throw new Error(`Unsupported project expr type in ExistsRel conversion: ${String(type)}`);
+}
+
+function toSerdeRelExpr(input: unknown): unknown {
+  const record = asRecord(input, "relation expr");
+  const type = record.type;
+  if (type === "TableScan") return { TableScan: { table: record.table } };
+  if (type === "Filter") {
+    return {
+      Filter: {
+        input: toSerdeRelExpr(record.input),
+        predicate: toSerdePredicate(record.predicate),
+      },
+    };
+  }
+  if (type === "Join") {
+    const on = Array.isArray(record.on) ? record.on : [];
+    return {
+      Join: {
+        left: toSerdeRelExpr(record.left),
+        right: toSerdeRelExpr(record.right),
+        on: on.map((entry) => {
+          const condition = asRecord(entry, "join condition");
+          return {
+            left: toSerdeColumnRef(condition.left),
+            right: toSerdeColumnRef(condition.right),
+          };
+        }),
+        join_kind: record.joinKind,
+      },
+    };
+  }
+  if (type === "Project") {
+    const columns = Array.isArray(record.columns) ? record.columns : [];
+    return {
+      Project: {
+        input: toSerdeRelExpr(record.input),
+        columns: columns.map((entry) => {
+          const column = asRecord(entry, "project column");
+          return {
+            alias: column.alias,
+            expr: toSerdeProjectExpr(column.expr),
+          };
+        }),
+      },
+    };
+  }
+  if (type === "Gather") {
+    const dedupeKey = Array.isArray(record.dedupeKey) ? record.dedupeKey : [];
+    return {
+      Gather: {
+        seed: toSerdeRelExpr(record.seed),
+        step: toSerdeRelExpr(record.step),
+        frontier_key: toSerdeKeyRef(record.frontierKey),
+        max_depth: record.maxDepth,
+        dedupe_key: dedupeKey.map((entry) => toSerdeKeyRef(entry)),
+      },
+    };
+  }
+  if (type === "Distinct") {
+    const key = Array.isArray(record.key) ? record.key : [];
+    return {
+      Distinct: {
+        input: toSerdeRelExpr(record.input),
+        key: key.map((entry) => toSerdeKeyRef(entry)),
+      },
+    };
+  }
+  if (type === "OrderBy") {
+    const terms = Array.isArray(record.terms) ? record.terms : [];
+    return {
+      OrderBy: {
+        input: toSerdeRelExpr(record.input),
+        terms: terms.map((entry) => {
+          const term = asRecord(entry, "order term");
+          return {
+            column: toSerdeColumnRef(term.column),
+            direction: term.direction,
+          };
+        }),
+      },
+    };
+  }
+  if (type === "Offset") {
+    return {
+      Offset: {
+        input: toSerdeRelExpr(record.input),
+        offset: record.offset,
+      },
+    };
+  }
+  if (type === "Limit") {
+    return {
+      Limit: {
+        input: toSerdeRelExpr(record.input),
+        limit: record.limit,
+      },
+    };
+  }
+  throw new Error(`Unsupported relation type in ExistsRel conversion: ${String(type)}`);
+}
+
+function normalizePolicyExprForWasm(input: unknown): unknown {
+  const expr = asRecord(input, "policy expr");
+  const type = expr.type;
+  if (type === "And" || type === "Or") {
+    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+    return {
+      ...expr,
+      exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)),
+    };
+  }
+  if (type === "Not") {
+    return {
+      ...expr,
+      expr: normalizePolicyExprForWasm(expr.expr),
+    };
+  }
+  if (type === "Exists") {
+    return {
+      ...expr,
+      condition: normalizePolicyExprForWasm(expr.condition),
+    };
+  }
+  if (type === "ExistsRel") {
+    return {
+      ...expr,
+      rel: toSerdeRelExpr(expr.rel),
+    };
+  }
+  return expr;
+}
+
+function normalizePermissionsForWasm<T>(permissions: T): T {
+  const out: Record<string, unknown> = {};
+  for (const [tableName, tablePolicies] of Object.entries(permissions as Record<string, unknown>)) {
+    const policiesRecord = asRecord(tablePolicies, `policies for ${tableName}`);
+    const normalizedTable: Record<string, unknown> = {};
+    for (const [operation, opPolicy] of Object.entries(policiesRecord)) {
+      if (!opPolicy) continue;
+      const opPolicyRecord = asRecord(opPolicy, `${tableName}.${operation}`);
+      const normalizedOperation: Record<string, unknown> = {};
+      if (opPolicyRecord.using) {
+        normalizedOperation.using = normalizePolicyExprForWasm(opPolicyRecord.using);
+      }
+      if (opPolicyRecord.with_check) {
+        normalizedOperation.with_check = normalizePolicyExprForWasm(opPolicyRecord.with_check);
+      }
+      normalizedTable[operation] = normalizedOperation;
+    }
+    out[tableName] = normalizedTable;
+  }
+  return out as T;
+}
+
+function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
+  const schema = makeSocialBaseSchema();
+  const socialApp = {
+    profiles: new SocialProfileQueryBuilder(),
+    people: new SocialPersonQueryBuilder(),
+    friendships: new SocialFriendshipQueryBuilder(),
+    wasmSchema: schema,
+  };
+
+  const permissions = normalizePermissionsForWasm(
+    definePermissions(socialApp, ({ policy, anyOf, allowedTo, session }) => {
+      const sessionPersonId = session.user_id;
+
+      if (style === "split") {
+        policy.people.allowRead.where((person) =>
+          anyOf([
+            policy.exists(
+              policy.friendships.where({
+                personAPrincipal: sessionPersonId,
+                personBPrincipal: person.principalId,
+              }),
+            ),
+            policy.exists(
+              policy.friendships.where({
+                personBPrincipal: sessionPersonId,
+                personAPrincipal: person.principalId,
+              }),
+            ),
+          ]),
+        );
+        policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId"));
+        return;
+      }
+
+      if (style === "join") {
+        policy.profiles.allowRead.where((profile) =>
+          anyOf([
+            policy.exists(
+              policy.people
+                .where({ principalId: profile.principalId })
+                .join(policy.friendships, { left: "id", right: "personAId" })
+                .where({ personBPrincipal: sessionPersonId }),
+            ),
+            policy.exists(
+              policy.people
+                .where({ principalId: profile.principalId })
+                .join(policy.friendships, { left: "id", right: "personBId" })
+                .where({ personAPrincipal: sessionPersonId }),
+            ),
+          ]),
+        );
+        return;
+      }
+
+      policy.profiles.allowRead.where((profile) =>
+        anyOf([
+          policy.exists(
+            policy.people
+              .where({ principalId: profile.principalId })
+              .hopTo("friendshipsViaPersonAId")
+              .where({ personBPrincipal: sessionPersonId }),
+          ),
+          policy.exists(
+            policy.people
+              .where({ principalId: profile.principalId })
+              .hopTo("friendshipsViaPersonBId")
+              .where({ personAPrincipal: sessionPersonId }),
+          ),
+        ]),
+      );
+    }),
+  );
+
+  const tables: WasmSchema["tables"] = {};
+  for (const [tableName, tableSchema] of Object.entries(schema.tables)) {
+    const tablePolicies = permissions[tableName];
+    tables[tableName] = tablePolicies
+      ? ({
+          ...tableSchema,
+          policies: tablePolicies as unknown as (typeof tableSchema)["policies"],
+        } as (typeof tables)[string])
+      : tableSchema;
+  }
+  return { tables };
+}
+
+function buildAllRowsQuery(schema: WasmSchema, table: string): string {
+  return translateQuery(
+    JSON.stringify({
+      table,
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      offset: 0,
+    }),
+    schema,
+  );
+}
+
+function buildProfileByIdQuery(schema: WasmSchema, id: string): string {
+  return translateQuery(
+    JSON.stringify({
+      table: "profiles",
+      conditions: [{ column: "id", op: "eq", value: id }],
+      includes: {},
+      orderBy: [],
+      offset: 0,
+    }),
+    schema,
+  );
+}
+
+async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
+  const aliceProfileId = await client.createWithAck(
+    "profiles",
+    [
+      { type: "Text", value: "alice" },
+      { type: "Text", value: "alice" },
+    ],
+    "edge",
+  );
+  const bobProfileId = await client.createWithAck(
+    "profiles",
+    [
+      { type: "Text", value: "bob" },
+      { type: "Text", value: "bob" },
+    ],
+    "edge",
+  );
+  const carolProfileId = await client.createWithAck(
+    "profiles",
+    [
+      { type: "Text", value: "carol" },
+      { type: "Text", value: "carol" },
+    ],
+    "edge",
+  );
+  const eveProfileId = await client.createWithAck(
+    "profiles",
+    [
+      { type: "Text", value: "eve" },
+      { type: "Text", value: "eve" },
+    ],
+    "edge",
+  );
+  const alicePrincipal = "alice";
+  const bobPrincipal = "bob";
+  const carolPrincipal = "carol";
+  const evePrincipal = "eve";
+
+  const alicePersonId = await client.createWithAck(
+    "people",
+    [
+      { type: "Uuid", value: aliceProfileId },
+      { type: "Text", value: alicePrincipal },
+    ],
+    "edge",
+  );
+  const bobPersonId = await client.createWithAck(
+    "people",
+    [
+      { type: "Uuid", value: bobProfileId },
+      { type: "Text", value: bobPrincipal },
+    ],
+    "edge",
+  );
+  await client.createWithAck(
+    "people",
+    [
+      { type: "Uuid", value: carolProfileId },
+      { type: "Text", value: carolPrincipal },
+    ],
+    "edge",
+  );
+  const evePersonId = await client.createWithAck(
+    "people",
+    [
+      { type: "Uuid", value: eveProfileId },
+      { type: "Text", value: evePrincipal },
+    ],
+    "edge",
+  );
+
+  await client.createWithAck(
+    "friendships",
+    [
+      { type: "Uuid", value: alicePersonId },
+      { type: "Uuid", value: bobPersonId },
+      { type: "Text", value: alicePrincipal },
+      { type: "Text", value: bobPrincipal },
+    ],
+    "edge",
+  );
+  await client.createWithAck(
+    "friendships",
+    [
+      { type: "Uuid", value: evePersonId },
+      { type: "Uuid", value: alicePersonId },
+      { type: "Text", value: evePrincipal },
+      { type: "Text", value: alicePrincipal },
+    ],
+    "edge",
+  );
+
+  return {
+    alicePrincipal,
+    bobProfileId,
+    carolPrincipal,
+    carolProfileId,
+    eveProfileId,
+  };
+}
+
+async function runSocialReadPermissionsScenario(style: SocialPolicyStyle): Promise<void> {
+  const socialSchema = buildSocialSchema(style);
+  const queryAllProfiles = buildAllRowsQuery(socialSchema, "profiles");
+  const queryAllFriendships = buildAllRowsQuery(socialSchema, "friendships");
+
+  const jwks = await JwksServer.start(JWT_SECRET);
+  const dataRoot = allocTempDir(`jazz-ts-cloud-server-social-${style}-`);
+  const server = await startCloudServer({ dataRoot });
+  let seeder: JazzClient | null = null;
+
+  try {
+    const app = await createApp(server.baseUrl, jwks.url);
+
+    seeder = await connectClient(
+      makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), socialSchema),
+    );
+    const seeded = await seedSocialGraph(seeder);
+
+    const aliceSession = seeder.forSession({ user_id: seeded.alicePrincipal, claims: {} });
+    const carolSession = seeder.forSession({ user_id: seeded.carolPrincipal, claims: {} });
+    await seeder.shutdown();
+    seeder = null;
+
+    const aliceProfiles = await aliceSession.query(queryAllProfiles);
+    const visibleIds = [...new Set(aliceProfiles.map((row) => row.id))].sort();
+    expect(visibleIds).toEqual([seeded.bobProfileId, seeded.eveProfileId].sort());
+
+    const bobRows = await aliceSession.query(
+      buildProfileByIdQuery(socialSchema, seeded.bobProfileId),
+    );
+    expect(bobRows).toHaveLength(1);
+    expect(bobRows[0]?.values[0]).toEqual({ type: "Text", value: "bob" });
+
+    const carolRowsForAlice = await aliceSession.query(
+      buildProfileByIdQuery(socialSchema, seeded.carolProfileId),
+    );
+    expect(carolRowsForAlice).toEqual([]);
+
+    const carolFriendships = await carolSession.query(queryAllFriendships);
+    expect(carolFriendships).toHaveLength(2);
+    const carolProfiles = await carolSession.query(queryAllProfiles);
+    expect(carolProfiles).toEqual([]);
+  } finally {
+    if (seeder) await seeder.shutdown();
+    await stopProcess(server.child);
+    await jwks.stop();
+  }
+}
+
+function makeContext(
+  appId: string,
+  serverUrl: string,
+  jwtToken: string,
+  schema: WasmSchema = TEST_SCHEMA,
+): AppContext {
   return {
     appId,
-    schema: TEST_SCHEMA,
+    schema,
     serverUrl,
     serverPathPrefix: `/apps/${appId}`,
     env: "test",
     userBranch: "main",
     jwtToken,
     adminSecret: ADMIN_SECRET,
+    backendSecret: BACKEND_SECRET,
   };
 }
 
@@ -491,7 +1149,7 @@ describe("cloud-server integration (Jazz TS)", () => {
         makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      const rowId = await clientA.createPersisted(
+      const rowId = await clientA.createWithAck(
         "todos",
         [
           { type: "Text", value: "shared-item" },
@@ -506,7 +1164,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
       expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
 
-      await clientA.updatePersisted(rowId, { done: { type: "Boolean", value: true } }, "edge");
+      await clientA.updateWithAck(rowId, { done: { type: "Boolean", value: true } }, "edge");
       const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
         const row = rows.find((r) => r.id === rowId);
         return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
@@ -514,7 +1172,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await clientA.deletePersisted(rowId, "edge");
+      await clientA.deleteWithAck(rowId, "edge");
       await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (clientA) await clientA.shutdown();
@@ -523,6 +1181,18 @@ describe("cloud-server integration (Jazz TS)", () => {
       await jwks.stop();
     }
   }, 30000);
+
+  it("enforces split social read permissions (exists + readReferencing)", async () => {
+    await runSocialReadPermissionsScenario("split");
+  }, 60000);
+
+  it("enforces social read permissions with one-clause join(...)", async () => {
+    await runSocialReadPermissionsScenario("join");
+  }, 60000);
+
+  it("enforces social read permissions with one-clause hopTo(...).where(...)", async () => {
+    await runSocialReadPermissionsScenario("hopToWhere");
+  }, 60000);
 
   it("resyncs data from cloud-server after server restart", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
@@ -546,7 +1216,7 @@ describe("cloud-server integration (Jazz TS)", () => {
         writer = await connectClient(
           makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
-        await writer.createPersisted(
+        await writer.createWithAck(
           "todos",
           [
             { type: "Text", value: "persisted-item" },

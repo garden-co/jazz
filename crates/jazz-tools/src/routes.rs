@@ -11,9 +11,10 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use groove::jazz_transport::{
+use jazz_tools::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
+use jazz_tools::sync_manager::ClientId;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -79,9 +80,9 @@ async fn events_handler(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Parse client_id from query param - error if malformed, generate if missing
     let client_id = match params.client_id {
-        Some(s) => groove::sync_manager::ClientId::parse(&s)
+        Some(s) => ClientId::parse(&s)
             .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
-        None => groove::sync_manager::ClientId::new(),
+        None => ClientId::new(),
     };
 
     {
@@ -157,6 +158,7 @@ async fn events_handler(
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
+            next_sync_seq: None,
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
@@ -171,7 +173,10 @@ async fn events_handler(
                         Ok((target_client_id, payload)) => {
                             // Only emit if this is for our client
                             if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate { payload: Box::new(payload) };
+                                let event = ServerEvent::SyncUpdate {
+                                    seq: None,
+                                    payload: Box::new(payload),
+                                };
                                 yield Ok(encode_frame(&event));
                             }
                         }
@@ -223,7 +228,7 @@ async fn sync_handler(
     headers: HeaderMap,
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
-    use groove::sync_manager::{InboxEntry, Source};
+    use jazz_tools::sync_manager::{InboxEntry, Source};
 
     let payload_size = serde_json::to_vec(&request.payload)
         .map(|v| v.len())

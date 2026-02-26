@@ -26,8 +26,8 @@ use axum::{
     http::{HeaderMap, StatusCode, header::AUTHORIZATION, request::Parts},
 };
 use base64::Engine;
-use groove::query_manager::session::Session;
-use groove::schema_manager::AppId;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::schema_manager::AppId;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{Jwk, JwkSet, KeyAlgorithm},

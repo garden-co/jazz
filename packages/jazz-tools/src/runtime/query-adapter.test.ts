@@ -7,6 +7,18 @@ import { translateBuilderToRelationIr, translateQuery } from "./query-adapter.js
 import type { WasmSchema } from "../drivers/types.js";
 
 describe("translateQuery", () => {
+  function parseTranslatedQuery(builderJson: string, schema: WasmSchema): any {
+    return JSON.parse(translateQuery(builderJson, schema));
+  }
+
+  function expectFilterPredicate(result: any): any {
+    expect(result.relation_ir?.type).toBe("Filter");
+    if (result.relation_ir?.type !== "Filter") {
+      throw new Error("Expected relation_ir Filter node.");
+    }
+    return result.relation_ir.predicate;
+  }
+
   const basicSchema: WasmSchema = {
     tables: {
       todos: {
@@ -14,6 +26,11 @@ describe("translateQuery", () => {
           { name: "title", column_type: { type: "Text" }, nullable: false },
           { name: "done", column_type: { type: "Boolean" }, nullable: false },
           { name: "priority", column_type: { type: "Integer" }, nullable: true },
+          {
+            name: "status",
+            column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
+            nullable: false,
+          },
           { name: "project", column_type: { type: "Uuid" }, nullable: true },
           {
             name: "tags",
@@ -35,17 +52,18 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+      const result = parseTranslatedQuery(builderJson, basicSchema);
 
       expect(result.table).toBe("todos");
-      expect(result.branches).toEqual([]);
-      expect(result.disjuncts).toEqual([{ conditions: [] }]);
-      expect(result.order_by).toEqual([]);
-      expect(result.offset).toBe(0);
-      expect(result.limit).toBeNull();
-      expect(result.include_deleted).toBe(false);
       expect(result.array_subqueries).toEqual([]);
-      expect(result.joins).toEqual([]);
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+      expect(result.branches).toBeUndefined();
+      expect(result.disjuncts).toBeUndefined();
+      expect(result.order_by).toBeUndefined();
+      expect(result.offset).toBeUndefined();
+      expect(result.limit).toBeUndefined();
+      expect(result.include_deleted).toBeUndefined();
+      expect(result.joins).toBeUndefined();
     });
 
     it("translates limit and offset", () => {
@@ -58,10 +76,18 @@ describe("translateQuery", () => {
         offset: 5,
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+      const result = parseTranslatedQuery(builderJson, basicSchema);
 
-      expect(result.limit).toBe(10);
-      expect(result.offset).toBe(5);
+      expect(result.relation_ir?.type).toBe("Limit");
+      if (result.relation_ir?.type !== "Limit") {
+        throw new Error("Expected relation_ir Limit node.");
+      }
+      expect(result.relation_ir.limit).toBe(10);
+      expect(result.relation_ir.input?.type).toBe("Offset");
+      if (result.relation_ir.input?.type !== "Offset") {
+        throw new Error("Expected relation_ir Offset node.");
+      }
+      expect(result.relation_ir.input.offset).toBe(5);
     });
   });
 
@@ -74,11 +100,30 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "title" },
+        op: "Eq",
+        right: { type: "Literal", value: { Text: "Buy milk" } },
+      });
+    });
 
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "title", value: { Text: "Buy milk" } } },
-      ]);
+    it("translates eq condition with enum value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "status", op: "eq", value: "todo" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "status" },
+        op: "Eq",
+        right: { type: "Literal", value: { Text: "todo" } },
+      });
     });
 
     it("translates eq condition with UUID string for Uuid columns", () => {
@@ -91,11 +136,16 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "project", value: { Uuid: "00000000-0000-0000-0000-000000000123" } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "project" },
+        op: "Eq",
+        right: {
+          type: "Literal",
+          value: { Uuid: "00000000-0000-0000-0000-000000000123" },
+        },
+      });
     });
 
     it("treats implicit id column as UUID", () => {
@@ -106,11 +156,16 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "_id", value: { Uuid: "00000000-0000-0000-0000-000000000abc" } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "id" },
+        op: "Eq",
+        right: {
+          type: "Literal",
+          value: { Uuid: "00000000-0000-0000-0000-000000000abc" },
+        },
+      });
     });
 
     it("translates eq condition with boolean", () => {
@@ -121,11 +176,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "done", value: { Boolean: false } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "done" },
+        op: "Eq",
+        right: { type: "Literal", value: { Boolean: false } },
+      });
     });
 
     it("translates eq condition with number", () => {
@@ -136,11 +193,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "priority", value: { Integer: 5 } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "priority" },
+        op: "Eq",
+        right: { type: "Literal", value: { Integer: 5 } },
+      });
     });
 
     it("translates eq condition with number for Timestamp columns", () => {
@@ -151,11 +210,61 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: 1712345678 } },
+      });
+    });
 
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "created_at", value: { Timestamp: 1712345678 } } },
-      ]);
+    it("translates eq condition with ISO string for Timestamp columns", () => {
+      const iso = "2024-01-01T00:00:00.000Z";
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: iso }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: Date.parse(iso) } },
+      });
+    });
+
+    it("throws for invalid timestamp string condition", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: "not-a-date" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => parseTranslatedQuery(builderJson, basicSchema)).toThrow(
+        "Invalid timestamp condition",
+      );
+    });
+
+    it("translates numeric string for Timestamp columns as epoch number", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: "1712345678" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: 1712345678 } },
+      });
     });
 
     it("translates eq condition with array value", () => {
@@ -172,18 +281,18 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        {
-          Eq: {
-            column: "tags",
-            value: {
-              Array: [{ Text: "tag1" }, { Text: "tag2" }],
-            },
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "tags" },
+        op: "Eq",
+        right: {
+          type: "Literal",
+          value: {
+            Array: [{ Text: "tag1" }, { Text: "tag2" }],
           },
         },
-      ]);
+      });
     });
 
     it("translates contains condition with array element value", () => {
@@ -200,16 +309,12 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        {
-          Contains: {
-            column: "tags",
-            value: { Text: "tag1" },
-          },
-        },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Contains",
+        left: { scope: "todos", column: "tags" },
+        value: { type: "Literal", value: { Text: "tag1" } },
+      });
     });
 
     it("translates ne condition", () => {
@@ -220,11 +325,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Ne: { column: "done", value: { Boolean: true } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "done" },
+        op: "Ne",
+        right: { type: "Literal", value: { Boolean: true } },
+      });
     });
 
     it("translates gt condition", () => {
@@ -235,11 +342,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Gt: { column: "priority", value: { Integer: 3 } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "priority" },
+        op: "Gt",
+        right: { type: "Literal", value: { Integer: 3 } },
+      });
     });
 
     it("translates gte condition", () => {
@@ -250,11 +359,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Ge: { column: "priority", value: { Integer: 3 } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "priority" },
+        op: "Ge",
+        right: { type: "Literal", value: { Integer: 3 } },
+      });
     });
 
     it("translates lt condition", () => {
@@ -265,11 +376,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Lt: { column: "priority", value: { Integer: 3 } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "priority" },
+        op: "Lt",
+        right: { type: "Literal", value: { Integer: 3 } },
+      });
     });
 
     it("translates lte condition", () => {
@@ -280,11 +393,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Le: { column: "priority", value: { Integer: 3 } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "priority" },
+        op: "Le",
+        right: { type: "Literal", value: { Integer: 3 } },
+      });
     });
 
     it("translates isNull condition", () => {
@@ -295,9 +410,11 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([{ IsNull: { column: "priority" } }]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "IsNull",
+        column: { scope: "todos", column: "priority" },
+      });
     });
 
     it("translates multiple conditions", () => {
@@ -311,14 +428,23 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toHaveLength(2);
-      expect(result.disjuncts[0].conditions[0]).toEqual({
-        Eq: { column: "done", value: { Boolean: false } },
-      });
-      expect(result.disjuncts[0].conditions[1]).toEqual({
-        Gt: { column: "priority", value: { Integer: 3 } },
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "And",
+        exprs: [
+          {
+            type: "Cmp",
+            left: { scope: "todos", column: "done" },
+            op: "Eq",
+            right: { type: "Literal", value: { Boolean: false } },
+          },
+          {
+            type: "Cmp",
+            left: { scope: "todos", column: "priority" },
+            op: "Gt",
+            right: { type: "Literal", value: { Integer: 3 } },
+          },
+        ],
       });
     });
 
@@ -330,11 +456,13 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.disjuncts[0].conditions).toEqual([
-        { Eq: { column: "priority", value: { Null: null } } },
-      ]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "priority" },
+        op: "Eq",
+        right: { type: "Literal", value: { Null: null } },
+      });
     });
 
     it("throws for unknown operator", () => {
@@ -347,6 +475,17 @@ describe("translateQuery", () => {
 
       expect(() => translateQuery(builderJson, basicSchema)).toThrow("Unknown operator: unknown");
     });
+
+    it("throws for invalid enum value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "status", op: "eq", value: "invalid" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow("Invalid enum value");
+    });
   });
 
   describe("orderBy translation", () => {
@@ -358,9 +497,11 @@ describe("translateQuery", () => {
         orderBy: [["priority", "asc"]],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.order_by).toEqual([["priority", "Ascending"]]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(result.relation_ir?.type).toBe("OrderBy");
+      expect(result.relation_ir?.terms).toEqual([
+        { column: { column: "priority" }, direction: "Asc" },
+      ]);
     });
 
     it("translates descending order", () => {
@@ -371,9 +512,11 @@ describe("translateQuery", () => {
         orderBy: [["priority", "desc"]],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.order_by).toEqual([["priority", "Descending"]]);
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(result.relation_ir?.type).toBe("OrderBy");
+      expect(result.relation_ir?.terms).toEqual([
+        { column: { column: "priority" }, direction: "Desc" },
+      ]);
     });
 
     it("translates multiple orderBy clauses", () => {
@@ -387,11 +530,11 @@ describe("translateQuery", () => {
         ],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, basicSchema));
-
-      expect(result.order_by).toEqual([
-        ["priority", "Descending"],
-        ["title", "Ascending"],
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(result.relation_ir?.type).toBe("OrderBy");
+      expect(result.relation_ir?.terms).toEqual([
+        { column: { column: "priority" }, direction: "Desc" },
+        { column: { column: "title" }, direction: "Asc" },
       ]);
     });
   });
@@ -424,7 +567,7 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, schemaWithRelations));
+      const result = parseTranslatedQuery(builderJson, schemaWithRelations);
 
       expect(result.array_subqueries).toEqual([
         {
@@ -450,7 +593,7 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, schemaWithRelations));
+      const result = parseTranslatedQuery(builderJson, schemaWithRelations);
 
       expect(result.array_subqueries).toEqual([
         {
@@ -458,6 +601,78 @@ describe("translateQuery", () => {
           table: "todos",
           inner_column: "owner_id",
           outer_column: "users.id",
+          filters: [],
+          joins: [],
+          select_columns: null,
+          order_by: [],
+          limit: null,
+          nested_arrays: [],
+        },
+      ]);
+    });
+
+    it("translates UUID[] forward and reverse includes using membership columns", () => {
+      const arrayFkSchema: WasmSchema = {
+        tables: {
+          files: {
+            columns: [
+              {
+                name: "parts",
+                column_type: { type: "Array", element: { type: "Uuid" } },
+                nullable: false,
+                references: "file_parts",
+              },
+            ],
+          },
+          file_parts: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+        },
+      };
+
+      const forward = JSON.parse(
+        translateQuery(
+          JSON.stringify({
+            table: "files",
+            conditions: [],
+            includes: { parts: true },
+            orderBy: [],
+          }),
+          arrayFkSchema,
+        ),
+      );
+      expect(forward.array_subqueries).toEqual([
+        {
+          column_name: "parts",
+          table: "file_parts",
+          inner_column: "id",
+          outer_column: "files.parts",
+          filters: [],
+          joins: [],
+          select_columns: null,
+          order_by: [],
+          limit: null,
+          nested_arrays: [],
+        },
+      ]);
+
+      const reverse = JSON.parse(
+        translateQuery(
+          JSON.stringify({
+            table: "file_parts",
+            conditions: [],
+            includes: { filesViaParts: true },
+            orderBy: [],
+          }),
+          arrayFkSchema,
+        ),
+      );
+      expect(reverse.array_subqueries).toEqual([
+        {
+          column_name: "filesViaParts",
+          table: "files",
+          inner_column: "parts",
+          outer_column: "file_parts.id",
           filters: [],
           joins: [],
           select_columns: null,
@@ -476,7 +691,7 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, schemaWithRelations));
+      const result = parseTranslatedQuery(builderJson, schemaWithRelations);
 
       expect(result.array_subqueries).toEqual([]);
     });
@@ -676,26 +891,10 @@ describe("translateQuery", () => {
         offset: 5,
       });
 
-      const result = JSON.parse(translateQuery(builderJson, fullSchema));
+      const result = parseTranslatedQuery(builderJson, fullSchema);
 
       expect(result).toMatchObject({
         table: "todos",
-        branches: [],
-        disjuncts: [
-          {
-            conditions: [
-              { Eq: { column: "done", value: { Boolean: false } } },
-              { Ge: { column: "priority", value: { Integer: 3 } } },
-            ],
-          },
-        ],
-        order_by: [
-          ["priority", "Descending"],
-          ["title", "Ascending"],
-        ],
-        offset: 5,
-        limit: 10,
-        include_deleted: false,
         array_subqueries: [
           {
             column_name: "owner",
@@ -710,9 +909,33 @@ describe("translateQuery", () => {
             nested_arrays: [],
           },
         ],
-        joins: [],
       });
-      expect(result.relation_ir).toBeDefined();
+      expect(result.branches).toBeUndefined();
+      expect(result.disjuncts).toBeUndefined();
+      expect(result.order_by).toBeUndefined();
+      expect(result.offset).toBeUndefined();
+      expect(result.limit).toBeUndefined();
+      expect(result.include_deleted).toBeUndefined();
+      expect(result.joins).toBeUndefined();
+
+      expect(result.relation_ir?.type).toBe("Limit");
+      if (result.relation_ir?.type !== "Limit") {
+        throw new Error("Expected top-level relation_ir Limit node.");
+      }
+      expect(result.relation_ir.limit).toBe(10);
+      expect(result.relation_ir.input.type).toBe("Offset");
+      if (result.relation_ir.input.type !== "Offset") {
+        throw new Error("Expected relation_ir Offset input node.");
+      }
+      expect(result.relation_ir.input.offset).toBe(5);
+      expect(result.relation_ir.input.input.type).toBe("OrderBy");
+      if (result.relation_ir.input.input.type !== "OrderBy") {
+        throw new Error("Expected relation_ir OrderBy input node.");
+      }
+      expect(result.relation_ir.input.input.terms).toEqual([
+        { column: { column: "priority" }, direction: "Desc" },
+        { column: { column: "title" }, direction: "Asc" },
+      ]);
     });
   });
 
@@ -749,7 +972,7 @@ describe("translateQuery", () => {
 
     const result = JSON.parse(translateQuery(builderJson, schema));
     expect(result.recursive).toBeUndefined();
-    expect(result.joins).toEqual([]);
+    expect(result.joins).toBeUndefined();
     expect(result.relation_ir?.type).toBe("Gather");
   });
 
@@ -789,7 +1012,7 @@ describe("translateQuery", () => {
     });
 
     const result = JSON.parse(translateQuery(builderJson, schema));
-    expect(result.joins).toEqual([]);
+    expect(result.joins).toBeUndefined();
     expect(result.result_element_index).toBeUndefined();
     expect(result.recursive).toBeUndefined();
     expect(result.relation_ir?.type).toBe("Project");
@@ -825,7 +1048,7 @@ describe("translateQuery", () => {
     });
 
     const result = JSON.parse(translateQuery(builderJson, schema));
-    expect(result.joins).toEqual([]);
+    expect(result.joins).toBeUndefined();
     expect(result.result_element_index).toBeUndefined();
     expect(result.recursive).toBeUndefined();
     expect(result.relation_ir?.type).toBe("Project");

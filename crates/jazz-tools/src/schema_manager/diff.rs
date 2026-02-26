@@ -255,10 +255,17 @@ fn default_for_type(ct: &ColumnType) -> Value {
     match ct {
         ColumnType::Integer => Value::Integer(0),
         ColumnType::BigInt => Value::BigInt(0),
+        ColumnType::Double => Value::Double(0.0),
         ColumnType::Boolean => Value::Boolean(false),
         ColumnType::Text => Value::Text(String::new()),
+        ColumnType::Enum(variants) => variants
+            .first()
+            .cloned()
+            .map(Value::Text)
+            .unwrap_or(Value::Null),
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
+        ColumnType::Bytea => Value::Bytea(vec![]),
         ColumnType::Array(_) => Value::Array(vec![]),
         ColumnType::Row(_) => Value::Null,
     }

@@ -3,7 +3,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
-use groove::query_manager::session::Session;
+use jazz_tools::query_manager::session::Session;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};

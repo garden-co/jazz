@@ -180,21 +180,21 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertPersisted(table: string, values: any, tier: string): Promise<string> {
+  insertWithAck(table: string, values: any, tier: string): Promise<string> {
     assertWorkerTier(tier);
     const id = this.insert(table, values);
     this.binding.flush();
     return Promise.resolve(id);
   }
 
-  updatePersisted(object_id: string, values: any, tier: string): Promise<void> {
+  updateWithAck(object_id: string, values: any, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
     return Promise.resolve();
   }
 
-  deletePersisted(object_id: string, tier: string): Promise<void> {
+  deleteWithAck(object_id: string, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.delete(object_id);
     this.binding.flush();

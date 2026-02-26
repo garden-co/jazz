@@ -2,6 +2,7 @@
  * Generate TypeScript interfaces from WasmSchema.
  */
 
+import pluralize from "pluralize-esm";
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "./relation-analyzer.js";
 import {
@@ -21,16 +22,22 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
-    case "Timestamp":
+    case "Double":
       return "number";
+    case "Timestamp":
+      return "Date";
     case "Uuid":
       return "string";
+    case "Bytea":
+      return "Uint8Array";
+    case "Enum":
+      return colType.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
       return `${wasmTypeToTs(colType.element)}[]`;
     case "Row":
       // Nested row - generate inline type
       const fields = colType.columns
-        .map((c) => {
+        .map((c: { name: string; nullable: boolean; column_type: ColumnType }) => {
           const opt = c.nullable ? "?" : "";
           return `${c.name}${opt}: ${wasmTypeToTs(c.column_type)}`;
         })
@@ -41,40 +48,8 @@ function wasmTypeToTs(colType: ColumnType): string {
   }
 }
 
-/**
- * Singularize a word using simple heuristics.
- *
- * Examples:
- *   todos -> todo
- *   categories -> category
- *   users -> user
- *   data -> data (unchanged)
- */
 function singularize(word: string): string {
-  if (word.endsWith("ies")) {
-    // categories -> category
-    return word.slice(0, -3) + "y";
-  }
-  if (word.endsWith("es") && word.length > 3) {
-    // Some words ending in 'es' - be conservative
-    const stem = word.slice(0, -2);
-    // Only apply if it ends with common patterns like 'sses', 'xes', 'ches', 'shes'
-    if (
-      word.endsWith("sses") ||
-      word.endsWith("xes") ||
-      word.endsWith("ches") ||
-      word.endsWith("shes")
-    ) {
-      return stem;
-    }
-    // Otherwise just remove 's'
-    return word.slice(0, -1);
-  }
-  if (word.endsWith("s") && !word.endsWith("ss")) {
-    // todos -> todo, users -> user
-    return word.slice(0, -1);
-  }
-  return word;
+  return pluralize.singular(word);
 }
 
 /**

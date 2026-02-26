@@ -45,13 +45,18 @@ fn add_server_receives_existing_objects() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated {
-            object_id,
-            metadata,
-            branch_name,
-            commits,
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    metadata,
+                    branch_name,
+                    commits,
+                },
         } => {
+            assert_eq!(*id, server_id);
             assert_eq!(*object_id, obj_id);
             let metadata = metadata
                 .as_ref()
@@ -64,7 +69,7 @@ fn add_server_receives_existing_objects() {
             assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 1);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to the newly added server"),
     }
 }
 
@@ -100,12 +105,24 @@ fn local_commit_syncs_to_server() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { commits, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 1);
             assert_eq!(commits[0].id(), commit_id);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to server"),
     }
 }
 
@@ -190,15 +207,27 @@ fn commits_sent_in_causal_order() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { commits, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 3);
             // Parents should come before children
             assert_eq!(commits[0].id(), c1);
             assert_eq!(commits[1].id(), c2);
             assert_eq!(commits[2].id(), c3);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated with causal commit ordering"),
     }
 }
 
@@ -238,10 +267,18 @@ fn client_with_query_receives_matching_objects() {
     match &outbox[0] {
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::ObjectUpdated { object_id, .. },
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
         }
         _ => panic!("Expected ObjectUpdated to client"),
     }
@@ -309,11 +346,23 @@ fn local_commit_in_scope_syncs_to_client() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { commits, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert!(commits.iter().any(|c| c.id() == commit_id));
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to matching client scope"),
     }
 }
 
@@ -385,11 +434,23 @@ fn query_update_adds_scope_triggers_initial_sync() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1); // Only obj2 (newly visible)
 
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { object_id, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
+        } => {
+            assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj2);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated for newly visible object"),
     }
 }
 
@@ -699,15 +760,23 @@ fn user_without_session_rejected() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::Error(SyncError::SessionRequired {
-            object_id,
-            branch_name,
-        }) => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::SessionRequired {
+                    object_id,
+                    branch_name,
+                }),
+        } => {
+            assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
             assert_eq!(branch_name.as_str(), "main");
         }
-        other => panic!("Expected SessionRequired error, got {:?}", other),
+        other => panic!(
+            "Expected SessionRequired error to source client, got {:?}",
+            other
+        ),
     }
 
     // Object should not exist
@@ -760,15 +829,23 @@ fn user_catalogue_write_rejected() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::Error(SyncError::CatalogueWriteDenied {
-            object_id,
-            branch_name,
-        }) => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                    object_id,
+                    branch_name,
+                }),
+        } => {
+            assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
             assert_eq!(branch_name.as_str(), "main");
         }
-        other => panic!("Expected CatalogueWriteDenied error, got {:?}", other),
+        other => panic!(
+            "Expected CatalogueWriteDenied error to source client, got {:?}",
+            other
+        ),
     }
 
     // Object should not exist
@@ -989,11 +1066,22 @@ fn reject_permission_check_sends_error() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::PermissionDenied {
+                    object_id,
+                    branch_name,
+                    reason,
+                }),
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
             assert_eq!(reason, "access denied by policy");
         }
-        _ => panic!("Expected PermissionDenied error"),
+        _ => panic!("Expected PermissionDenied error for source client"),
     }
 
     // Commit should NOT be applied
@@ -1032,6 +1120,7 @@ fn server_update_forwarded_to_matching_clients() {
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
     };
+    let commit_id = commit.id();
 
     sm.push_inbox(InboxEntry {
         source: Source::Server(server_id),
@@ -1055,10 +1144,19 @@ fn server_update_forwarded_to_matching_clients() {
     match &outbox[0] {
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::ObjectUpdated { object_id, .. },
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    ..
+                },
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
+            assert_eq!(commits[0].id(), commit_id);
         }
         _ => panic!("Expected ObjectUpdated to client"),
     }
@@ -1118,6 +1216,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
     };
+    let commit_id = commit.id();
 
     sm.push_inbox(InboxEntry {
         source: Source::Client(client1),
@@ -1140,6 +1239,56 @@ fn client_update_forwarded_to_server_and_other_clients() {
     assert!(destinations.contains(&Destination::Server(server_id)));
     assert!(destinations.contains(&Destination::Client(client2)));
     assert!(!destinations.contains(&Destination::Client(client1)));
+
+    let server_update = outbox
+        .iter()
+        .find(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .expect("expected forwarded update to server");
+    match &server_update.payload {
+        SyncPayload::ObjectUpdated {
+            object_id,
+            branch_name,
+            commits,
+            ..
+        } => {
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert!(
+                commits.iter().any(|c| c.id() == commit_id),
+                "server payload must include the client's new commit"
+            );
+            let parent_pos = commits.iter().position(|c| c.id() == c1);
+            let child_pos = commits.iter().position(|c| c.id() == commit_id);
+            if let (Some(parent_pos), Some(child_pos)) = (parent_pos, child_pos) {
+                assert!(
+                    parent_pos < child_pos,
+                    "if parent commit is forwarded, it must come before child"
+                );
+            }
+        }
+        other => panic!("Expected ObjectUpdated payload to server, got {:?}", other),
+    }
+
+    let client_update = outbox
+        .iter()
+        .find(|e| matches!(e.destination, Destination::Client(id) if id == client2))
+        .expect("expected forwarded update to matching client");
+    match &client_update.payload {
+        SyncPayload::ObjectUpdated {
+            object_id,
+            branch_name,
+            commits,
+            ..
+        } => {
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert!(
+                commits.iter().any(|c| c.id() == commit_id),
+                "client payload must include the forwarded commit"
+            );
+        }
+        other => panic!("Expected ObjectUpdated payload to client2, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1178,8 +1327,22 @@ fn metadata_sent_only_once_per_destination() {
 
     // First message should have metadata
     assert_eq!(outbox.len(), 1);
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { metadata, .. } => {
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    metadata,
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
+            assert_eq!(commits[0].id(), c1);
             let metadata = metadata
                 .as_ref()
                 .expect("Existing object sync should include metadata on first send");
@@ -1190,7 +1353,7 @@ fn metadata_sent_only_once_per_destination() {
                 "Expected key=value metadata to be included in first sync"
             );
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to server with first-send metadata"),
     }
 
     // Add another commit (as child of c1)
@@ -1209,11 +1372,25 @@ fn metadata_sent_only_once_per_destination() {
     let outbox = sm.take_outbox();
 
     // Second message should NOT have metadata
-    match &outbox[0].payload {
-        SyncPayload::ObjectUpdated { metadata, .. } => {
+    assert_eq!(outbox.len(), 1);
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    branch_name,
+                    commits,
+                    metadata,
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
             assert!(metadata.is_none());
         }
-        _ => panic!("Expected ObjectUpdated"),
+        _ => panic!("Expected ObjectUpdated to server without metadata on repeat send"),
     }
 }
 
@@ -1607,12 +1784,17 @@ fn send_query_subscription_includes_session() {
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
 
-    match &outbox[0].payload {
-        SyncPayload::QuerySubscription {
-            query_id,
-            query: sent_query,
-            session: sent_session,
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::QuerySubscription {
+                    query_id,
+                    query: sent_query,
+                    session: sent_session,
+                },
         } => {
+            assert_eq!(*id, server_id);
             assert_eq!(*query_id, QueryId(1));
             assert_eq!(sent_query.table, query.table);
             let sent_session = sent_session
@@ -1620,7 +1802,7 @@ fn send_query_subscription_includes_session() {
                 .expect("QuerySubscription payload should include session");
             assert_eq!(sent_session.user_id, "alice");
         }
-        _ => panic!("Expected QuerySubscription"),
+        _ => panic!("Expected QuerySubscription to connected server"),
     }
 }
 

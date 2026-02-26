@@ -25,8 +25,10 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
-  REAL: { type: "Integer" }, // REAL maps to Integer in WASM (no Float type)
+  REAL: { type: "Double" },
+  TIMESTAMP: { type: "Timestamp" },
   UUID: { type: "Uuid" },
+  BYTEA: { type: "Bytea" },
 };
 
 /**
@@ -34,12 +36,18 @@ const map: Record<ScalarSqlType, ColumnType> = {
  */
 function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
+    if (sqlType.kind === "ENUM") {
+      return { type: "Enum", variants: [...sqlType.variants] };
+    }
     return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
   }
   return map[sqlType];
 }
 
 function literalToWasmValue(value: unknown): Value {
+  if (value instanceof Uint8Array) {
+    return { type: "Bytea", value };
+  }
   if (value === null) {
     return { type: "Null" };
   }
@@ -88,11 +96,23 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return { type: "IsNull", column: expr.column };
     case "IsNotNull":
       return { type: "IsNotNull", column: expr.column };
+    case "Contains":
+      return {
+        type: "Contains",
+        column: expr.column,
+        value: clonePolicyValue(expr.value),
+      };
     case "In":
       return {
         type: "In",
         column: expr.column,
         session_path: [...expr.session_path],
+      };
+    case "InList":
+      return {
+        type: "InList",
+        column: expr.column,
+        values: expr.values.map(clonePolicyValue),
       };
     case "Exists":
       return {
@@ -108,6 +128,14 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return {
         type: "Inherits",
         operation: expr.operation,
+        via_column: expr.via_column,
+        max_depth: expr.max_depth,
+      };
+    case "InheritsReferencing":
+      return {
+        type: "InheritsReferencing",
+        operation: expr.operation,
+        source_table: expr.source_table,
         via_column: expr.via_column,
         max_depth: expr.max_depth,
       };

@@ -21,8 +21,8 @@ export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js
 export { toValue, toValueArray, toUpdateRecord } from "./value-converter.js";
 export {
   SubscriptionManager,
-  type IndexedItem,
+  type RowChangeKind,
+  type RowDelta,
   type SubscriptionDelta,
-  type UpdatedIndexedItem,
 } from "./subscription-manager.js";
 export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";

@@ -3,9 +3,20 @@ import { useDb, useAll, useSession } from "jazz-tools/react";
 import { app } from "../schema/app.js";
 
 export function TodoList() {
+  const [filterTitle, setFilterTitle] = useState("");
+  const [showDoneOnly, setShowDoneOnly] = useState(false);
+  const trimmedFilterTitle = filterTitle.trim();
+  let todosQuery = app.todos;
+  if (trimmedFilterTitle) {
+    todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
+  }
+  if (showDoneOnly) {
+    todosQuery = todosQuery.where({ done: true });
+  }
+
   // #region reading-reactive-hooks-react
   const db = useDb();
-  const todos = useAll(app.todos);
+  const todos = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
@@ -32,6 +43,23 @@ export function TodoList() {
           Add
         </button>
       </form>
+      <div>
+        <input
+          type="text"
+          value={filterTitle}
+          onChange={(e) => setFilterTitle(e.target.value)}
+          placeholder="Filter by title (contains)"
+          aria-label="Filter by title"
+        />
+        <label>
+          <input
+            type="checkbox"
+            checked={showDoneOnly}
+            onChange={(e) => setShowDoneOnly(e.target.checked)}
+          />
+          Done only
+        </label>
+      </div>
       <ul id="todo-list">
         {todos.map((todo) => (
           <li key={todo.id} className={todo.done ? "done" : ""}>
