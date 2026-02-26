@@ -38,7 +38,7 @@ function defaultColumnTypeToTs(type: ColumnType): string {
     case "Enum":
       return type.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
-      return arrayType(columnTypeToTs(type.element));
+      return arrayType(defaultColumnTypeToTs(type.element));
     default:
       return "unknown";
   }
