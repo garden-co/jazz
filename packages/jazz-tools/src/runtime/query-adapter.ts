@@ -77,12 +77,61 @@ function stripQualifier(column: string): string {
   return parts[parts.length - 1] ?? column;
 }
 
+function toTimestampMs(value: unknown): number {
+  if (value instanceof Date) {
+    const ts = value.getTime();
+    if (!Number.isFinite(ts)) {
+      throw new Error("Invalid Date value for timestamp condition");
+    }
+    return ts;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error("Invalid number value for timestamp condition");
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const fromNumber = Number(trimmed);
+      if (Number.isFinite(fromNumber)) {
+        return fromNumber;
+      }
+    }
+    const fromIso = Date.parse(trimmed);
+    if (Number.isFinite(fromIso)) {
+      return fromIso;
+    }
+  }
+  throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
+}
+
 /**
  * Translate a JavaScript value to WasmValue format.
  */
 function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { Null: null };
+  }
+  if (columnType.type === "Timestamp" && value instanceof Date) {
+    return { Timestamp: toTimestampMs(value) };
+  }
+  if (columnType.type === "Bytea") {
+    if (value instanceof Uint8Array) {
+      return { Bytea: [...value] };
+    }
+    if (Array.isArray(value)) {
+      const bytes = value.map((entry) => {
+        const n = Number(entry);
+        if (!Number.isInteger(n) || n < 0 || n > 255) {
+          throw new Error("Bytea values must contain integers in range 0..255");
+        }
+        return n;
+      });
+      return { Bytea: bytes };
+    }
+    throw new Error("Bytea values must be Uint8Array or byte arrays");
   }
   if (Array.isArray(value)) {
     if (columnType.type !== "Array") {
@@ -97,12 +146,15 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
   }
   if (typeof value === "number") {
     if (columnType?.type === "Timestamp") {
-      return { Timestamp: value };
+      return { Timestamp: toTimestampMs(value) };
     }
     // Use Integer for all numbers - WASM will handle type coercion
     return { Integer: value };
   }
   if (typeof value === "string") {
+    if (columnType?.type === "Timestamp") {
+      return { Timestamp: toTimestampMs(value) };
+    }
     if (columnType?.type === "Uuid") {
       return { Uuid: value };
     }
@@ -204,6 +256,12 @@ function conditionToRelPredicate(
           type: "Literal" as const,
           value: toWasmValue(cond.value, valueTypeForCondition),
         };
+  if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
+    throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
+  }
+  if (columnType.type === "Bytea" && cond.op === "contains") {
+    throw new Error(`BYTEA column "${column}" does not support contains filters.`);
+  }
   switch (cond.op) {
     case "eq":
       return { type: "Cmp", left: columnRef, op: "Eq", right: rightLiteral };
@@ -212,35 +270,35 @@ function conditionToRelPredicate(
         type: "Cmp",
         left: columnRef,
         op: "Ne",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "gt":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Gt",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "gte":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Ge",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "lt":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Lt",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "lte":
       return {
         type: "Cmp",
         left: columnRef,
         op: "Le",
-        right: { type: "Literal", value: cond.value },
+        right: rightLiteral,
       };
     case "isNull":
       return { type: "IsNull", column: columnRef };
@@ -467,6 +525,12 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   relation = lowerHopsToRelExpr(relation, builder.table, hops, relations, schema);
 
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
+    for (const [column] of builder.orderBy) {
+      const columnType = getColumnType(schema, builder.table, stripQualifier(column));
+      if (columnType?.type === "Bytea") {
+        throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+      }
+    }
     relation = {
       type: "OrderBy",
       input: relation,

@@ -55,8 +55,11 @@ describe("schemaToSql", () => {
       bool_null: col.boolean().optional(),
       integer: col.int(),
       integer_null: col.int().optional(),
+      ts: col.timestamp(),
+      ts_null: col.timestamp().optional(),
       real: col.float(),
       real_null: col.float().optional(),
+      blob: col.bytes(),
     });
     const schema = getCollectedSchema();
 
@@ -68,8 +71,11 @@ describe("schemaToSql", () => {
     expect(sql).toContain("bool_null BOOLEAN");
     expect(sql).toContain("integer INTEGER NOT NULL");
     expect(sql).toContain("integer_null INTEGER");
+    expect(sql).toContain("ts TIMESTAMP NOT NULL");
+    expect(sql).toContain("ts_null TIMESTAMP");
     expect(sql).toContain("real REAL NOT NULL");
     expect(sql).toContain("real_null REAL");
+    expect(sql).toContain("blob BYTEA NOT NULL");
   });
 
   it("handles enum column types", () => {
@@ -354,6 +360,18 @@ describe("lensToSql", () => {
     );
   });
 
+  it("renders bytea defaults as hex literals", () => {
+    resetCollectedState();
+    migrate("files", {
+      payload: col.add().bytes({ default: new Uint8Array([0, 1, 255]) }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd"))
+      .toBe(`ALTER TABLE files ADD COLUMN payload BYTEA DEFAULT '\\\\x0001ff';
+`);
+  });
+
   it("preserves SQL type for add lens operations", () => {
     resetCollectedState();
     migrate("todos", {
@@ -365,6 +383,19 @@ describe("lensToSql", () => {
 `);
   });
 
+  it("preserves TIMESTAMP type for add lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      created_at: col.add().timestamp({ default: 1735689600000000 }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN created_at TIMESTAMP DEFAULT 1735689600000000;
+`,
+    );
+  });
+
   it("preserves SQL type for drop lens operations", () => {
     resetCollectedState();
     migrate("todos", {
@@ -374,6 +405,45 @@ describe("lensToSql", () => {
 
     expect(lensToSql(lens, "bwd")).toBe(`ALTER TABLE todos ADD COLUMN priority INTEGER DEFAULT 0;
 `);
+  });
+
+  it("preserves TIMESTAMP type for drop lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      created_at: col.drop().timestamp({ backwardsDefault: 1735689600000000 }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN created_at TIMESTAMP DEFAULT 1735689600000000;
+`,
+    );
+  });
+
+  it("serializes Date defaults for add timestamp lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      created_at: col.add().timestamp({ default: new Date("2025-01-01T00:00:00.000Z") }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN created_at TIMESTAMP DEFAULT 1735689600000;
+`,
+    );
+  });
+
+  it("serializes Date backwards defaults for drop timestamp lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      created_at: col.drop().timestamp({ backwardsDefault: new Date("2025-01-01T00:00:00.000Z") }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN created_at TIMESTAMP DEFAULT 1735689600000;
+`,
+    );
   });
 
   it("supports array defaults in migration SQL generation", () => {

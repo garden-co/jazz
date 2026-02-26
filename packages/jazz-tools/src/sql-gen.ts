@@ -143,11 +143,18 @@ function tablePoliciesToSql(tableName: string, policies: TablePolicies | undefin
 }
 
 function formatDefaultValue(value: unknown): string {
+  if (value instanceof Uint8Array) {
+    const hex = [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `'\\\\x${hex}'`;
+  }
   if (typeof value === "string") {
     return `'${value.replace(/'/g, "''")}'`;
   }
   if (typeof value === "boolean") {
     return value ? "TRUE" : "FALSE";
+  }
+  if (value instanceof Date) {
+    return String(value.getTime());
   }
   if (typeof value === "number") {
     return String(value);

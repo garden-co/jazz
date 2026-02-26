@@ -1,0 +1,20 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["jazz"],
+  "ios": {
+    "iosModuleName": "JazzNitro"
+  },
+  "android": {
+    "androidNamespace": ["jazz"],
+    "androidCxxLibName": "JazzNitro"
+  },
+  "rust": {
+    "implCrate": "jazz-nitro"
+  },
+  "autolinking": {
+    "JazzRuntime": {
+      "rust": "JazzRuntimeImpl"
+    }
+  },
+  "ignorePaths": ["**/node_modules", "**/target"]
+}

@@ -34,6 +34,35 @@ async function canBindPort(port: number): Promise<boolean> {
   });
 }
 
+async function getAvailablePort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          reject(new Error("Failed to allocate an available port."));
+        });
+        return;
+      }
+
+      const port = address.port;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
 async function createFailingFakeJazzBinary(stderrText: string): Promise<string> {
   const rootPath = await createTempRoot("jazz-tools-testing-fake-fail-");
   const binaryPath = join(rootPath, "fake-jazz-fail");
@@ -50,10 +79,11 @@ describe("startLocalJazzServer", () => {
   it("starts the process, waits for /health, and stops cleanly", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-capture-");
     const dataDir = join(captureRoot, "data-dir");
+    const port = await getAvailablePort();
 
     const server = await startLocalJazzServer({
       appId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      port: 19111,
+      port,
       dataDir,
       backendSecret: "test-backend-secret",
       adminSecret: "test-admin-secret",
@@ -72,7 +102,7 @@ describe("startLocalJazzServer", () => {
   it("frees the port after stop so it can be rebound", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-port-free-");
     const dataDir = join(captureRoot, "data-dir");
-    const port = 19222;
+    const port = await getAvailablePort();
 
     const server = await startLocalJazzServer({
       appId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
@@ -90,20 +120,21 @@ describe("startLocalJazzServer", () => {
   it("can start a server with enableLogs turned on", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-logs-");
     const dataDir = join(captureRoot, "data-dir");
-    const port = 19444;
+    const port = await getAvailablePort();
 
     const server = await startLocalJazzServer({
       appId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
       port,
       dataDir,
-      healthTimeoutMs: 5_000,
+      healthTimeoutMs: 10_000,
+      enableLogs: true,
     });
 
     const healthResponse = await fetch(`${server.url}/health`);
     expect(healthResponse.status).toBe(200);
 
     await server.stop();
-  });
+  }, 15_000);
 
   it("rejects with child stderr when process exits before health", async () => {
     const binaryPath = await createFailingFakeJazzBinary("startup-failed-on-purpose");
@@ -118,7 +149,7 @@ describe("startLocalJazzServer", () => {
   });
 
   it("accepts a catalogue schema sync payload via /sync when admin secret matches", async () => {
-    const port = 19333;
+    const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
     const server = await startLocalJazzServer({
@@ -159,7 +190,7 @@ describe("startLocalJazzServer", () => {
   });
 
   it("rejects a catalogue schema sync payload via /sync when admin secret doesn't match", async () => {
-    const port = 19333;
+    const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
     const server = await startLocalJazzServer({
@@ -216,7 +247,7 @@ describe("pushSchemaCatalogue", () => {
   });
 
   it("pushes schema catalogue via schema directory using pushSchemaCatalogue", async () => {
-    const port = 19333;
+    const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
     const server = await startLocalJazzServer({

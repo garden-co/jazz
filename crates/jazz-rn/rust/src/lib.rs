@@ -103,6 +103,7 @@ enum RnValue {
     Text(String),
     Timestamp(u64),
     Uuid(String),
+    Bytea(Vec<u8>),
     Array(Vec<RnValue>),
     Row(Vec<RnValue>),
     Null,
@@ -118,6 +119,7 @@ impl From<Value> for RnValue {
             Value::Text(s) => RnValue::Text(s),
             Value::Timestamp(t) => RnValue::Timestamp(t),
             Value::Uuid(id) => RnValue::Uuid(id.uuid().to_string()),
+            Value::Bytea(bytes) => RnValue::Bytea(bytes),
             Value::Array(arr) => RnValue::Array(arr.into_iter().map(Into::into).collect()),
             Value::Row(row) => RnValue::Row(row.into_iter().map(Into::into).collect()),
             Value::Null => RnValue::Null,
@@ -142,6 +144,7 @@ impl TryFrom<RnValue> for Value {
                 })?;
                 Value::Uuid(ObjectId::from_uuid(uuid))
             }
+            RnValue::Bytea(bytes) => Value::Bytea(bytes),
             RnValue::Array(arr) => {
                 let converted = arr
                     .into_iter()
@@ -221,6 +224,7 @@ impl TryFrom<JsColumnType> for jazz_tools::query_manager::types::ColumnType {
             "Text" => Ok(ColumnType::Text),
             "Timestamp" => Ok(ColumnType::Timestamp),
             "Uuid" => Ok(ColumnType::Uuid),
+            "Bytea" => Ok(ColumnType::Bytea),
             "Array" => {
                 let elem = ct.element.ok_or_else(|| JazzRnError::Schema {
                     message: "Array type requires element".to_string(),

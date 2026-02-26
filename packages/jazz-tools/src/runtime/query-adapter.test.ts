@@ -219,6 +219,54 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates eq condition with ISO string for Timestamp columns", () => {
+      const iso = "2024-01-01T00:00:00.000Z";
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: iso }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: Date.parse(iso) } },
+      });
+    });
+
+    it("throws for invalid timestamp string condition", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: "not-a-date" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => parseTranslatedQuery(builderJson, basicSchema)).toThrow(
+        "Invalid timestamp condition",
+      );
+    });
+
+    it("translates numeric string for Timestamp columns as epoch number", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: "1712345678" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "created_at" },
+        op: "Eq",
+        right: { type: "Literal", value: { Timestamp: 1712345678 } },
+      });
+    });
+
     it("translates eq condition with array value", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -282,7 +330,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "done" },
         op: "Ne",
-        right: { type: "Literal", value: true },
+        right: { type: "Literal", value: { Boolean: true } },
       });
     });
 
@@ -299,7 +347,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Gt",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -316,7 +364,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Ge",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -333,7 +381,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Lt",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -350,7 +398,7 @@ describe("translateQuery", () => {
         type: "Cmp",
         left: { scope: "todos", column: "priority" },
         op: "Le",
-        right: { type: "Literal", value: 3 },
+        right: { type: "Literal", value: { Integer: 3 } },
       });
     });
 
@@ -394,7 +442,7 @@ describe("translateQuery", () => {
             type: "Cmp",
             left: { scope: "todos", column: "priority" },
             op: "Gt",
-            right: { type: "Literal", value: 3 },
+            right: { type: "Literal", value: { Integer: 3 } },
           },
         ],
       });

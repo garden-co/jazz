@@ -459,6 +459,7 @@ impl Parser {
                 "BOOLEAN" | "BOOL" => ColumnType::Boolean,
                 "TIMESTAMP" => ColumnType::Timestamp,
                 "UUID" => ColumnType::Uuid,
+                "BYTEA" => ColumnType::Bytea,
                 _ => return Err(SqlParseError::UnsupportedType(type_name)),
             }
         };
@@ -1036,6 +1037,58 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
     let mut parser = Parser::new(tokens);
     let mut schema = HashMap::new();
 
+    fn validate_policy_expr_for_bytea(
+        descriptor: &RowDescriptor,
+        expr: &PolicyExpr,
+    ) -> Result<(), SqlParseError> {
+        match expr {
+            PolicyExpr::Cmp { column, op, .. } => {
+                if matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge)
+                    && descriptor
+                        .column(column)
+                        .is_some_and(|col| matches!(col.column_type, ColumnType::Bytea))
+                {
+                    return Err(SqlParseError::UnsupportedType(format!(
+                        "BYTEA column '{}' only supports '=' and '!=' comparisons",
+                        column
+                    )));
+                }
+                Ok(())
+            }
+            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+                for inner in exprs {
+                    validate_policy_expr_for_bytea(descriptor, inner)?;
+                }
+                Ok(())
+            }
+            PolicyExpr::Not(inner) => validate_policy_expr_for_bytea(descriptor, inner),
+            PolicyExpr::IsNull { .. }
+            | PolicyExpr::IsNotNull { .. }
+            | PolicyExpr::Contains { .. }
+            | PolicyExpr::In { .. }
+            | PolicyExpr::InList { .. }
+            | PolicyExpr::Exists { .. }
+            | PolicyExpr::ExistsRel { .. }
+            | PolicyExpr::Inherits { .. }
+            | PolicyExpr::InheritsReferencing { .. }
+            | PolicyExpr::True
+            | PolicyExpr::False => Ok(()),
+        }
+    }
+
+    fn validate_operation_policy_for_bytea(
+        descriptor: &RowDescriptor,
+        policy: &OperationPolicy,
+    ) -> Result<(), SqlParseError> {
+        if let Some(using_expr) = &policy.using {
+            validate_policy_expr_for_bytea(descriptor, using_expr)?;
+        }
+        if let Some(with_check_expr) = &policy.with_check {
+            validate_policy_expr_for_bytea(descriptor, with_check_expr)?;
+        }
+        Ok(())
+    }
+
     fn apply_policy(
         schema: &mut Schema,
         table_name: String,
@@ -1049,6 +1102,7 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
                 table_name
             ))
         })?;
+        validate_operation_policy_for_bytea(&table_schema.descriptor, &policy)?;
 
         match operation {
             Operation::Select => table_schema.policies.select = policy,
@@ -1419,6 +1473,7 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         }
         ColumnType::Timestamp => "TIMESTAMP".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
+        ColumnType::Bytea => "BYTEA".to_string(),
         ColumnType::Array(elem) => format!("{}[]", column_type_to_sql(elem)),
         ColumnType::Row(_) => "TEXT".to_string(),
     }
@@ -1437,6 +1492,7 @@ fn value_to_sql(val: &Value) -> String {
         Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
         Value::Timestamp(t) => t.to_string(),
         Value::Uuid(id) => format!("'{:?}'", id),
+        Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
         Value::Array(_) => "'[]'".to_string(),
         Value::Row(_) => "'{}'".to_string(),
     }
@@ -1549,6 +1605,25 @@ mod tests {
         assert!(table.policies.update.using.is_some());
         assert!(table.policies.update.with_check.is_some());
         assert!(table.policies.delete.using.is_some());
+    }
+
+    #[test]
+    fn parse_policy_rejects_range_comparison_on_bytea() {
+        let sql = r#"
+            CREATE TABLE files (
+                id UUID NOT NULL,
+                data BYTEA NOT NULL
+            );
+            CREATE POLICY files_select_policy ON files FOR SELECT
+                USING (data < 'abc');
+        "#;
+
+        let err = parse_schema(sql).unwrap_err();
+        assert!(matches!(err, SqlParseError::UnsupportedType(_)));
+        assert!(
+            err.to_string()
+                .contains("BYTEA column 'data' only supports '=' and '!='")
+        );
     }
 
     #[test]
@@ -1845,7 +1920,8 @@ mod tests {
                 c BIGINT NOT NULL,
                 d BOOLEAN NOT NULL,
                 e TIMESTAMP NOT NULL,
-                f UUID NOT NULL
+                f UUID NOT NULL,
+                g BYTEA NOT NULL
             );
         "#;
 
@@ -1861,6 +1937,23 @@ mod tests {
             ColumnType::Timestamp
         );
         assert_eq!(table.descriptor.columns[5].column_type, ColumnType::Uuid);
+        assert_eq!(table.descriptor.columns[6].column_type, ColumnType::Bytea);
+    }
+
+    #[test]
+    fn parse_bytea_array_column_type() {
+        let sql = "CREATE TABLE chunks (parts BYTEA[] NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("chunks"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(
+            col.column_type,
+            ColumnType::Array(Box::new(ColumnType::Bytea))
+        );
     }
 
     #[test]
