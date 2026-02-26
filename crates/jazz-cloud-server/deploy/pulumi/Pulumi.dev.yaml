@@ -3,7 +3,7 @@ config:
   jazz-cloud2:awsDnsProfile: jazz2:shared
   jazz-cloud2:awsPrimaryProfile: jazz2:staging
   jazz-cloud2:containerImageRepository: 327252143262.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server
-  jazz-cloud2:containerImageTag: manage-ui-20260225-141658
+  jazz-cloud2:containerImageTag: persistence-dummy-20260225-160152
   jazz-cloud2:dataVolumeSizeGiB: "100"
   jazz-cloud2:domainName: cloud2.aws.cloud.jazz.tools
   jazz-cloud2:instanceType: t3.large
