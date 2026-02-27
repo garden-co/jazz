@@ -22,6 +22,7 @@
   "devDependencies": {
     "@changesets/cli": "^2.29.8",
     "lefthook": "^2.0.15",
+    "metro-runtime": "0.83.3",
     "next": "16.1.6",
     "oxfmt": "^0.27.0",
     "oxlint": "^1.42.0",
