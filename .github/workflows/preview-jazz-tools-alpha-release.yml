@@ -1,27 +1,13 @@
 name: Preview jazz-tools alpha release
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-    paths:
-      - packages/jazz-tools/package.json
-      - crates/jazz-wasm/package.json
-      - crates/jazz-napi/package.json
-      - crates/jazz-rn/package.json
-      - packages/jazz-tools/CHANGELOG.md
-      - crates/jazz-wasm/CHANGELOG.md
-      - crates/jazz-napi/CHANGELOG.md
-      - crates/jazz-rn/CHANGELOG.md
+      - changeset-release/*
   workflow_dispatch:
 
 concurrency:
-  group: preview-jazz-tools-alpha-${{ github.event.pull_request.number || github.ref }}
+  group: preview-jazz-tools-alpha-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -30,7 +16,7 @@ permissions:
 
 jobs:
   preview:
-    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && (github.event.pull_request.title == 'Version Packages (alpha)' || startsWith(github.event.pull_request.head.ref, 'changeset-release/')))
+    name: Release preview build
     uses: ./.github/workflows/publish-jazz-tools-alpha.yml
     with:
       mode: dry-run

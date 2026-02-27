@@ -184,16 +184,55 @@ jobs:
           path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
           if-no-files-found: error
 
+  build-rn-native:
+    name: Build jazz-rn native payload
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install/build React Native native prerequisites
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build jazz-rn iOS and Android native payloads
+        run: pnpm --filter jazz-rn build:rn
+
+      - name: Verify built jazz-rn native payloads
+        run: |
+          test -d crates/jazz-rn/JazzRnFramework.xcframework
+          test -f crates/jazz-rn/JazzRnFramework.xcframework/Info.plist
+          test -f crates/jazz-rn/android/src/main/jniLibs/arm64-v8a/libjazz_rn.a
+          test -f crates/jazz-rn/android/src/main/jniLibs/x86_64/libjazz_rn.a
+
+      - name: Stage jazz-rn native payload artifact
+        run: |
+          mkdir -p dist/rn-native
+          cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-native/
+          cp -R crates/jazz-rn/android/src/main/jniLibs dist/rn-native/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-rn-native-payload
+          path: dist/rn-native
+          if-no-files-found: error
+
   publish-npm:
     name: Publish npm alpha
     runs-on: ubuntu-latest
-    needs: [build-linux, build-macos, build-windows, build-napi]
+    needs: [build-linux, build-macos, build-windows, build-napi, build-rn-native]
     permissions:
       contents: read
       id-token: write
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      RELEASE_MODE: ${{ github.event_name == 'workflow_call' && inputs.mode || github.event_name == 'workflow_dispatch' && github.event.inputs.mode || 'publish' }}
+      RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -226,8 +265,29 @@ jobs:
           path: crates/jazz-napi/artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-rn-native-payload
+          path: dist/rn-native
+
+      - name: Stage jazz-rn native payload into npm package sources
+        run: |
+          rm -rf crates/jazz-rn/JazzRnFramework.xcframework
+          rm -rf crates/jazz-rn/android/src/main/jniLibs
+          mkdir -p crates/jazz-rn/android/src/main
+          cp -R dist/rn-native/JazzRnFramework.xcframework crates/jazz-rn/
+          cp -R dist/rn-native/jniLibs crates/jazz-rn/android/src/main/
+
       - name: Show release mode
-        run: 'echo "Release mode: ${RELEASE_MODE}"'
+        run: |
+          case "${RELEASE_MODE}" in
+            publish|dry-run) ;;
+            *)
+              echo "Unsupported RELEASE_MODE='${RELEASE_MODE}'"
+              exit 1
+              ;;
+          esac
+          echo "Release mode: ${RELEASE_MODE}"
 
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
@@ -267,11 +327,27 @@ jobs:
         run: |
           mkdir -p packages/jazz-tools/bin/native
           cp dist/jazz-tools-* packages/jazz-tools/bin/native/
-          chmod +x packages/jazz-tools/bin/native/jazz-tools-darwin-* packages/jazz-tools/bin/native/jazz-tools-linux-* || true
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64 \
+            jazz-tools-windows-x64.exe; do
+            FILE="packages/jazz-tools/bin/native/${bin}"
+            test -f "${FILE}" || { echo "Missing staged native binary ${bin}"; exit 1; }
+          done
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
+          ls -l packages/jazz-tools/bin/native
 
       - name: Resolve lock-stepped npm package versions
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${RELEASE_MODE}" = "dry-run" ]; then
+            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version || '' }}"
             if [ -n "${VERSION}" ]; then
               npm --prefix packages/jazz-tools version "${VERSION}" --no-git-tag-version
@@ -325,6 +401,37 @@ jobs:
           pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
           TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+
+      - name: Verify packed jazz-tools native binaries and runtime bootstrap
+        run: |
+          TMP_DIR=$(mktemp -d)
+          EXTRACT_DIR=$(mktemp -d)
+          pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
+          tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64; do
+            FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
+            test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
+          done
+
+          case "$(uname -m)" in
+            x86_64) HOST_LINUX_BIN="jazz-tools-linux-x64" ;;
+            aarch64|arm64) HOST_LINUX_BIN="jazz-tools-linux-arm64" ;;
+            *)
+              echo "Unsupported linux runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --help >/dev/null
+          test -x "${EXTRACT_DIR}/package/bin/native/${HOST_LINUX_BIN}" || {
+            echo "Packed native binary ${HOST_LINUX_BIN} is not executable after runtime bootstrap."
+            exit 1
+          }
 
       - name: Verify packed jazz-rn manifest
         run: |
