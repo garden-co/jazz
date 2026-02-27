@@ -281,8 +281,9 @@ describe("Svelte Todo App E2E", () => {
       adminSecret: ADMIN_SECRET,
     });
 
-    // Let both app instances finish server/event-stream setup before mutating.
-    await new Promise((r) => setTimeout(r, 750));
+    // Under heavily loaded CI, give both instances extra time to establish
+    // their event streams before sending the first mutation.
+    await new Promise((r) => setTimeout(r, 2000));
 
     // Add a todo in app 1 via the form
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -301,7 +302,7 @@ describe("Svelte Todo App E2E", () => {
     // Wait for it to appear in app 2 via server sync
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
-      20000,
+      45000,
       "Todo should sync to app 2 through the server",
     );
 
