@@ -26,6 +26,6 @@
     "@babel/plugin-transform-flow-strip-types": "^7.27.1",
     "@types/react": "^19.0.0",
     "babel-plugin-transform-import-meta": "^2.3.3",
-    "typescript": "^5.8.0"
+    "typescript": "catalog:default"
   }
 }
