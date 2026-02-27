@@ -2,7 +2,7 @@ export const metadata = {
   description: "Learn how to handle forms in Jazz for creating and updating CoValues."
 };
 
-import { Alert, CodeGroup, FileName } from "@/components/forMdx";
+import { Alert, CodeGroup, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo, ReactLogo, SvelteLogo, RNLogo, ExpoLogo, FileName } from "@/components/forMdx";
 
 # How to write forms with Jazz
 
@@ -12,28 +12,41 @@ This guide shows you a simple and powerful way to implement forms for creating a
 
 ## Updating a CoValue
 
-To update a CoValue, we simply assign the new value directly as changes happen. These changes are synced to the server.
+To update a CoValue, we use the `$jazz.set` method directly to update the CoValue with the new data as it changes. These changes are synced across all connected clients in real time.
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="tcg-form-updating">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx index.ts#Basic 
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx index.tsx#Basic
-<input
-  type="text"
-  value={order.name}
-  onChange={(e) => order.$jazz.set("name", e.target.value)}
-/>
 ```
-</CodeGroup>
-
-It's that simple!
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte UpdateCoValue.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx index.tsx#BasicRN
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx index.tsx#BasicRN
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ## Creating a CoValue
 
-When creating a CoValue, we can use a partial version that allows us to build up the data before submitting.
+We may want to create the CoValue early (for example, to save as a draft), even if we are not ready to fill all the mandatory fields yet. We can use the `.partial()` method to create the CoValue, and add data incrementally until it's ready to be saved.
 
 ### Using a Partial CoValue
 
+Rather than setting `.optional()` on every field in the schema, we can use the `.partial()` method to mark all fields as optional on an existing schema. This is useful when we want to create a CoValue, but we're not ready to fill all the mandatory fields yet.
+
 Let's say we have a CoValue called `BubbleTeaOrder`. We can create a partial version,
-`PartialBubbleTeaOrder`, which has some fields made optional so we can build up the data incrementally.
+`PartialBubbleTeaOrder`, which will allow us to create a form to fill fields incrementally until the order is ready to be submitted.
 
 <FileName>schema.ts</FileName>
 <CodeGroup>
@@ -41,24 +54,63 @@ Let's say we have a CoValue called `BubbleTeaOrder`. We can create a partial ver
 ```
 </CodeGroup>
 
-{/* TODO: add other frameworks */}
-## Writing the components in React
+## Writing the components
 
-Let's write the form component that will be used for both create and update.
+Let's write the form component that will be used for both creating and updating our order.
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="tcg-order-form">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx index.ts#OrderForm 
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx OrderForm.tsx#OrderForm
 ```
-</CodeGroup>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte OrderForm.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx OrderForm.tsx#OrderFormRN
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx OrderForm.tsx#OrderFormRN
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ### Writing the edit form
 
 To make the edit form, simply pass the `BubbleTeaOrder`. Changes are automatically saved as you type.
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="tcg-edit-form">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx index.ts#EditForm
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx OrderForm.tsx#EditForm
 ```
-</CodeGroup>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte EditForm.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx OrderForm.tsx#EditForm
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx OrderForm.tsx#EditForm
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<Alert variant="info" title="Note" className="mt-4">
+In a lot of cases, automatically saving as you type may not be what you want. For example, you may not want people to see the 'interim states' as you prepare your changes. In that case, [scroll down](#editing-with-a-save-button) to see how to use branching to create an isolated copy of the order that you can work on, and merge when you're ready.
+</Alert>
 
 ### Writing the create form
 
@@ -67,21 +119,59 @@ For the create form, we need to:
 2. Edit the partial order.
 3. Convert the partial order to a "real" order on submit.
 
-Here's how that looks like:
+Here's how that looks:
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="tcg-create-form">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx index.ts#CreateForm
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx OrderForm.tsx#CreateOrder
 ```
-</CodeGroup>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte CreateForm.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx index.ts#CreateForm
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx index.ts#CreateForm
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ## Editing with a save button
 
-If you need a save button for editing (rather than automatic saving), you can use Jazz's branching feature. The example app shows how to create a private branch for editing that can be merged back when the user saves:
+If you would rather prepare your changes locally, and only save them when you're ready, you can use Jazz's branching feature to create a private branch for editing that can be merged back when the user has finished editing.
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="tcg-edit-form-branch">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx index.ts#EditFormWithSave
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx OrderForm.tsx#EditOrderWithSave
 ```
-</CodeGroup>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte EditOrderWithSave.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx OrderForm.tsx#EditOrderWithSave
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx OrderForm.tsx#EditOrderWithSave
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+***Note**: branches are identified by a combination of their **name** and **owner**. In the example above, we create a new group on every page load in order to create a distinct branch, even though the name remains the same. Otherwise, the branch would be created with the current user as the owner. This would result in the same branch being reloaded on every page load, as the name and owner would match an existing branch.*
 
 This approach creates a private branch using `unstable_branch` with a unique owner group. The user can edit the branch without affecting the original data, and changes are only persisted when they click save via `unstable_merge()`.
 

@@ -13,7 +13,12 @@ export const BubbleTeaOrder = co.map({
   // [!code hide]
   instructions: co.plainText(),
 });
-export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
 
 export const PartialBubbleTeaOrder = BubbleTeaOrder.partial();
-export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
+// [!code hide:6]
+export const JazzAccount = co.account({
+  root: co.map({
+    orders: co.list(BubbleTeaOrder),
+  }),
+  profile: co.profile(),
+});
