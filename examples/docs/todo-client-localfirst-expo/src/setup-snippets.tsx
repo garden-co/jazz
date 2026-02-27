@@ -1,0 +1,25 @@
+import { createJazzClient, JazzProvider } from "jazz-tools/react-native";
+import { SafeAreaView, Text, View } from "react-native";
+import { TodoList } from "./TodoList";
+
+// #region context-setup-expo-minimal
+const client = createJazzClient({
+  appId: "00000000-0000-0000-0000-000000000002",
+  env: "dev",
+  userBranch: "main",
+  serverUrl: "http://127.0.0.1:1625",
+});
+
+export function AppMinimal() {
+  return (
+    <JazzProvider client={client}>
+      <SafeAreaView style={{ flex: 1 }}>
+        <View style={{ flex: 1, padding: 16, gap: 16 }}>
+          <Text style={{ fontSize: 28, fontWeight: "700" }}>Todos</Text>
+          <TodoList />
+        </View>
+      </SafeAreaView>
+    </JazzProvider>
+  );
+}
+// #endregion context-setup-expo-minimal

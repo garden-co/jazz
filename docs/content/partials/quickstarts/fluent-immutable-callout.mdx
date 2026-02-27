@@ -1,0 +1,8 @@
+import { Callout } from "fumadocs-ui/components/callout";
+
+<Callout title="Fluent and immutable?">
+  When you are building queries, you can create complex queries by chaining methods (fluency).
+
+Each chained call returns a new query object rather than modifying the original. So if you do `const base = query.where({ active: true })` and then `const sorted = base.orderBy("name")`, `base` is unchanged (immutability), and you have two separate queries.
+
+</Callout>

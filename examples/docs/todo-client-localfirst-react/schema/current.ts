@@ -1,3 +1,4 @@
+// #region schema-react
 import { table, col } from "jazz-tools";
 
 table("projects", {
@@ -11,3 +12,4 @@ table("todos", {
   parent: col.ref("todos").optional(),
   project: col.ref("projects").optional(),
 });
+// #endregion schema-react

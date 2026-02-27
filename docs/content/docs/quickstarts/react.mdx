@@ -1,0 +1,212 @@
+---
+title: React
+description: Build a local-first React app with Jazz. Schema, provider, reactive queries, and mutations.
+---
+
+import AuthMethods from "../../partials/quickstarts/auth-methods.mdx";
+import AvailableColumnTypes from "../../partials/quickstarts/available-column-types.mdx";
+import DbConfigReference from "../../partials/quickstarts/db-config-reference.mdx";
+import FluentImmutableCallout from "../../partials/quickstarts/fluent-immutable-callout.mdx";
+import NextLinks from "../../partials/quickstarts/next-links.mdx";
+import PersistenceTiersTable from "../../partials/quickstarts/persistence-tiers-table.mdx";
+import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
+import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
+import WhereOperatorsTable from "../../partials/quickstarts/where-operators-table.mdx";
+
+## Install
+
+Install the runtime package:
+
+`pnpm add jazz-tools`
+
+## Define your schema
+
+Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+
+<include cwd lang="ts" title="schema/current.ts">
+  ../examples/docs/todo-client-localfirst-react/schema/current.ts#schema-react
+</include>
+
+### Available column types
+
+<AvailableColumnTypes />
+
+### Run codegen
+
+<RunCodegen />
+
+## Create a client and wrap your app
+
+`JazzProvider` initializes the Jazz runtime and makes the database available to descendant components via React context.
+
+<include cwd lang="tsx" title="src/setup-snippets.tsx">
+  ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
+</include>
+
+### DbConfig reference
+
+<DbConfigReference />
+
+In browser clients, omitting local auth fields defaults to anonymous synthetic auth with a persisted local token.
+
+`client` is read once at mount. If you need to change it (for example after login), remount the provider with a new `key`.
+
+## Read data with `useAll`
+
+`useAll` subscribes to a query and returns live results that re-render your component whenever matching rows change.
+
+<include cwd lang="tsx" title="src/TodoList.tsx">
+  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
+</include>
+
+### Filtering, sorting, pagination
+
+Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit()`, and `.offset()` to shape queries.
+
+<include cwd lang="tsx" title="src/TodoList.tsx">
+  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-filtering-react
+</include>
+
+<FluentImmutableCallout />
+
+### Where operators
+
+Simple equality uses a plain value. For other comparisons, pass an operator object:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#where-operators-react
+</include>
+
+<WhereOperatorsTable />
+
+By default `useAll` returns results immediately from the local replica. Use settled tiers when you need explicit confirmation boundaries.
+
+## Write data with `useDb`
+
+`useDb` returns the `Db` handle for mutations. Mutations are synchronous at the local runtime level and sync to the server in the background.
+
+<include cwd lang="tsx" title="src/TodoList.tsx">
+  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
+</include>
+
+Because writes hit the local runtime first, subscriptions update immediately with local-first UX.
+
+## Persistence tiers
+
+<PersistenceTiersTable />
+
+<Callout title="Which tier to use?">
+  `worker` is the right default for most UI interactions. Use `edge` when you need to
+  confirm data has synced to the nearest server. Use `core` when you need globally
+  consistent acknowledgement.
+</Callout>
+
+### Reading with a settled tier
+
+Use `db.subscribeAll` (or `db.all`) with a settled tier when you need tier-gated delivery.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#reading-tier-react
+</include>
+
+### Writing with an ack tier
+
+Use `*WithAck` APIs to wait for specific durability tiers:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#writing-ack-react
+</include>
+
+## Querying in depth
+
+The examples above use `useAll` for reactive queries in components. Jazz also exposes imperative query methods on `db` for usage outside the render cycle.
+
+### One-shot queries
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#oneshot-react
+</include>
+
+Outside components (or when you need deltas), use `db.subscribeAll` directly:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#subscribe-react
+</include>
+
+### Relations with include
+
+If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#includes-react
+</include>
+
+### Chaining multiple where calls
+
+`.where()` calls are additive. Multiple calls produce AND semantics.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#chaining-react
+</include>
+
+### Combining everything
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#combining-react
+</include>
+
+## Authentication
+
+<AuthMethods />
+
+For browser clients, `anonymous` is the default when no external JWT/local auth override is supplied.
+
+### 1. Anonymous auth (default)
+
+If you provide no `jwtToken` or explicit local auth fields, Jazz auto-generates an anonymous token on first load and persists it in local storage.
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-react
+</include>
+
+If needed, you can explicitly override the local token:
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-token-react
+</include>
+
+### 2. Demo auth (local multi-user testing)
+
+Use synthetic user profiles for local multi-user testing:
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-demo-react
+</include>
+
+### 3. External auth and upgrade from anonymous/demo
+
+After provider sign-in, link the current local identity so existing local data stays attached when you switch to external JWT sessions:
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-external-react
+</include>
+
+### Server auth config (`jazz-tools server`)
+
+<ServerAuthConfig />
+
+<include cwd lang="bash">
+  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
+</include>
+
+### Offline-only mode
+
+Omit `serverUrl` to keep all data local:
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-offline-react
+</include>
+
+## Next
+
+<NextLinks />
