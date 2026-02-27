@@ -1073,16 +1073,19 @@ export class Db {
    * - If file deletion fails, still respawns worker and then rethrows the deletion error
    */
   async deleteClientStorage(): Promise<void> {
+    if (!isBrowser()) {
+      console.error(
+        "deleteClientStorage() is only available on browser worker-backed Db instances.",
+      );
+      return;
+    }
+
     const operation = this.workerReconfigure.then(async () => {
-      if (!this.worker || typeof window === "undefined") {
-        throw new Error(
-          "deleteClientStorage() is only available on browser worker-backed Db instances.",
-        );
-      }
       if (this.tabRole !== "leader") {
-        throw new Error(
+        console.error(
           "deleteClientStorage() can only run from the leader tab. Close other tabs and retry.",
         );
+        return;
       }
 
       const namespace = this.currentWorkerNamespace();
