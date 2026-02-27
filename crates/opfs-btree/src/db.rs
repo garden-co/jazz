@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap;
+use std::collections::HashSet;
 
 use crate::BTreeError;
 use crate::file::SyncFile;
@@ -18,6 +19,8 @@ const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
+
+type OpfsMap<K, V> = FxHashMap<K, V>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
@@ -89,9 +92,9 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
-    pages: HashMap<PageId, Vec<u8>>,
+    pages: OpfsMap<PageId, Vec<u8>>,
     blob_pages: HashSet<PageId>,
-    page_access_epoch: HashMap<PageId, u64>,
+    page_access_epoch: OpfsMap<PageId, u64>,
     access_epoch: u64,
     dirty_pages: HashSet<PageId>,
     free_pages: Vec<PageId>,
@@ -135,9 +138,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             active,
             root_page_id: None,
             total_pages: 2,
-            pages: HashMap::new(),
+            pages: OpfsMap::default(),
             blob_pages: HashSet::new(),
-            page_access_epoch: HashMap::new(),
+            page_access_epoch: OpfsMap::default(),
             access_epoch: 0,
             dirty_pages: HashSet::new(),
             free_pages: Vec::new(),
@@ -1101,8 +1104,12 @@ impl<F: SyncFile> OpfsBTree<F> {
             };
             self.pages.insert(current_page_id, page_raw.to_vec());
             self.touch_page(current_page_id);
-            self.evict_pages_if_needed(Some(page_id));
+            self.evict_pages_if_needed_with_allowance(
+                Some(page_id),
+                self.options.read_coalesce_pages,
+            );
         }
+        self.evict_pages_if_needed(Some(page_id));
 
         Ok(())
     }
@@ -1450,8 +1457,17 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn evict_pages_if_needed(&mut self, protected_page: Option<PageId>) {
+        self.evict_pages_if_needed_with_allowance(protected_page, 0);
+    }
+
+    fn evict_pages_if_needed_with_allowance(
+        &mut self,
+        protected_page: Option<PageId>,
+        over_budget_allowance: usize,
+    ) {
         let max_cached_pages = self.max_cached_pages();
-        if self.pages.len() <= max_cached_pages {
+        let trigger = max_cached_pages.saturating_add(over_budget_allowance);
+        if self.pages.len() <= trigger {
             return;
         }
 
@@ -1483,16 +1499,23 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ))
             })
             .collect();
-        candidates.sort_unstable();
 
-        let mut target = self.pages.len().saturating_sub(max_cached_pages);
-        for (_, _, page_id) in candidates {
-            if target == 0 {
-                break;
-            }
-            self.pages.remove(&page_id);
-            self.page_access_epoch.remove(&page_id);
-            target -= 1;
+        let target = self
+            .pages
+            .len()
+            .saturating_sub(max_cached_pages)
+            .min(candidates.len());
+        if target == 0 {
+            return;
+        }
+
+        let split_at = target - 1;
+        let _ = candidates.select_nth_unstable(split_at);
+        let victims = &mut candidates[..target];
+
+        for (_, _, page_id) in victims.iter() {
+            self.pages.remove(page_id);
+            self.page_access_epoch.remove(page_id);
         }
     }
 
@@ -2169,6 +2192,67 @@ mod tests {
         );
         let range = tree.range(b"k01000", b"k01010", 32).expect("range");
         assert_eq!(range.len(), 10);
+    }
+
+    #[test]
+    fn cache_eviction_allowance_defers_until_threshold() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
+        let max_cached = tree.max_cached_pages();
+        let allowance = 4usize;
+        let keep_len = max_cached + allowance;
+        let page_size = tree.options.page_size;
+
+        for idx in 0..keep_len {
+            let page_id = 10_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.touch_page(page_id);
+        }
+
+        tree.evict_pages_if_needed_with_allowance(None, allowance);
+        assert_eq!(
+            tree.pages.len(),
+            keep_len,
+            "eviction should not run while within allowance"
+        );
+
+        let overflow_page_id = 10_000 + keep_len as u64;
+        tree.pages.insert(overflow_page_id, vec![0u8; page_size]);
+        tree.touch_page(overflow_page_id);
+
+        tree.evict_pages_if_needed_with_allowance(None, allowance);
+        assert!(
+            tree.pages.len() <= max_cached,
+            "eviction should reduce cache back to strict budget"
+        );
+    }
+
+    #[test]
+    fn cache_eviction_keeps_budget_for_coalesced_reads() {
+        let file = MemoryFile::new();
+        let mut options = tiny_cache_options();
+        options.read_coalesce_pages = 8;
+        let mut tree = OpfsBTree::open(file, options).expect("open tree");
+
+        for i in 0..8_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("value-{}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+        tree.checkpoint().expect("checkpoint");
+
+        let max_cached = tree.max_cached_pages();
+        let root = tree.root_page_id.expect("root exists");
+
+        for page_id in 2..tree.total_pages {
+            tree.ensure_page_loaded(page_id).expect("load page");
+            assert!(
+                tree.pages.len() <= max_cached,
+                "cache exceeded budget after loading page {}",
+                page_id
+            );
+            assert!(tree.pages.contains_key(&root));
+        }
     }
 
     #[test]
