@@ -1085,6 +1085,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut raw = vec![0u8; run_bytes];
         self.file.read_exact_at(offset, &mut raw)?;
+        let allowance = self.max_cached_pages() / 4;
 
         for i in 0..run_pages {
             let current_page_id = page_id + i as u64;
@@ -1104,10 +1105,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             };
             self.pages.insert(current_page_id, page_raw.to_vec());
             self.touch_page(current_page_id);
-            self.evict_pages_if_needed_with_allowance(
-                Some(page_id),
-                self.options.read_coalesce_pages,
-            );
+            self.evict_pages_if_needed_with_allowance(Some(page_id), allowance);
         }
         self.evict_pages_if_needed(Some(page_id));
 
