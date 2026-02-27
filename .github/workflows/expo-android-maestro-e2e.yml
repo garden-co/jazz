@@ -40,11 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - name: Install Node.js
+        uses: useblacksmith/setup-node@v5
         with:
-          # RN/Expo Android bundling in this workflow is currently unstable on Node 24.
-          # Pin this job to Node 22 (LTS) while the upstream toolchain catches up.
-          node-version: "22"
+          node-version-file: '.node-version'
           cache: pnpm
 
       - name: Enable Corepack and pin pnpm
