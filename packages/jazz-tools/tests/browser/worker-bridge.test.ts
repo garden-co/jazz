@@ -431,6 +431,27 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
   });
 
+  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete-storage") }));
+
+    await db.insertWithAck(todos, { title: "Should be deleted", done: false }, "worker");
+    const before = await db.all(allTodos, "worker");
+    expect(before.length).toBe(1);
+    expect(before[0].title).toBe("Should be deleted");
+
+    await db.deleteClientStorage();
+
+    const afterDelete = await db.all(allTodos, "worker");
+    expect(afterDelete).toEqual([]);
+
+    const id = db.insert(todos, { title: "Fresh after delete", done: true });
+    const afterReinsert = await db.all(allTodos, "worker");
+    expect(afterReinsert).toHaveLength(1);
+    expect(afterReinsert[0].id).toBe(id);
+    expect(afterReinsert[0].title).toBe("Fresh after delete");
+    expect(afterReinsert[0].done).toBe(true);
+  });
+
   it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
     const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
     const seeded = track(await createDb({ appId: "test-app", dbName }));
