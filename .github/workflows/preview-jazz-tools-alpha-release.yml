@@ -1,18 +1,13 @@
 name: Preview jazz-tools alpha release
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
+      - changeset-release/*
   workflow_dispatch:
 
 concurrency:
-  group: preview-jazz-tools-alpha-${{ github.event.pull_request.number || github.ref }}
+  group: preview-jazz-tools-alpha-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,66 +15,9 @@ permissions:
   id-token: write
 
 jobs:
-  classify-pr:
-    name: Classify release PR
-    runs-on: ubuntu-latest
-    outputs:
-      is_release_pr: ${{ steps.classify.outputs.is_release_pr }}
-    steps:
-      - id: classify
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          if [ "${EVENT_NAME}" != "pull_request" ]; then
-            echo "is_release_pr=true" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          if [ "${PR_DRAFT}" = "true" ]; then
-            echo "is_release_pr=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          if [[ "${PR_HEAD_REF}" == changeset-release/* ]]; then
-            echo "is_release_pr=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "is_release_pr=false" >> "${GITHUB_OUTPUT}"
-          fi
-
   preview:
     name: Release preview build
-    needs: classify-pr
-    if: needs.classify-pr.outputs.is_release_pr == 'true'
     uses: ./.github/workflows/publish-jazz-tools-alpha.yml
     with:
       mode: dry-run
     secrets: inherit
-
-  release-preview-required:
-    name: Release preview required
-    runs-on: ubuntu-latest
-    needs: [classify-pr, preview]
-    if: always()
-    steps:
-      - name: Enforce preview result for release PRs
-        env:
-          IS_RELEASE_PR: ${{ needs.classify-pr.outputs.is_release_pr }}
-          PREVIEW_RESULT: ${{ needs.preview.result }}
-        run: |
-          echo "is_release_pr=${IS_RELEASE_PR}"
-          echo "preview_result=${PREVIEW_RESULT}"
-
-          if [ "${IS_RELEASE_PR}" != "true" ]; then
-            echo "Not a release PR; skipping heavy preview requirement."
-            exit 0
-          fi
-
-          if [ "${PREVIEW_RESULT}" = "success" ]; then
-            echo "Release preview passed."
-            exit 0
-          fi
-
-          echo "Release preview failed (result=${PREVIEW_RESULT})."
-          exit 1
