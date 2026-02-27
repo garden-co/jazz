@@ -12,7 +12,14 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import type { Session } from "./context.js";
-import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
+import {
+  JazzClient,
+  loadWasmModule,
+  type WasmModule,
+  type PersistenceTier,
+  type QueryExecutionOptions,
+  type QueryPropagation,
+} from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows, type IncludeSpec } from "./row-transformer.js";
@@ -73,6 +80,10 @@ export interface QueryBuilder<T> {
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
+}
+
+export interface QueryOptions extends QueryExecutionOptions {
+  propagation?: QueryPropagation;
 }
 
 interface BuiltQuery {
@@ -1126,11 +1137,11 @@ export class Db {
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
    * @returns Array of typed objects matching the query
    */
-  async all<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T[]> {
+  async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const rows = await client.query(translateQuery(builderJson, query._schema), settledTier);
+    const rows = await client.query(translateQuery(builderJson, query._schema), options);
     const outputTable =
       builtQuery.hops.length > 0
         ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
@@ -1146,8 +1157,8 @@ export class Db {
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns First matching typed object, or null if none found
    */
-  async one<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T | null> {
-    const results = await this.all(query, settledTier);
+  async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    const results = await this.all(query, options);
     return results[0] ?? null;
   }
 
@@ -1180,7 +1191,7 @@ export class Db {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    settledTier?: PersistenceTier,
+    options?: QueryOptions,
     session?: Session,
   ): () => void {
     const manager = new SubscriptionManager<T>();
@@ -1205,7 +1216,7 @@ export class Db {
         callback(typedDelta);
       },
       session,
-      settledTier,
+      options,
     );
 
     // Return unsubscribe function

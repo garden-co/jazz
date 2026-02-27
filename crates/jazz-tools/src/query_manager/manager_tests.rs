@@ -6436,6 +6436,7 @@ fn server_builds_query_graph_on_subscription() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
 
@@ -6535,6 +6536,7 @@ fn server_sends_error_for_uncompilable_query_subscription() {
             query_id: QueryId(42),
             query: Box::new(invalid_query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
 
@@ -6587,6 +6589,7 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
             query_id: QueryId(7),
             query: Box::new(valid_query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
     server_qm.process(&mut storage);
@@ -6685,6 +6688,7 @@ fn server_pushes_new_matches() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
 
@@ -6748,6 +6752,7 @@ fn server_does_not_push_non_matching() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
 
@@ -6825,6 +6830,80 @@ fn subscribe_with_sync_sends_to_servers() {
 }
 
 #[test]
+fn subscribe_with_sync_local_only_sends_to_connected_tier() {
+    use crate::sync_manager::QueryPropagation;
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    client_qm.sync_manager_mut().add_server(server_id);
+    let _ = client_qm.sync_manager_mut().take_outbox();
+
+    let query = client_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let _sub_id = client_qm
+        .subscribe_with_sync_and_propagation(query, None, None, QueryPropagation::LocalOnly)
+        .unwrap();
+
+    let outbox = client_qm.sync_manager_mut().take_outbox();
+    let query_subs: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        query_subs.len(),
+        1,
+        "local-only subscription should be sent to connected tier"
+    );
+}
+
+#[test]
+fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
+    use crate::sync_manager::QueryPropagation;
+    use crate::sync_manager::{Destination, PersistenceTier, ServerId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new().with_tier(PersistenceTier::Worker);
+    let schema = test_schema();
+    let (mut worker_qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    worker_qm.sync_manager_mut().add_server(server_id);
+    let _ = worker_qm.sync_manager_mut().take_outbox();
+
+    let query = worker_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let _sub_id = worker_qm
+        .subscribe_with_sync_and_propagation(query, None, None, QueryPropagation::LocalOnly)
+        .unwrap();
+
+    let outbox = worker_qm.sync_manager_mut().take_outbox();
+    let query_subs: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        query_subs.len(),
+        0,
+        "worker-tier local-only subscription should not be sent to upstream sync server"
+    );
+}
+
+#[test]
 fn add_server_replays_existing_local_query_subscriptions() {
     use crate::sync_manager::{Destination, QueryId, ServerId, SyncPayload};
     use uuid::Uuid;
@@ -6868,6 +6947,42 @@ fn add_server_replays_existing_local_query_subscriptions() {
         replayed,
         vec![QueryId(sub_id.0)],
         "add_server should replay active local subscriptions to the new server"
+    );
+}
+
+#[test]
+fn add_server_replays_local_only_query_subscriptions() {
+    use crate::sync_manager::QueryPropagation;
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let query = client_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let _sub_id = client_qm
+        .subscribe_with_sync_and_propagation(query, None, None, QueryPropagation::LocalOnly)
+        .unwrap();
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    client_qm.add_server(server_id);
+    let outbox = client_qm.sync_manager_mut().take_outbox();
+
+    let replayed: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        replayed.len(),
+        1,
+        "add_server should replay local-only subscriptions"
     );
 }
 
@@ -6952,6 +7067,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
 
@@ -6971,6 +7087,98 @@ fn mid_tier_forwards_query_subscription_upstream() {
         forwarded.len(),
         1,
         "Mid-tier should forward QuerySubscription to upstream server"
+    );
+}
+
+#[test]
+fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_server(upstream_id);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_client(client_id);
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let query = mid_tier
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::LocalOnly,
+        },
+    });
+    mid_tier.process(&mut storage);
+
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    let forwarded: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == upstream_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        forwarded.len(),
+        0,
+        "Mid-tier should not forward local-only QuerySubscription upstream"
+    );
+}
+
+#[test]
+fn add_server_does_not_replay_downstream_local_only_query_subscription() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    let downstream_client = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_client(downstream_client);
+
+    let query = mid_tier
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(downstream_client),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(77),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::LocalOnly,
+        },
+    });
+    mid_tier.process(&mut storage);
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.add_server(upstream_id);
+
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    let replayed: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == upstream_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        replayed.len(),
+        0,
+        "add_server should not replay downstream local-only subscriptions upstream"
     );
 }
 
@@ -7005,6 +7213,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
             query_id,
             query: Box::new(query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
     mid_tier.process(&mut storage);
@@ -7082,6 +7291,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
         },
     });
     mid_tier.process(&mut storage);

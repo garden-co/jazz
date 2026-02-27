@@ -8,7 +8,8 @@ use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
-    ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
+    ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, QueryPropagation,
+    SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -183,6 +184,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) achieved_tiers: HashSet<PersistenceTier>,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
+    /// Whether this subscription should be forwarded to upstream servers.
+    pub(crate) propagation: QueryPropagation,
 }
 
 /// Update for a query subscription.
@@ -235,6 +238,8 @@ pub(super) struct ServerQuerySubscription {
     /// Flag indicating this server subscription has settled at least once.
     /// Used to emit QuerySettled to the client on first settlement.
     pub(super) settled_once: bool,
+    /// Whether this subscription should be propagated to upstream servers.
+    pub(super) propagation: QueryPropagation,
 }
 
 /// A catalogue object update received via sync.
@@ -473,17 +478,23 @@ impl QueryManager {
         }
 
         for (sub_id, reason) in failed_local {
-            self.subscriptions.remove(&sub_id);
+            let propagation = self
+                .subscriptions
+                .remove(&sub_id)
+                .map(|sub| sub.propagation)
+                .unwrap_or(QueryPropagation::Full);
             self.failed_subscriptions.push(QuerySubscriptionFailure {
                 subscription_id: sub_id,
                 reason: reason.clone(),
             });
-            // Keep upstream state in sync for subscriptions created via subscribe_with_sync.
-            self.sync_manager
-                .send_query_unsubscription_to_servers(QueryId(sub_id.0));
+            if propagation == QueryPropagation::Full {
+                // Keep upstream state in sync for subscriptions created via subscribe_with_sync.
+                self.sync_manager
+                    .send_query_unsubscription_to_servers(QueryId(sub_id.0));
+            }
         }
 
-        let mut failed_server: Vec<(ClientId, QueryId, String)> = Vec::new();
+        let mut failed_server: Vec<(ClientId, QueryId, String, QueryPropagation)> = Vec::new();
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
@@ -507,18 +518,20 @@ impl QueryManager {
                             error = %reason,
                             "server subscription stale recompile failed; dropping subscription"
                         );
-                        failed_server.push((*client_id, *query_id, reason));
+                        failed_server.push((*client_id, *query_id, reason, sub.propagation));
                     }
                 }
             }
         }
 
-        for (client_id, query_id, reason) in failed_server {
+        for (client_id, query_id, reason, propagation) in failed_server {
             self.server_subscriptions.remove(&(client_id, query_id));
             self.sync_manager
                 .drop_client_query_subscription(client_id, query_id);
-            self.sync_manager
-                .send_query_unsubscription_to_servers(query_id);
+            if propagation == QueryPropagation::Full {
+                self.sync_manager
+                    .send_query_unsubscription_to_servers(query_id);
+            }
             self.sync_manager.emit_query_subscription_rejected(
                 client_id,
                 query_id,

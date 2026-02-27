@@ -10,6 +10,7 @@ export declare function deriveLocalPrincipalId(
   mode: LocalAuthMode,
   token: string,
 ): Promise<string>;
+export declare function resolveJwtSession(jwtToken: string): Session | null;
 /**
  * Resolve the client session that will be used for permission checks.
  *

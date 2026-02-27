@@ -31,12 +31,14 @@ export interface Runtime {
     query_json: string,
     session_json?: string | null,
     settled_tier?: string | null,
+    options_json?: string | null,
   ): Promise<any>;
   subscribe(
     query_json: string,
     on_update: Function,
     session_json?: string | null,
     settled_tier?: string | null,
+    options_json?: string | null,
   ): number;
   unsubscribe(handle: number): void;
   insertWithAck(table: string, values: any, tier: string): Promise<string>;
@@ -61,6 +63,11 @@ export interface Runtime {
  * - `core`: Persisted at core server
  */
 export type PersistenceTier = "worker" | "edge" | "core";
+export type QueryPropagation = "full" | "local-only";
+export interface QueryExecutionOptions {
+  settledTier?: PersistenceTier;
+  propagation?: QueryPropagation;
+}
 /**
  * Query row result.
  */
@@ -109,11 +116,15 @@ export declare class SessionClient {
   /**
    * Query as this session's user.
    */
-  query(query: string | QueryInput): Promise<Row[]>;
+  query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]>;
   /**
    * Subscribe to a query as this session's user.
    */
-  subscribe(query: string | QueryInput, callback: SubscriptionCallback): number;
+  subscribe(
+    query: string | QueryInput,
+    callback: SubscriptionCallback,
+    options?: QueryExecutionOptions,
+  ): number;
 }
 /**
  * High-level Jazz client.
@@ -124,6 +135,7 @@ export declare class JazzClient {
   private serverClientId;
   private subscriptions;
   private context;
+  private resolvedSession;
   private constructor();
   /**
    * Connect to Jazz with the given context.
@@ -207,7 +219,7 @@ export declare class JazzClient {
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns Array of matching rows
    */
-  query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]>;
+  query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]>;
   /**
    * Internal query with optional session and settled tier.
    * @internal
@@ -215,7 +227,7 @@ export declare class JazzClient {
   queryInternal(
     queryJson: string,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): Promise<Row[]>;
   /**
    * Update a row by ID (sync, fire-and-forget).
@@ -253,7 +265,7 @@ export declare class JazzClient {
   subscribe(
     query: string | QueryInput,
     callback: SubscriptionCallback,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number;
   /**
    * Internal subscribe with optional session and settled tier.
@@ -263,7 +275,7 @@ export declare class JazzClient {
     query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number;
   /**
    * Unsubscribe from a query.

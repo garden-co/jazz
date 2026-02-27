@@ -1,5 +1,5 @@
 import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import type { QueryBuilder } from "./runtime/db.js";
+import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 import type { PersistenceTier } from "./runtime/client.js";
 
@@ -148,7 +148,7 @@ interface DbLike {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    settledTier?: PersistenceTier,
+    options?: QueryOptions,
     session?: Session,
   ): () => void;
 }
@@ -293,7 +293,7 @@ export class SubscriptionsOrchestrator {
             this.scheduleCleanup(entry);
           }
         },
-        entry.tier,
+        entry.tier ? { settledTier: entry.tier } : undefined,
         this.session ?? undefined,
       );
     } catch (error) {
