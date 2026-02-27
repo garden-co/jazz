@@ -92,6 +92,13 @@ jobs:
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
+      - name: Build all workspace packages
+        run: |
+          set -euo pipefail
+          sccache --show-stats || true
+          pnpm build:all
+          sccache --show-stats || true
+
       - name: Build jazz-tools CLI
         run: |
           set -euo pipefail
@@ -121,6 +128,12 @@ jobs:
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
           "${HOME}/.local/bin/cloudflared" --version
+
+      - name: Generate Expo Android project (prebuild)
+        run: |
+          set -euo pipefail
+          pnpm --filter todo-client-localfirst-expo verify:expo:android
+          test -f examples/todo-client-localfirst-expo/android/gradlew
 
       - name: Start jazz-tools server
         run: |
