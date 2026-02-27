@@ -27,13 +27,15 @@ function defaultConfig(
 }
 // #endregion context-setup-react
 
-const jazzClient = await createJazzClient(defaultConfig());
+const jazzClient = createJazzClient(defaultConfig());
 
 if (location.origin.includes("localhost")) {
-  Object.defineProperty(window, "jazzClient", {
-    value: jazzClient,
-    writable: true,
-  });
+  jazzClient.then((client) =>
+    Object.defineProperty(window, "jazzClient", {
+      value: client,
+      writable: true,
+    }),
+  );
 }
 
 // #region context-setup-react
