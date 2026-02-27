@@ -30,7 +30,6 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           if [ "${EVENT_NAME}" != "pull_request" ]; then
@@ -43,7 +42,7 @@ jobs:
             exit 0
           fi
 
-          if [ "${PR_TITLE}" = "Version Packages (alpha)" ] || [[ "${PR_HEAD_REF}" == changeset-release/* ]]; then
+          if [[ "${PR_HEAD_REF}" == changeset-release/* ]]; then
             echo "is_release_pr=true" >> "${GITHUB_OUTPUT}"
           else
             echo "is_release_pr=false" >> "${GITHUB_OUTPUT}"
