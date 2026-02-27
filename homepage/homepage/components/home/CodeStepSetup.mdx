@@ -6,7 +6,7 @@ import { JazzReactProvider }
 // Describe your app with cloud-synced CoValues ("collaborative values")
 const Message = co.map({
   text: z.string(),
-});
+}).withPermissions("sameAsContainer");
 
 const Chat = co.list(Message);
 
@@ -15,11 +15,9 @@ const Chat = co.list(Message);
 const peer =
   "wss://cloud.jazz.tools/?key=...";
 
-function App() {
-  return (
-    <JazzReactProvider sync={{ peer }}>
-      ...
-    </JazzReactProvider>
-  );
-}
+const App = () => (
+  <JazzReactProvider sync={{ peer }}>
+    ...
+  </JazzReactProvider>
+);
 ```
