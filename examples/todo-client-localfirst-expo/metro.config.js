@@ -1,8 +1,13 @@
-const path = require("node:path");
-const fs = require("node:fs");
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 const { getDefaultConfig } = require("expo/metro-config");
 
-const projectRoot = __dirname;
+const __filename = fileURLToPath(import.meta.url);
+const projectRoot = path.dirname(__filename);
 const workspaceRoot = path.resolve(projectRoot, "../..");
 
 const config = getDefaultConfig(projectRoot);
@@ -42,4 +47,4 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   return defaultResolveRequest ? defaultResolveRequest(context, moduleName, platform) : null;
 };
 
-module.exports = config;
+export default config;
