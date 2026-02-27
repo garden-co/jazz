@@ -12,6 +12,14 @@ import {
 import { useAll, useDb, useSession } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema/app";
 
+function toTestIdSegment(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
@@ -39,9 +47,12 @@ export function TodoList() {
   };
 
   const renderItem: ListRenderItem<Todo> = ({ item }) => {
+    const titleId = toTestIdSegment(item.title);
+
     return (
       <View style={styles.todoRow}>
         <Switch
+          testID={`todo-toggle-${titleId}`}
           value={item.done}
           onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
         />
@@ -49,7 +60,7 @@ export function TodoList() {
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
-        <Pressable onPress={() => db.delete(app.todos, item.id)} style={styles.deleteButton}>
+        <Pressable testID={`todo-delete-${titleId}`} onPress={() => db.delete(app.todos, item.id)} style={styles.deleteButton}>
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>
@@ -60,6 +71,7 @@ export function TodoList() {
     <View style={styles.wrapper}>
       <View style={styles.inputRow}>
         <TextInput
+          testID="todo-input"
           value={title}
           onChangeText={setTitle}
           placeholder="What needs to be done?"
@@ -69,6 +81,7 @@ export function TodoList() {
         />
         <Pressable
           onPress={addTodo}
+          testID="todo-add"
           style={[styles.addButton, !sessionUserId && styles.addButtonDisabled]}
           disabled={!sessionUserId}
         >
@@ -85,7 +98,11 @@ export function TodoList() {
         />
         <View style={styles.doneOnlyRow}>
           <Text style={styles.doneOnlyLabel}>Done only</Text>
-          <Switch value={showDoneOnly} onValueChange={setShowDoneOnly} />
+          <Switch
+            testID="todo-filter-done-only"
+            value={showDoneOnly}
+            onValueChange={setShowDoneOnly}
+          />
         </View>
       </View>
 
