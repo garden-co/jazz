@@ -1,5 +1,4 @@
-use rustc_hash::FxHashMap;
-use std::collections::HashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::BTreeError;
 use crate::file::SyncFile;
@@ -21,6 +20,7 @@ const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
+type OpfsSet<T> = FxHashSet<T>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
@@ -93,12 +93,12 @@ pub struct OpfsBTree<F: SyncFile> {
     root_page_id: Option<PageId>,
     total_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
-    blob_pages: HashSet<PageId>,
+    blob_pages: OpfsSet<PageId>,
     page_access_epoch: OpfsMap<PageId, u64>,
     access_epoch: u64,
-    dirty_pages: HashSet<PageId>,
+    dirty_pages: OpfsSet<PageId>,
     free_pages: Vec<PageId>,
-    free_set: HashSet<PageId>,
+    free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
 }
 
@@ -139,12 +139,12 @@ impl<F: SyncFile> OpfsBTree<F> {
             root_page_id: None,
             total_pages: 2,
             pages: OpfsMap::default(),
-            blob_pages: HashSet::new(),
+            blob_pages: OpfsSet::default(),
             page_access_epoch: OpfsMap::default(),
             access_epoch: 0,
-            dirty_pages: HashSet::new(),
+            dirty_pages: OpfsSet::default(),
             free_pages: Vec::new(),
-            free_set: HashSet::new(),
+            free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
         };
 
@@ -290,7 +290,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut out = Vec::new();
         let mut current = self.find_leaf_page_id(start)?;
-        let mut visited = HashSet::new();
+        let mut visited = OpfsSet::default();
 
         while let Some(page_id) = current {
             if !visited.insert(page_id) {
@@ -1021,7 +1021,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn load_freelist_from_disk(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
         let mut current = head_page_id;
-        let mut seen = HashSet::new();
+        let mut seen = OpfsSet::default();
 
         while current != 0 {
             if !seen.insert(current) {
@@ -1324,7 +1324,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn sanitize_free_pages(&mut self) {
-        let live_page_ids: HashSet<PageId> = self.pages.keys().copied().collect();
+        let live_page_ids: OpfsSet<PageId> = self.pages.keys().copied().collect();
         self.free_set.retain(|page_id| {
             *page_id >= 2 && *page_id < self.total_pages && !live_page_ids.contains(page_id)
         });
