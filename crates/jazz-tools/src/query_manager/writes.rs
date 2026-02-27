@@ -790,6 +790,12 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
+        // Ensure object is loaded from storage (cold-start: may only exist on disk)
+        let branch = self.current_branch();
+        self.sync_manager
+            .object_manager
+            .get_or_load(id, storage, &[branch]);
+
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -956,6 +962,12 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
+        // Ensure object is loaded from storage (cold-start: may only exist on disk)
+        let branch = self.current_branch();
+        self.sync_manager
+            .object_manager
+            .get_or_load(id, storage, &[branch]);
+
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
