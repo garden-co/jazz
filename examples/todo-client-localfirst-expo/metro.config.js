@@ -1,5 +1,4 @@
 import path from "node:path";
-import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
@@ -28,23 +27,5 @@ config.resolver.extraNodeModules = {
 };
 config.resolver.unstable_enableSymlinks = true;
 config.resolver.unstable_enablePackageExports = true;
-
-// Resolve relative "./foo.js" to "./foo.ts" or "./foo.tsx" when .js doesn't exist (TS source in workspace)
-const defaultResolveRequest = config.resolver.resolveRequest;
-config.resolver.resolveRequest = (context, moduleName, platform) => {
-  if (moduleName.startsWith(".") && moduleName.endsWith(".js") && context.originModulePath) {
-    const dir = path.dirname(context.originModulePath);
-    const base = path.join(dir, moduleName.slice(0, -3));
-    for (const ext of [".ts", ".tsx", ".js", ".jsx"]) {
-      const candidate = base + ext;
-      try {
-        if (fs.existsSync(candidate)) {
-          return { type: "sourceFile", filePath: candidate };
-        }
-      } catch (_) {}
-    }
-  }
-  return defaultResolveRequest ? defaultResolveRequest(context, moduleName, platform) : null;
-};
 
 export default config;
