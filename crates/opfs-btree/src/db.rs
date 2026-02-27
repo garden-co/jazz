@@ -1,4 +1,5 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BinaryHeap;
 
 use crate::BTreeError;
 use crate::file::SyncFile;
@@ -1470,50 +1471,56 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         let root_page_id = self.root_page_id;
-        let mut candidates: Vec<(u8, u64, PageId)> = self
-            .pages
-            .iter()
-            .filter_map(|(page_id, page)| {
-                if Some(*page_id) == protected_page
-                    || Some(*page_id) == root_page_id
-                    || self.dirty_pages.contains(page_id)
-                {
-                    return None;
-                }
-                let priority = match raw_page_kind(page, self.options.page_size) {
-                    Ok(kind) => {
-                        if self.options.pin_internal_pages && kind == PageKind::Internal {
-                            return None;
-                        }
-                        eviction_priority(kind)
-                    }
-                    Err(_) => 0, // blob/raw pages are always evictable when clean
-                };
-
-                Some((
-                    priority,
-                    *self.page_access_epoch.get(page_id).unwrap_or(&0),
-                    *page_id,
-                ))
-            })
-            .collect();
-
-        let target = self
-            .pages
-            .len()
-            .saturating_sub(max_cached_pages)
-            .min(candidates.len());
+        let target = self.pages.len().saturating_sub(max_cached_pages);
         if target == 0 {
             return;
         }
 
-        let split_at = target - 1;
-        let _ = candidates.select_nth_unstable(split_at);
-        let victims = &mut candidates[..target];
+        // One pass top-k selection:
+        // Keep only the k worst eviction candidates in a bounded max heap.
+        // Candidate ordering is (priority, access_epoch, page_id), where smaller
+        // values are better eviction victims.
+        let mut victims: BinaryHeap<(u8, u64, PageId)> = BinaryHeap::with_capacity(target);
+        for (page_id, page) in &self.pages {
+            if Some(*page_id) == protected_page
+                || Some(*page_id) == root_page_id
+                || self.dirty_pages.contains(page_id)
+            {
+                continue;
+            }
 
-        for (_, _, page_id) in victims.iter() {
-            self.pages.remove(page_id);
-            self.page_access_epoch.remove(page_id);
+            let priority = match raw_page_kind(page, self.options.page_size) {
+                Ok(kind) => {
+                    if self.options.pin_internal_pages && kind == PageKind::Internal {
+                        continue;
+                    }
+                    eviction_priority(kind)
+                }
+                Err(_) => 0, // blob/raw pages are always evictable when clean
+            };
+
+            let candidate = (
+                priority,
+                *self.page_access_epoch.get(page_id).unwrap_or(&0),
+                *page_id,
+            );
+
+            if victims.len() < target {
+                victims.push(candidate);
+                continue;
+            }
+
+            if let Some(worst_kept) = victims.peek()
+                && candidate < *worst_kept
+            {
+                let _ = victims.pop();
+                victims.push(candidate);
+            }
+        }
+
+        for (_, _, page_id) in victims {
+            self.pages.remove(&page_id);
+            self.page_access_epoch.remove(&page_id);
         }
     }
 
