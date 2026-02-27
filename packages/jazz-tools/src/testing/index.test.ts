@@ -138,11 +138,13 @@ describe("startLocalJazzServer", () => {
 
   it("rejects with child stderr when process exits before health", async () => {
     const binaryPath = await createFailingFakeJazzBinary("startup-failed-on-purpose");
+    const port = await getAvailablePort();
 
     await expect(
       startLocalJazzServer({
         appId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         binaryPath,
+        port,
         healthTimeoutMs: 3_000,
       }),
     ).rejects.toThrow(/startup-failed-on-purpose/);

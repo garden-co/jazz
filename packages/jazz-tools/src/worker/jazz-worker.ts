@@ -14,6 +14,7 @@ import {
   buildEventsUrl,
   applyUserAuthHeaders,
   isCataloguePayload,
+  isExpectedFetchAbortError,
 } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -38,6 +39,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let streamConnecting = false;
 let streamAttached = false;
+const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
@@ -167,7 +169,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
           void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
-            console.error("[worker] Sync POST error:", error);
+            if (!isExpectedFetchAbortError(error)) {
+              console.error("[worker] Sync POST error:", error);
+            }
             detachServer();
             scheduleReconnect();
           });
@@ -283,14 +287,23 @@ async function connectStream(): Promise<void> {
   applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
 
   streamAbortController = new AbortController();
+  let streamConnectTimedOut = false;
+  const streamConnectTimeout = setTimeout(() => {
+    if (streamAbortController && !streamAbortController.signal.aborted) {
+      streamConnectTimedOut = true;
+      streamAbortController.abort();
+    }
+  }, streamConnectTimeoutMs);
 
   try {
     const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
+    console.log("[worker] Stream connect attempt", { eventsUrl });
 
     const response = await fetch(eventsUrl, {
       headers,
       signal: streamAbortController.signal,
     });
+    clearTimeout(streamConnectTimeout);
 
     if (!response.ok) {
       console.error(`[worker] Stream connect failed: ${response.status}`);
@@ -300,13 +313,26 @@ async function connectStream(): Promise<void> {
       return;
     }
 
-    const reader = response.body!.getReader();
+    if (!response.body || typeof response.body.getReader !== "function") {
+      console.error("[worker] Stream connect failed: fetch response body stream unavailable", {
+        hasBody: Boolean(response.body),
+        bodyType: response.body ? typeof response.body : "undefined",
+        url: eventsUrl,
+      });
+      detachServer();
+      streamConnecting = false;
+      scheduleReconnect();
+      return;
+    }
+
+    const reader = response.body.getReader();
     let connected = false;
     await readBinaryFrames(
       reader,
       {
         onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
         onConnected: (clientId) => {
+          console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;
           if (!connected) {
             connected = true;
@@ -317,9 +343,24 @@ async function connectStream(): Promise<void> {
       "[worker] ",
     );
   } catch (e: any) {
-    if (e?.name === "AbortError") return;
+    if (e?.name === "AbortError") {
+      if (streamConnectTimedOut) {
+        console.error(`[worker] Stream connect timeout after ${streamConnectTimeoutMs}ms`);
+        const fetchBaseHint = (globalThis.fetch as { __jazzRnFetchBaseHint?: string } | undefined)
+          ?.__jazzRnFetchBaseHint;
+        if (fetchBaseHint === "whatwg-fetch/xhr") {
+          console.error(
+            "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
+          );
+        }
+        detachServer();
+        scheduleReconnect();
+      }
+      return;
+    }
     console.error("[worker] Stream connect error:", e);
   } finally {
+    clearTimeout(streamConnectTimeout);
     streamConnecting = false;
   }
 

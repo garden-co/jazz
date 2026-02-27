@@ -39,6 +39,12 @@ function sqlTypeToWasm(sqlType: SqlType): ColumnType {
     if (sqlType.kind === "ENUM") {
       return { type: "Enum", variants: [...sqlType.variants] };
     }
+    if (sqlType.kind === "JSON") {
+      return {
+        type: "Json",
+        schema: sqlType.schema,
+      };
+    }
     return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
   }
   return map[sqlType];

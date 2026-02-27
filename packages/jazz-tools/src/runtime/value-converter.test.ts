@@ -84,6 +84,22 @@ describe("toValue", () => {
     expect(() => toValue([0, 256], colType)).toThrow("Bytea arrays must contain integers");
   });
 
+  it("converts Json values", () => {
+    const colType: ColumnType = { type: "Json" };
+    expect(toValue('{"a":1}', colType)).toEqual({ type: "Text", value: '{"a":1}' });
+    expect(toValue({ a: 1, b: ["x"] }, colType)).toEqual({
+      type: "Text",
+      value: '{"a":1,"b":["x"]}',
+    });
+  });
+
+  it("rejects non-serializable Json values", () => {
+    const colType: ColumnType = { type: "Json" };
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => toValue(circular, colType)).toThrow("JSON values must be serializable");
+  });
+
   it("converts Enum values and validates variants", () => {
     const colType = { type: "Enum", variants: ["done", "todo"] } as ColumnType;
     expect(toValue("todo", colType)).toEqual({ type: "Text", value: "todo" });

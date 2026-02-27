@@ -129,6 +129,9 @@ struct JsColumnType {
     variants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     columns: Option<Vec<JsColumnDescriptor>>,
+    // Optional JSON Schema metadata; valid only for `type: "Json"` columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -259,24 +262,69 @@ struct JsSchema {
 fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::types::ColumnType {
     use jazz_tools::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor};
 
-    match ct.type_name.as_str() {
-        "Integer" => ColumnType::Integer,
-        "BigInt" => ColumnType::BigInt,
-        "Boolean" => ColumnType::Boolean,
-        "Text" => ColumnType::Text,
+    let JsColumnType {
+        type_name,
+        element,
+        variants,
+        columns,
+        schema,
+    } = ct;
+
+    fn ensure_schema_absent(schema: &Option<serde_json::Value>, column_type: &str) {
+        assert!(
+            schema.is_none(),
+            "Only Json columns can include `schema` metadata. Received schema for {}.",
+            column_type
+        );
+    }
+
+    match type_name.as_str() {
+        "Integer" => {
+            ensure_schema_absent(&schema, "Integer");
+            ColumnType::Integer
+        }
+        "BigInt" => {
+            ensure_schema_absent(&schema, "BigInt");
+            ColumnType::BigInt
+        }
+        "Double" => {
+            ensure_schema_absent(&schema, "Double");
+            ColumnType::Double
+        }
+        "Boolean" => {
+            ensure_schema_absent(&schema, "Boolean");
+            ColumnType::Boolean
+        }
+        "Text" => {
+            ensure_schema_absent(&schema, "Text");
+            ColumnType::Text
+        }
         "Enum" => {
-            let variants = ct.variants.expect("Enum type requires variants");
+            ensure_schema_absent(&schema, "Enum");
+            let variants = variants.expect("Enum type requires variants");
             ColumnType::Enum(variants)
         }
-        "Timestamp" => ColumnType::Timestamp,
-        "Uuid" => ColumnType::Uuid,
-        "Bytea" => ColumnType::Bytea,
+        "Timestamp" => {
+            ensure_schema_absent(&schema, "Timestamp");
+            ColumnType::Timestamp
+        }
+        "Uuid" => {
+            ensure_schema_absent(&schema, "Uuid");
+            ColumnType::Uuid
+        }
+        "Bytea" => {
+            ensure_schema_absent(&schema, "Bytea");
+            ColumnType::Bytea
+        }
+        "Json" => ColumnType::Json(schema),
         "Array" => {
-            let elem = ct.element.expect("Array type requires element");
+            ensure_schema_absent(&schema, "Array");
+            let elem = element.expect("Array type requires element");
             ColumnType::Array(Box::new(js_column_type_to_groove(*elem)))
         }
         "Row" => {
-            let cols = ct.columns.expect("Row type requires columns");
+            ensure_schema_absent(&schema, "Row");
+            let cols = columns.expect("Row type requires columns");
             let descriptors = cols
                 .into_iter()
                 .map(|c| {
@@ -466,60 +514,77 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::BigInt => JsColumnType {
                 type_name: "BigInt".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Double => JsColumnType {
                 type_name: "Double".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Boolean => JsColumnType {
                 type_name: "Boolean".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Text => JsColumnType {
                 type_name: "Text".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Enum(variants) => JsColumnType {
                 type_name: "Enum".into(),
                 element: None,
                 variants: Some(variants.clone()),
                 columns: None,
+                schema: None,
             },
             ColumnType::Timestamp => JsColumnType {
                 type_name: "Timestamp".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Uuid => JsColumnType {
                 type_name: "Uuid".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Bytea => JsColumnType {
                 type_name: "Bytea".into(),
                 element: None,
                 variants: None,
                 columns: None,
+                schema: None,
+            },
+            ColumnType::Json(schema) => JsColumnType {
+                type_name: "Json".into(),
+                element: None,
+                variants: None,
+                columns: None,
+                schema: schema.clone(),
             },
             ColumnType::Array(elem) => JsColumnType {
                 type_name: "Array".into(),
                 element: Some(Box::new(ct_to_js(elem))),
                 variants: None,
                 columns: None,
+                schema: None,
             },
             ColumnType::Row(desc) => JsColumnType {
                 type_name: "Row".into(),
@@ -536,6 +601,7 @@ fn groove_schema_to_js(schema: &Schema) -> JsSchema {
                         })
                         .collect(),
                 ),
+                schema: None,
             },
         }
     }
@@ -1488,6 +1554,7 @@ mod tests {
                             element: None,
                             variants: Some(vec!["done".to_string(), "todo".to_string()]),
                             columns: None,
+                            schema: None,
                         },
                         nullable: false,
                         references: None,
@@ -1508,6 +1575,33 @@ mod tests {
             status.column_type,
             ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Only Json columns can include `schema` metadata")]
+    fn js_schema_to_groove_rejects_schema_on_non_json_column_type() {
+        let js_schema = JsSchema {
+            tables: HashMap::from([(
+                "todos".to_string(),
+                JsTableSchema {
+                    columns: vec![JsColumnDescriptor {
+                        name: "title".to_string(),
+                        column_type: JsColumnType {
+                            type_name: "Text".to_string(),
+                            element: None,
+                            variants: None,
+                            columns: None,
+                            schema: Some(serde_json::json!({ "type": "string" })),
+                        },
+                        nullable: false,
+                        references: None,
+                    }],
+                    policies: None,
+                },
+            )]),
+        };
+
+        let _ = js_schema_to_groove(js_schema);
     }
 
     #[test]

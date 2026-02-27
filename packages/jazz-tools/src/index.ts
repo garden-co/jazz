@@ -28,6 +28,9 @@ export type {
   AddOp,
   DropOp,
   RenameOp,
+  JsonValue,
+  JsonSchema,
+  JsonSchemaToTs,
 } from "./schema.js";
 export type {
   RelColumnRef,

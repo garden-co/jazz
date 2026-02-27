@@ -13,7 +13,7 @@ function readEnvAppId(): string | undefined {
 function defaultConfig(
   overrides: Partial<JazzProviderClientConfig> = {},
 ): JazzProviderClientConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "todo-react-example";
+  const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
@@ -27,10 +27,52 @@ function defaultConfig(
 }
 // #endregion context-setup-react
 
-const client = createJazzClient(defaultConfig());
+type AppProps = {
+  config?: Partial<JazzProviderClientConfig>;
+  fallback?: React.ReactNode;
+};
 
 // #region context-setup-react
-export function App() {
+export function App({ config, fallback }: AppProps = {}) {
+  const resolvedConfig = defaultConfig(config);
+  const configKey = JSON.stringify(resolvedConfig);
+  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
+    null,
+  );
+  const [error, setError] = React.useState<unknown>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    const pending = createJazzClient(resolvedConfig);
+
+    void pending.then(
+      (resolved) => {
+        if (!active) {
+          void resolved.shutdown();
+          return;
+        }
+        setClient(resolved);
+      },
+      (reason) => {
+        if (!active) return;
+        setError(reason);
+      },
+    );
+
+    return () => {
+      active = false;
+      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
+    };
+  }, [configKey]);
+
+  if (error) {
+    throw error;
+  }
+
+  if (!client) {
+    return <>{fallback ?? <p>Loading...</p>}</>;
+  }
+
   return (
     <JazzProvider client={client}>
       <h1>Todos</h1>
