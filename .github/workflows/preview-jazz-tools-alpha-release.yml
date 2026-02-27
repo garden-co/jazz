@@ -1,0 +1,23 @@
+name: Preview jazz-tools alpha release
+
+on:
+  push:
+    branches:
+      - changeset-release/*
+  workflow_dispatch:
+
+concurrency:
+  group: preview-jazz-tools-alpha-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  preview:
+    name: Release preview build
+    uses: ./.github/workflows/publish-jazz-tools-alpha.yml
+    with:
+      mode: dry-run
+    secrets: inherit

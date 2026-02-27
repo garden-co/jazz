@@ -957,6 +957,53 @@ fn frontier_with_extended_divergence() {
 }
 
 #[test]
+fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
+    // Simulates cold-start: session 1 creates A→B, session 2 loads from
+    // storage and must compute tips correctly (only B, not both A and B).
+    //
+    //   session 1: A → B       (2 commits, B is only tip)
+    //   session 2: get_or_load → add_commit C with parent B
+    let mut io = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    // --- Session 1: create object with two commits ---
+    let object_id = {
+        let mut mgr = ObjectManager::new();
+        let oid = mgr.create(&mut io, None);
+        let a = mgr
+            .add_commit(&mut io, oid, "main", vec![], b"A".to_vec(), author, None)
+            .unwrap();
+        mgr.add_commit(&mut io, oid, "main", vec![a], b"B".to_vec(), author, None)
+            .unwrap();
+        oid
+    };
+
+    // --- Session 2: new ObjectManager, load from storage ---
+    let mut mgr2 = ObjectManager::new();
+    let loaded = mgr2.get_or_load(object_id, &io, &["main".to_string()]);
+    assert!(loaded.is_some(), "object should load from storage");
+
+    // Verify only one tip (B), not two
+    let tips = mgr2.get_tip_ids(object_id, "main".to_string()).unwrap();
+    assert_eq!(tips.len(), 1, "should have exactly 1 tip after loading A→B");
+
+    // Adding a new commit should succeed — this failed before the fix
+    // because both A and B were tips, and add_commit rejected A as
+    // ParentNotFound during the tails check.
+    let tip = *tips.iter().next().unwrap();
+    mgr2.add_commit(
+        &mut io,
+        object_id,
+        "main",
+        vec![tip],
+        b"C".to_vec(),
+        author,
+        None,
+    )
+    .expect("add_commit after cold-start load should succeed");
+}
+
+#[test]
 fn frontier_with_three_way_divergence() {
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,30 @@ const BINARIES = {
 function fail(message) {
   console.error(message);
   process.exit(1);
+}
+
+function ensureExecutable(binaryPath, name) {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  try {
+    accessSync(binaryPath, constants.X_OK);
+    return;
+  } catch {}
+
+  try {
+    chmodSync(binaryPath, 0o755);
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    fail(`Bundled binary ${name} is not executable and chmod failed: ${details}`);
+  }
+
+  try {
+    accessSync(binaryPath, constants.X_OK);
+  } catch {
+    fail(`Bundled binary ${name} is not executable after chmod.`);
+  }
 }
 
 const key = `${process.platform}-${process.arch}`;
@@ -47,13 +71,15 @@ if (!binaryPath) {
   fail(lines.join("\n"));
 }
 
+ensureExecutable(binaryPath, binaryName ?? localBinaryName);
+
 const result = spawnSync(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   env: process.env,
 });
 
 if (result.error) {
-  fail(`Failed to execute ${binaryName}: ${result.error.message}`);
+  fail(`Failed to execute ${binaryName ?? binaryPath}: ${result.error.message}`);
 }
 
 if (typeof result.status === "number") {

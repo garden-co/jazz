@@ -14,6 +14,7 @@ import {
   applyUserAuthHeaders,
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
+  isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type SyncStreamController,
   type LinkExternalResponse,
@@ -630,7 +631,11 @@ export class JazzClient {
    * Get schema context for server requests.
    * @internal
    */
-  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+  getSchemaContext(): {
+    env: string;
+    schema_hash: string;
+    user_branch: string;
+  } {
     return {
       env: this.context.env ?? "dev",
       schema_hash: this.runtime.getSchemaHash(),
@@ -737,10 +742,14 @@ export class JazzClient {
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
+        retryServerPayloads: true,
         onServerPayload: (payload) => this.sendSyncMessage(payload),
         onServerPayloadError: (error) => {
-          console.error("Sync POST error:", error);
-          this.streamController.notifyTransportFailure();
+          const isExpectedAbort = isExpectedFetchAbortError(error);
+          if (!isExpectedAbort) {
+            console.error("Sync POST error:", error);
+            this.streamController.notifyTransportFailure();
+          }
         },
       }),
     );
