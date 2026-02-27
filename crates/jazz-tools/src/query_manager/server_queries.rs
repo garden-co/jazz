@@ -220,11 +220,14 @@ impl QueryManager {
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
-            self.sync_manager.send_query_subscription_to_servers(
-                sub.query_id,
-                sub.query.clone(),
-                session_for_policy.clone(),
-            );
+            if sub.propagation == crate::sync_manager::QueryPropagation::Full {
+                self.sync_manager.send_query_subscription_to_servers(
+                    sub.query_id,
+                    sub.query.clone(),
+                    session_for_policy.clone(),
+                    sub.propagation,
+                );
+            }
 
             // Store the server subscription for reactive updates
             self.server_subscriptions.insert(
@@ -237,6 +240,7 @@ impl QueryManager {
                     last_scope: scope,
                     needs_recompile: false,
                     settled_once: false,
+                    propagation: sub.propagation,
                 },
             );
         }
@@ -257,13 +261,17 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_unsubscriptions();
 
         for unsub in pending {
-            // Remove the server subscription
-            self.server_subscriptions
-                .remove(&(unsub.client_id, unsub.query_id));
+            let propagation = self
+                .server_subscriptions
+                .remove(&(unsub.client_id, unsub.query_id))
+                .map(|sub| sub.propagation)
+                .unwrap_or(crate::sync_manager::QueryPropagation::Full);
 
-            // Forward unsubscription to upstream servers
-            self.sync_manager
-                .send_query_unsubscription_to_servers(unsub.query_id);
+            if propagation == crate::sync_manager::QueryPropagation::Full {
+                // Forward unsubscription to upstream servers
+                self.sync_manager
+                    .send_query_unsubscription_to_servers(unsub.query_id);
+            }
         }
     }
 

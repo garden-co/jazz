@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PersistenceTier } from "./runtime/client.js";
-import type { QueryBuilder } from "./runtime/db.js";
+import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -17,7 +16,7 @@ type Todo = {
 type SubscribeCall = {
   callback: (delta: SubscriptionDelta<any>) => void;
   query: QueryBuilder<any>;
-  tier?: PersistenceTier;
+  options?: QueryOptions;
   unsubscribe: ReturnType<typeof vi.fn>;
 };
 
@@ -69,13 +68,13 @@ function createUnitHarness(appId = "orchestrator-unit"): UnitHarness {
     subscribeAll<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
-      tier?: PersistenceTier,
+      options?: QueryOptions,
     ): () => void;
   } = {
     subscribeAll<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
-      tier?: PersistenceTier,
+      options?: QueryOptions,
     ): () => void {
       if (throwOnSubscribe) {
         throw throwOnSubscribe;
@@ -84,7 +83,7 @@ function createUnitHarness(appId = "orchestrator-unit"): UnitHarness {
       calls.push({
         callback: callback as (delta: SubscriptionDelta<any>) => void,
         query: query as QueryBuilder<any>,
-        tier,
+        options,
         unsubscribe,
       });
       return unsubscribe;

@@ -332,7 +332,7 @@ async function waitForRows(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await client.query(queryJson, settledTier);
+      const rows = await client.query(queryJson, settledTier ? { settledTier } : undefined);
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
@@ -1368,7 +1368,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       );
 
       // Establish sync by fetching data without session first.
-      await aliceClient.queryInternal(queryAllItems, undefined, "edge");
+      await aliceClient.queryInternal(queryAllItems, undefined, { settledTier: "edge" });
 
       // query() should only return alice's row.
       const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 1);
@@ -1449,7 +1449,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       bobClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("bob", JWT_SECRET), schema),
       );
-      const rows = await bobClient.queryInternal(queryAllItems, undefined, "edge");
+      const rows = await bobClient.queryInternal(queryAllItems, undefined, { settledTier: "edge" });
 
       // Server should fall back to Bob's connection-level session.
       // The hashed principal ID won't match Alice's ownerId, so zero rows.

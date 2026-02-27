@@ -10,7 +10,14 @@
  * - all/one are async (need storage I/O for queries)
  */
 import type { WasmSchema, StorageDriver } from "../drivers/types.js";
-import { JazzClient, type WasmModule, type PersistenceTier } from "./client.js";
+import type { Session } from "./context.js";
+import {
+  JazzClient,
+  type WasmModule,
+  type PersistenceTier,
+  type QueryExecutionOptions,
+  type QueryPropagation,
+} from "./client.js";
 import { type SubscriptionDelta } from "./subscription-manager.js";
 /**
  * Configuration for creating a Db instance.
@@ -61,6 +68,9 @@ export interface QueryBuilder<T> {
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
+}
+export interface QueryOptions extends QueryExecutionOptions {
+  propagation?: QueryPropagation;
 }
 /**
  * Interface for table proxies used with mutations.
@@ -180,6 +190,9 @@ export declare class Db {
   private onLeaderElectionChange;
   private enqueueWorkerReconfigure;
   private restartWorkerWithCurrentDbName;
+  private currentWorkerNamespace;
+  private shutdownWorkerAndClientsForStorageReset;
+  private removeOpfsNamespaceFile;
   private static resolveWorkerDbNameForSnapshot;
   private static spawnWorker;
   /**
@@ -299,12 +312,26 @@ export declare class Db {
     tier: PersistenceTier,
   ): Promise<void>;
   /**
+   * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
+   *
+   * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
+   * localStorage-based auth or synthetic-user state.
+   *
+   * Behavior:
+   * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
+   * - Leader tab only (throws on follower tabs and asks to close other tabs)
+   * - Serializes with worker reconfigure operations
+   * - Tears down worker + clients, deletes OPFS file, respawns worker
+   * - If file deletion fails, still respawns worker and then rethrows the deletion error
+   */
+  deleteClientStorage(): Promise<void>;
+  /**
    * Execute a query and return all matching rows as typed objects.
    *
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
    * @returns Array of typed objects matching the query
    */
-  all<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T[]>;
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
   /**
    * Execute a query and return the first matching row, or null.
    *
@@ -312,7 +339,7 @@ export declare class Db {
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns First matching typed object, or null if none found
    */
-  one<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T | null>;
+  one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null>;
   /**
    * Subscribe to a query and receive updates when results change.
    *
@@ -346,7 +373,8 @@ export declare class Db {
   >(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    settledTier?: PersistenceTier,
+    options?: QueryOptions,
+    session?: Session,
   ): () => void;
   /**
    * Shutdown the Db and release all resources.
