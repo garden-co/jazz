@@ -12,6 +12,9 @@ catalogs:
     '@vitest/browser-playwright':
       specifier: 4.0.18
       version: 4.0.18
+    typescript:
+      specifier: 5.9.3
+      version: 5.9.3
     vitest:
       specifier: 4.0.18
       version: 4.0.18
@@ -50,6 +53,9 @@ importers:
       turbo:
         specifier: ^2.0.0
         version: 2.8.1
+      typescript:
+        specifier: catalog:default
+        version: 5.9.3
 
   crates: {}
 
@@ -63,10 +69,10 @@ importers:
     devDependencies:
       nitrogen:
         specifier: github:boorad/nitro#feat/rust&path:packages/nitrogen
-        version: https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/nitrogen(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+        version: https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/nitrogen(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
       react-native-nitro-modules:
         specifier: github:boorad/nitro#feat/rust&path:packages/react-native-nitro-modules
-        version: https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/react-native-nitro-modules(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+        version: https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/react-native-nitro-modules(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
 
   crates/jazz-rn:
     dependencies:
@@ -144,7 +150,7 @@ importers:
         specifier: ^2.5.6
         version: 2.8.1
       typescript:
-        specifier: ^5.9.2
+        specifier: catalog:default
         version: 5.9.3
 
   crates/jazz-wasm:
@@ -202,7 +208,7 @@ importers:
         specifier: ^4.1.18
         version: 4.1.18
       typescript:
-        specifier: ^5.9.3
+        specifier: catalog:default
         version: 5.9.3
 
   examples/docs/todo-client-localfirst-expo:
@@ -236,7 +242,7 @@ importers:
         specifier: ^2.3.3
         version: 2.3.3(@babel/core@7.29.0)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
 
   examples/docs/todo-client-localfirst-react:
@@ -267,7 +273,7 @@ importers:
         specifier: catalog:default
         version: 4.0.18(playwright@1.58.2)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
       vite:
         specifier: ^6.0.0
@@ -295,7 +301,7 @@ importers:
         specifier: ^5.0.0
         version: 5.1.1(svelte@5.53.5)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
       vite:
         specifier: ^6.0.0
@@ -317,7 +323,7 @@ importers:
         specifier: catalog:default
         version: 4.0.18(playwright@1.58.2)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
       vite:
         specifier: ^6.0.0
@@ -354,7 +360,7 @@ importers:
         specifier: ^4.0.0
         version: 4.21.0
       typescript:
-        specifier: ^5.3.0
+        specifier: catalog:default
         version: 5.9.3
       vitest:
         specifier: catalog:default
@@ -391,7 +397,7 @@ importers:
         specifier: ^2.3.3
         version: 2.3.3(@babel/core@7.29.0)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
 
   examples/todo-client-localfirst-react:
@@ -422,7 +428,7 @@ importers:
         specifier: catalog:default
         version: 4.0.18(playwright@1.58.2)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
       vite:
         specifier: ^6.0.0
@@ -456,7 +462,7 @@ importers:
         specifier: catalog:default
         version: 4.0.18(playwright@1.58.2)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
       vite:
         specifier: ^6.0.0
@@ -484,7 +490,7 @@ importers:
         specifier: catalog:default
         version: 4.0.18(playwright@1.58.2)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
       typescript:
-        specifier: ^5.8.0
+        specifier: catalog:default
         version: 5.9.3
       vite:
         specifier: ^6.0.0
@@ -521,7 +527,7 @@ importers:
         specifier: ^4.0.0
         version: 4.21.0
       typescript:
-        specifier: ^5.3.0
+        specifier: catalog:default
         version: 5.9.3
       vitest:
         specifier: catalog:default
@@ -582,7 +588,7 @@ importers:
         specifier: ^5.0.0
         version: 5.53.5
       typescript:
-        specifier: ^5.3.0
+        specifier: catalog:default
         version: 5.9.3
       vite-plugin-top-level-await:
         specifier: ^1.6.0
@@ -12181,15 +12187,6 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.2.14
 
-  '@react-native/virtualized-lists@0.81.5(@types/react@19.2.14)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)':
-    dependencies:
-      invariant: 2.2.4
-      nullthrows: 1.1.1
-      react: 19.2.4
-      react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4)
-    optionalDependencies:
-      '@types/react': 19.2.14
-
   '@release-it/conventional-changelog@10.0.5(conventional-commits-filter@5.0.0)(conventional-commits-parser@6.2.1)(release-it@19.2.4(@types/node@25.2.3))':
     dependencies:
       '@conventional-changelog/git-client': 2.5.1(conventional-commits-filter@5.0.0)(conventional-commits-parser@6.2.1)
@@ -17037,10 +17034,10 @@ snapshots:
       - '@babel/core'
       - babel-plugin-macros
 
-  nitrogen@https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/nitrogen(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4):
+  nitrogen@https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/nitrogen(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4):
     dependencies:
       chalk: 5.6.2
-      react-native-nitro-modules: 0.33.9(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      react-native-nitro-modules: 0.33.9(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
       ts-morph: 27.0.2
       yargs: 18.0.0
       zod: 4.3.6
@@ -17646,15 +17643,15 @@ snapshots:
       escape-string-regexp: 5.0.0
       fast-glob: 3.3.3
 
-  react-native-nitro-modules@0.33.9(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4):
+  react-native-nitro-modules@0.33.9(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4):
     dependencies:
       react: 19.2.4
-      react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4)
+      react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
 
-  react-native-nitro-modules@https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/react-native-nitro-modules(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4):
+  react-native-nitro-modules@https://codeload.github.com/boorad/nitro/tar.gz/dd99d4b1a4d53405c1b1fb3548d4ac87a062f4ba#path:packages/react-native-nitro-modules(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4):
     dependencies:
       react: 19.2.4
-      react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4)
+      react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
 
   react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4):
     dependencies:
@@ -17666,53 +17663,6 @@ snapshots:
       '@react-native/js-polyfills': 0.81.5
       '@react-native/normalize-colors': 0.81.5
       '@react-native/virtualized-lists': 0.81.5(@types/react@19.2.14)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
-      abort-controller: 3.0.0
-      anser: 1.4.10
-      ansi-regex: 5.0.1
-      babel-jest: 29.7.0(@babel/core@7.29.0)
-      babel-plugin-syntax-hermes-parser: 0.29.1
-      base64-js: 1.5.1
-      commander: 12.1.0
-      flow-enums-runtime: 0.0.6
-      glob: 7.2.3
-      invariant: 2.2.4
-      jest-environment-node: 29.7.0
-      memoize-one: 5.2.1
-      metro-runtime: 0.83.3
-      metro-source-map: 0.83.3
-      nullthrows: 1.1.1
-      pretty-format: 29.7.0
-      promise: 8.3.0
-      react: 19.2.4
-      react-devtools-core: 6.1.5
-      react-refresh: 0.14.2
-      regenerator-runtime: 0.13.11
-      scheduler: 0.26.0
-      semver: 7.7.4
-      stacktrace-parser: 0.1.11
-      whatwg-fetch: 3.6.20
-      ws: 6.2.3
-      yargs: 17.7.2
-    optionalDependencies:
-      '@types/react': 19.2.14
-    transitivePeerDependencies:
-      - '@babel/core'
-      - '@react-native-community/cli'
-      - '@react-native/metro-config'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-
-  react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4):
-    dependencies:
-      '@jest/create-cache-key-function': 29.7.0
-      '@react-native/assets-registry': 0.81.5
-      '@react-native/codegen': 0.81.5(@babel/core@7.29.0)
-      '@react-native/community-cli-plugin': 0.81.5(@react-native-community/cli@20.0.1(typescript@5.9.3))
-      '@react-native/gradle-plugin': 0.81.5
-      '@react-native/js-polyfills': 0.81.5
-      '@react-native/normalize-colors': 0.81.5
-      '@react-native/virtualized-lists': 0.81.5(@types/react@19.2.14)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1)(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
       abort-controller: 3.0.0
       anser: 1.4.10
       ansi-regex: 5.0.1
