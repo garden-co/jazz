@@ -1072,16 +1072,16 @@ export class Db {
    * - Tears down worker + clients, deletes OPFS file, respawns worker
    * - If file deletion fails, still respawns worker and then rethrows the deletion error
    */
-  async deleteDataStorage(): Promise<void> {
+  async deleteClientStorage(): Promise<void> {
     const operation = this.workerReconfigure.then(async () => {
       if (!this.worker || typeof window === "undefined") {
         throw new Error(
-          "deleteDataStorage() is only available on browser worker-backed Db instances.",
+          "deleteClientStorage() is only available on browser worker-backed Db instances.",
         );
       }
       if (this.tabRole !== "leader") {
         throw new Error(
-          "deleteDataStorage() can only run from the leader tab. Close other tabs and retry.",
+          "deleteClientStorage() can only run from the leader tab. Close other tabs and retry.",
         );
       }
 
