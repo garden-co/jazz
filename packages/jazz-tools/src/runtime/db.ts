@@ -1067,15 +1067,21 @@ export class Db {
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
+   * - Leader tab only (throws on follower tabs and asks to close other tabs)
    * - Serializes with worker reconfigure operations
    * - Tears down worker + clients, deletes OPFS file, respawns worker
    * - If file deletion fails, still respawns worker and then rethrows the deletion error
    */
-  async deleteBrowserStorage(): Promise<void> {
+  async deleteDataStorage(): Promise<void> {
     const operation = this.workerReconfigure.then(async () => {
       if (!this.worker || typeof window === "undefined") {
         throw new Error(
-          "deleteBrowserStorage() is only available on browser worker-backed Db instances.",
+          "deleteDataStorage() is only available on browser worker-backed Db instances.",
+        );
+      }
+      if (this.tabRole !== "leader") {
+        throw new Error(
+          "deleteDataStorage() can only run from the leader tab. Close other tabs and retry.",
         );
       }
 

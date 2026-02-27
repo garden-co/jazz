@@ -439,7 +439,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(before.length).toBe(1);
     expect(before[0].title).toBe("Should be deleted");
 
-    await db.deleteBrowserStorage();
+    await db.deleteDataStorage();
 
     const afterDelete = await db.all(allTodos, "worker");
     expect(afterDelete).toEqual([]);
