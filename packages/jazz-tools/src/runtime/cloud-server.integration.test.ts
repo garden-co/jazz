@@ -1251,3 +1251,214 @@ describe("cloud-server integration (Jazz TS)", () => {
     }
   }, 90000);
 });
+
+// ---------------------------------------------------------------------------
+// Policy bypass reproduction: subscription without session skips filtering
+// ---------------------------------------------------------------------------
+
+interface OwnedItem {
+  id: string;
+  title: string;
+  ownerId: string;
+}
+
+interface OwnedItemWhere {
+  id?: string;
+  title?: string;
+  ownerId?: string;
+}
+
+class OwnedItemQueryBuilder {
+  declare readonly _rowType: OwnedItem;
+  where(_input: OwnedItemWhere): OwnedItemQueryBuilder {
+    return this;
+  }
+}
+
+function buildOwnedItemsSchema(): WasmSchema {
+  const schema: WasmSchema = {
+    tables: {
+      owned_items: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    },
+  };
+
+  const app = {
+    owned_items: new OwnedItemQueryBuilder(),
+    wasmSchema: schema,
+  };
+
+  const permissions = normalizePermissionsForWasm(
+    definePermissions(app, ({ policy, session }) => {
+      policy.owned_items.allowRead.where({ ownerId: session.user_id });
+    }),
+  );
+
+  const tables: WasmSchema["tables"] = {};
+  for (const [tableName, tableSchema] of Object.entries(schema.tables)) {
+    const tablePolicies = permissions[tableName];
+    tables[tableName] = tablePolicies
+      ? ({
+          ...tableSchema,
+          policies: tablePolicies as unknown as (typeof tableSchema)["policies"],
+        } as (typeof tables)[string])
+      : tableSchema;
+  }
+  return { tables };
+}
+
+describe("Policy bypass: subscription without session skips PolicyFilterNode", () => {
+  beforeAll(() => {
+    assertIntegrationPrerequisites();
+  });
+
+  it("query() and subscribe() should filter by the JWT session", async () => {
+    const schema = buildOwnedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "owned_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-policy-bypass-");
+    const server = await startCloudServer({ dataRoot });
+    let seeder: JazzClient | null = null;
+    let aliceClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+
+      // Seed other users' rows via a separate client.
+      seeder = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), schema),
+      );
+
+      await seeder.createWithAck(
+        "owned_items",
+        [
+          { type: "Text", value: "bob-item" },
+          { type: "Text", value: "bob" },
+        ],
+        "edge",
+      );
+      await seeder.createWithAck(
+        "owned_items",
+        [
+          { type: "Text", value: "carol-item" },
+          { type: "Text", value: "carol" },
+        ],
+        "edge",
+      );
+
+      await seeder.shutdown();
+      seeder = null;
+
+      // Connect as alice and insert her own row.
+      aliceClient = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
+      );
+      await aliceClient.createWithAck(
+        "owned_items",
+        [
+          { type: "Text", value: "alice-item" },
+          { type: "Text", value: "alice" },
+        ],
+        "edge",
+      );
+
+      // Establish sync by fetching data without session first.
+      await aliceClient.queryInternal(queryAllItems, undefined, "edge");
+
+      // query() should only return alice's row.
+      const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 1);
+      const queryTitles = queryRows
+        .map((row) => (row.values[0] as { type: "Text"; value: string }).value)
+        .sort();
+      expect(queryTitles).toEqual(["alice-item"]);
+
+      // subscribe() should also only return alice's row.
+      const subscribedRows = await new Promise<Row[]>((resolve, reject) => {
+        const collected = new Map<string, Row>();
+        const timer = setTimeout(() => {
+          resolve([...collected.values()]);
+        }, 5000);
+
+        aliceClient!.subscribe(queryAllItems, (delta) => {
+          for (const change of delta) {
+            if (change.kind === 0) {
+              collected.set(change.id, { id: change.id, values: change.row.values });
+            } else if (change.kind === 1) {
+              collected.delete(change.id);
+            }
+          }
+        });
+
+        setTimeout(() => {
+          clearTimeout(timer);
+          reject(new Error("subscribe timed out after 20s"));
+        }, 20000);
+      });
+
+      const subscribeTitles = subscribedRows
+        .map((row) => (row.values[0] as { type: "Text"; value: string }).value)
+        .sort();
+
+      expect(subscribeTitles).toEqual(["alice-item"]);
+    } finally {
+      if (seeder) await seeder.shutdown();
+      if (aliceClient) await aliceClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
+
+  // Server-side defence in depth: even when a query explicitly omits the
+  // session, the server should fall back to the connection-level session
+  // (hashed principal ID) and apply the PolicyFilterNode. Because the hashed
+  // ID won't match ownerId values written with the raw JWT sub claim, the
+  // policy filter returns zero rows — fail closed rather than fail open.
+  it("server falls back to connection-level session when query omits session (fail closed)", async () => {
+    const schema = buildOwnedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "owned_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-policy-server-fallback-");
+    const server = await startCloudServer({ dataRoot });
+    let aliceClient: JazzClient | null = null;
+    let bobClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+
+      // Alice connects and inserts her own row.
+      aliceClient = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
+      );
+      await aliceClient.createWithAck(
+        "owned_items",
+        [
+          { type: "Text", value: "alice-item" },
+          { type: "Text", value: "alice" },
+        ],
+        "edge",
+      );
+
+      // Bob connects and queries WITHOUT a session (explicitly undefined).
+      // This sends QuerySubscription { session: None } to the server.
+      bobClient = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("bob", JWT_SECRET), schema),
+      );
+      const rows = await bobClient.queryInternal(queryAllItems, undefined, "edge");
+
+      // Server should fall back to Bob's connection-level session.
+      // The hashed principal ID won't match Alice's ownerId, so zero rows.
+      expect(rows).toEqual([]);
+    } finally {
+      if (aliceClient) await aliceClient.shutdown();
+      if (bobClient) await bobClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
+});
