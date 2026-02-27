@@ -209,11 +209,24 @@ impl ObjectManager {
             let bn = BranchName::new(branch_name);
             if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
                 let mut commits = HashMap::new();
+                // Compute tips correctly: a tip is a commit not referenced
+                // as a parent by any other commit in the branch.
+                let mut all_ids: HashSet<CommitId> = HashSet::new();
+                let mut parent_ids: HashSet<CommitId> = HashSet::new();
+                for commit in &loaded.commits {
+                    all_ids.insert(commit.id());
+                    for parent in &commit.parents {
+                        parent_ids.insert(*parent);
+                    }
+                }
                 let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
+                for cid in &all_ids {
+                    if !parent_ids.contains(cid) {
+                        tips.insert(*cid);
+                    }
+                }
                 for commit in loaded.commits {
-                    let cid = commit.id();
-                    tips.insert(cid);
-                    commits.insert(cid, commit);
+                    commits.insert(commit.id(), commit);
                 }
                 object.branches.insert(
                     bn,

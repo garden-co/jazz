@@ -48,8 +48,8 @@
     "./package.json": "./package.json"
   },
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/",
     "access": "public",
+    "registry": "https://registry.npmjs.org/",
     "tag": "alpha"
   },
   "scripts": {
