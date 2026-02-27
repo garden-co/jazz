@@ -43,8 +43,8 @@ jobs:
       - name: Install Node.js
         uses: useblacksmith/setup-node@v5
         with:
+          # Keep Node pinned for RN/Expo stability in this workflow.
           node-version: "22"
-          cache: pnpm
 
       - name: Enable Corepack and pin pnpm
         run: |
