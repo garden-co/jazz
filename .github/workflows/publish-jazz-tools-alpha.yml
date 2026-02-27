@@ -427,7 +427,7 @@ jobs:
               ;;
           esac
 
-          node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --version >/dev/null
+          node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --help >/dev/null
           test -x "${EXTRACT_DIR}/package/bin/native/${HOST_LINUX_BIN}" || {
             echo "Packed native binary ${HOST_LINUX_BIN} is not executable after runtime bootstrap."
             exit 1
