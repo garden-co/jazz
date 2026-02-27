@@ -87,7 +87,7 @@ test.describe("data explorer page", () => {
   test("loads data explorer from stored config", async ({ page }) => {
     await page.getByRole("link", { name: "View todos data" }).click();
 
-    await expect(page.getByText("2 columns")).toBeVisible();
+    await expect(page.getByText("3 columns")).toBeVisible();
 
     await expect(page.getByText("2 rows")).toBeVisible({ timeout: 10000 });
   });
