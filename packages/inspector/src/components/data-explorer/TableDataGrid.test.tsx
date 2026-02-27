@@ -9,7 +9,6 @@ const mockWasmSchema = {
   tables: {
     todos: {
       columns: [
-        { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
@@ -62,7 +61,7 @@ describe("TableDataGrid", () => {
 
     expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
     expect(screen.getByText("4 columns · 2 rows")).not.toBeNull();
-    expect(screen.getByRole("columnheader", { name: "id" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "ID" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "meta" })).not.toBeNull();

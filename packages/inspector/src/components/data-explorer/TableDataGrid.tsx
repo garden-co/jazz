@@ -43,13 +43,22 @@ export function TableDataGrid() {
   const schemaColumns = schema.tables[table]?.columns ?? [];
 
   const columnDefs = useMemo<ColumnDef<DynamicTableRow>[]>(
-    () =>
-      schemaColumns.map((column) => ({
-        id: column.name,
-        accessorKey: column.name,
-        header: column.name,
+    () => [
+      {
+        id: "id",
+        accessorKey: "id",
+        header: "ID",
         cell: (cellContext) => formatCellValue(cellContext.getValue()),
-      })),
+      },
+      ...schemaColumns.map(
+        (column): ColumnDef<DynamicTableRow> => ({
+          id: column.name,
+          accessorKey: column.name,
+          header: column.name,
+          cell: (cellContext) => formatCellValue(cellContext.getValue()),
+        }),
+      ),
+    ],
     [schemaColumns],
   );
 
@@ -82,7 +91,7 @@ export function TableDataGrid() {
         <div>
           <h2 className={styles.title}>{table}</h2>
           <p className={styles.stats}>
-            {schemaColumns.length} column{schemaColumns.length === 1 ? "" : "s"} · {rows.length} row
+            {columnDefs.length} column{columnDefs.length === 1 ? "" : "s"} · {rows.length} row
             {rows.length === 1 ? "" : "s"}
           </p>
         </div>
