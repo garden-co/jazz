@@ -109,7 +109,7 @@ After linking, external JWT sessions resolve to the same principal.
 
 ## Session Resolution Order
 
-For both `jazz-tools server` and `jazz-cloud-server`:
+For `jazz-tools server`:
 
 1. Backend impersonation (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
 2. External JWT (`Authorization: Bearer <jwt>`)
@@ -129,16 +129,6 @@ For both `jazz-tools server` and `jazz-cloud-server`:
 <include cwd lang="bash">
   ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
 </include>
-
-### `jazz-cloud-server` (multi-tenant)
-
-Per app config supports:
-
-- `jwks_endpoint` (optional; if unset, external JWT auth is disabled)
-- `allow_anonymous` (default `true`)
-- `allow_demo` (default `true`)
-
-And a persistent `external_identities` mapping table for upgrade/link fallback.
 
 ### Offline-only mode
 

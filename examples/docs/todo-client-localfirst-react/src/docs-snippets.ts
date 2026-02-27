@@ -89,7 +89,11 @@ export async function combinedQuery(db: Db) {
 
 // #region reading-tier-react
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length), "edge");
+  return db.subscribeAll(
+    app.todos.where({ done: false }),
+    ({ all }) => onCount(all.length),
+    "edge",
+  );
 }
 // #endregion reading-tier-react
 

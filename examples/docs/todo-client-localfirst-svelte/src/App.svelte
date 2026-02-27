@@ -5,8 +5,9 @@
 
 	const client = createJazzClient({
 		appId: 'todo-svelte-example',
-		env: 'dev',
-		userBranch: 'main',
+		serverUrl: 'http://127.0.0.1:1625',
+		localAuthMode: 'anonymous',
+		// jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
 	});
 </script>
 

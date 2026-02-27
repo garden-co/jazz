@@ -4,8 +4,9 @@ import { TodoList } from "./TodoList.js";
 // #region context-setup-react-minimal
 const client = createJazzClient({
   appId: "todo-react-example",
-  env: "dev",
-  userBranch: "main",
+  serverUrl: "http://127.0.0.1:1625",
+  localAuthMode: "anonymous",
+  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
 });
 
 export function AppMinimal() {

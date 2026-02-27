@@ -4,20 +4,20 @@ description: Build a local-first React app with Jazz. Schema, provider, reactive
 ---
 
 import AuthMethods from "../../partials/quickstarts/auth-methods.mdx";
-import AvailableColumnTypes from "../../partials/quickstarts/available-column-types.mdx";
-import DbConfigReference from "../../partials/quickstarts/db-config-reference.mdx";
 import FluentImmutableCallout from "../../partials/quickstarts/fluent-immutable-callout.mdx";
-import NextLinks from "../../partials/quickstarts/next-links.mdx";
 import PersistenceTiersTable from "../../partials/quickstarts/persistence-tiers-table.mdx";
 import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
 import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
-import WhereOperatorsTable from "../../partials/quickstarts/where-operators-table.mdx";
+import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
+import QuickstartWhereOperatorsSummary from "../../partials/quickstarts/where-operators-summary.mdx";
 
 ## Install
 
 Install the runtime package:
 
 `pnpm add jazz-tools`
+
+For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
@@ -27,13 +27,13 @@ Create `schema/current.ts` at the root of your project. This is the source of tr
   ../examples/docs/todo-client-localfirst-react/schema/current.ts#schema-react
 </include>
 
-### Available column types
-
-<AvailableColumnTypes />
+<QuickstartSchemaTypesSummary />
 
 ### Run codegen
 
 <RunCodegen />
+
+Deep dive: [Schemas](/docs/schemas).
 
 ## Create a client and wrap your app
 
@@ -43,13 +43,14 @@ Create `schema/current.ts` at the root of your project. This is the source of tr
   ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
 </include>
 
-### DbConfig reference
-
-<DbConfigReference />
-
-In browser clients, omitting local auth fields defaults to anonymous synthetic auth with a persisted local token.
+- `appId` identifies the app namespace for storage and sync.
+- `serverUrl` enables sync; omit it for offline-only mode.
+- `localAuthMode` is the local synthetic auth path (`"anonymous"` / `"demo"`).
+- `jwtToken` is the external auth path and should be used instead of `localAuthMode`.
 
 `client` is read once at mount. If you need to change it (for example after login), remount the provider with a new `key`.
+
+For all other options (`dbName`, `adminSecret`, `env`, `userBranch`, `localAuthToken`), see [Setup: createJazzClient reference](/docs/setup#createjazzclient-reference).
 
 ## Read data with `useAll`
 
@@ -69,17 +70,11 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
 
 <FluentImmutableCallout />
 
-### Where operators
-
-Simple equality uses a plain value. For other comparisons, pass an operator object:
-
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#where-operators-react
-</include>
-
-<WhereOperatorsTable />
+<QuickstartWhereOperatorsSummary />
 
 By default `useAll` returns results immediately from the local replica. Use settled tiers when you need explicit confirmation boundaries.
+
+Deep dive: [Reading Data](/docs/reading-data).
 
 ## Write data with `useDb`
 
@@ -91,14 +86,15 @@ By default `useAll` returns results immediately from the local replica. Use sett
 
 Because writes hit the local runtime first, subscriptions update immediately with local-first UX.
 
+Mutation API details: [Writing Data](/docs/writing-data).
+
 ## Persistence tiers
 
 <PersistenceTiersTable />
 
 <Callout title="Which tier to use?">
-  `worker` is the right default for most UI interactions. Use `edge` when you need to
-  confirm data has synced to the nearest server. Use `core` when you need globally
-  consistent acknowledgement.
+  `worker` is the right default for most UI interactions. Use `edge` when you need to confirm data
+  has synced to the nearest server. Use `core` when you need globally consistent acknowledgement.
 </Callout>
 
 ### Reading with a settled tier
@@ -116,6 +112,8 @@ Use `*WithAck` APIs to wait for specific durability tiers:
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#writing-ack-react
 </include>
+
+Tier semantics in depth: [Reading Data](/docs/reading-data#read-settled-tiers) and [Writing Data](/docs/writing-data#write-ack-tiers).
 
 ## Querying in depth
 
@@ -154,6 +152,8 @@ If your schema has `col.ref()` columns, codegen produces typed include interface
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#combining-react
 </include>
+
+More query patterns: [Reading Data](/docs/reading-data).
 
 ## Authentication
 
@@ -207,6 +207,21 @@ Omit `serverUrl` to keep all data local:
   ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-offline-react
 </include>
 
-## Next
+Full auth flows and server behavior: [Authentication](/docs/authentication).
 
-<NextLinks />
+## Permissions
+
+Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+
+<include cwd lang="ts" title="schema/permissions.ts">
+  ../examples/docs/todo-client-localfirst-react/schema/permissions.ts#permissions-basic-react
+</include>
+
+Think about permissions in four checks:
+
+- Who can read a row?
+- Who can insert a row?
+- Which old/new row states are allowed on update?
+- Who can delete a row?
+
+For advanced policy patterns and Rust parity, see [Permissions](/docs/permissions).

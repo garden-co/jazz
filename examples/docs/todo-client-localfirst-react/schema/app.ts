@@ -158,12 +158,30 @@ export const wasmSchema: WasmSchema = {
         },
         insert: {
           with_check: {
-            type: "True",
+            type: "Cmp",
+            column: "done",
+            op: "Eq",
+            value: {
+              type: "Literal",
+              value: {
+                type: "Boolean",
+                value: false,
+              },
+            },
           },
         },
         update: {
           using: {
-            type: "True",
+            type: "Cmp",
+            column: "done",
+            op: "Eq",
+            value: {
+              type: "Literal",
+              value: {
+                type: "Boolean",
+                value: false,
+              },
+            },
           },
           with_check: {
             type: "True",
@@ -171,7 +189,16 @@ export const wasmSchema: WasmSchema = {
         },
         delete: {
           using: {
-            type: "True",
+            type: "Cmp",
+            column: "done",
+            op: "Eq",
+            value: {
+              type: "Literal",
+              value: {
+                type: "Boolean",
+                value: false,
+              },
+            },
           },
         },
       },
