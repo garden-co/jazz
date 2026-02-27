@@ -41,3 +41,20 @@ definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
     .whereNew(allowedTo.update("project"));
 });
 // #endregion permissions-allowed-to-ts
+
+// #region permissions-combinators-ts
+definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
+  );
+});
+// #endregion permissions-combinators-ts
+
+// #region permissions-recursive-inherits-ts
+definePermissions(app, ({ policy, allowedTo }) => {
+  policy.todos.allowRead.where(allowedTo.read("parent"));
+  policy.todos.allowUpdate
+    .whereOld(allowedTo.update("parent", { maxDepth: 5 }))
+    .whereNew(allowedTo.update("parent", { maxDepth: 5 }));
+});
+// #endregion permissions-recursive-inherits-ts
