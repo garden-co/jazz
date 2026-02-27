@@ -49,6 +49,10 @@ pub enum CatalogueColumnType {
     Double,
     Boolean,
     Text,
+    Json {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema: Option<serde_json::Value>,
+    },
     Enum {
         variants: Vec<String>,
     },
@@ -77,9 +81,10 @@ impl From<ColumnType> for CatalogueColumnType {
         match column_type {
             ColumnType::Integer => Self::Integer,
             ColumnType::BigInt => Self::BigInt,
-            ColumnType::Double => Self::Double,
             ColumnType::Boolean => Self::Boolean,
+            ColumnType::Double => Self::Double,
             ColumnType::Text => Self::Text,
+            ColumnType::Json(schema) => Self::Json { schema },
             ColumnType::Enum(variants) => Self::Enum { variants },
             ColumnType::Timestamp => Self::Timestamp,
             ColumnType::Uuid => Self::Uuid,
