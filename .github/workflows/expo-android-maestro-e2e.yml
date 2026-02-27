@@ -100,7 +100,14 @@ jobs:
         run: |
           set -euo pipefail
           sccache --show-stats || true
-          pnpm build:all
+
+          # `build:all` includes jazz-rn iOS native artifacts.
+          # This workflow runs on Linux, so we run the Linux-equivalent set:
+          # 1) explicit jazz-rn Android native payload build
+          # 2) workspace build (same as CI)
+          pnpm --filter jazz-rn build:rn:android
+          pnpm build
+
           sccache --show-stats || true
 
       - name: Build jazz-tools CLI
