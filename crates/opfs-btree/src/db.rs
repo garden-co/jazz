@@ -1471,7 +1471,8 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         let root_page_id = self.root_page_id;
-        let target = self.pages.len().saturating_sub(max_cached_pages);
+        let steady_cached_pages = max_cached_pages.saturating_sub(max_cached_pages / 4).max(1);
+        let target = self.pages.len().saturating_sub(steady_cached_pages);
         if target == 0 {
             return;
         }
@@ -2204,6 +2205,7 @@ mod tests {
         let file = MemoryFile::new();
         let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
         let max_cached = tree.max_cached_pages();
+        let steady_cached = max_cached.saturating_sub(max_cached / 4).max(1);
         let allowance = 4usize;
         let keep_len = max_cached + allowance;
         let page_size = tree.options.page_size;
@@ -2227,8 +2229,8 @@ mod tests {
 
         tree.evict_pages_if_needed_with_allowance(None, allowance);
         assert!(
-            tree.pages.len() <= max_cached,
-            "eviction should reduce cache back to strict budget"
+            tree.pages.len() <= steady_cached,
+            "eviction should reduce cache to steady-state budget"
         );
     }
 
