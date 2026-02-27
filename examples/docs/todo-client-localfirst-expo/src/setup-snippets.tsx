@@ -5,9 +5,9 @@ import { TodoList } from "./TodoList";
 // #region context-setup-expo-minimal
 const client = createJazzClient({
   appId: "00000000-0000-0000-0000-000000000002",
-  env: "dev",
-  userBranch: "main",
-  serverUrl: "http://127.0.0.1:1625",
+  serverUrl: "http://10.0.2.2:1625",
+  localAuthMode: "demo",
+  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
 });
 
 export function AppMinimal() {

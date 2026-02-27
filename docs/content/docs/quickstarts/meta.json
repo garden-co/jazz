@@ -1,4 +1,6 @@
 {
   "title": "Quickstarts",
-  "pages": ["react", "expo", "svelte"]
+  "defaultOpen": true,
+  "collapsible": false,
+  "pages": ["react", "expo", "svelte", "typescript-server"]
 }

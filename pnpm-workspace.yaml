@@ -2,7 +2,7 @@ packages:
   - docs
   - packages/*
   - examples/*
-  - '!examples/rn-jazz-nitro'
+  - "!examples/rn-jazz-nitro"
   - examples/docs/*
   - crates
   - crates/jazz-wasm
@@ -12,8 +12,8 @@ packages:
 
 catalogs:
   default:
-    '@vitest/browser': 4.0.18
-    '@vitest/browser-playwright': 4.0.18
+    "@vitest/browser": 4.0.18
+    "@vitest/browser-playwright": 4.0.18
     vitest: 4.0.18
 
 ignoredBuiltDependencies:

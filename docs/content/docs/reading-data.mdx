@@ -3,6 +3,8 @@ title: Reading Data
 description: Query APIs across one-shot reads, subscriptions, framework hooks, and local-first delivery tiers.
 ---
 
+import WhereOperatorsTable from "../partials/quickstarts/where-operators-table.mdx";
+
 ## One-shot Queries
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
@@ -64,8 +66,10 @@ Use framework bindings immediately after subscription concepts:
 
 - **Behavior:** `where(...)` adds AND-combined predicates to a query.
 - **Parameters:** pass a partial row-shaped object.
-- **TypeScript operators:** scalar equality (`done: false`) plus operator objects like `{ eq, ne, contains, in, gt, gte, lt, lte, isNull }` where supported by the column type.
+- **TypeScript operators:** scalar equality plus typed operator objects by column kind.
 - **Rust operators:** use explicit builder methods such as `filter_eq(...)`.
+
+<WhereOperatorsTable />
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
@@ -76,6 +80,7 @@ Use framework bindings immediately after subscription concepts:
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-where-operators-ts
     </include>
+
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs">

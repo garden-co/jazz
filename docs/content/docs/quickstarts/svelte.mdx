@@ -4,20 +4,20 @@ description: Build a local-first Svelte app with Jazz. Schema, provider, reactiv
 ---
 
 import AuthMethods from "../../partials/quickstarts/auth-methods.mdx";
-import AvailableColumnTypes from "../../partials/quickstarts/available-column-types.mdx";
-import DbConfigReference from "../../partials/quickstarts/db-config-reference.mdx";
 import FluentImmutableCallout from "../../partials/quickstarts/fluent-immutable-callout.mdx";
-import NextLinks from "../../partials/quickstarts/next-links.mdx";
 import PersistenceTiersTable from "../../partials/quickstarts/persistence-tiers-table.mdx";
 import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
 import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
-import WhereOperatorsTable from "../../partials/quickstarts/where-operators-table.mdx";
+import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
+import QuickstartWhereOperatorsSummary from "../../partials/quickstarts/where-operators-summary.mdx";
 
 ## Install
 
 Install the runtime package:
 
 `pnpm add jazz-tools`
+
+For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
@@ -27,13 +27,13 @@ Create `schema/current.ts` at the root of your project. This is the source of tr
   ../examples/docs/todo-client-localfirst-svelte/schema/current.ts#schema-svelte
 </include>
 
-### Available column types
-
-<AvailableColumnTypes />
+<QuickstartSchemaTypesSummary />
 
 ### Run codegen
 
 <RunCodegen />
+
+Deep dive: [Schemas](/docs/schemas).
 
 ## Create a client and wrap your app
 
@@ -43,13 +43,14 @@ Call `createJazzClient` with your config outside the component tree, then pass t
   ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
 </include>
 
-### DbConfig reference
-
-<DbConfigReference />
-
-In browser clients, omitting local auth fields defaults to anonymous synthetic auth with a persisted local token.
+- `appId` identifies the app namespace for storage and sync.
+- `serverUrl` enables sync; omit it for offline-only mode.
+- `localAuthMode` is the local synthetic auth path (`"anonymous"` / `"demo"`).
+- `jwtToken` is the external auth path and should be used instead of `localAuthMode`.
 
 `createJazzClient` is typically called once at the top level. If you need to reinitialize (for example after login), remount the provider with a `{#key}` block.
+
+For all other options (`dbName`, `adminSecret`, `env`, `userBranch`, `localAuthToken`), see [Setup: createJazzClient reference](/docs/setup#createjazzclient-reference).
 
 ## Read data with `QuerySubscription`
 
@@ -69,17 +70,11 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
 
 <FluentImmutableCallout />
 
-### Where operators
-
-Simple equality uses a plain value. For other comparisons, pass an operator object:
-
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-svelte/src/docs-snippets.ts#where-operators-svelte
-</include>
-
-<WhereOperatorsTable />
+<QuickstartWhereOperatorsSummary />
 
 By default `QuerySubscription` returns results immediately from the local replica. Use persistence tiers when you need explicit confirmation boundaries.
+
+Deep dive: [Reading Data](/docs/reading-data).
 
 ## Write data with `getDb`
 
@@ -91,14 +86,15 @@ By default `QuerySubscription` returns results immediately from the local replic
 
 Because writes hit the local runtime first, subscriptions update immediately with local-first UX.
 
+Mutation API details: [Writing Data](/docs/writing-data).
+
 ## Persistence tiers
 
 <PersistenceTiersTable />
 
 <Callout title="Which tier to use?">
-  `worker` is the right default for most UI interactions. Use `edge` when you need to
-  confirm data has synced to the nearest server. Use `core` when you need globally
-  consistent acknowledgement.
+  `worker` is the right default for most UI interactions. Use `edge` when you need to confirm data
+  has synced to the nearest server. Use `core` when you need globally consistent acknowledgement.
 </Callout>
 
 ### Reading with a tier
@@ -116,6 +112,8 @@ Use `*WithAck` variants when you need durability guarantees before continuing:
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#writing-persisted-svelte
 </include>
+
+Tier semantics in depth: [Reading Data](/docs/reading-data#read-settled-tiers) and [Writing Data](/docs/writing-data#write-ack-tiers).
 
 ## Querying in depth
 
@@ -154,6 +152,8 @@ If your schema has `col.ref()` columns, codegen produces typed include interface
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-svelte/src/docs-snippets.ts#combining-svelte
 </include>
+
+More query patterns: [Reading Data](/docs/reading-data).
 
 ## Authentication
 
@@ -207,6 +207,21 @@ Omit `serverUrl` to keep all data local:
   ../examples/docs/todo-client-localfirst-svelte/src/AuthOffline.svelte#auth-offline-svelte
 </include>
 
-## Next
+Full auth flows and server behavior: [Authentication](/docs/authentication).
 
-<NextLinks />
+## Permissions
+
+Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+
+<include cwd lang="ts" title="schema/permissions.ts">
+  ../examples/docs/todo-client-localfirst-svelte/schema/permissions.ts#permissions-basic-svelte
+</include>
+
+Think about permissions in four checks:
+
+- Who can read a row?
+- Who can insert a row?
+- Which old/new row states are allowed on update?
+- Who can delete a row?
+
+For advanced policy patterns and Rust parity, see [Permissions](/docs/permissions).
