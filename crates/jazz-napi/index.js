@@ -67,7 +67,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require("./jazz-napi.win32-x64-msvc.node");
           } else {
-            nativeBinding = require("@garden-co/jazz-napi-win32-x64-msvc");
+            nativeBinding = require("jazz-napi-win32-x64-msvc");
           }
         } catch (e) {
           loadError = e;
@@ -118,7 +118,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require("./jazz-napi.darwin-x64.node");
           } else {
-            nativeBinding = require("@garden-co/jazz-napi-darwin-x64");
+            nativeBinding = require("jazz-napi-darwin-x64");
           }
         } catch (e) {
           loadError = e;
@@ -130,7 +130,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require("./jazz-napi.darwin-arm64.node");
           } else {
-            nativeBinding = require("@garden-co/jazz-napi-darwin-arm64");
+            nativeBinding = require("jazz-napi-darwin-arm64");
           }
         } catch (e) {
           loadError = e;
@@ -175,7 +175,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require("./jazz-napi.linux-x64-gnu.node");
             } else {
-              nativeBinding = require("@garden-co/jazz-napi-linux-x64-gnu");
+              nativeBinding = require("jazz-napi-linux-x64-gnu");
             }
           } catch (e) {
             loadError = e;

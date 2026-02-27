@@ -3,6 +3,8 @@ title: Schemas
 description: Define tables and relationships in TS DSL or SQL, then use the CLI for generated artifacts.
 ---
 
+import AvailableColumnTypes from "../partials/quickstarts/available-column-types.mdx";
+
 ## Table Definitions
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
@@ -23,6 +25,10 @@ description: Define tables and relationships in TS DSL or SQL, then use the CLI 
 - TypeScript DSL defaults to `col.string`, `col.boolean`, and `col.ref` for relationships.
 - SQL keeps the same model via `TEXT`, `BOOLEAN`, and `UUID REFERENCES ...`.
 - Use SQL as the alternate path when your project is Rust-first.
+
+### Available column types
+
+<AvailableColumnTypes />
 
 ## Jazz CLI and Generated Files
 

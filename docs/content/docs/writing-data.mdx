@@ -1,6 +1,6 @@
 ---
 title: Writing Data
-description: Insert, update, and delete APIs with write acknowledgement semantics.
+description: Insert, update, and delete APIs with local-first execution, framework context hooks, and write acknowledgement tiers.
 ---
 
 ## Local-First Writes
@@ -10,6 +10,33 @@ That keeps UI latency low because your app does not wait for any network hop.
 
 Use this mode when you want the fastest local response and can tolerate async sync
 to higher durability tiers.
+
+## Mutating from Framework Context
+
+Use the framework context binding to access the shared `Db` instance and execute mutations.
+
+<Tabs groupId="jazz-framework" items={["React", "Expo", "Svelte"]} persist>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#writing-use-db-expo
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#writing-get-db-svelte
+    </include>
+
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#writing-mutations-svelte
+    </include>
+
+  </Tab>
+</Tabs>
 
 ## Insert, Update, Delete
 
@@ -63,6 +90,9 @@ In practical terms:
     </include>
   </Tab>
 </Tabs>
+
+`insertPersisted` / `updatePersisted` / `deleteFromPersisted` are legacy aliases.
+Prefer the explicit `*WithAck` APIs in new code.
 
 ## Combining Write Acks with Settled Reads
 

@@ -3,10 +3,12 @@
 	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
 	import { app } from '../schema/app.js';
 
+	// #region writing-get-db-svelte
 	// #region reading-reactive-svelte
 	const db = getDb();
 	const todos = new QuerySubscription(app.todos);
 	// #endregion reading-reactive-svelte
+	// #endregion writing-get-db-svelte
 
 	// #region filtering-svelte
 	const incompleteTodos = new QuerySubscription(
@@ -41,9 +43,9 @@
 
 	// #region writing-persisted-svelte
 	async function addImportantTodo(todoTitle: string) {
-		const id = await db.insertPersisted(app.todos, { title: todoTitle, done: false }, 'edge');
-		await db.updatePersisted(app.todos, id, { done: true }, 'edge');
-		await db.deleteFromPersisted(app.todos, id, 'core');
+		const id = await db.insertWithAck(app.todos, { title: todoTitle, done: false }, 'edge');
+		await db.updateWithAck(app.todos, id, { done: true }, 'edge');
+		await db.deleteFromWithAck(app.todos, id, 'core');
 	}
 	// #endregion writing-persisted-svelte
 </script>
