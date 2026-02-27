@@ -9,15 +9,6 @@ on:
       - synchronize
       - reopened
       - ready_for_review
-    paths:
-      - packages/jazz-tools/package.json
-      - crates/jazz-wasm/package.json
-      - crates/jazz-napi/package.json
-      - crates/jazz-rn/package.json
-      - packages/jazz-tools/CHANGELOG.md
-      - crates/jazz-wasm/CHANGELOG.md
-      - crates/jazz-napi/CHANGELOG.md
-      - crates/jazz-rn/CHANGELOG.md
   workflow_dispatch:
 
 concurrency:
@@ -29,9 +20,67 @@ permissions:
   id-token: write
 
 jobs:
+  classify-pr:
+    name: Classify release PR
+    runs-on: ubuntu-latest
+    outputs:
+      is_release_pr: ${{ steps.classify.outputs.is_release_pr }}
+    steps:
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            echo "is_release_pr=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${PR_DRAFT}" = "true" ]; then
+            echo "is_release_pr=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${PR_TITLE}" = "Version Packages (alpha)" ] || [[ "${PR_HEAD_REF}" == changeset-release/* ]]; then
+            echo "is_release_pr=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "is_release_pr=false" >> "${GITHUB_OUTPUT}"
+          fi
+
   preview:
-    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && (github.event.pull_request.title == 'Version Packages (alpha)' || startsWith(github.event.pull_request.head.ref, 'changeset-release/')))
+    name: Release preview build
+    needs: classify-pr
+    if: needs.classify-pr.outputs.is_release_pr == 'true'
     uses: ./.github/workflows/publish-jazz-tools-alpha.yml
     with:
       mode: dry-run
     secrets: inherit
+
+  release-preview-required:
+    name: Release preview required
+    runs-on: ubuntu-latest
+    needs: [classify-pr, preview]
+    if: always()
+    steps:
+      - name: Enforce preview result for release PRs
+        env:
+          IS_RELEASE_PR: ${{ needs.classify-pr.outputs.is_release_pr }}
+          PREVIEW_RESULT: ${{ needs.preview.result }}
+        run: |
+          echo "is_release_pr=${IS_RELEASE_PR}"
+          echo "preview_result=${PREVIEW_RESULT}"
+
+          if [ "${IS_RELEASE_PR}" != "true" ]; then
+            echo "Not a release PR; skipping heavy preview requirement."
+            exit 0
+          fi
+
+          if [ "${PREVIEW_RESULT}" = "success" ]; then
+            echo "Release preview passed."
+            exit 0
+          fi
+
+          echo "Release preview failed (result=${PREVIEW_RESULT})."
+          exit 1
