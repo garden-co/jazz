@@ -188,18 +188,35 @@ jobs:
             exit 1
           fi
 
-          for attempt in $(seq 1 20); do
-            if curl --fail --silent --show-error "${SERVER_PUBLIC_URL}/health" > /dev/null; then
-              echo "SERVER_PUBLIC_URL=${SERVER_PUBLIC_URL}" >> "${GITHUB_ENV}"
-              echo "Resolved tunnel URL: ${SERVER_PUBLIC_URL}"
-              exit 0
+          TUNNEL_HOST="${SERVER_PUBLIC_URL#https://}"
+          TUNNEL_READY=0
+          for attempt in $(seq 1 180); do
+            if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
+              echo "::error::cloudflared exited before tunnel became reachable."
+              tail -n 200 cloudflared.log || true
+              exit 1
             fi
+
+            # Quick tunnels can take time to propagate in DNS; skip health checks
+            # until the hostname resolves from this runner.
+            if getent hosts "${TUNNEL_HOST}" >/dev/null 2>&1; then
+              if curl --fail --silent --show-error --max-time 5 "${SERVER_PUBLIC_URL}/health" > /dev/null; then
+                TUNNEL_READY=1
+                break
+              fi
+            fi
+
             sleep 1
           done
 
-          echo "::error::Tunnel URL resolved but /health did not respond: ${SERVER_PUBLIC_URL}/health"
-          tail -n 200 cloudflared.log || true
-          exit 1
+          echo "SERVER_PUBLIC_URL=${SERVER_PUBLIC_URL}" >> "${GITHUB_ENV}"
+          if [ "${TUNNEL_READY}" -eq 1 ]; then
+            echo "Resolved tunnel URL and verified /health: ${SERVER_PUBLIC_URL}"
+            exit 0
+          fi
+
+          echo "::warning::Tunnel URL resolved but could not verify /health from this runner within timeout (likely DNS propagation). Continuing with discovered URL for Maestro Cloud."
+          tail -n 100 cloudflared.log || true
 
       - name: Build Expo Android release APK
         working-directory: examples/todo-client-localfirst-expo/android
