@@ -13,8 +13,23 @@ on:
       - crates/jazz-wasm/CHANGELOG.md
       - crates/jazz-napi/CHANGELOG.md
       - crates/jazz-rn/CHANGELOG.md
+  workflow_call:
+    inputs:
+      mode:
+        description: "Execution mode: publish (real release) or dry-run (build + verify only)."
+        required: false
+        type: string
+        default: publish
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Execution mode."
+        required: true
+        type: choice
+        default: publish
+        options:
+          - publish
+          - dry-run
       version:
         description: "Optional exact manual version override (for example 2.0.0-alpha.6)."
         required: false
@@ -178,6 +193,7 @@ jobs:
       id-token: write
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      RELEASE_MODE: ${{ github.event_name == 'workflow_call' && inputs.mode || github.event_name == 'workflow_dispatch' && github.event.inputs.mode || 'publish' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -209,6 +225,9 @@ jobs:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
+
+      - name: Show release mode
+        run: 'echo "Release mode: ${RELEASE_MODE}"'
 
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
@@ -312,9 +331,31 @@ jobs:
           TMP_DIR=$(mktemp -d)
           npm_config_ignore_scripts=true pnpm --filter jazz-rn pack --pack-destination "${TMP_DIR}"
           TARBALL=$(ls "${TMP_DIR}"/jazz-rn-*.tgz | head -n 1)
+          LISTING=$(mktemp)
+          tar -tf "${TARBALL}" > "${LISTING}"
+
+          # Ensure iOS payload is present for CocoaPods (Expo/RN iOS consumers).
+          grep -q '^package/JazzRnFramework.xcframework/' "${LISTING}" || {
+            echo "Missing JazzRnFramework.xcframework in packed jazz-rn tarball."
+            exit 1
+          }
+          grep -q '^package/JazzRnFramework.xcframework/Info.plist$' "${LISTING}" || {
+            echo "Missing JazzRnFramework.xcframework/Info.plist in packed jazz-rn tarball."
+            exit 1
+          }
+
+          # Ensure key Android native slices are present for Expo/RN Android consumers.
+          for abi in arm64-v8a x86_64; do
+            grep -q "^package/android/src/main/jniLibs/${abi}/libjazz_rn\\.a$" "${LISTING}" || {
+              echo "Missing Android native library for ABI ${abi} in packed jazz-rn tarball."
+              exit 1
+            }
+          done
+
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}if(!(p.publishConfig&&p.publishConfig.tag==="alpha")){throw new Error(`Expected publishConfig.tag=alpha for ${p.name}, got ${(p.publishConfig||{}).tag}`);}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
 
       - name: Publish jazz-wasm (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
         run: |
           WASM_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-wasm/package.json","utf8")).version')
           if npm view "jazz-wasm@${WASM_VERSION}" version >/dev/null 2>&1; then
@@ -324,6 +365,7 @@ jobs:
           fi
 
       - name: Publish jazz-napi (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
         run: |
           NAPI_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-napi/package.json","utf8")).version')
           for pkg_dir in crates/jazz-napi/npm/*; do
@@ -342,6 +384,7 @@ jobs:
           fi
 
       - name: Publish jazz-rn (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
         run: |
           RN_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-rn/package.json","utf8")).version')
           if npm view "jazz-rn@${RN_VERSION}" version >/dev/null 2>&1; then
@@ -351,6 +394,7 @@ jobs:
           fi
 
       - name: Publish jazz-tools (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
         run: |
           TOOLS_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
           if npm view "jazz-tools@${TOOLS_VERSION}" version >/dev/null 2>&1; then
