@@ -193,7 +193,7 @@ jobs:
       id-token: write
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      RELEASE_MODE: ${{ github.event_name == 'workflow_call' && inputs.mode || github.event_name == 'workflow_dispatch' && github.event.inputs.mode || 'publish' }}
+      RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -227,7 +227,15 @@ jobs:
           merge-multiple: true
 
       - name: Show release mode
-        run: 'echo "Release mode: ${RELEASE_MODE}"'
+        run: |
+          case "${RELEASE_MODE}" in
+            publish|dry-run) ;;
+            *)
+              echo "Unsupported RELEASE_MODE='${RELEASE_MODE}'"
+              exit 1
+              ;;
+          esac
+          echo "Release mode: ${RELEASE_MODE}"
 
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
@@ -271,7 +279,9 @@ jobs:
 
       - name: Resolve lock-stepped npm package versions
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${RELEASE_MODE}" = "dry-run" ]; then
+            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version || '' }}"
             if [ -n "${VERSION}" ]; then
               npm --prefix packages/jazz-tools version "${VERSION}" --no-git-tag-version
