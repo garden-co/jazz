@@ -327,7 +327,21 @@ jobs:
         run: |
           mkdir -p packages/jazz-tools/bin/native
           cp dist/jazz-tools-* packages/jazz-tools/bin/native/
-          chmod +x packages/jazz-tools/bin/native/jazz-tools-darwin-* packages/jazz-tools/bin/native/jazz-tools-linux-* || true
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64 \
+            jazz-tools-windows-x64.exe; do
+            FILE="packages/jazz-tools/bin/native/${bin}"
+            test -f "${FILE}" || { echo "Missing staged native binary ${bin}"; exit 1; }
+          done
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
+          ls -l packages/jazz-tools/bin/native
 
       - name: Resolve lock-stepped npm package versions
         run: |
@@ -388,7 +402,7 @@ jobs:
           TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
 
-      - name: Verify packed jazz-tools native binaries are executable
+      - name: Verify packed jazz-tools native binaries and runtime bootstrap
         run: |
           TMP_DIR=$(mktemp -d)
           EXTRACT_DIR=$(mktemp -d)
@@ -402,8 +416,22 @@ jobs:
             jazz-tools-linux-x64; do
             FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
             test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
-            test -x "${FILE}" || { echo "Packed native binary ${bin} is not executable"; exit 1; }
           done
+
+          case "$(uname -m)" in
+            x86_64) HOST_LINUX_BIN="jazz-tools-linux-x64" ;;
+            aarch64|arm64) HOST_LINUX_BIN="jazz-tools-linux-arm64" ;;
+            *)
+              echo "Unsupported linux runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --version >/dev/null
+          test -x "${EXTRACT_DIR}/package/bin/native/${HOST_LINUX_BIN}" || {
+            echo "Packed native binary ${HOST_LINUX_BIN} is not executable after runtime bootstrap."
+            exit 1
+          }
 
       - name: Verify packed jazz-rn manifest
         run: |
