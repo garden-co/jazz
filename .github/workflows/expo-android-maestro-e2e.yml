@@ -35,9 +35,6 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
-      COREPACK_HOME: ${{ runner.temp }}/corepack
-      XDG_CACHE_HOME: ${{ runner.temp }}/xdg-cache
-      PNPM_HOME: ${{ runner.temp }}/pnpm-home
 
     steps:
       - uses: actions/checkout@v6
@@ -45,6 +42,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
 
       - uses: actions/setup-java@v5
         with:
@@ -89,8 +91,6 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
-          mkdir -p "${COREPACK_HOME}" "${XDG_CACHE_HOME}" "${PNPM_HOME}"
-          corepack enable
           pnpm install --frozen-lockfile
 
       - name: Install Rust prerequisites
