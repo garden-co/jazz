@@ -3,6 +3,8 @@ title: Setup
 description: Hosted and self-hosted setup, plus runtime context setup across client and backend environments.
 ---
 
+import CreateJazzClientReference from "../partials/quickstarts/create-jazz-client-reference.mdx";
+
 ## 1. Hosted Database Server (From Us)
 
 Current onboarding is manual.
@@ -19,6 +21,23 @@ Current onboarding is manual.
   ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
 </include>
 
+`jazz-tools server` currently supports:
+
+| Option                              | Purpose                                                     | Environment variable   | Default                   |
+| ----------------------------------- | ----------------------------------------------------------- | ---------------------- | ------------------------- |
+| `-p, --port <PORT>`                 | Listen port                                                 | -                      | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                | -                      | `./data`                  |
+| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                   | `JAZZ_JWKS_URL`        | unset                     |
+| `--allow-anonymous`                 | Allow local anonymous auth (`X-Jazz-Local-Mode: anonymous`) | `JAZZ_ALLOW_ANONYMOUS` | see `NODE_ENV` note below |
+| `--allow-demo`                      | Allow local demo auth (`X-Jazz-Local-Mode: demo`)           | `JAZZ_ALLOW_DEMO`      | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                        | `JAZZ_BACKEND_SECRET`  | unset                     |
+| `--admin-secret <ADMIN_SECRET>`     | Enable admin operations (schema/policy sync)                | `JAZZ_ADMIN_SECRET`    | unset                     |
+
+Local auth defaults depend on `NODE_ENV`:
+
+- `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled (`--allow-anonymous` / `--allow-demo`)
+- non-production (`development`, unset, etc.): anonymous/demo are enabled by default
+
 For backend examples, set `JAZZ_SERVER_URL` to your server URL and keep `JAZZ_APP_ID` aligned across clients and backends.
 
 ## 3. Context Setup
@@ -26,14 +45,10 @@ For backend examples, set `JAZZ_SERVER_URL` to your server URL and keep `JAZZ_AP
 Use `JAZZ_APP_ID` as the app ID configuration key across environments.
 For auth modes and upgrade/link flow, see [Authentication](/docs/authentication).
 
-<Tabs
-  groupId="jazz-toolsent-framework"
-  items={["React Client", "Svelte Client", "TS Client"]}
-  persist
->
+<Tabs groupId="jazz-framework" items={["React Client", "Svelte Client", "TS Client"]} persist>
   <Tab value="React Client">
     <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/App.tsx#context-setup-react
+      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
     </include>
   </Tab>
   <Tab value="Svelte Client">
@@ -47,6 +62,13 @@ For auth modes and upgrade/link flow, see [Authentication](/docs/authentication)
     </include>
   </Tab>
 </Tabs>
+
+### createJazzClient reference
+
+<CreateJazzClientReference />
+
+In browser clients, omitting local auth fields defaults to anonymous synthetic auth with a persisted local token.
+For React Native/Expo clients, make sure `serverUrl` points to a host your runtime can reach (for example Android emulator often uses `10.0.2.2`).
 
 ### Backend Context Setup
 
@@ -67,7 +89,7 @@ For auth modes and upgrade/link flow, see [Authentication](/docs/authentication)
 
 Client-side usage enforces permissions for the local user context.
 Backend usage should derive a requester-scoped client directly from the request.
-In TypeScript backends, `client.forRequest(req)` extracts the bearer JWT payload and scopes the client.
+In TypeScript backends, use `createJazzContext(...)` once at startup, then `context.forRequest(req)` to extract the bearer JWT payload and scope the client.
 
 #### Per-request user-scoped client
 

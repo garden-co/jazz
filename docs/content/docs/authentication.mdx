@@ -1,6 +1,6 @@
 ---
 title: Authentication
-description: Anonymous, demo, and external JWT auth in Jazz 2, from zero-config onboarding to external provider upgrades.
+description: Anonymous, demo, and external JWT auth in Jazz 2, from zero-config onboarding to external identity upgrades.
 ---
 
 Jazz 2 supports three auth methods:
@@ -16,67 +16,41 @@ On first load, Jazz auto-generates a device token and persists it in `localStora
 
 <Tabs items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
-    ```tsx
-    import { createJazzClient, JazzProvider } from "jazz-tools/react";
-
-    const client = createJazzClient({
-      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-      env: "dev",
-      userBranch: "main",
-    });
-
-    export function App() {
-      return (
-        <JazzProvider
-          client={client}><TodoApp /></JazzProvider>;
-    }
-    ```
-
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-react
+    </include>
   </Tab>
   <Tab value="Svelte">
-    ```svelte
-    <script lang="ts">
-      import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
-
-      const client = createJazzClient({
-        appId: import.meta.env.JAZZ_APP_ID ?? 'my-app',
-        env: 'dev',
-        userBranch: 'main',
-      });
-    </script>
-
-    <JazzSvelteProvider {client}>
-      {#snippet children({ db })}
-        <TodoApp />
-      {/snippet}
-    </JazzSvelteProvider>
-    ```
-
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthAnonymous.svelte#auth-anon-svelte
+    </include>
   </Tab>
   <Tab value="TypeScript">
-    ```ts
-    import { createDb } from "jazz-tools";
-
-    const db = await createDb({
-      appId: process.env.JAZZ_APP_ID!,
-      env: "dev",
-      userBranch: "main",
-    });
-    ```
-
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-anon-ts
+    </include>
   </Tab>
 </Tabs>
 
 If you want to force a specific device token, pass `localAuthToken` as an explicit override:
 
-```ts
-const db = await createDb({
-  appId: process.env.JAZZ_APP_ID!,
-  env: "dev",
-  userBranch: "main",
-  localAuthToken: "device-token-123", // localAuthMode defaults to "anonymous"
-});
-```
+<Tabs items={["React", "Svelte", "TypeScript"]}>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-token-react
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthAnonymousToken.svelte#auth-anon-token-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-anon-token-ts
+    </include>
+  </Tab>
+</Tabs>
 
 ## 2. Add Demo Auth with a Local Account Switcher
 
@@ -84,95 +58,19 @@ When you want to test multi-user flows locally, switch to `demo` profiles and ex
 
 <Tabs items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
-    ```tsx
-    import {
-      JazzProvider,
-      SyntheticUserSwitcher,
-      getActiveSyntheticAuth,
-    } from "jazz-tools/react";
-
-    const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-    const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
-    export function App() {
-      return (
-        <>
-          <SyntheticUserSwitcher appId={appId} defaultMode="demo" />
-          <JazzProvider
-            // const client = await createJazzClient({
-            //   appId,
-            //   env: "dev",
-            //   userBranch: "main",
-            //   localAuthMode: active.localAuthMode,
-            //   localAuthToken: active.localAuthToken,
-            // });
-            client={client}
-          >
-            <TodoApp />
-          </JazzProvider>
-        </>
-      );
-    }
-    ```
-
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-demo-react
+    </include>
   </Tab>
   <Tab value="Svelte">
-    ```svelte
-    <script lang="ts">
-      import {
-        createJazzClient,
-        JazzSvelteProvider,
-        SyntheticUserSwitcher,
-        getActiveSyntheticAuth,
-      } from 'jazz-tools/svelte';
-
-      const appId = import.meta.env.JAZZ_APP_ID ?? 'my-app';
-      const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
-
-      const client = createJazzClient({
-        appId,
-        env: 'dev',
-        userBranch: 'main',
-        localAuthMode: active.localAuthMode,
-        localAuthToken: active.localAuthToken,
-      });
-    </script>
-
-    <SyntheticUserSwitcher {appId} defaultMode="demo" />
-    <JazzSvelteProvider {client}>
-      {#snippet children({ db })}
-        <TodoApp />
-      {/snippet}
-    </JazzSvelteProvider>
-    ```
-
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthDemo.svelte#auth-demo-svelte
+    </include>
   </Tab>
   <Tab value="TypeScript">
-    ```ts
-    import {
-      createDb,
-      createSyntheticUserSwitcher,
-      getActiveSyntheticAuth,
-    } from "jazz-tools";
-
-    const appId = process.env.JAZZ_APP_ID!;
-    const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
-    createSyntheticUserSwitcher({
-      appId,
-      container: document.getElementById("auth-controls")!,
-      defaultMode: "demo",
-    });
-
-    const db = await createDb({
-      appId,
-      env: "dev",
-      userBranch: "main",
-      localAuthMode: active.localAuthMode,
-      localAuthToken: active.localAuthToken,
-    });
-    ```
-
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-demo-ts
+    </include>
   </Tab>
 </Tabs>
 
@@ -188,89 +86,14 @@ Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created 
 
 <Tabs items={["React", "Svelte"]}>
   <Tab value="React">
-    ```tsx
-    import { useState } from "react";
-    import { createJazzClient, JazzProvider, useLinkExternalIdentity } from "jazz-tools/react";
-
-    const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-    const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-
-    function AuthGate() {
-      const [jwtToken, setJwtToken] = useState<string | undefined>();
-      const linkExternalIdentity = useLinkExternalIdentity({
-        appId,
-        serverUrl,
-        defaultMode: "anonymous",
-      });
-
-      async function onSignedIn(providerJwt: string) {
-        await linkExternalIdentity({ jwtToken: providerJwt });
-        setJwtToken(providerJwt);
-      }
-
-      // const client = await createJazzClient({
-      //   appId,
-      //   env: "dev",
-      //   userBranch: "main",
-      //   jwtToken,
-      // });
-
-      return (
-        <JazzProvider
-          client={client}
-        >
-          <button onClick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
-          <TodoApp />
-        </JazzProvider>
-      );
-    }
-    ```
-
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-external-react
+    </include>
   </Tab>
   <Tab value="Svelte">
-    ```svelte
-    <script lang="ts">
-      import {
-        createJazzClient,
-        JazzSvelteProvider,
-        useLinkExternalIdentity,
-      } from 'jazz-tools/svelte';
-
-      const appId = import.meta.env.JAZZ_APP_ID ?? 'my-app';
-      const serverUrl = import.meta.env.JAZZ_SERVER_URL!;
-
-      const linkExternalIdentity = useLinkExternalIdentity({
-        appId,
-        serverUrl,
-        defaultMode: 'anonymous',
-      });
-
-      let jwtToken = $state<string | undefined>();
-
-      async function onSignedIn(providerJwt: string) {
-        await linkExternalIdentity({ jwtToken: providerJwt });
-        jwtToken = providerJwt;
-      }
-
-      const client = $derived(
-        createJazzClient({
-          appId,
-          serverUrl,
-          jwtToken,
-        }),
-      );
-    </script>
-
-    {#key jwtToken}
-      <JazzSvelteProvider {client}>
-        {#snippet children({ db })}
-          <button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
-          <TodoApp />
-        {/snippet}
-      </JazzSvelteProvider>
-    {/key}
-    ```
-
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthExternal.svelte#auth-external-svelte
+    </include>
   </Tab>
 </Tabs>
 
@@ -278,21 +101,15 @@ Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created 
 
 Use `JazzClient.linkExternalIdentity(...)` directly:
 
-```ts
-const result = await client.linkExternalIdentity({
-  jwtToken: providerJwt,
-  localAuthMode: "anonymous", // or "demo"
-  localAuthToken: "device-token-123",
-});
-
-console.log(result.created, result.principal_id);
-```
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-external-ts
+</include>
 
 After linking, external JWT sessions resolve to the same principal.
 
 ## Session Resolution Order
 
-For both `jazz-tools server` and `jazz-cloud-server`:
+For `jazz-tools server`:
 
 1. Backend impersonation (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
 2. External JWT (`Authorization: Bearer <jwt>`)
@@ -305,31 +122,30 @@ For both `jazz-tools server` and `jazz-cloud-server`:
 
 - Supports external JWT only when `--jwks-url` is configured.
 - Local auth mode defaults depend on `NODE_ENV`:
-  - `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled
-    with `--allow-anonymous` / `--allow-demo`
-  - non-production (`development`, unset, etc.): anonymous and demo are enabled by
-    default
+  - `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled with `--allow-anonymous` / `--allow-demo`
+  - non-production (`development`, unset, etc.): anonymous and demo are enabled by default
 - Supports external identity mapping persistence via `external_identities`.
 
-Example:
+<include cwd lang="bash">
+  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
+</include>
 
-```bash
-NODE_ENV=production \
-jazz-tools server "$JAZZ_APP_ID" \
-  --port 1625 \
-  --data-dir ./data \
-  --allow-demo \
-  --jwks-url https://auth.example.com/.well-known/jwks.json \
-  --backend-secret "$JAZZ_BACKEND_SECRET" \
-  --admin-secret "$JAZZ_ADMIN_SECRET"
-```
+### Offline-only mode
 
-### `jazz-cloud-server` (multi-tenant)
-
-Per app config supports:
-
-- `jwks_endpoint` (optional; if unset, external JWT auth is disabled)
-- `allow_anonymous` (default `true`)
-- `allow_demo` (default `true`)
-
-And a persistent `external_identities` mapping table for upgrade/link fallback.
+<Tabs items={["React", "Svelte", "TypeScript"]}>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-offline-react
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthOffline.svelte#auth-offline-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-offline-ts
+    </include>
+  </Tab>
+</Tabs>
