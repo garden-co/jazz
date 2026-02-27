@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -35,6 +36,7 @@ jobs:
           node -e 'const fs=require("fs");const pre=JSON.parse(fs.readFileSync(".changeset/pre.json","utf8"));if(pre.mode!=="pre"||pre.tag!=="alpha"){throw new Error(`Expected .changeset/pre.json mode=pre tag=alpha, got mode=${pre.mode} tag=${pre.tag}`);}console.log("Changesets prerelease mode: alpha");'
 
       - name: Create or update release PR
+        id: changesets
         uses: changesets/action@v1
         with:
           version: pnpm release:version
@@ -42,3 +44,21 @@ jobs:
           commit: "Version Packages (alpha)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger release preview workflow
+        if: steps.changesets.outputs.hasChangesets == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          RELEASE_BRANCH="changeset-release/${BASE_BRANCH}"
+          PR_NUMBER=$(gh pr list --repo "${REPO}" --head "${RELEASE_BRANCH}" --base "${BASE_BRANCH}" --state open --json number -q '.[0].number')
+
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "No open release PR found for ${RELEASE_BRANCH}; skipping preview dispatch."
+            exit 0
+          fi
+
+          gh workflow run preview-jazz-tools-alpha-release.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          echo "Dispatched release preview workflow for ${RELEASE_BRANCH} (PR #${PR_NUMBER})."
