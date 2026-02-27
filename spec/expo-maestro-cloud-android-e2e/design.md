@@ -67,6 +67,14 @@ cloudflared tunnel --url http://127.0.0.1:1625 --no-autoupdate > cloudflared.log
 SERVER_PUBLIC_URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare.com' cloudflared.log | head -n1)"
 ```
 
+`cloudflared` quick tunnels are free for test/dev usage and do not require creating a Cloudflare account. They are explicitly best-effort and not production-SLA, which is acceptable for CI E2E.
+
+Compatibility note:
+
+- Quick Tunnel docs call out an SSE limitation.
+- This Expo test path uses Jazz binary chunked `/events` (not SSE), so this limitation is not expected to block the run.
+- If tunnel flakiness is observed in CI, fallback is a named Cloudflare Tunnel (account-backed) for higher stability.
+
 ### 4) Build an Android artifact suitable for Maestro Cloud
 
 Build a release APK from the Expo example with E2E env vars embedded:
@@ -227,17 +235,7 @@ test "${EVENT_COUNT}" -gt 0
 
 ## Open Questions
 
-### Trigger scope
+### Security policy
 
-1. On PRs, should Expo-example-only changes (`examples/todo-client-localfirst-expo/**`) trigger this job?  
-   Impact: you asked both “only crates/jazz-tools/native” and “except Expo example”; this decides final `paths` filter.
-
-### Network/security
-
-2. Is an ephemeral public tunnel from CI acceptable for this test backend?  
-   Impact: without a public endpoint, Maestro Cloud cannot reach the GitHub-runner server.
-
-### Build variant
-
-3. Do you want `release` APK only, or `debug` APK on cloud?  
-   Impact: `release` is usually more deterministic in cloud runs (bundled JS, no Metro dependency), but slower to build.
+1. Confirm this CI-only policy is acceptable: ephemeral tunnel URL is public but unguessable, and server uses app id/admin secret dedicated to E2E scope only.  
+   Impact: this is the main security boundary for exposing the CI test server to cloud devices.
