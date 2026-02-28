@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.8",
+  "version": "2.0.0-alpha.9",
   "description": "Jazz TypeScript SDK, React bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
