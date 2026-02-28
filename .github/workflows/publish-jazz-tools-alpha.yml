@@ -59,12 +59,19 @@ jobs:
             exit 0
           fi
 
-          PRS_JSON=$(gh api "repos/${REPOSITORY}/commits/${SHA}/pulls" 2>/dev/null || echo "[]")
-          PR_NUMBER=$(PRS_JSON="${PRS_JSON}" node -e 'const prs=JSON.parse(process.env.PRS_JSON || "[]");const pr=prs.find((p)=>p&&p.merged_at&&p.head&&typeof p.head.ref==="string"&&p.head.ref.startsWith("changeset-release/"));if(pr){process.stdout.write(String(pr.number));}')
+          MATCH_SOURCE="commit pull association"
+          PR_NUMBER=$(gh api "repos/${REPOSITORY}/commits/${SHA}/pulls" --jq '.[] | select(.merged_at != null and .base.ref == "main" and (.head.ref | startswith("changeset-release/"))) | .number' 2>/dev/null | head -n 1 || true)
+
+          # The commit->pull association endpoint can lag right after merge.
+          # Fallback to scanning recent merged PRs by merge_commit_sha.
+          if [ -z "${PR_NUMBER}" ]; then
+            MATCH_SOURCE="recent merged PR scan by merge_commit_sha"
+            PR_NUMBER=$(gh api "repos/${REPOSITORY}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100" --jq ".[] | select(.merged_at != null and .merge_commit_sha == \"${SHA}\" and (.head.ref | startswith(\"changeset-release/\"))) | .number" 2>/dev/null | head -n 1 || true)
+          fi
 
           if [ -n "${PR_NUMBER}" ]; then
             echo "should_run=true" >> "${GITHUB_OUTPUT}"
-            echo "reason=merged changeset release PR #${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+            echo "reason=merged changeset release PR #${PR_NUMBER} (${MATCH_SOURCE})" >> "${GITHUB_OUTPUT}"
           else
             echo "should_run=false" >> "${GITHUB_OUTPUT}"
             echo "reason=main push is not from a merged changeset-release/* PR" >> "${GITHUB_OUTPUT}"
