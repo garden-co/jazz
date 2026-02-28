@@ -57,7 +57,6 @@ mod integration_tests;
 
 // Re-exports
 pub use auto_lens::generate_lens;
-pub use catalogue_export::CatalogueSchemaResponse;
 pub use context::{QuerySchemaContext, SchemaContext, SchemaError};
 pub use diff::{Ambiguity, DiffResult, diff_schemas};
 pub use encoding::{

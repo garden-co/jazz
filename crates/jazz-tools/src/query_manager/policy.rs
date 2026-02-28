@@ -10,9 +10,10 @@ use super::encoding::{
 use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
+use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -23,7 +24,7 @@ pub enum CmpOp {
 }
 
 /// A value in a policy expression - either a literal or a session reference.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PolicyValue {
     /// A literal value.
     Literal(Value),
@@ -52,7 +53,7 @@ pub fn normalize_recursive_max_depth(requested: Option<usize>) -> Option<usize> 
 }
 
 /// Database operation type for policy evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Operation {
     Select,
     Insert,
@@ -75,7 +76,7 @@ impl std::fmt::Display for Operation {
 ///
 /// Policies are boolean expressions evaluated against rows and session context.
 /// They can reference row columns, session variables, and related rows via INHERITS.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PolicyExpr {
     /// Compare a column value against a policy value.
     Cmp {
@@ -494,7 +495,7 @@ where
     evaluate_recursive(
         parent_policy,
         &parent_content,
-        &parent_schema.descriptor,
+        &parent_schema.columns,
         ctx,
         depth + 1,
     )
@@ -1760,7 +1761,12 @@ mod tests {
     fn test_simple_parts_contains_text_and_array() {
         let desc = RowDescriptor::new(vec![
             ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ]);
         let content = encode_row(
             &desc,

@@ -5,10 +5,9 @@
 use wasm_bindgen::prelude::*;
 
 use jazz_tools::query_manager::query::{Query, QueryBuilder as JazzQueryBuilder};
-use jazz_tools::query_manager::types::Value;
 use jazz_tools::query_manager::{parse_query_json, parse_query_value};
 
-use crate::types::WasmValue;
+use crate::types::Value;
 
 /// WASM-exposed QueryBuilder with camelCase methods.
 #[wasm_bindgen]
@@ -44,66 +43,48 @@ impl WasmQueryBuilder {
     /// Add an equals filter.
     #[wasm_bindgen(js_name = filterEq)]
     pub fn filter_eq(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {
-        let wasm_value: WasmValue = serde_wasm_bindgen::from_value(value)?;
-        let groove_value: Value = wasm_value
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
-        self.inner = self.inner.filter_eq(column, groove_value);
+        let value: Value = serde_wasm_bindgen::from_value(value)?;
+        self.inner = self.inner.filter_eq(column, value);
         Ok(self)
     }
 
     /// Add a not-equals filter.
     #[wasm_bindgen(js_name = filterNe)]
     pub fn filter_ne(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {
-        let wasm_value: WasmValue = serde_wasm_bindgen::from_value(value)?;
-        let groove_value: Value = wasm_value
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
-        self.inner = self.inner.filter_ne(column, groove_value);
+        let value: Value = serde_wasm_bindgen::from_value(value)?;
+        self.inner = self.inner.filter_ne(column, value);
         Ok(self)
     }
 
     /// Add a less-than filter.
     #[wasm_bindgen(js_name = filterLt)]
     pub fn filter_lt(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {
-        let wasm_value: WasmValue = serde_wasm_bindgen::from_value(value)?;
-        let groove_value: Value = wasm_value
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
-        self.inner = self.inner.filter_lt(column, groove_value);
+        let value: Value = serde_wasm_bindgen::from_value(value)?;
+        self.inner = self.inner.filter_lt(column, value);
         Ok(self)
     }
 
     /// Add a less-than-or-equal filter.
     #[wasm_bindgen(js_name = filterLe)]
     pub fn filter_le(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {
-        let wasm_value: WasmValue = serde_wasm_bindgen::from_value(value)?;
-        let groove_value: Value = wasm_value
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
-        self.inner = self.inner.filter_le(column, groove_value);
+        let value: Value = serde_wasm_bindgen::from_value(value)?;
+        self.inner = self.inner.filter_le(column, value);
         Ok(self)
     }
 
     /// Add a greater-than filter.
     #[wasm_bindgen(js_name = filterGt)]
     pub fn filter_gt(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {
-        let wasm_value: WasmValue = serde_wasm_bindgen::from_value(value)?;
-        let groove_value: Value = wasm_value
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
-        self.inner = self.inner.filter_gt(column, groove_value);
+        let value: Value = serde_wasm_bindgen::from_value(value)?;
+        self.inner = self.inner.filter_gt(column, value);
         Ok(self)
     }
 
     /// Add a greater-than-or-equal filter.
     #[wasm_bindgen(js_name = filterGe)]
     pub fn filter_ge(mut self, column: &str, value: JsValue) -> Result<WasmQueryBuilder, JsError> {
-        let wasm_value: WasmValue = serde_wasm_bindgen::from_value(value)?;
-        let groove_value: Value = wasm_value
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
-        self.inner = self.inner.filter_ge(column, groove_value);
+        let value: Value = serde_wasm_bindgen::from_value(value)?;
+        self.inner = self.inner.filter_ge(column, value);
         Ok(self)
     }
 

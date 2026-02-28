@@ -114,7 +114,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
 
 fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema) {
     write_string(buf, name.as_str());
-    encode_row_descriptor(buf, &schema.descriptor);
+    encode_row_descriptor(buf, &schema.columns);
     encode_table_policies(buf, &schema.policies);
 }
 
@@ -129,7 +129,7 @@ fn decode_table_entry(
     Ok((
         TableName::new(name),
         TableSchema {
-            descriptor,
+            columns: descriptor,
             policies,
         },
     ))
@@ -146,7 +146,7 @@ fn decode_table_entry_v2(
     Ok((
         TableName::new(name),
         TableSchema {
-            descriptor,
+            columns: descriptor,
             policies,
         },
     ))
@@ -162,7 +162,7 @@ fn decode_table_entry_v1(
     Ok((
         TableName::new(name),
         TableSchema {
-            descriptor,
+            columns: descriptor,
             policies: TablePolicies::default(),
         },
     ))
@@ -334,7 +334,7 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
         ColumnType::Bytea => buf.push(TYPE_BYTEA),
-        ColumnType::Json(schema) => {
+        ColumnType::Json { schema } => {
             buf.push(TYPE_JSON);
             match schema {
                 Some(schema) => {
@@ -349,18 +349,18 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
                 None => buf.push(0),
             }
         }
-        ColumnType::Enum(variants) => {
+        ColumnType::Enum { variants } => {
             buf.push(TYPE_ENUM);
             write_u32(buf, variants.len() as u32);
             for variant in variants {
                 write_string(buf, variant);
             }
         }
-        ColumnType::Array(elem) => {
+        ColumnType::Array { element: elem } => {
             buf.push(TYPE_ARRAY);
             encode_column_type(buf, elem);
         }
-        ColumnType::Row(desc) => {
+        ColumnType::Row { columns: desc } => {
             buf.push(TYPE_ROW);
             encode_row_descriptor(buf, desc);
         }
@@ -391,9 +391,11 @@ fn decode_column_type(
                         message: format!("invalid json schema payload: {err}"),
                     }
                 })?;
-                Ok(ColumnType::Json(Some(schema)))
+                Ok(ColumnType::Json {
+                    schema: Some(schema),
+                })
             } else {
-                Ok(ColumnType::Json(None))
+                Ok(ColumnType::Json { schema: None })
             }
         }
         TYPE_ENUM => {
@@ -402,15 +404,19 @@ fn decode_column_type(
             for _ in 0..variant_count {
                 variants.push(read_string(data, offset, "enum_variant")?);
             }
-            Ok(ColumnType::Enum(variants))
+            Ok(ColumnType::Enum { variants })
         }
         TYPE_ARRAY => {
             let elem = decode_column_type(data, offset)?;
-            Ok(ColumnType::Array(Box::new(elem)))
+            Ok(ColumnType::Array {
+                element: Box::new(elem),
+            })
         }
         TYPE_ROW => {
             let desc = decode_row_descriptor(data, offset)?;
-            Ok(ColumnType::Row(Box::new(desc)))
+            Ok(ColumnType::Row {
+                columns: Box::new(desc),
+            })
         }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
@@ -595,7 +601,7 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
 }
 
 fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
-    encode_row_descriptor(buf, &schema.descriptor);
+    encode_row_descriptor(buf, &schema.columns);
     encode_table_policies(buf, &schema.policies);
 }
 
@@ -606,7 +612,7 @@ fn decode_table_schema(
     let descriptor = decode_row_descriptor(data, offset)?;
     let policies = decode_table_policies(data, offset)?;
     Ok(TableSchema {
-        descriptor,
+        columns: descriptor,
         policies,
     })
 }
@@ -1243,7 +1249,7 @@ mod tests {
 
         // Check table exists
         let users = decoded.get(&TableName::new("users")).unwrap();
-        assert_eq!(users.descriptor.columns.len(), 2);
+        assert_eq!(users.columns.columns.len(), 2);
     }
 
     #[test]
@@ -1269,15 +1275,15 @@ mod tests {
         assert_eq!(decoded.len(), 2);
 
         let users = decoded.get(&TableName::new("users")).unwrap();
-        assert_eq!(users.descriptor.columns.len(), 4);
+        assert_eq!(users.columns.columns.len(), 4);
 
         // Find nullable email column
-        let email_col = users.descriptor.column("email").unwrap();
+        let email_col = users.columns.column("email").unwrap();
         assert!(email_col.nullable);
         assert_eq!(email_col.column_type, ColumnType::Text);
 
         // Find FK column
-        let org_col = users.descriptor.column("org_id").unwrap();
+        let org_col = users.columns.column("org_id").unwrap();
         assert_eq!(org_col.references, Some(TableName::new("orgs")));
     }
 
@@ -1287,7 +1293,12 @@ mod tests {
             .table(
                 TableSchema::builder("posts")
                     .column("id", ColumnType::Uuid)
-                    .column("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+                    .column(
+                        "tags",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    ),
             )
             .build();
 
@@ -1295,8 +1306,11 @@ mod tests {
         let decoded = decode_schema(&encoded).unwrap();
 
         let posts = decoded.get(&TableName::new("posts")).unwrap();
-        let tags_col = posts.descriptor.column("tags").unwrap();
-        assert!(matches!(tags_col.column_type, ColumnType::Array(_)));
+        let tags_col = posts.columns.column("tags").unwrap();
+        assert!(matches!(
+            tags_col.column_type,
+            ColumnType::Array { element: _ }
+        ));
     }
 
     #[test]
@@ -1313,7 +1327,7 @@ mod tests {
         let decoded = decode_schema(&encoded).unwrap();
         let chunks = decoded.get(&TableName::new("chunks")).unwrap();
         assert_eq!(
-            chunks.descriptor.column("payload").unwrap().column_type,
+            chunks.columns.column("payload").unwrap().column_type,
             ColumnType::Bytea
         );
     }
@@ -1325,12 +1339,14 @@ mod tests {
                 TableSchema::builder("documents")
                     .column(
                         "payload",
-                        ColumnType::Json(Some(json!({
-                            "type": "object",
-                            "required": ["name"]
-                        }))),
+                        ColumnType::Json {
+                            schema: Some(json!({
+                                "type": "object",
+                                "required": ["name"]
+                            })),
+                        },
                     )
-                    .column("raw_payload", ColumnType::Json(None)),
+                    .column("raw_payload", ColumnType::Json { schema: None }),
             )
             .build();
 
@@ -1338,15 +1354,17 @@ mod tests {
         let decoded = decode_schema(&encoded).unwrap();
         let docs = decoded.get(&TableName::new("documents")).unwrap();
         assert_eq!(
-            docs.descriptor.column("payload").unwrap().column_type,
-            ColumnType::Json(Some(json!({
-                "type": "object",
-                "required": ["name"]
-            })))
+            docs.columns.column("payload").unwrap().column_type,
+            ColumnType::Json {
+                schema: Some(json!({
+                    "type": "object",
+                    "required": ["name"]
+                }))
+            }
         );
         assert_eq!(
-            docs.descriptor.column("raw_payload").unwrap().column_type,
-            ColumnType::Json(None)
+            docs.columns.column("raw_payload").unwrap().column_type,
+            ColumnType::Json { schema: None }
         );
     }
 
@@ -1374,7 +1392,7 @@ mod tests {
         let image_col = decoded
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .column("image")
             .unwrap();
         assert_eq!(image_col.references, Some(TableName::new("files")));
@@ -1393,7 +1411,7 @@ mod tests {
             for (name, table_schema) in tables {
                 write_string(&mut buf, name.as_str());
 
-                let mut columns: Vec<_> = table_schema.descriptor.columns.iter().collect();
+                let mut columns: Vec<_> = table_schema.columns.columns.iter().collect();
                 columns.sort_by_key(|c| c.name.as_str());
                 write_u32(&mut buf, columns.len() as u32);
                 for col in columns {
@@ -1435,7 +1453,7 @@ mod tests {
         let image_col = decoded
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .column("image")
             .unwrap();
         assert_eq!(image_col.references, Some(TableName::new("files")));
@@ -1446,11 +1464,13 @@ mod tests {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column(
                 "status",
-                ColumnType::Enum(vec![
-                    "done".to_string(),
-                    "in_progress".to_string(),
-                    "todo".to_string(),
-                ]),
+                ColumnType::Enum {
+                    variants: vec![
+                        "done".to_string(),
+                        "in_progress".to_string(),
+                        "todo".to_string(),
+                    ],
+                },
             ))
             .build();
 
@@ -1458,14 +1478,16 @@ mod tests {
         let decoded = decode_schema(&encoded).unwrap();
 
         let todos = decoded.get(&TableName::new("todos")).unwrap();
-        let status_col = todos.descriptor.column("status").unwrap();
+        let status_col = todos.columns.column("status").unwrap();
         assert_eq!(
             status_col.column_type,
-            ColumnType::Enum(vec![
-                "done".to_string(),
-                "in_progress".to_string(),
-                "todo".to_string(),
-            ])
+            ColumnType::Enum {
+                variants: vec![
+                    "done".to_string(),
+                    "in_progress".to_string(),
+                    "todo".to_string(),
+                ]
+            }
         );
     }
 
