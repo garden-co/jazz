@@ -414,8 +414,8 @@ describe("sync-transport", () => {
       onClientPayload,
     });
 
-    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
-    router(JSON.stringify({ destination: { Client: "client-1" }, payload: { Pong: {} } }));
+    router("server", "upstream-1", JSON.stringify({ Ping: {} }));
+    router("client", "client-1", JSON.stringify({ Pong: {} }));
 
     await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledWith({ Ping: {} }));
     expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
@@ -430,7 +430,7 @@ describe("sync-transport", () => {
       onServerPayloadError,
     });
 
-    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
+    router("server", "upstream-1", JSON.stringify({ Ping: {} }));
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
   });

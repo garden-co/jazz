@@ -290,44 +290,37 @@ export interface SyncOutboxRouterOptions {
   retryServerPayloads?: boolean;
 }
 
+export type OutboxDestinationKind = "server" | "client";
+
 /**
  * Create a shared runtime outbox router for server/client destinations.
  */
 export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
-): (envelope: string) => void {
+): (destinationKind: OutboxDestinationKind, destinationId: string, payloadJson: string) => void {
   const logPrefix = options.logPrefix ?? "";
 
-  return (envelope: string) => {
-    let parsed: { destination?: unknown; payload?: unknown };
+  return (destinationKind: OutboxDestinationKind, _destinationId: string, payloadJson: string) => {
+    if (destinationKind === "client") {
+      options.onClientPayload?.(payloadJson);
+      return;
+    }
+
+    let payload: unknown;
     try {
-      parsed = JSON.parse(envelope) as { destination?: unknown; payload?: unknown };
+      payload = JSON.parse(payloadJson);
     } catch (error) {
-      console.error(`${logPrefix}Sync envelope parse error:`, error);
+      console.error(`${logPrefix}Sync payload parse error:`, error);
       return;
     }
 
-    const destination = parsed.destination;
-    const payload = parsed.payload;
-    const isObjectDestination = destination !== null && typeof destination === "object";
-
-    if (isObjectDestination && "Client" in destination) {
-      const payloadJson = JSON.stringify(payload);
-      if (payloadJson !== undefined) {
-        options.onClientPayload?.(payloadJson);
+    Promise.resolve(options.onServerPayload(payload)).catch((error) => {
+      if (options.onServerPayloadError) {
+        options.onServerPayloadError(error);
+        return;
       }
-      return;
-    }
-
-    if (isObjectDestination && "Server" in destination) {
-      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
-        if (options.onServerPayloadError) {
-          options.onServerPayloadError(error);
-          return;
-        }
-        console.error(`${logPrefix}Sync POST error:`, error);
-      });
-    }
+      console.error(`${logPrefix}Sync POST error:`, error);
+    });
   };
 }
 
