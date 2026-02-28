@@ -1,4 +1,10 @@
-import { JazzClient, PersistenceTier, QueryInput, WasmSchema } from "../index.js";
+import {
+  JazzClient,
+  PersistenceTier,
+  QueryExecutionOptions,
+  QueryInput,
+  WasmSchema,
+} from "../index.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -255,6 +261,11 @@ function hookRegistration(
         const queryPayload = isRecord(envelope.payload) ? envelope.payload : {};
         const query = queryPayload.query;
         const settledTier = queryPayload.settledTier as PersistenceTier | undefined;
+        const options = isRecord(queryPayload.options)
+          ? (queryPayload.options as QueryExecutionOptions)
+          : settledTier
+            ? { settledTier }
+            : undefined;
 
         if (typeof query !== "string" && !isRecord(query)) {
           throw new Error(
@@ -308,7 +319,7 @@ function hookRegistration(
                 "*",
               );
             },
-            settledTier,
+            options,
           );
 
           state?.activeSubscriptions.set(bridgeSubscriptionId, {
@@ -319,7 +330,7 @@ function hookRegistration(
           return;
         }
 
-        const rows = await client.query(query as string | QueryInput, settledTier);
+        const rows = await client.query(query as string | QueryInput, options);
         respond({ ok: true, payload: rows });
       } catch (error) {
         const errorMessage =
