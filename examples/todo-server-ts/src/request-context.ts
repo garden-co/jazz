@@ -1,6 +1,6 @@
 import type { Request } from "express";
-import { JazzClient, translateQuery, type Session } from "jazz-tools";
-import { wasmSchema as schema } from "../schema/app.js";
+import { translateQuery, type JazzContext, type Session } from "jazz-tools/backend";
+import { app as schemaApp, wasmSchema as schema } from "../schema/app.js";
 
 type RequesterIdentity = {
   userId: string;
@@ -47,22 +47,22 @@ export function sessionFromRequest(req: Request): Session {
   return { user_id: identity.userId, claims: identity.claims };
 }
 
-export async function listTodosForRequester(req: Request, client: JazzClient) {
-  const userClient = client.forSession(sessionFromRequest(req));
+export async function listTodosForRequester(req: Request, context: JazzContext) {
+  const userClient = context.forSession(sessionFromRequest(req), schemaApp);
   const rows = await userClient.query(buildQuery("todos"));
   return rows;
 }
 
-export async function listTodosWithSimplePolicy(req: Request, client: JazzClient) {
-  const userClient = client.forSession(sessionFromRequest(req));
+export async function listTodosWithSimplePolicy(req: Request, context: JazzContext) {
+  const userClient = context.forSession(sessionFromRequest(req), schemaApp);
   return userClient.query(buildQuery("todos"));
 }
 
 export async function listTodosWithInheritedPolicy(
   req: Request,
-  client: JazzClient,
+  context: JazzContext,
   folderId: string,
 ) {
-  const userClient = client.forSession(sessionFromRequest(req));
+  const userClient = context.forSession(sessionFromRequest(req), schemaApp);
   return userClient.query(buildFolderScopedQuery(folderId));
 }

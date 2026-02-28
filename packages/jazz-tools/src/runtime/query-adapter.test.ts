@@ -37,6 +37,7 @@ describe("translateQuery", () => {
             column_type: { type: "Array", element: { type: "Text" } },
             nullable: false,
           },
+          { name: "metadata", column_type: { type: "Json" }, nullable: true },
           { name: "created_at", column_type: { type: "Timestamp" }, nullable: true },
         ],
       },
@@ -295,6 +296,51 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates eq condition with Json object value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "metadata", op: "eq", value: { phase: "alpha", retries: 1 } }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "metadata" },
+        op: "Eq",
+        right: {
+          type: "Literal",
+          value: { Text: '{"phase":"alpha","retries":1}' },
+        },
+      });
+    });
+
+    it("translates in condition with Json values", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [
+          {
+            column: "metadata",
+            op: "in",
+            value: [{ phase: "alpha" }, { phase: "beta" }],
+          },
+        ],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "In",
+        left: { scope: "todos", column: "metadata" },
+        values: [
+          { type: "Literal", value: { Text: '{"phase":"alpha"}' } },
+          { type: "Literal", value: { Text: '{"phase":"beta"}' } },
+        ],
+      });
+    });
+
     it("translates contains condition with array element value", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -486,6 +532,28 @@ describe("translateQuery", () => {
 
       expect(() => translateQuery(builderJson, basicSchema)).toThrow("Invalid enum value");
     });
+
+    it("rejects unsupported Json comparison operators", () => {
+      const gtBuilderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "metadata", op: "gt", value: { retries: 1 } }],
+        includes: {},
+        orderBy: [],
+      });
+      expect(() => translateQuery(gtBuilderJson, basicSchema)).toThrow(
+        'JSON column "metadata" only supports eq/ne/in/isNull operators.',
+      );
+
+      const containsBuilderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "metadata", op: "contains", value: { retries: 1 } }],
+        includes: {},
+        orderBy: [],
+      });
+      expect(() => translateQuery(containsBuilderJson, basicSchema)).toThrow(
+        'JSON column "metadata" only supports eq/ne/in/isNull operators.',
+      );
+    });
   });
 
   describe("orderBy translation", () => {
@@ -536,6 +604,19 @@ describe("translateQuery", () => {
         { column: { column: "priority" }, direction: "Desc" },
         { column: { column: "title" }, direction: "Asc" },
       ]);
+    });
+
+    it("rejects Json columns in orderBy", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [["metadata", "asc"]],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow(
+        'JSON column "metadata" cannot be used in orderBy().',
+      );
     });
   });
 

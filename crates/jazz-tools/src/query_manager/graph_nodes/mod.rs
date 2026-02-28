@@ -13,6 +13,7 @@ pub mod recursive_relation;
 pub mod select_element;
 pub mod sort;
 pub mod subgraph;
+pub mod tuple_delta;
 pub mod union;
 
 use ahash::AHashSet;

@@ -28,6 +28,14 @@ export async function readTodosWithFilters(db: Db) {
 }
 // #endregion reading-filters-ts
 
+// #region reading-where-operators-ts
+export async function readTodosWithWhereOperators(db: Db) {
+  await db.all(app.todos.where({ done: false }));
+  await db.all(app.todos.where({ title: { contains: "milk" } }));
+  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+}
+// #endregion reading-where-operators-ts
+
 // #region reading-sorting-ts
 export async function readTodosSortedByTitle(db: Db) {
   return db.all(app.todos.where({ done: false }).orderBy("title", "asc"));
@@ -50,6 +58,16 @@ export async function readTodosWithIncludes(db: Db) {
   );
 }
 // #endregion reading-includes-ts
+
+// #region reading-recursive-ts
+export function buildTodoLineageQuery() {
+  return app.todos.gather({
+    start: { done: false },
+    step: ({ current }) => app.todos.where({ parent: current }).hopTo("parent"),
+    maxDepth: 10,
+  });
+}
+// #endregion reading-recursive-ts
 
 // #region writing-crud-ts
 export function writeTodoCrud(db: Db, todoId: string) {

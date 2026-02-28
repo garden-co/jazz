@@ -461,6 +461,23 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Bytea => {
             hasher.update(&[10]);
         }
+        ColumnType::Json(schema) => {
+            hasher.update(&[11]);
+            match schema {
+                Some(schema) => {
+                    hasher.update(&[1]);
+                    if let Ok(encoded) = serde_json::to_vec(schema) {
+                        hasher.update(&(encoded.len() as u64).to_le_bytes());
+                        hasher.update(&encoded);
+                    } else {
+                        hasher.update(&0u64.to_le_bytes());
+                    }
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
         ColumnType::Array(elem) => {
             hasher.update(&[7]);
             hash_column_type(hasher, elem);
