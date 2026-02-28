@@ -107,11 +107,22 @@ impl QueryManager {
                 }
             };
 
+            // Defence in depth: if the subscription has no session (client omitted
+            // it), fall back to the connection-level session set during JWT auth
+            // on the WebSocket handshake. This ensures the PolicyFilterNode is
+            // always present — at worst it will fail closed (zero results) rather
+            // than fail open (bypass policies).
+            let session_for_policy = sub.session.clone().or_else(|| {
+                self.sync_manager
+                    .get_client(sub.client_id)
+                    .and_then(|c| c.session.clone())
+            });
+
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let graph = Self::compile_graph(
                 &sub.query,
                 &schema_for_compile,
-                sub.session.clone(),
+                session_for_policy.clone(),
                 &self.schema_context,
             );
 
@@ -204,7 +215,7 @@ impl QueryManager {
                 sub.client_id,
                 sub.query_id,
                 scope.clone(),
-                sub.session.clone(),
+                session_for_policy.clone(),
             );
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
@@ -212,7 +223,7 @@ impl QueryManager {
             self.sync_manager.send_query_subscription_to_servers(
                 sub.query_id,
                 sub.query.clone(),
-                sub.session.clone(),
+                session_for_policy.clone(),
             );
 
             // Store the server subscription for reactive updates
@@ -221,7 +232,7 @@ impl QueryManager {
                 ServerQuerySubscription {
                     query: sub.query,
                     graph,
-                    session: sub.session,
+                    session: session_for_policy,
                     branches,
                     last_scope: scope,
                     needs_recompile: false,

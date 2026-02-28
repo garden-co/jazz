@@ -83,7 +83,7 @@
     "jazz-rn": "workspace:*",
     "react-dom": "^19.0.0",
     "svelte": "^5.0.0",
-    "typescript": "^5.3.0",
+    "typescript": "catalog:default",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
     "vitest": "catalog:default",

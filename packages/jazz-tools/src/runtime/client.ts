@@ -20,6 +20,7 @@ import {
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
+import { resolveJwtSession } from "./client-session.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -303,10 +304,12 @@ export class JazzClient {
   private serverClientId: string = generateClientId();
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
+  private resolvedSession: Session | null;
 
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
+    this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
       getAuth: () => ({
@@ -479,7 +482,11 @@ export class JazzClient {
    * @returns Array of matching rows
    */
   async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(resolveQueryJson(query), undefined, settledTier);
+    return this.queryInternal(
+      resolveQueryJson(query),
+      this.resolvedSession ?? undefined,
+      settledTier,
+    );
   }
 
   /**
@@ -546,7 +553,7 @@ export class JazzClient {
     callback: SubscriptionCallback,
     settledTier?: PersistenceTier,
   ): number {
-    return this.subscribeInternal(query, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, settledTier);
   }
 
   /**
