@@ -23,6 +23,7 @@ declare const self: {
   postMessage(msg: unknown): void;
   onmessage: ((event: MessageEvent) => void) | null;
   close(): void;
+  location?: { origin?: string };
 };
 
 let runtime: any = null; // WasmRuntime instance
@@ -50,6 +51,44 @@ let bootstrapCatalogueForwarding = false;
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
+
+function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
+  const origin = self.location?.origin;
+  if (!origin) return null;
+
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const match = message.match(/(\/[^"'\s]+\.wasm)/);
+  if (!match) return null;
+
+  return new URL(match[1], origin).href;
+}
+
+async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): Promise<T> {
+  const globalRef = globalThis as typeof globalThis & {
+    fetch?: typeof fetch;
+  };
+  const originalFetch = globalRef.fetch;
+  const origin = self.location?.origin;
+
+  if (typeof originalFetch !== "function" || !origin) {
+    return operation();
+  }
+
+  const patchedFetch: typeof fetch = (input, init) =>
+    originalFetch(
+      typeof input === "string" && input.startsWith("/")
+        ? new URL(input, origin).toString()
+        : input,
+      init,
+    );
+  globalRef.fetch = patchedFetch;
+
+  try {
+    return await operation();
+  } finally {
+    globalRef.fetch = originalFetch;
+  }
+}
 
 function enqueueSyncMessageForMain(payload: string): void {
   pendingSyncPayloadsForMain.push(payload);
@@ -79,7 +118,15 @@ async function startup(): Promise<void> {
     // With vite-plugin-wasm, init happens at import time and default is not a function.
     // Without it, default is the init function that must be called.
     if (typeof wasmModule.default === "function") {
-      await wasmModule.default();
+      try {
+        await runWithRootRelativeFetchSupport(() => wasmModule.default());
+      } catch (error) {
+        const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error);
+        if (!absoluteWasmUrl) {
+          throw error;
+        }
+        await wasmModule.default({ module_or_path: absoluteWasmUrl });
+      }
     }
     post({ type: "ready" });
   } catch (e: any) {
