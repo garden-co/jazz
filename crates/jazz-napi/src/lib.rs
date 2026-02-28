@@ -16,7 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use napi::Env;
-use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::threadsafe_function::{
+    ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
+};
 use napi_derive::napi;
 
 use jazz_tools::object::ObjectId;
@@ -32,7 +34,8 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{Storage, SurrealKvStorage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, Destination, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager,
+    SyncPayload,
 };
 
 fn convert_values(values: Vec<Value>) -> Vec<Value> {
@@ -132,8 +135,12 @@ impl Scheduler for NapiScheduler {
 // NapiSyncSender
 // ============================================================================
 
+/// Arguments for the sync message callback (destinationKind, destinationId, payloadJson)
+type SyncCallbackParams = (String, String, String);
+
 pub struct NapiSyncSender {
-    callback: Arc<Mutex<Option<ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>>>>,
+    callback:
+        Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams, ErrorStrategy::CalleeHandled>>>>,
 }
 
 impl NapiSyncSender {
@@ -143,7 +150,10 @@ impl NapiSyncSender {
         }
     }
 
-    fn set_callback(&self, tsfn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>) {
+    fn set_callback(
+        &self,
+        tsfn: ThreadsafeFunction<(String, String, String), ErrorStrategy::CalleeHandled>,
+    ) {
         if let Ok(mut cb) = self.callback.lock() {
             *cb = Some(tsfn);
         }
@@ -160,12 +170,19 @@ impl SyncSender for NapiSyncSender {
             Some(tsfn) => tsfn,
             None => return,
         };
-        let json = match serde_json::to_string(&message) {
+        let payload_json = match serde_json::to_string(&message.payload) {
             Ok(json) => json,
             Err(_) => return,
         };
+        let (destination_kind, destination_id) = match message.destination {
+            Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
+            Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
+        };
 
-        tsfn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
+        tsfn.call(
+            Ok((destination_kind, destination_id, payload_json)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
     }
 }
 
@@ -685,11 +702,20 @@ impl NapiRuntime {
         &self,
         #[napi(ts_arg_type = "(...args: any[]) => any")] callback: napi::JsFunction,
     ) -> napi::Result<()> {
-        let tsfn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled> = callback
-            .create_threadsafe_function(0, |ctx| {
-                let val = ctx.env.create_string_from_std(ctx.value)?;
-                Ok(vec![val])
-            })?;
+        let tsfn: ThreadsafeFunction<(String, String, String), ErrorStrategy::CalleeHandled> =
+            callback.create_threadsafe_function(
+                0,
+                |ctx: ThreadSafeCallContext<(String, String, String)>| {
+                    let destination_kind = ctx.env.create_string_from_std(ctx.value.0)?;
+                    let destination_id = ctx.env.create_string_from_std(ctx.value.1)?;
+                    let payload_json = ctx.env.create_string_from_std(ctx.value.2)?;
+                    Ok(vec![
+                        destination_kind.into_unknown(),
+                        destination_id.into_unknown(),
+                        payload_json.into_unknown(),
+                    ])
+                },
+            )?;
 
         let core = self
             .core

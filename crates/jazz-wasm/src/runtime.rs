@@ -53,7 +53,8 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, Destination, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager,
+    SyncPayload,
 };
 
 use crate::query::parse_query;
@@ -218,9 +219,18 @@ impl JsSyncSender {
 impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
-            if let Ok(json) = serde_json::to_string(&message) {
-                let js_value = JsValue::from_str(&json);
-                let _ = callback.call1(&JsValue::NULL, &js_value);
+            if let Ok(payload_json) = serde_json::to_string(&message.payload) {
+                let (destination_kind, destination_id) = match message.destination {
+                    Destination::Server(server_id) => ("server", server_id.0.to_string()),
+                    Destination::Client(client_id) => ("client", client_id.0.to_string()),
+                };
+
+                let _ = callback.call3(
+                    &JsValue::NULL,
+                    &JsValue::from_str(destination_kind),
+                    &JsValue::from_str(&destination_id),
+                    &JsValue::from_str(&payload_json),
+                );
             }
         }
     }
