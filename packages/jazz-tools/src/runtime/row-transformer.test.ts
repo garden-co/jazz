@@ -56,6 +56,13 @@ describe("unwrapValue", () => {
     expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);
   });
 
+  it("unwraps Bytea byte arrays to Uint8Array", () => {
+    const v = { type: "Bytea", value: [0, 1, 255] } as unknown as WasmValue;
+    const unwrapped = unwrapValue(v);
+    expect(unwrapped).toBeInstanceOf(Uint8Array);
+    expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);
+  });
+
   it("unwraps Null to undefined", () => {
     const v: WasmValue = { type: "Null" };
     expect(unwrapValue(v)).toBeUndefined();
@@ -112,36 +119,32 @@ describe("unwrapValue", () => {
 
 describe("transformRows", () => {
   const schema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      ],
     },
   };
 
   const relationSchema: WasmSchema = {
-    tables: {
-      users: {
-        columns: [
-          { name: "name", column_type: { type: "Text" }, nullable: false },
-          {
-            name: "manager_id",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "users",
-          },
-        ],
-      },
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "owner_id", column_type: { type: "Uuid" }, nullable: false, references: "users" },
-        ],
-      },
+    users: {
+      columns: [
+        { name: "name", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "manager_id",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "users",
+        },
+      ],
+    },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "owner_id", column_type: { type: "Uuid" }, nullable: false, references: "users" },
+      ],
     },
   };
 
@@ -234,10 +237,8 @@ describe("transformRows", () => {
 
   it("transforms timestamp values to Date objects", () => {
     const timestampSchema: WasmSchema = {
-      tables: {
-        events: {
-          columns: [{ name: "created_at", column_type: { type: "Timestamp" }, nullable: false }],
-        },
+      events: {
+        columns: [{ name: "created_at", column_type: { type: "Timestamp" }, nullable: false }],
       },
     };
     const ts = 1704067200000;
@@ -255,10 +256,8 @@ describe("transformRows", () => {
 
   it("transforms Json columns to parsed values", () => {
     const jsonSchema: WasmSchema = {
-      tables: {
-        documents: {
-          columns: [{ name: "payload", column_type: { type: "Json" }, nullable: false }],
-        },
+      documents: {
+        columns: [{ name: "payload", column_type: { type: "Json" }, nullable: false }],
       },
     };
     const rows: WasmRow[] = [
@@ -280,14 +279,12 @@ describe("transformRows", () => {
     // Even if WASM returns values in a different order conceptually,
     // we map them based on positional index matching schema column order
     const customSchema: WasmSchema = {
-      tables: {
-        items: {
-          columns: [
-            { name: "first", column_type: { type: "Text" }, nullable: false },
-            { name: "second", column_type: { type: "Integer" }, nullable: false },
-            { name: "third", column_type: { type: "Boolean" }, nullable: false },
-          ],
-        },
+      items: {
+        columns: [
+          { name: "first", column_type: { type: "Text" }, nullable: false },
+          { name: "second", column_type: { type: "Integer" }, nullable: false },
+          { name: "third", column_type: { type: "Boolean" }, nullable: false },
+        ],
       },
     };
 

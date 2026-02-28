@@ -1,5 +1,5 @@
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { JazzProvider, useDb, useSession } from "../../src/react-core/provider.js";
 import { useAll, useAllSuspense } from "../../src/react-core/use-all.js";
@@ -56,10 +56,8 @@ type TestClientOptions = {
 const BASE_QUERY: QueryBuilder<Todo> = {
   _table: "todos",
   _schema: {
-    tables: {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
+    todos: {
+      columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
     },
   } as any,
   _rowType: {} as Todo,

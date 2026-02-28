@@ -1107,7 +1107,12 @@ mod tests {
     fn test_descriptor_with_array() -> RowDescriptor {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ])
     }
 

@@ -15,13 +15,11 @@ type TodoInit = {
 };
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 

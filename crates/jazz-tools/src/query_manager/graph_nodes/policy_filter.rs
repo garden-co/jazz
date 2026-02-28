@@ -347,7 +347,7 @@ impl PolicyFilterNode {
         let Some(source_schema) = self.schema.get(&source_table_name) else {
             return false;
         };
-        let source_descriptor = &source_schema.descriptor;
+        let source_descriptor = &source_schema.columns;
 
         let Some(col_idx) = source_descriptor.column_index(via_column) else {
             return false;
@@ -364,7 +364,7 @@ impl PolicyFilterNode {
                 &self.branch,
                 &Value::Uuid(row.id),
             ),
-            ColumnType::Array(element) if **element == ColumnType::Uuid => {
+            ColumnType::Array { element } if **element == ColumnType::Uuid => {
                 io.index_scan_all(source_table_name.as_str(), col.name.as_str(), &self.branch)
             }
             _ => return false,
@@ -584,7 +584,7 @@ impl PolicyFilterNode {
         self.evaluate_expr_with_context(
             parent_policy,
             &parent_row,
-            &parent_schema.descriptor,
+            &parent_schema.columns,
             parent_table_name.as_str(),
             io,
             row_loader,
