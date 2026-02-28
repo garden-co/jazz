@@ -3,9 +3,58 @@ use crate::storage::Storage;
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
-use super::types::{RowDescriptor, Value};
+use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
 impl QueryManager {
+    fn expand_index_values(column: &ColumnDescriptor, value: &Value) -> Vec<Value> {
+        let mut values = vec![value.clone()];
+        if column.references.is_some()
+            && matches!(
+                &column.column_type,
+                ColumnType::Array { element: element_type } if matches!(element_type.as_ref(), ColumnType::Uuid)
+            )
+            && let Value::Array(elements) = value
+        {
+            values.extend(
+                elements
+                    .iter()
+                    .filter(|element| matches!(element, Value::Uuid(_)))
+                    .cloned(),
+            );
+        }
+        values
+    }
+
+    fn insert_column_index_values(
+        storage: &mut dyn Storage,
+        table: &str,
+        column: &ColumnDescriptor,
+        branch: &str,
+        value: &Value,
+        object_id: ObjectId,
+    ) -> Result<(), QueryError> {
+        for index_value in Self::expand_index_values(column, value) {
+            storage
+                .index_insert(table, column.name.as_str(), branch, &index_value, object_id)
+                .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
+        }
+        Ok(())
+    }
+
+    fn remove_column_index_values(
+        storage: &mut dyn Storage,
+        table: &str,
+        column: &ColumnDescriptor,
+        branch: &str,
+        value: &Value,
+        object_id: ObjectId,
+    ) {
+        for index_value in Self::expand_index_values(column, value) {
+            let _ =
+                storage.index_remove(table, column.name.as_str(), branch, &index_value, object_id);
+        }
+    }
+
     /// Update indices when a row is inserted on a specific branch.
     pub(super) fn update_indices_for_insert_on_branch(
         storage: &mut dyn Storage,
@@ -25,9 +74,7 @@ impl QueryManager {
             if let Ok(value) = decode_column(descriptor, data, col_idx)
                 && value != Value::Null
             {
-                storage
-                    .index_insert(table, col.name.as_str(), branch, &value, object_id)
-                    .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
+                Self::insert_column_index_values(storage, table, col, branch, &value, object_id)?;
             }
         }
 
@@ -71,15 +118,17 @@ impl QueryManager {
             if let Ok(old_value) = decode_column(descriptor, old_data, col_idx)
                 && old_value != Value::Null
             {
-                let _ =
-                    storage.index_remove(table, col.name.as_str(), branch, &old_value, object_id);
+                Self::remove_column_index_values(
+                    storage, table, col, branch, &old_value, object_id,
+                );
             }
             // Add new value
             if let Ok(new_value) = decode_column(descriptor, new_data, col_idx)
                 && new_value != Value::Null
             {
-                let _ =
-                    storage.index_insert(table, col.name.as_str(), branch, &new_value, object_id);
+                let _ = Self::insert_column_index_values(
+                    storage, table, col, branch, &new_value, object_id,
+                );
             }
         }
 
@@ -124,7 +173,7 @@ impl QueryManager {
             if let Ok(value) = decode_column(descriptor, old_data, col_idx)
                 && value != Value::Null
             {
-                let _ = storage.index_remove(table, col.name.as_str(), branch, &value, object_id);
+                Self::remove_column_index_values(storage, table, col, branch, &value, object_id);
             }
         }
 
@@ -179,8 +228,9 @@ impl QueryManager {
                 if let Ok(value) = decode_column(descriptor, data, col_idx)
                     && value != Value::Null
                 {
-                    let _ =
-                        storage.index_remove(table, col.name.as_str(), branch, &value, object_id);
+                    Self::remove_column_index_values(
+                        storage, table, col, branch, &value, object_id,
+                    );
                 }
             }
         }
@@ -244,7 +294,9 @@ impl QueryManager {
             if let Ok(value) = decode_column(descriptor, new_data, col_idx)
                 && value != Value::Null
             {
-                let _ = storage.index_insert(table, col.name.as_str(), branch, &value, object_id);
+                let _ = Self::insert_column_index_values(
+                    storage, table, col, branch, &value, object_id,
+                );
             }
         }
 

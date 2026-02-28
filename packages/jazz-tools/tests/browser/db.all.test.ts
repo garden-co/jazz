@@ -3,41 +3,54 @@ import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src
 import type { WasmSchema } from "../../src/drivers/types.js";
 
 const schema: WasmSchema = {
-  tables: {
-    orgs: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
-    teams: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-        {
-          name: "parent_id",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "teams",
-        },
-      ],
-    },
-    users: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-      ],
-    },
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: false,
-        },
-      ],
-    },
+  orgs: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+    ],
+  },
+  file_parts: {
+    columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+  },
+  files: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "parts",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+        references: "file_parts",
+      },
+    ],
   },
 };
 
@@ -67,7 +80,19 @@ interface Todo {
   priority?: number;
   owner_id?: string;
   tags: string[];
+  payload?: Uint8Array;
   owner?: User;
+}
+
+interface FilePart {
+  id: string;
+  label: string;
+}
+
+interface File {
+  id: string;
+  name: string;
+  parts: string[];
 }
 
 const orgs: TableProxy<Org, Omit<Org, "id">> = {
@@ -96,6 +121,20 @@ const todos: TableProxy<Todo, Omit<Todo, "id" | "owner">> = {
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as Omit<Todo, "id" | "owner">,
+};
+
+const fileParts: TableProxy<FilePart, Omit<FilePart, "id">> = {
+  _table: "file_parts",
+  _schema: schema,
+  _rowType: {} as FilePart,
+  _initType: {} as Omit<FilePart, "id">,
+};
+
+const files: TableProxy<File, Omit<File, "id">> = {
+  _table: "files",
+  _schema: schema,
+  _rowType: {} as File,
+  _initType: {} as Omit<File, "id">,
 };
 
 function uniqueDbName(label: string): string {
@@ -197,6 +236,11 @@ describe("db.all browser integration", () => {
       conditions: [{ column: "title", op: "contains", value: "" }],
       expectedTitles: ["alpha", "beta", "gamma"],
     },
+    {
+      name: "eq-bytea",
+      conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
+      expectedTitles: ["alpha"],
+    },
   ];
 
   function track(db: Db): Db {
@@ -215,6 +259,7 @@ describe("db.all browser integration", () => {
       priority: 1,
       owner_id: userId,
       tags: ["work", "backend"],
+      payload: new Uint8Array([1, 2, 3]),
     });
     db.insert(todos, {
       title: "beta",
@@ -222,6 +267,7 @@ describe("db.all browser integration", () => {
       priority: 2,
       owner_id: userId,
       tags: ["home"],
+      payload: new Uint8Array([4, 5, 6]),
     });
     db.insert(todos, {
       title: "gamma",
@@ -229,6 +275,7 @@ describe("db.all browser integration", () => {
       priority: undefined,
       owner_id: userId,
       tags: ["work", "urgent"],
+      payload: undefined,
     });
   }
 
@@ -257,6 +304,29 @@ describe("db.all browser integration", () => {
       expect(actual).toEqual(expected);
     });
   }
+
+  it("returns BYTEA columns as Uint8Array", async () => {
+    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("bytea") }));
+
+    const id = db.insert(todos, {
+      title: "has-bytes",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+      payload: new Uint8Array([0, 1, 2, 255]),
+    });
+
+    const rows = await db.all<Todo>(
+      makeQuery<Todo>("todos", {
+        conditions: [{ column: "id", op: "eq", value: id }],
+      }),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload).toBeInstanceOf(Uint8Array);
+    expect(Array.from(rows[0]?.payload ?? [])).toEqual([0, 1, 2, 255]);
+  });
 
   it("supports orderBy + limit + offset", async () => {
     const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("paginate") }));
@@ -329,7 +399,13 @@ describe("db.all browser integration", () => {
       id: ownerId,
       name: "Owner",
     });
-    expect(rows[0].todosViaOwner).toBeUndefined();
+    expect(rows[0].todosViaOwner).toHaveLength(2);
+    expect(rows[0].todosViaOwner).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "with-owner-1", owner_id: ownerId }),
+        expect.objectContaining({ title: "with-owner-2", owner_id: ownerId }),
+      ]),
+    );
   });
 
   it("supports multi-hop queries", async () => {
@@ -348,6 +424,36 @@ describe("db.all browser integration", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({ id: orgId, name: "Org A" });
+  });
+
+  it("supports one-off all queries across scalar and UUID[] foreign-key hops", async () => {
+    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("fk-hops") }));
+
+    const orgId = db.insert(orgs, { name: "FK Org" });
+    const teamId = db.insert(teams, { name: "FK Team", org_id: orgId, parent_id: undefined });
+    const userId = db.insert(users, { name: "FK User", team_id: teamId });
+
+    const partAId = db.insert(fileParts, { label: "A" });
+    const partBId = db.insert(fileParts, { label: "B" });
+    const fileId = db.insert(files, { name: "File 1", parts: [partBId, partAId] });
+
+    const teamRows = await db.all<Team>(
+      makeQuery<Team>("users", {
+        conditions: [{ column: "id", op: "eq", value: userId }],
+        hops: ["team"],
+      }),
+    );
+    expect(teamRows).toHaveLength(1);
+    expect(teamRows[0]).toMatchObject({ id: teamId, name: "FK Team" });
+
+    const partRows = await db.all<FilePart>(
+      makeQuery<FilePart>("files", {
+        conditions: [{ column: "id", op: "eq", value: fileId }],
+        hops: ["parts"],
+      }),
+    );
+    expect(partRows).toHaveLength(2);
+    expect(partRows.map((row) => row.label).sort()).toEqual(["A", "B"]);
   });
 
   it("supports gather queries", async () => {

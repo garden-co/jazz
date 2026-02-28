@@ -1,6 +1,6 @@
 ---
 title: Permissions
-description: Fast RLS (ReBAC), simple policies, and inherited access policies.
+description: Fast RLS (ReBAC), simple policies, combinators, and inherited access policies.
 ---
 
 ## Schema Policy Syntax
@@ -15,7 +15,7 @@ Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly 
       ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
     </include>
 
-    We can define permissions in a file called `schema/permissions.ts`:
+    Define permissions in `schema/permissions.ts`:
 
     <include cwd lang="ts">
       ../examples/docs/todo-server-ts/schema/permissions.ts
@@ -48,18 +48,18 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
 
 ## Combining Conditions (`allOf` / `anyOf`)
 
-In TypeScript permissions, combine multiple conditions with array-based combinators:
-
-```ts
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
-
-export default definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => [
-  policy.todos.allowRead.where(
-    anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
-  ),
-]);
-```
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#permissions-combinators-rust
+    </include>
+  </Tab>
+</Tabs>
 
 `allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
 
@@ -82,153 +82,28 @@ TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete
 
 ## Advanced: Recursive INHERITS
 
-Use depth-bounded `INHERITS` when foreign keys can form recursive chains (for example, `folders.parent_id -> folders.id`).
+Use depth-bounded inherited access when foreign keys can form recursive chains.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
-    ```ts
-    import { definePermissions } from "jazz-tools/permissions";
-    import { app } from "./app.js";
-
-    export default definePermissions(app, ({ policy, allowedTo }) => [
-      // Default recursive depth is 10.
-      policy.folders.allowRead.where(allowedTo.read("parentId")),
-
-      // Explicit override for recursive/self-referential chains.
-      policy.folders.allowUpdate
-        .whereOld(allowedTo.update("parentId", { maxDepth: 5 }))
-        .whereNew(allowedTo.update("parentId", { maxDepth: 5 })),
-    ]);
-    ```
-
-    `maxDepth` must be a positive integer.
-    Unbounded self-referential `INHERITS` cycles are rejected by schema validation; use `maxDepth` for bounded traversal.
-
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
+    </include>
   </Tab>
   <Tab value="Rust">
-    ```rs
-    use groove::query_manager::policy::{Operation, PolicyExpr};
-    use groove::query_manager::types::TablePolicies;
-
-    let folder_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(Operation::Select, "parent_id", 10),
-    ]));
-    ```
-
-    `PolicyExpr::inherits(...)` uses default depth `10`.
-    `PolicyExpr::inherits_with_depth(...)` overrides it.
-    Runtime hard cap is `64`.
-
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#permissions-recursive-inherits-rust
+    </include>
   </Tab>
 </Tabs>
 
-## Advanced: Complex Recursive Policies (`gather` / `hopTo`)
+`maxDepth` must be a positive integer.
 
-When simple `allowedTo.*(...)` is not expressive enough, build an explicit recursive relation with `policy.<table>.gather({ start, step })` and anchor it with `policy.exists(...)`.
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
-  <Tab value="TypeScript">
-    ```ts
-    import { definePermissions } from "jazz-tools/permissions";
-    import { app } from "./app.js";
-
-    export default definePermissions(app, ({ policy, session }) => {
-      const reachableTeams = policy.teams.gather({
-        start: {
-          kind: "individual",
-          identity_key: session.userId,
-        },
-        step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
-        maxDepth: 10,
-      });
-
-      return [
-        policy.todos.allowRead.where((todo) =>
-          policy.exists(
-            reachableTeams.hopTo("resource_access_edgesViaTeam").where({
-              "resource_access_edges.resource": todo.id,
-              grant_role: "viewer",
-            }),
-          ),
-        ),
-      ];
-    });
-    ```
-
-    MVP constraints:
-
-    - `gather(...)` must start from `policy.<table>`.
-    - `step` must include exactly one `where({ ...: current })` condition and exactly one `hopTo(...)`.
-    - `step` must hop back to the same output table as the `gather(...)` root.
-    - Recursion is depth-bounded (default `10`, hard cap `64`).
-    - Post-recursive relation filtering is composed normally, e.g. `reachableTeams.hopTo(...).where(...)` inside `policy.exists(...)`.
-
-  </Tab>
-  <Tab value="Rust">
-    ```rs
-    use groove::query_manager::policy::PolicyExpr;
-    use groove::query_manager::relation_ir::{
-        ColumnRef, KeyRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
-    };
-    use groove::query_manager::types::{TablePolicies, Value};
-
-    // Rust currently exposes this as ExistsRel + RelExpr::Gather.
-    let reachable_teams = RelExpr::Gather {
-        seed: Box::new(RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: "teams".into(),
-            }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("kind"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Text("individual".into())),
-                },
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("identity_key"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
-                },
-            ]),
-        }),
-        step: Box::new(RelExpr::Project {
-            input: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
-                    table: "team_team_edges".into(),
-                }),
-                predicate: PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("child_team"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Frontier),
-                },
-            }),
-            columns: vec![groove::query_manager::relation_ir::ProjectColumn {
-                alias: "id".into(),
-                expr: groove::query_manager::relation_ir::ProjectExpr::Column(
-                    ColumnRef::unscoped("parent_team"),
-                ),
-            }],
-        }),
-        frontier_key: KeyRef::RowId(RowIdRef::Current),
-        max_depth: 10,
-        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
-    };
-
-    let policies = TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-        rel: reachable_teams,
-    });
-    ```
-
-  </Tab>
-</Tabs>
-
-## Policy enforcement and request context
+## Policy Enforcement and Request Context
 
 Jazz permissions use relationship-based policy evaluation with requester session context.
 Backend endpoints should scope a client/session per request before reads and writes.
-Frontend clients are evaluated with the auth/session identity used to initialize context at the server boundary.
+Frontend clients are evaluated with the auth/session identity used to initialize context.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">

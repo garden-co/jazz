@@ -46,7 +46,7 @@ function makeQuery(payload?: Record<string, unknown>): QueryBuilder<Todo> {
 
   return {
     _table: "todos",
-    _schema: { tables: {} },
+    _schema: {},
     _rowType: {} as Todo,
     _build() {
       return JSON.stringify(builtPayload);
@@ -57,9 +57,7 @@ function makeQuery(payload?: Record<string, unknown>): QueryBuilder<Todo> {
 function makeDelta(all: Todo[]): SubscriptionDelta<Todo> {
   return {
     all,
-    added: [],
-    updated: [],
-    removed: [],
+    delta: [],
   };
 }
 

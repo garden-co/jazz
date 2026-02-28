@@ -25,9 +25,11 @@ use jazz_tools::jazz_transport::{
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz_tools::query_manager::types::{
+    ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchema, Value,
+};
 use jazz_tools::runtime_tokio::TokioRuntime;
-use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
@@ -659,6 +661,15 @@ enum WorkerCommand {
         payload: SyncPayload,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    GetCatalogueSchema {
+        app_id: AppId,
+        schema_hash: SchemaHash,
+        response: tokio::sync::oneshot::Sender<Result<Option<Schema>, String>>,
+    },
+    GetSchemaHashes {
+        app_id: AppId,
+        response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
+    },
 }
 
 impl WorkerCommand {
@@ -667,7 +678,9 @@ impl WorkerCommand {
             WorkerCommand::CreateRuntime { app_id, .. }
             | WorkerCommand::EnsureClientWithSession { app_id, .. }
             | WorkerCommand::SyncAsSession { app_id, .. }
-            | WorkerCommand::SyncAsAdmin { app_id, .. } => *app_id,
+            | WorkerCommand::SyncAsAdmin { app_id, .. }
+            | WorkerCommand::GetCatalogueSchema { app_id, .. }
+            | WorkerCommand::GetSchemaHashes { app_id, .. } => *app_id,
         }
     }
 }
@@ -866,6 +879,39 @@ impl WorkerPool {
         };
         let worker = self.send_command(command)?;
         Self::await_result(worker, response_rx).await
+    }
+
+    async fn get_catalogue_schema(
+        &self,
+        app_id: AppId,
+        schema_hash: SchemaHash,
+    ) -> Result<Option<Schema>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetCatalogueSchema {
+            app_id,
+            schema_hash,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(schema)) => Ok(schema),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn get_schema_hashes(&self, app_id: AppId) -> Result<Vec<String>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetSchemaHashes {
+            app_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(schema_hashes)) => Ok(schema_hashes),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
     }
 
     fn worker_count(&self) -> usize {
@@ -1441,11 +1487,13 @@ impl AppRuntime {
         })?;
 
         let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
-        let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
+        let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
         let db_path = data_dir.join("jazz.surrealkv");
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
+
+        rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;
 
         let sync_tx_clone = sync_broadcast.clone();
         let send_seq_by_client_clone = send_seq_by_client.clone();
@@ -1653,6 +1701,42 @@ async fn run_worker_loop(
                         );
                     }
                 }
+                WorkerCommand::GetCatalogueSchema {
+                    app_id,
+                    schema_hash,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            let maybe_schema = runtime
+                                .runtime
+                                .known_schema(&schema_hash)
+                                .map_err(|err| err.to_string())?;
+                            Ok(maybe_schema.as_ref().cloned())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(worker, app_id = %app_id, "schema response receiver dropped");
+                    }
+                }
+                WorkerCommand::GetSchemaHashes { app_id, response } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .known_schema_hashes()
+                                .map(|schema_hashes| {
+                                    schema_hashes.iter().map(ToString::to_string).collect()
+                                })
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(worker, app_id = %app_id, "schema hashes response receiver dropped");
+                    }
+                }
             }
         }
 
@@ -1687,6 +1771,12 @@ impl ServerState {
 #[derive(Debug, Deserialize)]
 struct AppPath {
     app_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaPath {
+    app_id: String,
+    hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1777,6 +1867,11 @@ struct LinkExternalResponse {
 struct ManageAdminSecretResponse {
     app_id: String,
     admin_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SchemaHashesResponse {
+    hashes: Vec<String>,
 }
 
 pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -1897,6 +1992,8 @@ fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
+        .route("/apps/:app_id/schema/:hash", get(schema_catalogue_handler))
+        .route("/apps/:app_id/schemas", get(schema_hashes_handler))
         .route(
             "/apps/:app_id/auth/link-external",
             post(link_external_handler),
@@ -1958,6 +2055,25 @@ fn now_timestamp_us() -> u64 {
 fn parse_app_id(value: &str) -> Result<AppId, (StatusCode, String)> {
     AppId::from_string(value)
         .map_err(|_| (StatusCode::BAD_REQUEST, format!("invalid app_id: {value}")))
+}
+
+fn parse_schema_hash(value: &str) -> Result<SchemaHash, (StatusCode, String)> {
+    let decoded_hash_bytes = hex::decode(value).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid schema hash: expected hex".to_string(),
+        )
+    })?;
+    if decoded_hash_bytes.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid schema hash: expected 64 hex chars".to_string(),
+        ));
+    }
+
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(&decoded_hash_bytes);
+    Ok(SchemaHash::from_bytes(hash_bytes))
 }
 
 fn encode_frame(event: &ServerEvent) -> Bytes {
@@ -2986,6 +3102,125 @@ async fn sync_handler(
 
     match dispatch_result {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn schema_catalogue_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<SchemaPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    let schema_hash = match parse_schema_hash(&path.hash) {
+        Ok(h) => h,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    match state
+        .workers
+        .get_catalogue_schema(app_id, schema_hash)
+        .await
+    {
+        Ok(Some(schema)) => Json(schema).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found("schema catalogue not found")),
+        )
+            .into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn schema_hashes_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    match state.workers.get_schema_hashes(app_id).await {
+        Ok(schema_hashes) => Json(SchemaHashesResponse {
+            hashes: schema_hashes,
+        })
+        .into_response(),
         Err(err) => {
             let (status, message) = worker_dispatch_status_and_message(err);
             (status, Json(ErrorResponse::internal(message))).into_response()

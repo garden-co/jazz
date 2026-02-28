@@ -25,8 +25,10 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
-  REAL: { type: "Integer" }, // REAL maps to Integer in WASM (no Float type)
+  REAL: { type: "Double" },
+  TIMESTAMP: { type: "Timestamp" },
   UUID: { type: "Uuid" },
+  BYTEA: { type: "Bytea" },
 };
 
 /**
@@ -37,12 +39,21 @@ function sqlTypeToWasm(sqlType: SqlType): ColumnType {
     if (sqlType.kind === "ENUM") {
       return { type: "Enum", variants: [...sqlType.variants] };
     }
+    if (sqlType.kind === "JSON") {
+      return {
+        type: "Json",
+        schema: sqlType.schema,
+      };
+    }
     return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
   }
   return map[sqlType];
 }
 
 function literalToWasmValue(value: unknown): Value {
+  if (value instanceof Uint8Array) {
+    return { type: "Bytea", value };
+  }
   if (value === null) {
     return { type: "Null" };
   }
@@ -91,11 +102,23 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return { type: "IsNull", column: expr.column };
     case "IsNotNull":
       return { type: "IsNotNull", column: expr.column };
+    case "Contains":
+      return {
+        type: "Contains",
+        column: expr.column,
+        value: clonePolicyValue(expr.value),
+      };
     case "In":
       return {
         type: "In",
         column: expr.column,
         session_path: [...expr.session_path],
+      };
+    case "InList":
+      return {
+        type: "InList",
+        column: expr.column,
+        values: expr.values.map(clonePolicyValue),
       };
     case "Exists":
       return {
@@ -112,7 +135,15 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         type: "Inherits",
         operation: expr.operation,
         via_column: expr.via_column,
-        max_depth: expr.max_depth,
+        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
+      };
+    case "InheritsReferencing":
+      return {
+        type: "InheritsReferencing",
+        operation: expr.operation,
+        source_table: expr.source_table,
+        via_column: expr.via_column,
+        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
       };
     case "And":
       return { type: "And", exprs: expr.exprs.map(clonePolicyExpr) };
@@ -127,40 +158,28 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   }
 }
 
+function cloneOperationPolicy(
+  policy: DslTablePolicies[keyof DslTablePolicies],
+): TablePolicies["select"] {
+  const out: TablePolicies["select"] = {};
+  if (!policy) {
+    return out;
+  }
+  if (policy.using) {
+    out.using = clonePolicyExpr(policy.using);
+  }
+  if (policy.with_check) {
+    out.with_check = clonePolicyExpr(policy.with_check);
+  }
+  return out;
+}
+
 function clonePolicies(policies: DslTablePolicies): TablePolicies {
   return {
-    select: policies.select
-      ? {
-          using: policies.select.using ? clonePolicyExpr(policies.select.using) : undefined,
-          with_check: policies.select.with_check
-            ? clonePolicyExpr(policies.select.with_check)
-            : undefined,
-        }
-      : undefined,
-    insert: policies.insert
-      ? {
-          using: policies.insert.using ? clonePolicyExpr(policies.insert.using) : undefined,
-          with_check: policies.insert.with_check
-            ? clonePolicyExpr(policies.insert.with_check)
-            : undefined,
-        }
-      : undefined,
-    update: policies.update
-      ? {
-          using: policies.update.using ? clonePolicyExpr(policies.update.using) : undefined,
-          with_check: policies.update.with_check
-            ? clonePolicyExpr(policies.update.with_check)
-            : undefined,
-        }
-      : undefined,
-    delete: policies.delete
-      ? {
-          using: policies.delete.using ? clonePolicyExpr(policies.delete.using) : undefined,
-          with_check: policies.delete.with_check
-            ? clonePolicyExpr(policies.delete.with_check)
-            : undefined,
-        }
-      : undefined,
+    select: cloneOperationPolicy(policies.select),
+    insert: cloneOperationPolicy(policies.insert),
+    update: cloneOperationPolicy(policies.update),
+    delete: cloneOperationPolicy(policies.delete),
   };
 }
 
@@ -191,5 +210,5 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     };
   }
 
-  return { tables };
+  return tables;
 }

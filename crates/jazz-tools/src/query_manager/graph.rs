@@ -13,7 +13,7 @@ use crate::schema_manager::{SchemaContext, translate_column_for_index};
 use crate::storage::Storage;
 
 use super::graph_nodes::alias::AliasNode;
-use super::graph_nodes::array_subquery::ArraySubqueryNode;
+use super::graph_nodes::array_subquery::{ArraySubqueryNode, Correlate};
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::IndexScanNode;
@@ -27,7 +27,7 @@ use super::graph_nodes::recursive_relation::{
     CorrelationSource, RecursiveHop, RecursiveRelationNode,
 };
 use super::graph_nodes::select_element::SelectElementNode;
-use super::graph_nodes::sort::{SortDirection, SortKey, SortNode};
+use super::graph_nodes::sort::{SortDirection, SortKey, SortNode, SortTarget};
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
@@ -44,7 +44,7 @@ use super::types::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryCompileError {
     UnknownTable(TableName),
-    InvalidPlan(&'static str),
+    InvalidPlan(String),
 }
 
 impl fmt::Display for QueryCompileError {
@@ -257,12 +257,38 @@ impl QueryGraph {
 
     /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
-        Self::try_compile_with_session(query, schema, None).ok()
+        let schema_context = Self::default_schema_context(schema);
+        let mut query_with_default_branch = query.clone();
+        if query_with_default_branch.branches.is_empty() {
+            query_with_default_branch.branches.push("main".to_string());
+        }
+        Self::try_compile_with_schema_context(
+            &query_with_default_branch,
+            schema,
+            None,
+            &schema_context,
+        )
+        .ok()
     }
 
     /// Compile a query into a graph with typed errors (without policy filtering).
     pub fn try_compile(query: &Query, schema: &Schema) -> Result<Self, QueryCompileError> {
-        Self::try_compile_with_session(query, schema, None)
+        let schema_context = Self::default_schema_context(schema);
+        let mut query_with_default_branch = query.clone();
+        if query_with_default_branch.branches.is_empty() {
+            query_with_default_branch.branches.push("main".to_string());
+        }
+        Self::try_compile_with_schema_context(
+            &query_with_default_branch,
+            schema,
+            None,
+            &schema_context,
+        )
+    }
+
+    /// Legacy compile sites default to querying `main` without schema fan-out.
+    fn default_schema_context(schema: &Schema) -> SchemaContext {
+        SchemaContext::with_defaults(schema.clone(), "main")
     }
 
     /// Compile relation IR directly into a graph.
@@ -288,6 +314,12 @@ impl QueryGraph {
         session: Option<Session>,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
+        let default_branches = vec!["main".to_string()];
+        let branches: &[String] = if branches.is_empty() {
+            &default_branches
+        } else {
+            branches
+        };
         let plan = lower_relation_to_execution_plan(
             relation,
             branches,
@@ -295,7 +327,9 @@ impl QueryGraph {
             features.array_subqueries,
             features.select_columns,
         )?;
-        Self::compile_execution_plan_with_session(&plan, schema, session)
+        validate_execution_plan(&plan, schema).ok()?;
+        let schema_context = Self::default_schema_context(schema);
+        Self::compile_execution_plan_with_schema_context(&plan, schema, session, &schema_context)
     }
 
     /// Compile relation IR directly into a graph with schema context.
@@ -331,222 +365,8 @@ impl QueryGraph {
             features.array_subqueries,
             features.select_columns,
         )?;
+        validate_execution_plan(&plan, schema).ok()?;
         Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
-    }
-
-    fn compile_execution_plan_with_session(
-        plan: &ExecutionQueryPlan,
-        schema: &Schema,
-        session: Option<Session>,
-    ) -> Option<Self> {
-        // Get branches (default to "main" if not specified)
-        let default_branches = vec!["main".to_string()];
-        let branches: &[String] = if plan.branches.is_empty() {
-            &default_branches
-        } else {
-            &plan.branches
-        };
-
-        if !plan.joins.is_empty() {
-            return Self::compile_join_plan(plan, schema, branches, session.clone());
-        }
-
-        let table_schema = schema.get(&plan.table)?;
-        let descriptor = table_schema.descriptor.clone();
-        let select_policy = table_schema.policies.select.using.clone();
-        let mut graph = QueryGraph::new(plan.table, descriptor.clone());
-
-        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
-        // For multi-branch queries, we create scans for each branch and union them
-        let mut phase1_outputs: Vec<NodeId> = Vec::new();
-        let mut index_columns: Vec<String> = Vec::new();
-
-        for branch in branches {
-            for disjunct in &plan.disjuncts {
-                // Find best index condition for this disjunct
-                let (scan_column, scan_condition) =
-                    if let Some(cond) = disjunct.best_index_condition() {
-                        let column = cond.column().to_string();
-                        let scan_cond = condition_to_scan(cond);
-                        (column, scan_cond)
-                    } else {
-                        // No index condition, use "_id" for full scan
-                        ("_id".to_string(), ScanCondition::All)
-                    };
-
-                index_columns.push(scan_column.clone());
-                let scan_column_name = ColumnName::new(&scan_column);
-
-                let scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
-                    scan_column_name,
-                    branch,
-                    scan_condition,
-                    descriptor.clone(),
-                );
-                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((scan_id, plan.table, scan_column_name));
-                phase1_outputs.push(scan_id);
-            }
-
-            // If include_deleted is set, also scan _id_deleted index for this branch
-            if plan.include_deleted {
-                let deleted_column = ColumnName::new("_id_deleted");
-                let deleted_scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
-                    deleted_column,
-                    branch,
-                    ScanCondition::All,
-                    descriptor.clone(),
-                );
-                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((deleted_scan_id, plan.table, deleted_column));
-                phase1_outputs.push(deleted_scan_id);
-            }
-        }
-
-        // If multiple outputs, add Union node
-        let phase1_output = if phase1_outputs.len() > 1 {
-            let union_node = UnionNode::new();
-            let union_id = graph.add_node(GraphNode::Union(union_node));
-            for scan_id in &phase1_outputs {
-                graph.add_edge(union_id, *scan_id);
-            }
-            union_id
-        } else if !phase1_outputs.is_empty() {
-            phase1_outputs[0]
-        } else {
-            return None;
-        };
-
-        // Materialize node (boundary between Phase 1 and Phase 2)
-        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
-        let materialize_node = MaterializeNode::new_all(tuple_desc);
-        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
-        graph.add_edge(materialize_id, phase1_output);
-
-        let mut phase2_input = materialize_id;
-        let mut current_descriptor = descriptor.clone();
-
-        // Policy filter node (if session provided and table has SELECT policy)
-        if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let policy_node = PolicyFilterNode::new(
-                current_descriptor.clone(),
-                policy,
-                session.clone(),
-                schema.clone(),
-                plan.table.as_str(),
-            );
-            let inherits_tables: Vec<TableName> = policy_node
-                .inherits_tables()
-                .iter()
-                .map(TableName::new)
-                .collect();
-            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
-            graph.add_edge(policy_id, phase2_input);
-            for inherits_table in inherits_tables {
-                graph.policy_filter_tables.push((policy_id, inherits_table));
-            }
-            phase2_input = policy_id;
-        }
-
-        // Array subqueries: insert ArraySubqueryNode for each array subquery
-        for subquery_spec in &plan.array_subqueries {
-            if let Some((node, new_descriptor)) =
-                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, branches)
-            {
-                let node_id = graph.add_node(GraphNode::ArraySubquery(node));
-                graph.add_edge(node_id, phase2_input);
-                graph
-                    .array_subquery_tables
-                    .push((node_id, subquery_spec.table));
-                phase2_input = node_id;
-                current_descriptor = new_descriptor;
-            }
-        }
-
-        // Phase 2: Filter node (only if there are remaining conditions not covered by index)
-        let predicate = build_remaining_predicate_from_disjuncts(
-            &plan.disjuncts,
-            &index_columns,
-            &current_descriptor,
-        );
-        if !matches!(predicate, Predicate::True) {
-            let filter_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
-            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
-            graph.add_edge(filter_id, phase2_input);
-            phase2_input = filter_id;
-        }
-
-        // Sort node (if order_by specified)
-        if !plan.order_by.is_empty() {
-            let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
-            if !sort_keys.is_empty() {
-                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
-                    "",
-                    current_descriptor.clone(),
-                    true,
-                );
-                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
-                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-                graph.add_edge(sort_id, phase2_input);
-                phase2_input = sort_id;
-            }
-        }
-
-        // LimitOffset node (if limit or offset specified)
-        if plan.limit.is_some() || plan.offset > 0 {
-            let limit_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let limit_offset_node =
-                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
-            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
-            graph.add_edge(limit_offset_id, phase2_input);
-            phase2_input = limit_offset_id;
-        }
-
-        // Project node (if select_columns specified)
-        if let Some(columns) = &plan.select_columns {
-            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
-            let project_node = ProjectNode::new(current_descriptor.clone(), &col_refs);
-            current_descriptor = project_node.output_descriptor().clone();
-            let project_id = graph.add_node(GraphNode::Project(project_node));
-            graph.add_edge(project_id, phase2_input);
-            phase2_input = project_id;
-        }
-
-        // Recursive relation expansion (if configured).
-        if let Some(recursive_spec) = &plan.recursive
-            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
-                recursive_spec,
-                &current_descriptor,
-                schema,
-                branches,
-            )
-        {
-            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
-            graph.add_edge(node_id, phase2_input);
-            graph.recursive_relation_tables.push((node_id, step_table));
-            phase2_input = node_id;
-            current_descriptor = new_descriptor;
-        }
-
-        // Output node
-        graph.combined_descriptor = current_descriptor.clone();
-        let output_tuple_desc =
-            TupleDescriptor::single_with_materialization("", current_descriptor, true);
-        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
-        let output_id = graph.add_node(GraphNode::Output(output_node));
-        graph.add_edge(output_id, phase2_input);
-        graph.output_node = output_id;
-
-        Some(graph)
     }
 
     fn compile_execution_plan_with_schema_context(
@@ -555,13 +375,18 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        // Build branch -> schema hash map for column translation
+        // Build branch -> schema hash map for column translation.
+        // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
+        // a shortened hash prefix).
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
-        for branch_name in schema_context.all_branch_names() {
-            let branch_str = branch_name.as_str().to_string();
-            if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                branch_schema_map.insert(branch_str, composed.schema_hash);
-            }
+        for schema_hash in schema_context.all_live_hashes() {
+            let branch_name = ComposedBranchName::new(
+                &schema_context.env,
+                schema_hash,
+                &schema_context.user_branch,
+            )
+            .to_branch_name();
+            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
         }
 
         // Expand branches to include all live schema branches if not specified
@@ -576,11 +401,17 @@ impl QueryGraph {
         };
 
         if !plan.joins.is_empty() {
-            return Self::compile_join_plan(plan, schema, &branches, session.clone());
+            return Self::compile_join_plan(
+                plan,
+                schema,
+                &branches,
+                session.clone(),
+                schema_context,
+            );
         }
 
         let table_schema = schema.get(&plan.table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let select_policy = table_schema.policies.select.using.clone();
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
@@ -686,12 +517,17 @@ impl QueryGraph {
 
         // Policy filter node (if session provided and table has SELECT policy)
         if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let policy_node = PolicyFilterNode::new(
+            let branch_for_policy = branches
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
+            let policy_node = PolicyFilterNode::new_with_branch(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
+                branch_for_policy,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -708,9 +544,13 @@ impl QueryGraph {
 
         // Array subqueries: insert ArraySubqueryNode for each array subquery
         for subquery_spec in &plan.array_subqueries {
-            if let Some((node, new_descriptor)) =
-                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, &branches)
-            {
+            if let Some((node, new_descriptor)) = graph.compile_array_subquery(
+                subquery_spec,
+                &current_descriptor,
+                schema,
+                &branches,
+                schema_context,
+            ) {
                 let node_id = graph.add_node(GraphNode::ArraySubquery(node));
                 graph.add_edge(node_id, phase2_input);
                 graph
@@ -736,20 +576,15 @@ impl QueryGraph {
             phase2_input = filter_id;
         }
 
-        // Sort node (if order_by specified)
-        if !plan.order_by.is_empty() {
-            let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
-            if !sort_keys.is_empty() {
-                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
-                    "",
-                    current_descriptor.clone(),
-                    true,
-                );
-                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
-                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-                graph.add_edge(sort_id, phase2_input);
-                phase2_input = sort_id;
-            }
+        // Sort node (default: id ASC when order_by is omitted)
+        let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase2_input);
+            phase2_input = sort_id;
         }
 
         // LimitOffset node (if limit or offset specified)
@@ -780,6 +615,7 @@ impl QueryGraph {
                 &current_descriptor,
                 schema,
                 &branches,
+                schema_context,
             )
         {
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
@@ -799,49 +635,6 @@ impl QueryGraph {
         graph.output_node = output_id;
 
         Some(graph)
-    }
-
-    /// Compile a query into a graph with optional session-based policy filtering.
-    ///
-    /// When a session is provided and the table has a SELECT policy, a PolicyFilterNode
-    /// is inserted after materialization to filter rows based on the policy.
-    pub fn compile_with_session(
-        query: &Query,
-        schema: &Schema,
-        session: Option<Session>,
-    ) -> Option<Self> {
-        Self::try_compile_with_session(query, schema, session).ok()
-    }
-
-    /// Compile a query into a graph with optional session-based policy filtering.
-    ///
-    /// Returns a typed error instead of collapsing failures into `None`.
-    pub fn try_compile_with_session(
-        query: &Query,
-        schema: &Schema,
-        session: Option<Session>,
-    ) -> Result<Self, QueryCompileError> {
-        let default_branches = vec!["main".to_string()];
-        let branches: &[String] = if query.branches.is_empty() {
-            &default_branches
-        } else {
-            &query.branches
-        };
-        ensure_relation_tables_exist(&query.relation_ir, schema)?;
-        Self::compile_relation_ir_with_features(
-            &query.relation_ir,
-            schema,
-            branches,
-            session,
-            RelationCompileFeatures {
-                include_deleted: query.include_deleted,
-                array_subqueries: query.array_subqueries.clone(),
-                select_columns: query.select_columns.clone(),
-            },
-        )
-        .ok_or(QueryCompileError::InvalidPlan(
-            "unsupported relation_ir shape for query graph compilation",
-        ))
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -878,21 +671,29 @@ impl QueryGraph {
             query.branches.clone()
         };
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
-        Self::compile_relation_ir_with_schema_context_and_features(
+
+        let plan = lower_relation_to_execution_plan(
             &query.relation_ir,
-            schema,
             &branches,
-            session,
-            schema_context,
-            RelationCompileFeatures {
-                include_deleted: query.include_deleted,
-                array_subqueries: query.array_subqueries.clone(),
-                select_columns: query.select_columns.clone(),
-            },
+            query.include_deleted,
+            query.array_subqueries.clone(),
+            query.select_columns.clone(),
         )
-        .ok_or(QueryCompileError::InvalidPlan(
-            "unsupported relation_ir shape for schema-context query compilation",
-        ))
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for schema-context query compilation".to_string(),
+            )
+        })?;
+
+        validate_execution_plan(&plan, schema)?;
+
+        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+            .ok_or_else(|| {
+                QueryCompileError::InvalidPlan(
+                    "unsupported relation_ir shape for schema-context query compilation"
+                        .to_string(),
+                )
+            })
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -903,9 +704,10 @@ impl QueryGraph {
         outer_descriptor: &RowDescriptor,
         schema: &Schema,
         branches: &[String],
+        schema_context: &SchemaContext,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
-        let inner_descriptor = schema.get(&spec.table)?.descriptor.clone();
+        let inner_descriptor = schema.get(&spec.table)?.columns.clone();
 
         // Find outer correlation column index
         // The outer_column may be qualified (table.column) or unqualified
@@ -914,7 +716,11 @@ impl QueryGraph {
             .split('.')
             .next_back()
             .unwrap_or(&spec.outer_column);
-        let outer_correlation_col = outer_descriptor.column_index(outer_col_name)?;
+        let outer_correlation = match outer_descriptor.column_index(outer_col_name) {
+            Some(index) => Correlate::Col(index),
+            None if outer_col_name == "id" || outer_col_name == "_id" => Correlate::Id,
+            None => return None,
+        };
 
         // Build base query for subgraph, inheriting branches from outer query.
         let mut base_builder = QueryBuilder::new(spec.table);
@@ -954,7 +760,7 @@ impl QueryGraph {
         let mut combined_columns = inner_descriptor.columns.clone();
         for join_spec in &spec.joins {
             if let Some(joined_schema) = schema.get(&join_spec.table) {
-                combined_columns.extend(joined_schema.descriptor.columns.clone());
+                combined_columns.extend(joined_schema.columns.columns.clone());
             }
         }
 
@@ -963,7 +769,11 @@ impl QueryGraph {
             if let Some(nested_element_desc) = Self::build_nested_array_descriptor(nested, schema) {
                 combined_columns.push(ColumnDescriptor::new(
                     &nested.column_name,
-                    ColumnType::Array(Box::new(ColumnType::Row(Box::new(nested_element_desc)))),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Row {
+                            columns: Box::new(nested_element_desc),
+                        }),
+                    },
                 ));
             }
         }
@@ -993,6 +803,7 @@ impl QueryGraph {
             spec.inner_column.clone(),
             spec.select_columns.clone().unwrap_or_default(),
             inner_output_descriptor,
+            schema_context.clone(),
         );
 
         // Create outer tuple descriptor
@@ -1003,7 +814,7 @@ impl QueryGraph {
         let node = ArraySubqueryNode::new(
             outer_tuple_descriptor,
             subgraph_template,
-            outer_correlation_col,
+            outer_correlation,
             spec.column_name.clone(),
             schema.clone(),
         );
@@ -1022,10 +833,10 @@ impl QueryGraph {
         let inner_schema = schema.get(&spec.table)?;
 
         // Start with base table columns + joined table columns
-        let mut columns = inner_schema.descriptor.columns.clone();
+        let mut columns = inner_schema.columns.columns.clone();
         for join_spec in &spec.joins {
             if let Some(joined_schema) = schema.get(&join_spec.table) {
-                columns.extend(joined_schema.descriptor.columns.clone());
+                columns.extend(joined_schema.columns.columns.clone());
             }
         }
 
@@ -1034,7 +845,11 @@ impl QueryGraph {
             if let Some(nested_element_desc) = Self::build_nested_array_descriptor(nested, schema) {
                 columns.push(ColumnDescriptor::new(
                     &nested.column_name,
-                    ColumnType::Array(Box::new(ColumnType::Row(Box::new(nested_element_desc)))),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Row {
+                            columns: Box::new(nested_element_desc),
+                        }),
+                    },
                 ));
             }
         }
@@ -1058,9 +873,10 @@ impl QueryGraph {
         current_descriptor: &RowDescriptor,
         schema: &Schema,
         branches: &[String],
+        schema_context: &SchemaContext,
     ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
         let step_table_schema = schema.get(&spec.table)?;
-        let step_table_descriptor = step_table_schema.descriptor.clone();
+        let step_table_descriptor = step_table_schema.columns.clone();
 
         let outer_col_name = spec
             .outer_column
@@ -1108,7 +924,7 @@ impl QueryGraph {
         // Build descriptor for step output.
         let mut step_table_descriptors = vec![step_table_descriptor.clone()];
         for join_spec in &spec.joins {
-            let joined_descriptor = schema.get(&join_spec.table)?.descriptor.clone();
+            let joined_descriptor = schema.get(&join_spec.table)?.columns.clone();
             step_table_descriptors.push(joined_descriptor);
         }
         let combined_step_descriptor = RowDescriptor::combine(&step_table_descriptors);
@@ -1133,7 +949,7 @@ impl QueryGraph {
 
         let hop = if let Some(hop_spec) = &spec.hop {
             let target_schema = schema.get(&hop_spec.table)?;
-            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.descriptor) {
+            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.columns) {
                 return None;
             }
 
@@ -1155,6 +971,7 @@ impl QueryGraph {
             spec.inner_column.clone(),
             spec.select_columns.clone().unwrap_or_default(),
             step_output_descriptor,
+            schema_context.clone(),
         );
 
         let input_descriptor =
@@ -1177,9 +994,10 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         session: Option<Session>,
+        schema_context: &SchemaContext,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
-        let base_descriptor = base_table_schema.descriptor.clone();
+        let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
 
         let join_branches: Vec<&str> = if branches.is_empty() {
@@ -1236,12 +1054,17 @@ impl QueryGraph {
         if let (Some(session), Some(policy)) =
             (&session, base_table_schema.policies.select.using.clone())
         {
-            let policy_node = PolicyFilterNode::new(
+            let branch_for_policy = branches
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
+            let policy_node = PolicyFilterNode::new_with_branch(
                 base_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
+                branch_for_policy,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1258,8 +1081,13 @@ impl QueryGraph {
         let mut left_descriptor = base_descriptor.clone();
 
         if let Some(recursive_spec) = &plan.recursive
-            && let Some((node, new_descriptor, step_table)) =
-                graph.compile_recursive_relation(recursive_spec, &left_descriptor, schema, branches)
+            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+                recursive_spec,
+                &left_descriptor,
+                schema,
+                branches,
+                schema_context,
+            )
         {
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
             graph.add_edge(node_id, left_id);
@@ -1281,7 +1109,7 @@ impl QueryGraph {
             let (left_col, right_col) = join_spec.on.as_ref()?;
 
             let right_table_schema = schema.get(&join_spec.table)?;
-            let right_descriptor = right_table_schema.descriptor.clone();
+            let right_descriptor = right_table_schema.columns.clone();
 
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
@@ -1323,12 +1151,17 @@ impl QueryGraph {
             if let (Some(session), Some(policy)) =
                 (&session, right_table_schema.policies.select.using.clone())
             {
-                let policy_node = PolicyFilterNode::new(
+                let branch_for_policy = branches
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string());
+                let policy_node = PolicyFilterNode::new_with_branch(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
+                    branch_for_policy,
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1423,16 +1256,13 @@ impl QueryGraph {
             phase2_input = filter_id;
         }
 
-        // Sort node (if order_by specified)
-        if !plan.order_by.is_empty() {
-            let sort_keys = sort_keys_from_order_by(&plan.order_by, &combined_descriptor);
-            if !sort_keys.is_empty() {
-                let sort_node =
-                    SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
-                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-                graph.add_edge(sort_id, phase2_input);
-                phase2_input = sort_id;
-            }
+        // Sort node (default: id ASC when order_by is omitted)
+        let sort_keys = sort_keys_from_order_by(&plan.order_by, &combined_descriptor);
+        if !sort_keys.is_empty() {
+            let sort_node = SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
+            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+            graph.add_edge(sort_id, phase2_input);
+            phase2_input = sort_id;
         }
 
         // LimitOffset node (if limit or offset specified)
@@ -1983,14 +1813,23 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::LimitOffset(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
+                    let input_node = self.get_inputs(node_id).first().copied();
+                    let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
+                        Some(GraphNode::Sort(sort_node)) => {
+                            Some(sort_node.sorted_tuples().to_vec())
+                        }
+                        _ => None,
+                    });
 
                     if let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(lo_node, input_delta);
+                        let delta = if let Some(ordered) = ordered_input {
+                            lo_node.process_with_ordered_input(&ordered)
+                        } else {
+                            let input_delta = input_node
+                                .and_then(|dep| tuple_deltas.get(&dep).cloned())
+                                .unwrap_or_default();
+                            RowNode::process(lo_node, input_delta)
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2038,14 +1877,26 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Output(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
+                    let input_node = self.get_inputs(node_id).first().copied();
+                    let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
+                        Some(GraphNode::LimitOffset(lo_node)) => {
+                            Some(lo_node.windowed_tuples().to_vec())
+                        }
+                        Some(GraphNode::Sort(sort_node)) => {
+                            Some(sort_node.sorted_tuples().to_vec())
+                        }
+                        _ => None,
+                    });
 
                     if let Some(GraphNode::Output(output_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(output_node, input_delta);
+                        let delta = if let Some(ordered) = ordered_input {
+                            output_node.process_with_ordered_input(&ordered)
+                        } else {
+                            let input_delta = input_node
+                                .and_then(|dep| tuple_deltas.get(&dep).cloned())
+                                .unwrap_or_default();
+                            RowNode::process(output_node, input_delta)
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2125,7 +1976,7 @@ impl QueryGraph {
             .get_node(self.output_node)
             .and_then(|node| {
                 if let GraphNode::Output(output) = node {
-                    Some(output.current_tuples().iter().cloned().collect())
+                    Some(output.ordered_tuples().to_vec())
                 } else {
                     None
                 }
@@ -2139,6 +1990,7 @@ impl QueryGraph {
         let td = TupleDelta {
             added: output_tuples,
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -2230,6 +2082,144 @@ fn ensure_relation_tables_exist(
     }
 }
 
+fn unqualify_column_name(column: &str) -> &str {
+    column.split('.').next_back().unwrap_or(column)
+}
+
+fn validate_condition_for_descriptor(
+    descriptor: &RowDescriptor,
+    condition: &Condition,
+) -> Result<(), QueryCompileError> {
+    let column_name = unqualify_column_name(condition.column());
+    let Some(column) = descriptor.column(column_name) else {
+        return Ok(());
+    };
+
+    let is_bytea = matches!(column.column_type, ColumnType::Bytea);
+    let is_ordering_cmp = matches!(
+        condition,
+        Condition::Lt { .. }
+            | Condition::Le { .. }
+            | Condition::Gt { .. }
+            | Condition::Ge { .. }
+            | Condition::Between { .. }
+    );
+
+    if is_bytea && is_ordering_cmp {
+        return Err(QueryCompileError::InvalidPlan(format!(
+            "bytea column '{}' only supports '=' and '!=' comparisons",
+            column_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_disjuncts_for_descriptor(
+    disjuncts: &[Conjunction],
+    descriptor: &RowDescriptor,
+) -> Result<(), QueryCompileError> {
+    for disjunct in disjuncts {
+        for condition in &disjunct.conditions {
+            validate_condition_for_descriptor(descriptor, condition)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_order_by_for_descriptor(
+    order_by: &[(String, SortDirection)],
+    descriptor: &RowDescriptor,
+) -> Result<(), QueryCompileError> {
+    for (column, _direction) in order_by {
+        let column_name = unqualify_column_name(column);
+        if descriptor
+            .column(column_name)
+            .is_some_and(|c| matches!(c.column_type, ColumnType::Bytea))
+        {
+            return Err(QueryCompileError::InvalidPlan(format!(
+                "bytea column '{}' cannot be used in ORDER BY",
+                column_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn descriptor_for_execution_plan(
+    plan: &ExecutionQueryPlan,
+    schema: &Schema,
+) -> Result<RowDescriptor, QueryCompileError> {
+    descriptor_for_table_with_joins(plan.table, &plan.joins, schema)
+}
+
+fn descriptor_for_table_with_joins(
+    table: TableName,
+    joins: &[crate::query_manager::query::JoinSpec],
+    schema: &Schema,
+) -> Result<RowDescriptor, QueryCompileError> {
+    let base = schema
+        .get(&table)
+        .ok_or(QueryCompileError::UnknownTable(table))?
+        .columns
+        .clone();
+    if joins.is_empty() {
+        return Ok(base);
+    }
+
+    let mut descriptors = vec![base];
+    for join in joins {
+        let joined = schema
+            .get(&join.table)
+            .ok_or(QueryCompileError::UnknownTable(join.table))?
+            .columns
+            .clone();
+        descriptors.push(joined);
+    }
+
+    Ok(RowDescriptor::combine(&descriptors))
+}
+
+fn validate_array_subquery_spec(
+    spec: &ArraySubquerySpec,
+    schema: &Schema,
+) -> Result<(), QueryCompileError> {
+    let descriptor = descriptor_for_table_with_joins(spec.table, &spec.joins, schema)?;
+    for condition in &spec.filters {
+        validate_condition_for_descriptor(&descriptor, condition)?;
+    }
+    validate_order_by_for_descriptor(&spec.order_by, &descriptor)?;
+
+    for nested in &spec.nested_arrays {
+        validate_array_subquery_spec(nested, schema)?;
+    }
+
+    Ok(())
+}
+
+fn validate_execution_plan(
+    plan: &ExecutionQueryPlan,
+    schema: &Schema,
+) -> Result<(), QueryCompileError> {
+    let descriptor = descriptor_for_execution_plan(plan, schema)?;
+    validate_disjuncts_for_descriptor(&plan.disjuncts, &descriptor)?;
+    validate_order_by_for_descriptor(&plan.order_by, &descriptor)?;
+
+    if let Some(recursive) = &plan.recursive {
+        let recursive_descriptor =
+            descriptor_for_table_with_joins(recursive.table, &recursive.joins, schema)?;
+        for condition in &recursive.filters {
+            validate_condition_for_descriptor(&recursive_descriptor, condition)?;
+        }
+    }
+
+    for subquery in &plan.array_subqueries {
+        validate_array_subquery_spec(subquery, schema)?;
+    }
+
+    Ok(())
+}
+
 fn descriptors_compatible_by_shape(left: &RowDescriptor, right: &RowDescriptor) -> bool {
     if left.columns.len() != right.columns.len() {
         return false;
@@ -2269,13 +2259,42 @@ fn sort_keys_from_order_by(
     order_by: &[(String, SortDirection)],
     descriptor: &RowDescriptor,
 ) -> Vec<SortKey> {
+    if order_by.is_empty() {
+        // Deterministic default ordering when no explicit orderBy is provided.
+        return vec![SortKey {
+            target: SortTarget::RowId,
+            direction: SortDirection::Ascending,
+        }];
+    }
+
     order_by
         .iter()
         .filter_map(|(col, dir)| {
-            descriptor.column_index(col).map(|idx| SortKey {
-                col_index: idx,
-                direction: *dir,
-            })
+            if col == "_id" {
+                Some(SortKey {
+                    target: SortTarget::RowId,
+                    direction: *dir,
+                })
+            } else {
+                descriptor
+                    .column_index(col)
+                    .map(|idx| SortKey {
+                        target: SortTarget::Column(idx),
+                        direction: *dir,
+                    })
+                    .or_else(|| {
+                        // Backward compatibility: "id" maps to internal row id when no explicit
+                        // "id" column exists on the descriptor.
+                        if col == "id" {
+                            Some(SortKey {
+                                target: SortTarget::RowId,
+                                direction: *dir,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+            }
         })
         .collect()
 }
@@ -2383,6 +2402,19 @@ mod tests {
         schema
     }
 
+    fn bytea_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("files"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("payload", ColumnType::Bytea),
+            ])
+            .into(),
+        );
+        schema
+    }
+
     #[test]
     fn compile_simple_query() {
         let schema = test_schema();
@@ -2392,8 +2424,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: IndexScan -> Materialize -> Output (Filter elided - Eq fully covered)
-        assert_eq!(graph.nodes.len(), 3);
+        // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
+        assert_eq!(graph.nodes.len(), 4);
         assert_eq!(graph.index_scan_nodes.len(), 1);
     }
 
@@ -2408,8 +2440,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: 2x IndexScan -> Union -> Materialize -> Output (Filter elided)
-        assert_eq!(graph.nodes.len(), 5);
+        // Should have: 2x IndexScan -> Union -> Materialize -> Sort(default id ASC) -> Output
+        assert_eq!(graph.nodes.len(), 6);
         assert_eq!(graph.index_scan_nodes.len(), 2);
     }
 
@@ -2436,8 +2468,46 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: IndexScan -> Materialize -> Output
-        assert_eq!(graph.nodes.len(), 3);
+        // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
+        assert_eq!(graph.nodes.len(), 4);
+    }
+
+    #[test]
+    fn compile_query_allows_bytea_eq_and_ne() {
+        let schema = bytea_schema();
+
+        let eq_query = QueryBuilder::new("files")
+            .filter_eq("payload", Value::Bytea(vec![1, 2, 3]))
+            .build();
+        assert!(QueryGraph::try_compile(&eq_query, &schema).is_ok());
+
+        let ne_query = QueryBuilder::new("files")
+            .filter_ne("payload", Value::Bytea(vec![4, 5, 6]))
+            .build();
+        assert!(QueryGraph::try_compile(&ne_query, &schema).is_ok());
+    }
+
+    #[test]
+    fn compile_query_rejects_bytea_range_comparisons() {
+        let schema = bytea_schema();
+        let query = QueryBuilder::new("files")
+            .filter_lt("payload", Value::Bytea(vec![1, 2, 3]))
+            .build();
+
+        let err = QueryGraph::try_compile(&query, &schema).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only supports '=' and '!=' comparisons")
+        );
+    }
+
+    #[test]
+    fn compile_query_rejects_order_by_on_bytea() {
+        let schema = bytea_schema();
+        let query = QueryBuilder::new("files").order_by("payload").build();
+
+        let err = QueryGraph::try_compile(&query, &schema).unwrap_err();
+        assert!(err.to_string().contains("cannot be used in ORDER BY"));
     }
 
     // ========================================================================
@@ -2461,12 +2531,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         // Eq is fully covered by index scan, no FilterNode needed
-        // Should have: IndexScan -> Materialize -> Output (3 nodes)
+        // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
         assert!(
             !has_filter_node(&graph),
             "FilterNode should be elided for single Eq condition"
         );
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     #[test]
@@ -2483,7 +2553,7 @@ mod tests {
             !has_filter_node(&graph),
             "FilterNode should be elided for single Lt condition"
         );
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     #[test]
@@ -2500,7 +2570,7 @@ mod tests {
             !has_filter_node(&graph),
             "FilterNode should be elided for single Between condition"
         );
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 4);
     }
 
     #[test]
@@ -2514,12 +2584,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         // Index scan covers score < 50, but name = 'Alice' still needs filtering
-        // Should have: IndexScan -> Materialize -> Filter -> Output (4 nodes)
+        // Should have: IndexScan -> Materialize -> Filter -> Sort(default id ASC) -> Output
         assert!(
             has_filter_node(&graph),
             "FilterNode needed for non-indexed condition"
         );
-        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.nodes.len(), 5);
     }
 
     #[test]
@@ -2532,12 +2602,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         // Ne is not index-scannable, uses full scan + filter
-        // Should have: IndexScan -> Materialize -> Filter -> Output (4 nodes)
+        // Should have: IndexScan -> Materialize -> Filter -> Sort(default id ASC) -> Output
         assert!(
             has_filter_node(&graph),
             "FilterNode needed for non-indexable condition"
         );
-        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.nodes.len(), 5);
     }
 
     #[test]
@@ -2553,12 +2623,12 @@ mod tests {
 
         // Each disjunct has one Eq condition fully covered by its index scan
         // Union combines them, no additional filtering needed
-        // Should have: 2x IndexScan -> Union -> Materialize -> Output (5 nodes)
+        // Should have: 2x IndexScan -> Union -> Materialize -> Sort(default id ASC) -> Output
         assert!(
             !has_filter_node(&graph),
             "FilterNode should be elided when all disjuncts are fully covered"
         );
-        assert_eq!(graph.nodes.len(), 5);
+        assert_eq!(graph.nodes.len(), 6);
     }
 
     // ========================================================================
@@ -2783,10 +2853,8 @@ mod tests {
             .build();
 
         let graph = QueryGraph::compile(&query, &schema);
-        // Should succeed but with no ArraySubqueryNode (graceful degradation)
-        // Or should fail entirely - depends on design choice
-        // Current implementation silently skips invalid array subqueries
-        assert!(graph.is_some());
+        // Execution-plan validation rejects array subqueries that reference missing tables.
+        assert!(graph.is_none());
     }
 
     fn recursive_schema() -> Schema {
@@ -3061,7 +3129,12 @@ mod tests {
             TableName::new("users"),
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("name", ColumnType::Text),
-                ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+                ColumnDescriptor::new(
+                    "tags",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
             ])
             .into(),
         );

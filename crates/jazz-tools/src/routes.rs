@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Json},
     routing::{get, post},
@@ -24,11 +24,14 @@ use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
     validate_jwt_identity,
 };
+use jazz_tools::query_manager::types::SchemaHash;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let traced_routes = Router::new()
         .route("/sync", post(sync_handler))
+        .route("/schema/:hash", get(schema_handler))
+        .route("/schemas", get(schema_hashes_handler))
         // Link a local anonymous/demo principal to an external identity.
         .route("/auth/link-external", post(link_external_handler))
         // Health check
@@ -47,6 +50,11 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 struct EventsParams {
     /// Client-provided ID for reconnect support.
     client_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SchemaHashesResponse {
+    hashes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -334,6 +342,110 @@ async fn sync_handler(
     }
 }
 
+/// Return the catalogue schema for the given hash.
+///
+/// Requires a valid admin secret; returns 404 if no schema exists for the hash.
+async fn schema_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(hash_text): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    let schema_hash = match parse_schema_hash_param(&hash_text) {
+        Ok(hash) => hash,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
+
+    match state.runtime.known_schema(&schema_hash) {
+        Ok(Some(schema)) => {
+            tracing::info!(
+                requested_hash = %schema_hash.short(),
+                "schema request: returning requested hash"
+            );
+            let body = schema.clone();
+            Json(body).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "schema catalogue not found for hash {}",
+                schema_hash
+            ))),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to read schema catalogue: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
+/// Return all known schema hashes from catalogue state.
+///
+/// Requires a valid admin secret.
+async fn schema_hashes_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    match state.runtime.known_schema_hashes() {
+        Ok(hashes) => {
+            let body = SchemaHashesResponse {
+                hashes: hashes.iter().map(ToString::to_string).collect(),
+            };
+            Json(body).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to read schema hashes: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
+fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, String> {
+    let decoded_hash_bytes = hex::decode(hash_text)
+        .map_err(|_| "invalid schema hash: expected hex string".to_string())?;
+    if decoded_hash_bytes.len() != 32 {
+        return Err("invalid schema hash: expected 64 hex chars".to_string());
+    }
+
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(&decoded_hash_bytes);
+    Ok(SchemaHash::from_bytes(hash_bytes))
+}
+
 async fn link_external_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -526,4 +638,209 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy"
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use axum::body;
+    use axum::routing::get;
+    use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use groove::runtime_tokio::TokioRuntime;
+    use groove::schema_manager::{AppId, SchemaManager};
+    use groove::storage::SurrealKvStorage;
+    use groove::sync_manager::{ClientId, PersistenceTier, SyncManager, SyncPayload};
+    use serde_json::Value;
+    use tempfile::TempDir;
+    use tokio::sync::{RwLock, broadcast};
+    use tower::util::ServiceExt;
+
+    use crate::commands::server::{ExternalIdentityStore, ServerState};
+    use crate::middleware::AuthConfig;
+
+    #[tokio::test]
+    async fn schema_handler_requires_admin_secret() {
+        let data_dir = TempDir::new().expect("temp dir");
+        let db_path = data_dir.path().join("groove.surrealkv");
+        let storage =
+            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+
+        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let schema_manager =
+            SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        let auth_config = AuthConfig {
+            backend_secret: None,
+            admin_secret: Some("admin-secret".to_string()),
+            allow_anonymous: true,
+            allow_demo: true,
+            jwks_url: None,
+            jwks_set: None,
+        };
+
+        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
+
+        let state = Arc::new(ServerState {
+            runtime,
+            app_id: AppId::from_name("test-app"),
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            sync_broadcast: sync_tx,
+            auth_config,
+            external_identity_store: Arc::new(
+                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
+            ),
+            external_identities: RwLock::new(HashMap::new()),
+        });
+
+        let app = axum::Router::new()
+            .route("/schema/:hash", get(schema_handler))
+            .route("/schemas", get(schema_hashes_handler))
+            .with_state(state);
+
+        let placeholder_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/schema/{placeholder_hash}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response_with_admin = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/schema/{placeholder_hash}"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response_with_admin.status(), StatusCode::NOT_FOUND);
+
+        let hashes_without_admin = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/schemas")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hashes_without_admin.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn schema_handlers_return_hashes_and_requested_schema() {
+        let data_dir = TempDir::new().expect("temp dir");
+        let db_path = data_dir.path().join("groove.surrealkv");
+        let storage =
+            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let schema_manager = SchemaManager::new(
+            sync_manager,
+            schema,
+            AppId::from_name("test-app"),
+            "prod",
+            "main",
+        )
+        .expect("schema manager");
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        let auth_config = AuthConfig {
+            backend_secret: None,
+            admin_secret: Some("admin-secret".to_string()),
+            allow_anonymous: true,
+            allow_demo: true,
+            jwks_url: None,
+            jwks_set: None,
+        };
+
+        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
+
+        let state = Arc::new(ServerState {
+            runtime,
+            app_id: AppId::from_name("test-app"),
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            sync_broadcast: sync_tx,
+            auth_config,
+            external_identity_store: Arc::new(
+                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
+            ),
+            external_identities: RwLock::new(HashMap::new()),
+        });
+
+        let app = axum::Router::new()
+            .route("/schema/:hash", get(schema_handler))
+            .route("/schemas", get(schema_hashes_handler))
+            .with_state(state);
+
+        let hashes_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/schemas")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hashes_response.status(), StatusCode::OK);
+        let hashes_body = body::to_bytes(hashes_response.into_body(), usize::MAX)
+            .await
+            .expect("hashes body");
+        let hashes_json: Value = serde_json::from_slice(&hashes_body).expect("hashes json");
+        let expected_hash = schema_hash.to_string();
+        assert_eq!(
+            hashes_json["hashes"][0].as_str(),
+            Some(expected_hash.as_str())
+        );
+
+        let schema_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/schema/{}", schema_hash))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(schema_response.status(), StatusCode::OK);
+
+        let bad_hash_response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/schema/invalid")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_hash_response.status(), StatusCode::BAD_REQUEST);
+    }
 }

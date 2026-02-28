@@ -1,7 +1,7 @@
 //! opfs-btree-backed Storage implementation.
 //!
 //! Uses a single opfs-btree instance with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, and indices.
+//! objects, commits, ack tiers, catalogue manifest ops, and indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
@@ -10,6 +10,7 @@
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
 //! "ack:{commit_hex}"                                      → JSON HashSet<PersistenceTier>
+//! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
 //! ```
 
@@ -31,12 +32,14 @@ use crate::query_manager::types::Value;
 use crate::sync_manager::PersistenceTier;
 
 use super::{
-    LoadedBranch, Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_commit_core, create_object_core, delete_commit_core, index_insert_core,
-        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
-        load_branch_core, load_object_metadata_core, set_branch_tails_core, store_ack_tier_core,
+        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
+        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
+        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
+        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
+        store_ack_tier_core,
     },
 };
 
@@ -140,7 +143,6 @@ impl OpfsBTreeStorage {
         let storage = Self {
             tree: RefCell::new(tree),
         };
-        storage.log_key_stats();
         Ok(storage)
     }
 
@@ -162,15 +164,6 @@ impl OpfsBTreeStorage {
             .try_borrow_mut()
             .map_err(|_| StorageError::IoError("opfs-btree already borrowed".to_string()))?;
         f(&mut tree)
-    }
-
-    fn log_key_stats(&self) {
-        let count_prefix =
-            |pfx: &str| -> usize { self.tree_scan_keys(pfx).map(|v| v.len()).unwrap_or(0) };
-        let obj_count = count_prefix("obj:");
-        let idx_count = count_prefix("idx:");
-        let ack_count = count_prefix("ack:");
-        tracing::info!(obj_count, idx_count, ack_count, "OpfsBTreeStorage opened");
     }
 
     fn tree_insert(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
@@ -320,6 +313,39 @@ impl Storage for OpfsBTreeStorage {
             |key| self.tree_read(key),
             |key, value| self.tree_insert(key, value),
         )
+    }
+
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError> {
+        append_catalogue_manifest_op_core(
+            app_id,
+            op,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
+    }
+
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError> {
+        append_catalogue_manifest_ops_core(
+            app_id,
+            ops,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
+    }
+
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        load_catalogue_manifest_core(app_id, |prefix| self.tree_scan_prefix(prefix))
     }
 
     fn index_insert(
@@ -642,5 +668,58 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert!(results.contains(&id));
         }
+    }
+
+    #[test]
+    fn opfs_btree_catalogue_manifest_roundtrip() {
+        let mut storage = test_storage();
+        let app_id = ObjectId::new();
+        let schema_object_id = ObjectId::new();
+        let lens_object_id = ObjectId::new();
+        let schema_hash = crate::query_manager::types::SchemaHash::from_bytes([0x11; 32]);
+        let source_hash = crate::query_manager::types::SchemaHash::from_bytes([0x22; 32]);
+        let target_hash = crate::query_manager::types::SchemaHash::from_bytes([0x33; 32]);
+
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                crate::storage::CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                crate::storage::CatalogueManifestOp::LensSeen {
+                    object_id: lens_object_id,
+                    source_hash,
+                    target_hash,
+                },
+            )
+            .unwrap();
+        storage
+            .append_catalogue_manifest_op(
+                app_id,
+                crate::storage::CatalogueManifestOp::SchemaSeen {
+                    object_id: schema_object_id,
+                    schema_hash,
+                },
+            )
+            .unwrap();
+
+        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
+        assert_eq!(
+            manifest.schema_seen.get(&schema_object_id),
+            Some(&schema_hash)
+        );
+        assert_eq!(
+            manifest.lens_seen.get(&lens_object_id),
+            Some(&crate::storage::CatalogueLensSeen {
+                source_hash,
+                target_hash,
+            })
+        );
     }
 }

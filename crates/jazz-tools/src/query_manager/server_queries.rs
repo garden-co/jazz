@@ -5,7 +5,7 @@ use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId};
+use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
 
 use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
@@ -107,11 +107,22 @@ impl QueryManager {
                 }
             };
 
+            // Defence in depth: if the subscription has no session (client omitted
+            // it), fall back to the connection-level session set during JWT auth
+            // on the WebSocket handshake. This ensures the PolicyFilterNode is
+            // always present — at worst it will fail closed (zero results) rather
+            // than fail open (bypass policies).
+            let session_for_policy = sub.session.clone().or_else(|| {
+                self.sync_manager
+                    .get_client(sub.client_id)
+                    .and_then(|c| c.session.clone())
+            });
+
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let graph = Self::compile_graph(
                 &sub.query,
                 &schema_for_compile,
-                sub.session.clone(),
+                session_for_policy.clone(),
                 &self.schema_context,
             );
 
@@ -204,7 +215,7 @@ impl QueryManager {
                 sub.client_id,
                 sub.query_id,
                 scope.clone(),
-                sub.session.clone(),
+                session_for_policy.clone(),
             );
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
@@ -212,7 +223,7 @@ impl QueryManager {
             self.sync_manager.send_query_subscription_to_servers(
                 sub.query_id,
                 sub.query.clone(),
-                sub.session.clone(),
+                session_for_policy.clone(),
             );
 
             // Store the server subscription for reactive updates
@@ -221,7 +232,7 @@ impl QueryManager {
                 ServerQuerySubscription {
                     query: sub.query,
                     graph,
-                    session: sub.session,
+                    session: session_for_policy,
                     branches,
                     last_scope: scope,
                     needs_recompile: false,
@@ -391,6 +402,12 @@ impl QueryManager {
         storage: &mut H,
         check: PendingPermissionCheck,
     ) {
+        let branch = match &check.payload {
+            SyncPayload::ObjectUpdated { branch_name, .. }
+            | SyncPayload::ObjectTruncated { branch_name, .. } => branch_name.as_str().to_string(),
+            _ => self.current_branch(),
+        };
+
         // Get table name from metadata
         let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => TableName::new(t),
@@ -411,9 +428,24 @@ impl QueryManager {
             }
         };
 
+        if check.operation == Operation::Insert
+            && let Some(new_content) = check.new_content.as_ref()
+            && let Err(err) = self.validate_foreign_keys_for_content(
+                storage,
+                &table_name,
+                &table_schema.columns,
+                new_content,
+                &branch,
+            )
+        {
+            self.sync_manager
+                .reject_permission_check(check, err.to_string());
+            return;
+        }
+
         // Handle UPDATE specially - needs both USING and WITH CHECK
         if check.operation == Operation::Update {
-            self.evaluate_update_permission(storage, check, table_name, table_schema);
+            self.evaluate_update_permission(storage, check, table_name, table_schema, &branch);
             return;
         }
 
@@ -459,8 +491,7 @@ impl QueryManager {
         };
 
         // Evaluate simple parts of the policy
-        let result =
-            evaluate_simple_parts(&policy, content, &table_schema.descriptor, &check.session);
+        let result = evaluate_simple_parts(&policy, content, &table_schema.columns, &check.session);
 
         if !result.passed {
             // Simple parts failed - reject immediately
@@ -478,11 +509,64 @@ impl QueryManager {
             return;
         }
 
-        // Has complex clauses - create policy graphs for them
+        let mut graph_clauses = Vec::new();
+        for clause in result.complex_clauses {
+            match clause {
+                ComplexClause::InheritsReferencing {
+                    operation,
+                    source_table,
+                    via_column,
+                    max_depth,
+                } => {
+                    let (object_id, branch_name) = match &check.payload {
+                        SyncPayload::ObjectUpdated {
+                            object_id,
+                            branch_name,
+                            ..
+                        } => (*object_id, branch_name.as_str()),
+                        _ => {
+                            let reason = format!(
+                                "{:?} denied by policy on table {} (missing row context for INHERITS REFERENCING)",
+                                check.operation, table_name.0
+                            );
+                            self.sync_manager.reject_permission_check(check, reason);
+                            return;
+                        }
+                    };
+
+                    if !self.evaluate_referencing_inherited_access(
+                        storage,
+                        table_name,
+                        object_id,
+                        operation,
+                        &source_table,
+                        &via_column,
+                        max_depth,
+                        &check.session,
+                        branch_name,
+                    ) {
+                        let reason = format!(
+                            "{:?} denied by policy on table {} (INHERITS REFERENCING failed)",
+                            check.operation, table_name.0
+                        );
+                        self.sync_manager.reject_permission_check(check, reason);
+                        return;
+                    }
+                }
+                other => graph_clauses.push(other),
+            }
+        }
+
+        if graph_clauses.is_empty() {
+            self.sync_manager.approve_permission_check(storage, check);
+            return;
+        }
+
+        // Remaining complex clauses use policy graphs.
         let graphs = self.create_policy_graphs_for_complex_clauses(
-            &result.complex_clauses,
+            &graph_clauses,
             content,
-            &table_schema.descriptor,
+            &table_schema.columns,
             &table_name,
             &check.session,
         );
@@ -518,7 +602,22 @@ impl QueryManager {
         check: PendingPermissionCheck,
         table_name: TableName,
         table_schema: TableSchema,
+        branch: &str,
     ) {
+        if let Some(new_content) = check.new_content.as_ref()
+            && let Err(err) = self.validate_foreign_keys_for_content(
+                storage,
+                &table_name,
+                &table_schema.columns,
+                new_content,
+                branch,
+            )
+        {
+            self.sync_manager
+                .reject_permission_check(check, err.to_string());
+            return;
+        }
+
         let using_policy = table_schema.policies.update.using.as_ref();
         let check_policy = table_schema.policies.update.with_check.as_ref();
 
@@ -547,7 +646,7 @@ impl QueryManager {
             };
 
             let result =
-                evaluate_simple_parts(using, old_content, &table_schema.descriptor, &check.session);
+                evaluate_simple_parts(using, old_content, &table_schema.columns, &check.session);
 
             if !result.passed {
                 // USING check failed - session cannot see the old row
@@ -579,7 +678,7 @@ impl QueryManager {
             let result = evaluate_simple_parts(
                 with_check,
                 new_content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &check.session,
             );
 
@@ -605,13 +704,67 @@ impl QueryManager {
             return;
         }
 
-        // Create policy graphs for all complex clauses
+        let row_context = match &check.payload {
+            SyncPayload::ObjectUpdated {
+                object_id,
+                branch_name,
+                ..
+            } => Some((*object_id, branch_name.as_str())),
+            _ => None,
+        };
+
+        let mut graph_inputs: Vec<(ComplexClause, Vec<u8>)> = Vec::new();
+        for (clause, content) in all_complex_clauses {
+            match clause {
+                ComplexClause::InheritsReferencing {
+                    operation,
+                    source_table,
+                    via_column,
+                    max_depth,
+                } => {
+                    let Some((object_id, branch_name)) = row_context else {
+                        let reason = format!(
+                            "Update denied by policy on table {} (missing row context for INHERITS REFERENCING)",
+                            table_name.0
+                        );
+                        self.sync_manager.reject_permission_check(check, reason);
+                        return;
+                    };
+                    if !self.evaluate_referencing_inherited_access(
+                        storage,
+                        table_name,
+                        object_id,
+                        operation,
+                        &source_table,
+                        &via_column,
+                        max_depth,
+                        &check.session,
+                        branch_name,
+                    ) {
+                        let reason = format!(
+                            "Update denied by policy on table {} (INHERITS REFERENCING failed)",
+                            table_name.0
+                        );
+                        self.sync_manager.reject_permission_check(check, reason);
+                        return;
+                    }
+                }
+                other => graph_inputs.push((other, content)),
+            }
+        }
+
+        if graph_inputs.is_empty() {
+            self.sync_manager.approve_permission_check(storage, check);
+            return;
+        }
+
+        // Create policy graphs for remaining complex clauses
         let mut graphs = Vec::new();
-        for (clause, content) in &all_complex_clauses {
+        for (clause, content) in &graph_inputs {
             let clause_graphs = self.create_policy_graphs_for_complex_clauses(
                 std::slice::from_ref(clause),
                 content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &table_name,
                 &check.session,
             );
@@ -729,6 +882,9 @@ impl QueryManager {
                     if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
                         graphs.push(graph);
                     }
+                }
+                ComplexClause::InheritsReferencing { .. } => {
+                    // Evaluated directly in write permission checks (needs target row context).
                 }
             }
         }

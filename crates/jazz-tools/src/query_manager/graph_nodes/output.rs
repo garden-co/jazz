@@ -5,7 +5,7 @@ use crate::query_manager::types::{
     Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 
-use super::RowNode;
+use super::{RowNode, tuple_delta::compute_tuple_delta};
 
 /// Output mode for query results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +93,26 @@ impl OutputNode {
             .collect()
     }
 
+    /// Ordered tuples as received from upstream nodes.
+    pub fn ordered_tuples(&self) -> &[Tuple] {
+        &self.ordered_tuples
+    }
+
+    /// Rebuild ordered output from a full ordered upstream input.
+    pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
+        let delta = compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
+
+        self.ordered_tuples = ordered_tuples.to_vec();
+        self.current_tuples = self.ordered_tuples.iter().cloned().collect();
+        self.dirty = false;
+        self.subscriber_initialized = true;
+
+        if !delta.is_empty() {
+            self.pending_tuple_deltas.push(delta.clone());
+        }
+        delta
+    }
+
     /// Decode a delta to Values.
     pub fn decode_delta(&self, delta: &RowDelta) -> DecodedDelta {
         DecodedDelta {
@@ -150,6 +170,13 @@ impl RowNode for OutputNode {
         for tuple in &input.added {
             self.current_tuples.insert(tuple.clone());
             self.ordered_tuples.push(tuple.clone());
+        }
+
+        for tuple in &input.moved {
+            if let Some(pos) = self.ordered_tuples.iter().position(|t| t == tuple) {
+                let existing = self.ordered_tuples.remove(pos);
+                self.ordered_tuples.push(existing);
+            }
         }
 
         for (old_tuple, new_tuple) in &input.updated {
@@ -226,6 +253,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -251,6 +279,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -283,6 +312,7 @@ mod tests {
         let delta = RowDelta {
             added: vec![row1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -327,6 +357,7 @@ mod tests {
         let delta1 = TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
         node.process(delta1);
@@ -340,6 +371,7 @@ mod tests {
         let delta2 = TupleDelta {
             added: vec![tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
         node.process(delta2);
@@ -348,5 +380,79 @@ mod tests {
         let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
+    }
+
+    #[test]
+    fn ordered_input_insert_does_not_mark_existing_as_moved() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let base: Vec<_> = ids
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&base);
+
+        let inserted = make_tuple(ids[3], 99, "Inserted");
+        let delta = node.process_with_ordered_input(&[
+            inserted.clone(),
+            base[0].clone(),
+            base[1].clone(),
+            base[2].clone(),
+        ]);
+
+        assert_eq!(delta.added.len(), 1);
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_remove_does_not_mark_following_as_moved() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        let delta = node.process_with_ordered_input(&[
+            tuples[0].clone(),
+            tuples[2].clone(),
+            tuples[3].clone(),
+        ]);
+
+        assert_eq!(delta.removed.len(), 1);
+        assert_eq!(delta.removed[0].first_id(), tuples[1].first_id());
+        assert!(delta.added.is_empty());
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_rotation_marks_only_reordered_tuple_as_moved() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let ids: Vec<_> = (0..3).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        let delta = node.process_with_ordered_input(&[
+            tuples[1].clone(),
+            tuples[2].clone(),
+            tuples[0].clone(),
+        ]);
+
+        assert!(delta.added.is_empty());
+        assert!(delta.removed.is_empty());
+        assert_eq!(delta.moved.len(), 1);
+        assert_eq!(delta.moved[0].first_id(), tuples[0].first_id());
     }
 }

@@ -1,6 +1,6 @@
-# Policy Inheritance via FK Declarations — TODO (MVP)
+# Policy Inheritance via permissions.ts Referencing Rules — TODO (MVP)
 
-Implements gap #3 from [`built_in_file_storage.md`](../todo/a_mvp/built_in_file_storage.md): declarative inheritance edges on foreign keys, with OR semantics across inbound references.
+Implements gap #3 from [`built_in_file_storage.md`](../todo/a_mvp/built_in_file_storage.md): declarative inbound inheritance via permissions DSL, with OR semantics across inbound references.
 
 ## Goal
 
@@ -8,8 +8,8 @@ Allow tables like `files` and `file_parts` to inherit access from referencing ro
 
 ## Scope
 
-- Add schema-level declaration for FK edges that opt into policy inheritance.
-- Evaluate inherited access by scanning inbound declared edges.
+- Add policy-level declaration for inbound FK edges (`allowedTo.*Referencing(...)`).
+- Evaluate inherited access by scanning source-table rows that reference the target row.
 - Combine inherited grants with OR semantics.
 - Support scalar and `UUID[]` inheritance edges.
 - Add cycle safety and dependency invalidation semantics.
@@ -23,31 +23,30 @@ Out of scope:
 
 ### Declaration Model
 
-- Add FK edge metadata flag: `inherit_policy`.
-- SQL surface (MVP): `REFERENCES <table> INHERIT POLICY`.
-- TS DSL surface (MVP): `col.ref("table").inheritPolicy()` and array equivalent.
+- TS permissions DSL surface:
+  - `allowedTo.readReferencing(policy.<sourceTable>, "<fkColumn>")`
+  - operation variants for `insert/update/delete` as needed
+- SQL policy surface:
+  - `INHERITS <OPERATION> REFERENCING <source_table> VIA <fk_column>`
 
 ### Access Evaluation
 
 For `(target_table, target_row_id, operation)`:
 
-1. Evaluate existing local table policy result (`local_allow`).
-2. Collect all FK columns across schema where:
-   - `references == target_table`
-   - `inherit_policy == true`
-3. For each such edge, load referencing rows that point to `target_row_id`:
+1. Evaluate target-table policy expression normally.
+2. For each `INHERITS ... REFERENCING` clause, load source rows from `source_table` where `<fk_column>` points to `target_row_id`:
    - Scalar FK: `fk == target_row_id`
    - Array FK: `target_row_id ∈ fk_array`
-4. Evaluate referencing-row policy for the same operation.
-5. `inherited_allow` is true if any referencing row passes.
-6. Final decision: `local_allow OR inherited_allow`.
+3. Evaluate source-row policy for the same operation.
+4. Clause result is true if any source row passes.
+5. Final decision follows the composed policy expression (typically `local_allow OR inherited_allow` via `anyOf`).
 
 ### Multi-Hop Behavior
 
 - Inheritance composes transitively via recursive policy evaluation.
 - Example path for built-in file storage:
-  - `todos.image -> files` (inherit)
-  - `files.parts -> file_parts` (inherit)
+  - `files` policy contains `allowedTo.readReferencing(policy.todos, "image")`
+  - `file_parts` policy contains `allowedTo.readReferencing(policy.files, "parts")`
 
 ### Safety
 
@@ -57,22 +56,22 @@ For `(target_table, target_row_id, operation)`:
 
 ### Reactivity/Invalidation
 
-- Policy graph tracking must mark dependent target rows dirty when referencing rows or FK values change.
+- Policy graph tracking must mark dependent target rows dirty when source rows or FK values change.
 - Both scalar and array inheritance edges participate in dirty propagation.
 
 ## Invariants
 
-- Inherited permissions never remove existing local access; they only add access via OR.
-- If no inbound inheritance edge grants access, behavior equals current local-policy behavior.
+- Inherited permissions never remove existing local access; they only add access when composed with OR.
+- If no referencing-row grant exists, behavior equals local-policy behavior.
 - Array-FK inheritance is membership-based and deterministic.
 - Cycles do not cause infinite recursion or accidental allow-all.
 
 ## Testing Strategy
 
-### Declaration/Schema Tests
+### DSL/Compiler Tests
 
-- Parse and generate FK declarations with `INHERIT POLICY`.
-- Preserve flag through schema encoding/decoding and WASM conversion.
+- Compile `allowedTo.*Referencing(policy.<table>, "<fk>")` to policy IR.
+- Validate source FK exists and points to the current target table.
 
 ### Policy Evaluation Tests
 

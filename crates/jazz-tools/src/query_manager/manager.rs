@@ -6,7 +6,7 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
-use crate::storage::Storage;
+use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
@@ -18,7 +18,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
+    ComposedBranchName, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash, TableName,
+    TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -44,6 +45,20 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
+    /// UUID reference points at a missing row.
+    UuidForeignKeyViolation {
+        table: TableName,
+        column: String,
+        referenced_table: TableName,
+        missing_id: ObjectId,
+    },
+    /// UUID[] reference points at a missing row.
+    UuidArrayForeignKeyViolation {
+        table: TableName,
+        column: String,
+        referenced_table: TableName,
+        missing_id: ObjectId,
+    },
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
 }
@@ -68,6 +83,26 @@ impl std::fmt::Display for QueryError {
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
             }
+            QueryError::UuidForeignKeyViolation {
+                table,
+                column,
+                referenced_table,
+                missing_id,
+            } => write!(
+                f,
+                "uuid foreign key violation on {}.{}: missing referenced row {} in table {}",
+                table, column, missing_id, referenced_table
+            ),
+            QueryError::UuidArrayForeignKeyViolation {
+                table,
+                column,
+                referenced_table,
+                missing_id,
+            } => write!(
+                f,
+                "uuid[] foreign key violation on {}.{}: missing referenced row {} in table {}",
+                table, column, missing_id, referenced_table
+            ),
             QueryError::UnknownSchema(hash) => {
                 write!(
                     f,
@@ -146,6 +181,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) settled_tier: Option<PersistenceTier>,
     /// Tiers that have confirmed settlement for this query.
     pub(crate) achieved_tiers: HashSet<PersistenceTier>,
+    /// Current ordered IDs for ordered delta construction.
+    pub(crate) current_ordered_ids: Vec<ObjectId>,
 }
 
 /// Update for a query subscription.
@@ -153,6 +190,7 @@ pub(crate) struct QuerySubscription {
 pub struct QueryUpdate {
     pub subscription_id: QuerySubscriptionId,
     pub delta: RowDelta,
+    pub ordered_delta: OrderedRowDelta,
     /// Output descriptor for decoding the binary row data.
     /// This matches the query's output schema (handles JOINs, projections, etc).
     pub descriptor: RowDescriptor,
@@ -725,6 +763,19 @@ impl QueryManager {
                 // First delivery — full current state snapshot
                 subscription.settled_once = true;
                 let full_result = subscription.graph.current_result_as_delta();
+                let ordered_ids_after: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &full_result,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
                 // Always emit the first snapshot once tier is satisfied, even if empty.
                 // This guarantees one-shot queries can resolve to [] instead of hanging.
                 tracing::debug!(
@@ -735,9 +786,23 @@ impl QueryManager {
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
                     delta: full_result,
+                    ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             } else if !delta.is_empty() {
+                let ordered_ids_after: Vec<ObjectId> = subscription
+                    .graph
+                    .current_result()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect();
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
                 tracing::debug!(
                     sub_id = sub_id.0,
                     added = delta.added.len(),
@@ -748,7 +813,8 @@ impl QueryManager {
                 // Incremental delivery
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
-                    delta,
+                    delta: delta.clone(),
+                    ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             }
@@ -789,6 +855,52 @@ impl QueryManager {
         self.load_row_from_object_on_branch(object_id, "main")
             .map(|(content, _)| content)
     }
+
+    fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(SchemaHash::from_bytes(arr))
+    }
+
+    fn catalogue_manifest_append(
+        metadata: &HashMap<String, String>,
+        object_id: ObjectId,
+    ) -> Option<(ObjectId, CatalogueManifestOp)> {
+        let app_id_str = metadata.get(MetadataKey::AppId.as_str())?;
+        let app_uuid = uuid::Uuid::parse_str(app_id_str).ok()?;
+        let app_id = ObjectId::from_uuid(app_uuid);
+
+        let type_str = metadata.get(MetadataKey::Type.as_str())?;
+        let op = match type_str.as_str() {
+            t if t == ObjectType::CatalogueSchema.as_str() => {
+                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
+                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                CatalogueManifestOp::SchemaSeen {
+                    object_id,
+                    schema_hash,
+                }
+            }
+            t if t == ObjectType::CatalogueLens.as_str() => {
+                let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
+                let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
+                let source_hash = Self::parse_schema_hash_hex(source_hex)?;
+                let target_hash = Self::parse_schema_hash_hex(target_hex)?;
+                CatalogueManifestOp::LensSeen {
+                    object_id,
+                    source_hash,
+                    target_hash,
+                }
+            }
+            _ => return None,
+        };
+
+        Some((app_id, op))
+    }
+
     /// Handle an object update from the global subscription.
     pub(super) fn handle_object_update(
         &mut self,
@@ -800,6 +912,18 @@ impl QueryManager {
             && (type_str == ObjectType::CatalogueSchema.as_str()
                 || type_str == ObjectType::CatalogueLens.as_str())
         {
+            if let Some((app_id, op)) =
+                Self::catalogue_manifest_append(&update.metadata, update.object_id)
+                && let Err(error) = storage.append_catalogue_manifest_op(app_id, op)
+            {
+                tracing::warn!(
+                    object_id = %update.object_id,
+                    app_id = %app_id,
+                    ?error,
+                    "failed to persist catalogue manifest op"
+                );
+            }
+
             // Queue for SchemaManager processing
             // Load content from the object's latest commit
             if let Some(content) = self.load_object_content(update.object_id) {
@@ -871,7 +995,7 @@ impl QueryManager {
             return;
         };
 
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let has_prior_history = !update.previous_commit_ids.is_empty();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates

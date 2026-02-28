@@ -6,6 +6,10 @@ import {
   type PermissionRelation,
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
+import {
+  toLegacyPolicyExprWithRelForTest,
+  toLegacyRelExprForTest,
+} from "../testing/relation-ir-test-helpers.js";
 
 interface Todo {
   id: string;
@@ -45,6 +49,36 @@ interface TodoShareWhere {
   todoId?: string;
   userId?: string;
   canRead?: boolean;
+}
+
+interface Profile {
+  id: string;
+}
+
+interface ProfileWhere {
+  id?: string;
+}
+
+interface Person {
+  id: string;
+  profileId?: string;
+}
+
+interface PersonWhere {
+  id?: string;
+  profileId?: string;
+}
+
+interface Friendship {
+  id: string;
+  personAId: string;
+  personBId: string;
+}
+
+interface FriendshipWhere {
+  id?: string;
+  personAId?: string;
+  personBId?: string;
 }
 
 interface Team {
@@ -106,6 +140,27 @@ class ProjectQueryBuilder {
   }
 }
 
+class ProfileQueryBuilder {
+  declare readonly _rowType: Profile;
+  where(_input: ProfileWhere): ProfileQueryBuilder {
+    return this;
+  }
+}
+
+class PersonQueryBuilder {
+  declare readonly _rowType: Person;
+  where(_input: PersonWhere): PersonQueryBuilder {
+    return this;
+  }
+}
+
+class FriendshipQueryBuilder {
+  declare readonly _rowType: Friendship;
+  where(_input: FriendshipWhere): FriendshipQueryBuilder {
+    return this;
+  }
+}
+
 class TeamQueryBuilder {
   declare readonly _rowType: Team;
   where(_input: TeamWhere): TeamQueryBuilder {
@@ -135,82 +190,80 @@ const app = {
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
-    tables: {
-      todos: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-          { name: "archived", column_type: { type: "Boolean" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          {
-            name: "projectId",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "projects",
-          },
-        ],
-      },
-      projects: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
-      todoShares: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "todoId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "todos",
-          },
-          { name: "userId", column_type: { type: "Text" }, nullable: false },
-          { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
-        ],
-      },
-      teams: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "kind", column_type: { type: "Text" }, nullable: false },
-          { name: "identity_key", column_type: { type: "Text" }, nullable: true },
-        ],
-      },
-      team_team_edges: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "child_team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-          {
-            name: "parent_team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-        ],
-      },
-      resource_access_edges: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-          {
-            name: "resource",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "todos",
-          },
-          { name: "grant_role", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        { name: "archived", column_type: { type: "Boolean" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        {
+          name: "projectId",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "projects",
+        },
+      ],
+    },
+    projects: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+    todoShares: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "todoId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "todos",
+        },
+        { name: "userId", column_type: { type: "Text" }, nullable: false },
+        { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
+      ],
+    },
+    teams: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "kind", column_type: { type: "Text" }, nullable: false },
+        { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+      ],
+    },
+    team_team_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "child_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "parent_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+      ],
+    },
+    resource_access_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "resource",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "todos",
+        },
+        { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+      ],
     },
   },
 };
@@ -222,6 +275,45 @@ const appWithoutSchema = {
   teams: new TeamQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
+};
+
+const socialApp = {
+  profiles: new ProfileQueryBuilder(),
+  people: new PersonQueryBuilder(),
+  friendships: new FriendshipQueryBuilder(),
+  wasmSchema: {
+    profiles: {
+      columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
+    },
+    people: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "profileId",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "profiles",
+        },
+      ],
+    },
+    friendships: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "personAId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+        {
+          name: "personBId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+      ],
+    },
+  },
 };
 
 describe("permissions DSL", () => {
@@ -391,6 +483,168 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("supports allowedTo.readReferencing helper", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+    ]);
+
+    expect(compiled.projects.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "todos",
+      via_column: "projectId",
+    });
+  });
+
+  it("supports bounded recursive referencing inherits depth override", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.projects.allowRead.where(
+        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 3 }),
+      ),
+    ]);
+
+    expect(compiled.projects.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "todos",
+      via_column: "projectId",
+      max_depth: 3,
+    });
+  });
+
+  it("rejects referencing inherits when source FK does not target current table", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todoId")),
+      ]),
+    ).toThrow(/references "todos" but this rule is for "projects"/i);
+  });
+
+  it("supports split friend-profile chain style (friendships + readReferencing)", () => {
+    const compiled = definePermissions(socialApp, ({ policy, anyOf, allowedTo, session }) => [
+      policy.people.allowRead.where((person) =>
+        anyOf([
+          policy.friendships.exists.where({
+            personAId: session.personId,
+            personBId: person.id,
+          }),
+          policy.friendships.exists.where({
+            personBId: session.personId,
+            personAId: person.id,
+          }),
+        ]),
+      ),
+      policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId")),
+    ]);
+
+    expect(compiled.profiles.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "people",
+      via_column: "profileId",
+    });
+
+    const peopleUsing = compiled.people.select?.using;
+    expect(peopleUsing?.type).toBe("Or");
+    if (!peopleUsing || peopleUsing.type !== "Or") {
+      throw new Error("Expected people policy to compile to OR.");
+    }
+    expect(peopleUsing.exprs).toHaveLength(2);
+    for (const expr of peopleUsing.exprs) {
+      expect(expr.type).toBe("Exists");
+      if (expr.type !== "Exists") {
+        throw new Error("Expected OR branch to be Exists.");
+      }
+      expect(expr.table).toBe("friendships");
+    }
+  });
+
+  it("supports one-clause friend-profile chain style using join(...)", () => {
+    const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        anyOf([
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .join(policy.friendships, { left: "id", right: "personAId" })
+              .where({ personBId: session.personId }),
+          ),
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .join(policy.friendships, { left: "id", right: "personBId" })
+              .where({ personAId: session.personId }),
+          ),
+        ]),
+      ),
+    ]);
+
+    const using = compiled.profiles.select?.using;
+    expect(using?.type).toBe("Or");
+    if (!using || using.type !== "Or") {
+      throw new Error("Expected profile policy to compile to OR.");
+    }
+    expect(using.exprs).toHaveLength(2);
+    for (const branch of using.exprs) {
+      expect(branch.type).toBe("ExistsRel");
+      if (branch.type !== "ExistsRel") {
+        throw new Error("Expected OR branch to be ExistsRel.");
+      }
+      const rel = toLegacyRelExprForTest(branch.rel);
+      expect(rel.type).toBe("Filter");
+      if (rel.type !== "Filter") {
+        throw new Error("Expected ExistsRel relation to be Filter.");
+      }
+      expect(rel.input.type).toBe("Join");
+      expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
+    }
+  });
+
+  it("supports one-clause friend-profile chain style using hopTo(...).where(...)", () => {
+    const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        anyOf([
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .hopTo("friendshipsViaPersonAId")
+              .where({ personBId: session.personId }),
+          ),
+          policy.exists(
+            policy.people
+              .where({ profileId: profile.id })
+              .hopTo("friendshipsViaPersonBId")
+              .where({ personAId: session.personId }),
+          ),
+        ]),
+      ),
+    ]);
+
+    const using = compiled.profiles.select?.using;
+    expect(using?.type).toBe("Or");
+    if (!using || using.type !== "Or") {
+      throw new Error("Expected profile policy to compile to OR.");
+    }
+    expect(using.exprs).toHaveLength(2);
+    for (const branch of using.exprs) {
+      expect(branch.type).toBe("ExistsRel");
+      if (branch.type !== "ExistsRel") {
+        throw new Error("Expected OR branch to be ExistsRel.");
+      }
+      const rel = toLegacyRelExprForTest(branch.rel);
+      expect(rel.type).toBe("Project");
+      if (rel.type !== "Project") {
+        throw new Error("Expected ExistsRel relation to be Project.");
+      }
+      expect(rel.input.type).toBe("Filter");
+      if (rel.input.type !== "Filter") {
+        throw new Error("Expected hop relation filter.");
+      }
+      expect(rel.input.input.type).toBe("Join");
+      expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
+    }
+  });
+
   it("supports bounded recursive inherits depth override", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),
@@ -435,7 +689,7 @@ describe("permissions DSL", () => {
       return [policy.todos.allowRead.where((todo) => hasResourceRole(todo.id, "viewer"))];
     });
 
-    const using = compiled.todos.select?.using;
+    const using = toLegacyPolicyExprWithRelForTest(compiled.todos.select?.using);
     expect(using?.type).toBe("ExistsRel");
     if (!using || using.type !== "ExistsRel") {
       throw new Error("Expected compiled recursive expression to be ExistsRel.");
@@ -465,7 +719,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation to be initialized.");
     }
 
-    const ir = relationToIr(relation);
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected relation IR project.");
@@ -517,7 +771,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = relationToIr(relation);
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected projected recursive relation IR.");
@@ -532,7 +786,7 @@ describe("permissions DSL", () => {
     }
     expect(ir.input.input.left.type).toBe("Gather");
 
-    const existsExpr = relationExistsToPolicy(relation);
+    const existsExpr = toLegacyPolicyExprWithRelForTest(relationExistsToPolicy(relation));
     expect(existsExpr).toMatchObject({
       type: "ExistsRel",
       rel: {
@@ -565,7 +819,8 @@ describe("permissions DSL", () => {
       ];
     });
 
-    expect(compiled.todos.select?.using).toMatchObject({
+    const using = toLegacyPolicyExprWithRelForTest(compiled.todos.select?.using);
+    expect(using).toMatchObject({
       type: "ExistsRel",
       rel: {
         type: "Project",
@@ -649,12 +904,66 @@ describe("permissions DSL", () => {
     expect(newOnly.todos.update?.using).toEqual(newOnly.todos.update?.with_check);
   });
 
+  it("supports contains and in where operators", () => {
+    const containsCompiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ ownerId: { contains: "ali" } } as unknown as TodoWhere),
+    ]);
+    expect(containsCompiled.todos.select?.using).toEqual({
+      type: "Contains",
+      column: "ownerId",
+      value: {
+        type: "Literal",
+        value: "ali",
+      },
+    });
+
+    const inListCompiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ ownerId: { in: ["alice", "bob"] } } as unknown as TodoWhere),
+    ]);
+    expect(inListCompiled.todos.select?.using).toEqual({
+      type: "InList",
+      column: "ownerId",
+      values: [
+        {
+          type: "Literal",
+          value: "alice",
+        },
+        {
+          type: "Literal",
+          value: "bob",
+        },
+      ],
+    });
+
+    const inSessionCompiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({
+        ownerId: { in: session["claims.teamIds"] },
+      } as unknown as TodoWhere),
+    ]);
+    expect(inSessionCompiled.todos.select?.using).toEqual({
+      type: "In",
+      column: "ownerId",
+      session_path: ["claims", "teamIds"],
+    });
+
+    const emptyInCompiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ ownerId: { in: [] } } as unknown as TodoWhere),
+    ]);
+    expect(emptyInCompiled.todos.select?.using).toEqual({ type: "False" });
+  });
+
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {
     expect(() =>
       definePermissions(app, ({ policy }) => [
-        policy.todos.allowRead.where({ done: { contains: true } } as unknown as TodoWhere),
+        policy.todos.allowRead.where({ ownerId: { in: "alice" } } as unknown as TodoWhere),
       ]),
-    ).toThrow(/where operator "contains" is not yet supported/i);
+    ).toThrow(/ownerId\.in.*array or session reference/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where({ done: { startsWith: true } } as unknown as TodoWhere),
+      ]),
+    ).toThrow(/unsupported where operator "startsWith"/i);
 
     expect(() =>
       definePermissions(app, ({ policy, allOf }) => [

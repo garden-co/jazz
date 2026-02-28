@@ -1,5 +1,6 @@
 import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 import type { QueryBuilder } from "./runtime/db.js";
+import type { Session } from "./runtime/context.js";
 import type { PersistenceTier } from "./runtime/client.js";
 
 type UseAllStatePending<T> = {
@@ -148,6 +149,7 @@ interface DbLike {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     settledTier?: PersistenceTier,
+    session?: Session,
   ): () => void;
 }
 
@@ -159,6 +161,7 @@ export class SubscriptionsOrchestrator {
   constructor(
     private readonly config: { appId: string },
     private readonly db: DbLike,
+    private readonly session?: Session | null,
   ) {}
 
   async init(): Promise<void> {}
@@ -291,6 +294,7 @@ export class SubscriptionsOrchestrator {
           }
         },
         entry.tier,
+        this.session ?? undefined,
       );
     } catch (error) {
       entry.state = { status: "rejected", data: undefined, error };

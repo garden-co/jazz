@@ -156,7 +156,8 @@ export class JazzRnRuntimeAdapter implements Runtime {
       {
         onUpdate: (deltaJson: string) => {
           try {
-            on_update(deltaJson);
+            const parsed = JSON.parse(deltaJson) as unknown;
+            on_update(parsed);
           } catch (error) {
             swallowCallbackError("subscription", error);
           }
@@ -202,6 +203,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   onSyncMessageReceived(message_json: string): void {
+    if (this.closed) return;
     this.binding.onSyncMessageReceived(message_json);
   }
 
@@ -218,10 +220,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   addServer(): void {
+    if (this.closed) return;
     this.binding.addServer();
   }
 
   removeServer(): void {
+    if (this.closed) return;
     this.binding.removeServer();
   }
 
@@ -242,6 +246,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   onSyncMessageReceivedFromClient(client_id: string, message_json: string): void {
+    if (this.closed) return;
     this.binding.onSyncMessageReceivedFromClient(client_id, message_json);
   }
 

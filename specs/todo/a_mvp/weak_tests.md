@@ -10,28 +10,12 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## Remaining Weak Assertions
 
-## 3. Test Stub / Non-Behavioral Case (high priority)
-
-- `crates/groove/src/schema_manager/integration_tests.rs:query_manager_queues_catalogue_updates`
-  - Current: asserts only initial empty queue and then stops.
-  - Needed: inject a real catalogue payload via sync path and assert pending catalogue update enqueue/dequeue behavior.
-
-## 4. Broader Sweep (medium priority)
+## 4. Broader Sweep (medium priority) - Partially done but needs more work
 
 - Continue reducing `len()`-only checks in older tests (especially early `sync_manager/tests.rs` and older `manager_tests.rs` cases) where object identity/content can be asserted cheaply.
 - Avoid broad `matches!` patterns that do not validate key payload fields.
 
 ## Missing Schema/Catalogue Negative Paths
-
-## 5. Catalogue metadata filtering
-
-- Add tests that non-matching `app_id` catalogue objects are ignored without side effects.
-- Add tests that unknown catalogue `type` is ignored without side effects.
-
-## 6. Malformed payload handling
-
-- Add malformed schema-content test for `process_catalogue_update(... CatalogueSchema ...)` decode failure path.
-- Add malformed lens-content test for `process_catalogue_update(... CatalogueLens ...)` decode failure path.
 
 ## 7. Invalid/missing lens metadata
 

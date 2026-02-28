@@ -368,7 +368,12 @@ mod tests {
     fn array_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ])
     }
 
@@ -429,6 +434,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -483,6 +489,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -537,6 +544,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -577,6 +585,7 @@ mod tests {
         let add_delta = TupleDelta {
             added: vec![old_tuple.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
         node.process(add_delta);
@@ -585,6 +594,7 @@ mod tests {
         let update_delta = TupleDelta {
             added: vec![],
             removed: vec![],
+            moved: vec![],
             updated: vec![(old_tuple, new_tuple)],
         };
         let result = node.process(update_delta);
@@ -626,6 +636,7 @@ mod tests {
         let add_delta = TupleDelta {
             added: vec![old_tuple.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
         let result1 = node.process(add_delta);
@@ -635,6 +646,7 @@ mod tests {
         let update_delta = TupleDelta {
             added: vec![],
             removed: vec![],
+            moved: vec![],
             updated: vec![(old_tuple, new_tuple)],
         };
         let result = node.process(update_delta);
@@ -675,6 +687,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -703,6 +716,7 @@ mod tests {
         let result = node.process(TupleDelta {
             added: vec![tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -725,6 +739,7 @@ mod tests {
         let result = node.process(TupleDelta {
             added: vec![tuple],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -762,6 +777,7 @@ mod tests {
         let initial = node.process(TupleDelta {
             added: vec![non_matching.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(initial.added.is_empty());
@@ -770,6 +786,7 @@ mod tests {
         let to_matching = node.process(TupleDelta {
             added: vec![],
             removed: vec![],
+            moved: vec![],
             updated: vec![(non_matching, matching.clone())],
         });
         assert_eq!(to_matching.added.len(), 1);
@@ -781,6 +798,7 @@ mod tests {
         let to_non_matching = node.process(TupleDelta {
             added: vec![],
             removed: vec![],
+            moved: vec![],
             updated: vec![(matching, non_matching_again)],
         });
         assert_eq!(to_non_matching.removed.len(), 1);
@@ -956,6 +974,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -1014,6 +1033,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
