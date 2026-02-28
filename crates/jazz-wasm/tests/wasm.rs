@@ -8,7 +8,7 @@ use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-use jazz_wasm::types::WasmValue;
+use jazz_wasm::types::Value;
 use jazz_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
 
 #[wasm_bindgen_test]
@@ -39,13 +39,11 @@ fn test_current_timestamp() {
 #[wasm_bindgen_test]
 fn test_parse_schema() {
     let schema_json = r#"{
-        "tables": {
-            "todos": {
-                "columns": [
-                    {"name": "title", "column_type": {"type": "Text"}, "nullable": false},
-                    {"name": "completed", "column_type": {"type": "Boolean"}, "nullable": false}
-                ]
-            }
+        "todos": {
+            "columns": [
+                {"name": "title", "column_type": {"type": "Text"}, "nullable": false},
+                {"name": "completed", "column_type": {"type": "Boolean"}, "nullable": false}
+            ]
         }
     }"#;
 
@@ -75,7 +73,7 @@ fn test_query_builder_with_filters() {
     let builder = WasmQueryBuilder::new("todos");
 
     // Create a boolean value for filtering
-    let value = serde_wasm_bindgen::to_value(&WasmValue::Boolean(true)).unwrap();
+    let value = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
 
     let result = builder.branch("main").filter_eq("completed", value);
 
@@ -139,8 +137,8 @@ fn test_query_builder_join() {
 fn test_query_builder_or() {
     let builder = WasmQueryBuilder::new("todos");
 
-    let value1 = serde_wasm_bindgen::to_value(&WasmValue::Text("urgent".to_string())).unwrap();
-    let value2 = serde_wasm_bindgen::to_value(&WasmValue::Boolean(true)).unwrap();
+    let value1 = serde_wasm_bindgen::to_value(&Value::Text("urgent".to_string())).unwrap();
+    let value2 = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
 
     let result = builder.branch("main").filter_eq("priority", value1);
 
