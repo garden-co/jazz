@@ -242,7 +242,7 @@ self.sync_manager.send_query_subscription_to_servers(query_id, sync_query, sessi
 Wire shape:
 
 ```rust
-SyncPayload::QuerySubscription { query_id, query, session }
+SyncPayload::QuerySubscription { query_id, query, session, propagation }
 ```
 
 > [`sync_manager/types.rs:225`](../../crates/jazz-tools/src/sync_manager/types.rs#L225)

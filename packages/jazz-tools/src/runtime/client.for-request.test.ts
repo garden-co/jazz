@@ -13,16 +13,29 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 function makeClient() {
-  const queryCalls: Array<[string, string | undefined, string | undefined]> = [];
-  const subscribeCalls: Array<[string, string | undefined, string | undefined]> = [];
+  const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
+    [];
+  const subscribeCalls: Array<
+    [string, string | undefined, string | undefined, string | undefined]
+  > = [];
   const subscribeCallbacks: Array<Function> = [];
 
   const runtime: Runtime = {
     insert: () => "00000000-0000-0000-0000-000000000001",
     update: () => {},
     delete: () => {},
-    query: async (queryJson: string, sessionJson?: string | null, settledTier?: string | null) => {
-      queryCalls.push([queryJson, sessionJson ?? undefined, settledTier ?? undefined]);
+    query: async (
+      queryJson: string,
+      sessionJson?: string | null,
+      settledTier?: string | null,
+      optionsJson?: string | null,
+    ) => {
+      queryCalls.push([
+        queryJson,
+        sessionJson ?? undefined,
+        settledTier ?? undefined,
+        optionsJson ?? undefined,
+      ]);
       return [];
     },
     subscribe: (
@@ -30,8 +43,14 @@ function makeClient() {
       onUpdate: Function,
       sessionJson?: string | null,
       settledTier?: string | null,
+      optionsJson?: string | null,
     ) => {
-      subscribeCalls.push([queryJson, sessionJson ?? undefined, settledTier ?? undefined]);
+      subscribeCalls.push([
+        queryJson,
+        sessionJson ?? undefined,
+        settledTier ?? undefined,
+        optionsJson ?? undefined,
+      ]);
       subscribeCallbacks.push(onUpdate);
       return 1;
     },
@@ -221,5 +240,17 @@ describe("JazzClient.forRequest", () => {
     expect(callback).toHaveBeenCalledWith({
       pending: true,
     });
+  });
+
+  it("passes query propagation options to runtime query", async () => {
+    const { client, queryCalls } = makeClient();
+    await client.query('{"table":"todos"}', { propagation: "local-only" });
+    expect(queryCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  it("passes query propagation options to runtime subscribe", () => {
+    const { client, subscribeCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
+    expect(subscribeCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 });

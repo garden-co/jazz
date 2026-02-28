@@ -18,7 +18,7 @@ export function subscribeTodos(db: Db, onCount: (count: number) => void) {
 
 // #region reading-settled-tier-ts
 export async function readTodosSettledAtEdge(db: Db) {
-  return db.all(app.todos.where({ done: false }), "edge");
+  return db.all(app.todos.where({ done: false }), { settledTier: "edge" });
 }
 // #endregion reading-settled-tier-ts
 

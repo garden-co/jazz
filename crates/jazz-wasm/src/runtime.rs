@@ -51,6 +51,7 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
+use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -89,6 +90,29 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
         _ => Err(JsError::new(&format!(
             "Invalid tier '{}'. Must be 'worker', 'edge', or 'core'.",
             tier
+        ))),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct QueryExecutionOptionsWire {
+    propagation: Option<String>,
+}
+
+fn parse_propagation(options_json: Option<String>) -> Result<QueryPropagation, JsError> {
+    let Some(raw) = options_json else {
+        return Ok(QueryPropagation::Full);
+    };
+
+    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
+        .map_err(|e| JsError::new(&format!("Invalid query options JSON: {}", e)))?;
+
+    match options.propagation.as_deref() {
+        None | Some("full") => Ok(QueryPropagation::Full),
+        Some("local-only") => Ok(QueryPropagation::LocalOnly),
+        Some(other) => Err(JsError::new(&format!(
+            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
+            other
         ))),
     }
 }
@@ -402,6 +426,7 @@ impl WasmRuntime {
         query_json: &str,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> Result<js_sys::Promise, JsError> {
         let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
@@ -416,10 +441,11 @@ impl WasmRuntime {
         };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query(query, session, tier)
+            core.query_with_propagation(query, session, tier, propagation)
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -592,6 +618,7 @@ impl WasmRuntime {
         on_update: Function,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
@@ -606,6 +633,7 @@ impl WasmRuntime {
         };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         let callback = move |delta: SubscriptionDelta| {
             let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
@@ -659,7 +687,13 @@ impl WasmRuntime {
         let handle = self
             .core
             .borrow_mut()
-            .subscribe_with_settled_tier(query, callback, session, tier)
+            .subscribe_with_settled_tier_and_propagation(
+                query,
+                callback,
+                session,
+                tier,
+                propagation,
+            )
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
         let subscription_id = handle.0;

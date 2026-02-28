@@ -75,6 +75,11 @@ Used in PersistenceAck and QuerySettled for tier-aware durability.
 
 Note: the spec originally called these `QueryRegistration`/`QueryUnregistration` — renamed to `QuerySubscription`/`QueryUnsubscription` in implementation.
 
+`QuerySubscription` now carries `propagation` (`full` default, `local-only` optional). `local-only` prevents forwarding beyond the local persistence tier.
+
+> [`sync_manager/types.rs:83`](../../crates/jazz-tools/src/sync_manager/types.rs#L83)
+> [`sync_manager/types.rs:235`](../../crates/jazz-tools/src/sync_manager/types.rs#L235)
+
 ### SyncError
 
 | Variant                | Purpose                                |
@@ -116,7 +121,7 @@ A key boundary: the SyncManager never touches query graphs or SQL. When a client
 | `set_client_query_scope()`               | Called by QM after graph building               |
 | `requeue_pending_query_subscriptions()`  | Re-queue if schema unavailable                  |
 | `take_pending_query_unsubscriptions()`   | For QM cleanup                                  |
-| `send_query_subscription_to_servers()`   | Push queries upstream                           |
+| `send_query_subscription_to_servers()`   | Push queries upstream (honors propagation mode) |
 | `send_query_unsubscription_to_servers()` | Remove queries upstream                         |
 
 > `crates/groove/src/sync_manager.rs:605-696`
@@ -166,12 +171,13 @@ A key boundary: the SyncManager never touches query graphs or SQL. When a client
 
 One-hop flow (browser main thread -> worker):
 
-1. Main sends `QuerySubscription { query_id, query, session }`.
+1. Main sends `QuerySubscription { query_id, query, session, propagation }`.
 2. Worker records `query_origin[query_id]` and queues `PendingQuerySubscription`.
 3. Worker `QueryManager` compiles and settles the server-side graph.
-4. On first settle only, worker emits `QuerySettled { query_id, tier: Worker }`.
-5. Main receives that payload, queues it in `pending_query_settled`, then `QueryManager::process()` moves it into `subscription.achieved_tiers`.
-6. First delivery is held until `achieved_tiers` satisfies `settled_tier`; then the first callback is a full snapshot.
+4. If `propagation=full`, worker forwards upstream; if `local-only`, worker stops propagation at worker tier.
+5. On first settle only, worker emits `QuerySettled { query_id, tier: Worker }`.
+6. Main receives that payload, queues it in `pending_query_settled`, then `QueryManager::process()` moves it into `subscription.achieved_tiers`.
+7. First delivery is held until `achieved_tiers` satisfies `settled_tier`; then the first callback is a full snapshot.
 
 > [`sync_manager/inbox.rs:279`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L279)
 > [`sync_manager/inbox.rs:285`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L285)
