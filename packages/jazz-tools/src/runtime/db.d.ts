@@ -10,6 +10,7 @@
  * - all/one are async (need storage I/O for queries)
  */
 import type { WasmSchema, StorageDriver } from "../drivers/types.js";
+import type { Session } from "./context.js";
 import { JazzClient, type WasmModule, type PersistenceTier } from "./client.js";
 import { type SubscriptionDelta } from "./subscription-manager.js";
 /**
@@ -180,6 +181,9 @@ export declare class Db {
   private onLeaderElectionChange;
   private enqueueWorkerReconfigure;
   private restartWorkerWithCurrentDbName;
+  private currentWorkerNamespace;
+  private shutdownWorkerAndClientsForStorageReset;
+  private removeOpfsNamespaceFile;
   private static resolveWorkerDbNameForSnapshot;
   private static spawnWorker;
   /**
@@ -299,6 +303,20 @@ export declare class Db {
     tier: PersistenceTier,
   ): Promise<void>;
   /**
+   * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
+   *
+   * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
+   * localStorage-based auth or synthetic-user state.
+   *
+   * Behavior:
+   * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
+   * - Leader tab only (throws on follower tabs and asks to close other tabs)
+   * - Serializes with worker reconfigure operations
+   * - Tears down worker + clients, deletes OPFS file, respawns worker
+   * - If file deletion fails, still respawns worker and then rethrows the deletion error
+   */
+  deleteClientStorage(): Promise<void>;
+  /**
    * Execute a query and return all matching rows as typed objects.
    *
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
@@ -347,6 +365,7 @@ export declare class Db {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     settledTier?: PersistenceTier,
+    session?: Session,
   ): () => void;
   /**
    * Shutdown the Db and release all resources.

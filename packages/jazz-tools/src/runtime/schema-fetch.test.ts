@@ -14,7 +14,7 @@ describe("schema-fetch", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ tables: { users: { columns: [] } } }),
+      json: async () => ({ users: { columns: [] } }),
     });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
@@ -25,7 +25,7 @@ describe("schema-fetch", () => {
       schemaHash: hash,
     });
 
-    expect(result.schema.tables.users).toBeDefined();
+    expect(result.schema.users).toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe(`http://localhost:1625/apps/app-123/schema/${hash}`);
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
@@ -88,7 +88,7 @@ describe("schema-fetch", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ tables: { users: { columns: [] } } }),
+      json: async () => ({ users: { columns: [] } }),
     });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 

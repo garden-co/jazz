@@ -66,7 +66,7 @@ function transformRowValues(
   includePlans: IncludePlan[],
   rowId?: string,
 ): Record<string, unknown> {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
@@ -151,7 +151,7 @@ export function transformRows<T>(
   tableName: string,
   includes: IncludeSpec = {},
 ): T[] {
-  if (!schema.tables[tableName]) {
+  if (!schema[tableName]) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
 

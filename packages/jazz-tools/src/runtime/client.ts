@@ -7,6 +7,7 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
   generateClientId,
@@ -337,7 +338,7 @@ export class JazzClient {
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
@@ -370,7 +371,7 @@ export class JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
@@ -597,7 +598,7 @@ export class JazzClient {
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    return this.runtime.getSchema();
+    return this.runtime.getSchema() as WasmSchema;
   }
 
   /**

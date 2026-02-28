@@ -180,7 +180,7 @@ function createRuntimeHarness() {
 
 function makeBridgeOptions(): WorkerBridgeOptions {
   return {
-    schemaJson: JSON.stringify({ tables: {} }),
+    schemaJson: JSON.stringify({}),
     appId: "race-harness-app",
     env: "dev",
     userBranch: "main",
