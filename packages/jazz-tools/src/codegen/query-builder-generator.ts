@@ -388,7 +388,16 @@ export function generateQueryBuilderClasses(
 export function generateAppExport(schema: WasmSchema): string[] {
   const lines: string[] = [];
 
-  lines.push(`export const app = {`);
+  lines.push(`export interface GeneratedApp {`);
+  for (const tableName of Object.keys(schema)) {
+    const interfaceName = tableNameToInterface(tableName);
+    lines.push(`  ${tableName}: ${interfaceName}QueryBuilder;`);
+  }
+  lines.push(`  wasmSchema: WasmSchema;`);
+  lines.push(`}`);
+  lines.push(``);
+
+  lines.push(`export const app: GeneratedApp = {`);
   for (const tableName of Object.keys(schema)) {
     const interfaceName = tableNameToInterface(tableName);
     lines.push(`  ${tableName}: new ${interfaceName}QueryBuilder(),`);

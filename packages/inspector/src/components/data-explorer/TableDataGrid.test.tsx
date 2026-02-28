@@ -6,14 +6,12 @@ const mockUseAll = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 
 const mockWasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
+    ],
   },
 };
 

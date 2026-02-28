@@ -21,11 +21,18 @@ type QueryBuilderLike = {
   where(input: unknown): unknown;
 };
 
-type AppLike = Record<string, QueryBuilderLike | unknown> & {
-  wasmSchema?: unknown;
-};
+type AppLike = object;
 
-type TableKey<TApp extends AppLike> = Exclude<keyof TApp, "wasmSchema">;
+type TableKey<TApp extends AppLike> = Extract<
+  {
+    [K in keyof TApp]-?: K extends "wasmSchema"
+      ? never
+      : TApp[K] extends QueryBuilderLike
+        ? K
+        : never;
+  }[keyof TApp],
+  string
+>;
 type QueryBuilderFor<TApp extends AppLike, K extends TableKey<TApp>> = Extract<
   TApp[K],
   QueryBuilderLike

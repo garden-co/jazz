@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock svelte context and lifecycle
 const contextStore = new Map<unknown, unknown>();
@@ -9,6 +9,12 @@ vi.mock("svelte", () => ({
   getContext: (key: unknown) => contextStore.get(key),
   onDestroy: (fn: () => void) => destroyCallbacks.push(fn),
 }));
+
+let contextModule: typeof import("./context.svelte.js");
+
+beforeAll(async () => {
+  contextModule = await import("./context.svelte.js");
+});
 
 // QuerySubscription uses $state and $effect (rune transforms), so we test
 // the underlying subscription wiring against the db.subscribeAll API directly.
@@ -170,15 +176,15 @@ describe("context integration", () => {
     contextStore.clear();
   });
 
-  it("context round-trips through set/get", async () => {
-    const { initJazzContext, getJazzContext } = await import("./context.svelte.js");
+  it("context round-trips through set/get", () => {
+    const { initJazzContext, getJazzContext } = contextModule;
     const ctx = initJazzContext();
     const retrieved = getJazzContext();
     expect(retrieved).toBe(ctx);
   });
 
-  it("db and session can be updated on the context object", async () => {
-    const { initJazzContext } = await import("./context.svelte.js");
+  it("db and session can be updated on the context object", () => {
+    const { initJazzContext } = contextModule;
     const ctx = initJazzContext();
 
     const mockDb = { shutdown: vi.fn() } as any;
