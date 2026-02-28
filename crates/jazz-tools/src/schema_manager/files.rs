@@ -592,6 +592,10 @@ fn enum_variants_to_ts_args(variants: &[String]) -> String {
         .join(", ")
 }
 
+fn json_schema_to_ts_literal(schema: &serde_json::Value) -> String {
+    schema.to_string()
+}
+
 /// Map ColumnType to col builder method name.
 fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
     match column_type {
@@ -601,6 +605,7 @@ fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
         ColumnType::Integer | ColumnType::BigInt => "int",
         ColumnType::Timestamp => "int", // Timestamps are stored as integers
         ColumnType::Bytea => "bytes",
+        ColumnType::Json(_) => "json",
         _ => "string", // Fallback for unknown types
     }
 }
@@ -664,6 +669,21 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                                 column, optional, variant_args, default_ts, draft_comment
                             ));
                         }
+                        ColumnType::Json(schema) => {
+                            let opts = if let Some(schema) = schema {
+                                format!(
+                                    "{{ default: {}, schema: {} }}",
+                                    default_ts,
+                                    json_schema_to_ts_literal(schema)
+                                )
+                            } else {
+                                format!("{{ default: {} }}", default_ts)
+                            };
+                            lines.push(format!(
+                                "  {}: col.add(){}.json({}),{}",
+                                column, optional, opts, draft_comment
+                            ));
+                        }
                         _ => {
                             let method = sql_type_to_col_method(column_type);
                             lines.push(format!(
@@ -693,6 +713,21 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                             lines.push(format!(
                                 "  {}: col.drop().enum({}, {{ backwardsDefault: {} }}),{}",
                                 column, variant_args, default_ts, draft_comment
+                            ));
+                        }
+                        ColumnType::Json(schema) => {
+                            let opts = if let Some(schema) = schema {
+                                format!(
+                                    "{{ backwardsDefault: {}, schema: {} }}",
+                                    default_ts,
+                                    json_schema_to_ts_literal(schema)
+                                )
+                            } else {
+                                format!("{{ backwardsDefault: {} }}", default_ts)
+                            };
+                            lines.push(format!(
+                                "  {}: col.drop().json({}),{}",
+                                column, opts, draft_comment
                             ));
                         }
                         _ => {
@@ -735,6 +770,7 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
 mod tests {
     use super::*;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn create_test_schema() -> Schema {
@@ -1088,6 +1124,40 @@ mod tests {
         assert!(ts.contains(
             "status: col.drop().enum(\"done\", \"todo\", { backwardsDefault: \"todo\" }),"
         ));
+    }
+
+    #[test]
+    fn lens_transform_to_ts_uses_json_builder_for_json_columns() {
+        let transform = LensTransform::with_ops(vec![
+            super::super::lens::LensOp::AddColumn {
+                table: "documents".to_string(),
+                column: "payload".to_string(),
+                column_type: ColumnType::Json(Some(json!({
+                    "type": "object",
+                    "required": ["name"]
+                }))),
+                default: crate::query_manager::types::Value::Text("{\"name\":\"Ada\"}".to_string()),
+            },
+            super::super::lens::LensOp::RemoveColumn {
+                table: "documents".to_string(),
+                column: "payload".to_string(),
+                column_type: ColumnType::Json(Some(json!({
+                    "type": "object",
+                    "required": ["name"]
+                }))),
+                default: crate::query_manager::types::Value::Text("{\"name\":\"Ada\"}".to_string()),
+            },
+        ]);
+
+        let ts = lens_transform_to_ts(&transform);
+        assert!(
+            ts.contains("payload: col.add().json({ default: \"{\\\"name\\\":\\\"Ada\\\"}\", schema: {\"required\":[\"name\"],\"type\":\"object\"} }),")
+                || ts.contains("payload: col.add().json({ default: \"{\\\"name\\\":\\\"Ada\\\"}\", schema: {\"type\":\"object\",\"required\":[\"name\"]} }),")
+        );
+        assert!(
+            ts.contains("payload: col.drop().json({ backwardsDefault: \"{\\\"name\\\":\\\"Ada\\\"}\", schema: {\"required\":[\"name\"],\"type\":\"object\"} }),")
+                || ts.contains("payload: col.drop().json({ backwardsDefault: \"{\\\"name\\\":\\\"Ada\\\"}\", schema: {\"type\":\"object\",\"required\":[\"name\"]} }),")
+        );
     }
 
     #[test]

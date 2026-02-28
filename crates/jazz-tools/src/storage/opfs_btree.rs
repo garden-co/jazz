@@ -143,7 +143,6 @@ impl OpfsBTreeStorage {
         let storage = Self {
             tree: RefCell::new(tree),
         };
-        storage.log_key_stats();
         Ok(storage)
     }
 
@@ -165,22 +164,6 @@ impl OpfsBTreeStorage {
             .try_borrow_mut()
             .map_err(|_| StorageError::IoError("opfs-btree already borrowed".to_string()))?;
         f(&mut tree)
-    }
-
-    fn log_key_stats(&self) {
-        let count_prefix =
-            |pfx: &str| -> usize { self.tree_scan_keys(pfx).map(|v| v.len()).unwrap_or(0) };
-        let obj_count = count_prefix("obj:");
-        let idx_count = count_prefix("idx:");
-        let ack_count = count_prefix("ack:");
-        let catman_count = count_prefix("catman:");
-        tracing::info!(
-            obj_count,
-            idx_count,
-            ack_count,
-            catman_count,
-            "OpfsBTreeStorage opened"
-        );
     }
 
     fn tree_insert(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {

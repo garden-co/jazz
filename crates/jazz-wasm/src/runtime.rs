@@ -29,7 +29,7 @@ fn init_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::TRACE)
+            .with_max_level(tracing::Level::WARN)
             .with_console_group_spans();
         let _ = wasm_tracing::set_as_global_default_with_config(config);
     });

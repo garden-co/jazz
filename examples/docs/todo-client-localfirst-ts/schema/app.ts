@@ -1,5 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export interface Project {
   id: string;

@@ -1346,7 +1346,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new() !==
-    12877
+    5640
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_constructor_rnruntime_new'
