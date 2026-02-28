@@ -39,6 +39,7 @@
 //! ```
 
 pub mod auto_lens;
+pub mod catalogue_export;
 pub mod context;
 pub mod diff;
 pub mod encoding;

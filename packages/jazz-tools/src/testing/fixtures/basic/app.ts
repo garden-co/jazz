@@ -19,41 +19,39 @@ export interface TodoWhereInput {
 }
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        {
-          name: "title",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+  todos: {
+    columns: [
+      {
+        name: "title",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "done",
-          column_type: {
-            type: "Boolean",
-          },
-          nullable: false,
+        nullable: false,
+      },
+      {
+        name: "done",
+        column_type: {
+          type: "Boolean",
         },
-      ],
-      policies: {
-        select: {
-          using: {
-            type: "True",
-          },
+        nullable: false,
+      },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "True",
         },
-        insert: {
-          with_check: {
-            type: "Cmp",
-            column: "done",
-            op: "Eq",
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
             value: {
-              type: "Literal",
-              value: {
-                type: "Boolean",
-                value: true,
-              },
+              type: "Boolean",
+              value: true,
             },
           },
         },

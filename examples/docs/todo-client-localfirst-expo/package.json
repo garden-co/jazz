@@ -1,0 +1,31 @@
+{
+  "name": "todo-client-localfirst-expo-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "scripts": {
+    "start": "expo start --clear",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "build": "jazz-tools build && tsc --noEmit",
+    "test": "tsc --noEmit",
+    "prebuild": "expo prebuild --clean",
+    "verify:expo:android": "expo prebuild --platform android --clean --no-install --non-interactive",
+    "verify:expo:ios": "expo prebuild --platform ios --clean --no-install --non-interactive"
+  },
+  "dependencies": {
+    "expo": "^54.0.0",
+    "jazz-rn": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "react": "19.2.4",
+    "react-native": "0.81.5",
+    "web-streams-polyfill": "^4.2.0"
+  },
+  "devDependencies": {
+    "@babel/plugin-transform-flow-strip-types": "^7.27.1",
+    "@types/react": "^19.0.0",
+    "babel-plugin-transform-import-meta": "^2.3.3",
+    "typescript": "catalog:default"
+  }
+}

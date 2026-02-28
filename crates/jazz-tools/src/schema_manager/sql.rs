@@ -437,7 +437,30 @@ impl Parser {
                     "ENUM type requires at least one variant".to_string(),
                 ));
             }
-            ColumnType::Enum(variants)
+            ColumnType::Enum { variants }
+        } else if upper == "JSON" {
+            if self.peek() == Some(&Token::LParen) {
+                self.advance();
+                let raw_schema = match self.advance() {
+                    Some(Token::StringLit(value)) => value.clone(),
+                    Some(t) => {
+                        return Err(SqlParseError::Expected(format!(
+                            "JSON schema string literal, got {:?}",
+                            t
+                        )));
+                    }
+                    None => return Err(SqlParseError::UnexpectedEnd),
+                };
+                self.expect(&Token::RParen)?;
+                let parsed_schema = serde_json::from_str(&raw_schema).map_err(|err| {
+                    SqlParseError::SyntaxError(format!("Invalid JSON schema payload: {err}"))
+                })?;
+                ColumnType::Json {
+                    schema: Some(parsed_schema),
+                }
+            } else {
+                ColumnType::Json { schema: None }
+            }
         } else {
             // Skip optional size like VARCHAR(255)
             if self.peek() == Some(&Token::LParen) {
@@ -468,7 +491,9 @@ impl Parser {
         while self.peek() == Some(&Token::LBracket) {
             self.advance(); // consume '['
             self.expect(&Token::RBracket)?;
-            col_type = ColumnType::Array(Box::new(col_type));
+            col_type = ColumnType::Array {
+                element: Box::new(col_type),
+            };
         }
 
         Ok(col_type)
@@ -1003,14 +1028,16 @@ impl Parser {
 fn is_valid_reference_column_type(column_type: &ColumnType) -> bool {
     match column_type {
         ColumnType::Uuid => true,
-        ColumnType::Array(element_type) => matches!(element_type.as_ref(), ColumnType::Uuid),
+        ColumnType::Array {
+            element: element_type,
+        } => matches!(element_type.as_ref(), ColumnType::Uuid),
         _ => false,
     }
 }
 
 fn validate_schema_references(schema: &Schema) -> Result<(), SqlParseError> {
     for (table_name, table_schema) in schema {
-        for column in &table_schema.descriptor.columns {
+        for column in &table_schema.columns.columns {
             let Some(referenced_table) = column.references else {
                 continue;
             };
@@ -1102,7 +1129,7 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
                 table_name
             ))
         })?;
-        validate_operation_policy_for_bytea(&table_schema.descriptor, &policy)?;
+        validate_operation_policy_for_bytea(&table_schema.columns, &policy)?;
 
         match operation {
             Operation::Select => table_schema.policies.select = policy,
@@ -1223,7 +1250,7 @@ pub fn schema_to_sql(schema: &Schema) -> String {
 fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
     let mut columns = Vec::new();
 
-    for col in &schema.descriptor.columns {
+    for col in &schema.columns.columns {
         let col_sql = column_descriptor_to_sql(col);
         columns.push(format!("    {}", col_sql));
     }
@@ -1463,7 +1490,7 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         ColumnType::Double => "REAL".to_string(),
         ColumnType::Boolean => "BOOLEAN".to_string(),
         ColumnType::Text => "TEXT".to_string(),
-        ColumnType::Enum(variants) => {
+        ColumnType::Enum { variants } => {
             let variants = variants
                 .iter()
                 .map(|variant| format!("'{}'", variant.replace('\'', "''")))
@@ -1474,8 +1501,15 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         ColumnType::Timestamp => "TIMESTAMP".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
         ColumnType::Bytea => "BYTEA".to_string(),
-        ColumnType::Array(elem) => format!("{}[]", column_type_to_sql(elem)),
-        ColumnType::Row(_) => "TEXT".to_string(),
+        ColumnType::Json { schema } => {
+            if let Some(schema) = schema {
+                format!("JSON('{}')", schema.to_string().replace('\'', "''"))
+            } else {
+                "JSON".to_string()
+            }
+        }
+        ColumnType::Array { element: elem } => format!("{}[]", column_type_to_sql(elem)),
+        ColumnType::Row { columns: _ } => "TEXT".to_string(),
     }
 }
 
@@ -1501,6 +1535,7 @@ fn value_to_sql(val: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_simple_create_table() {
@@ -1515,14 +1550,14 @@ mod tests {
         assert_eq!(schema.len(), 1);
 
         let todos = schema.get(&TableName::new("todos")).unwrap();
-        assert_eq!(todos.descriptor.columns.len(), 2);
+        assert_eq!(todos.columns.columns.len(), 2);
 
-        let title = &todos.descriptor.columns[0];
+        let title = &todos.columns.columns[0];
         assert_eq!(title.name.as_str(), "title");
         assert_eq!(title.column_type, ColumnType::Text);
         assert!(!title.nullable);
 
-        let completed = &todos.descriptor.columns[1];
+        let completed = &todos.columns.columns[1];
         assert_eq!(completed.name.as_str(), "completed");
         assert_eq!(completed.column_type, ColumnType::Boolean);
         assert!(!completed.nullable);
@@ -1541,9 +1576,9 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let users = schema.get(&TableName::new("users")).unwrap();
 
-        assert!(!users.descriptor.columns[0].nullable); // name
-        assert!(users.descriptor.columns[1].nullable); // email
-        assert!(users.descriptor.columns[2].nullable); // age
+        assert!(!users.columns.columns[0].nullable); // name
+        assert!(users.columns.columns[1].nullable); // email
+        assert!(users.columns.columns[2].nullable); // age
     }
 
     #[test]
@@ -1790,7 +1825,7 @@ mod tests {
         match &transform.ops[0] {
             LensOp::AddTable { table, schema } => {
                 assert_eq!(table, "new_table");
-                assert_eq!(schema.descriptor.columns.len(), 2);
+                assert_eq!(schema.columns.columns.len(), 2);
             }
             _ => panic!("Expected AddTable"),
         }
@@ -1842,10 +1877,7 @@ mod tests {
         assert_eq!(schema.len(), reparsed.len());
         let todos = schema.get(&TableName::new("todos")).unwrap();
         let todos2 = reparsed.get(&TableName::new("todos")).unwrap();
-        assert_eq!(
-            todos.descriptor.columns.len(),
-            todos2.descriptor.columns.len()
-        );
+        assert_eq!(todos.columns.columns.len(), todos2.columns.columns.len());
     }
 
     #[test]
@@ -1928,16 +1960,13 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("test")).unwrap();
 
-        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Text);
-        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Integer);
-        assert_eq!(table.descriptor.columns[2].column_type, ColumnType::BigInt);
-        assert_eq!(table.descriptor.columns[3].column_type, ColumnType::Boolean);
-        assert_eq!(
-            table.descriptor.columns[4].column_type,
-            ColumnType::Timestamp
-        );
-        assert_eq!(table.descriptor.columns[5].column_type, ColumnType::Uuid);
-        assert_eq!(table.descriptor.columns[6].column_type, ColumnType::Bytea);
+        assert_eq!(table.columns.columns[0].column_type, ColumnType::Text);
+        assert_eq!(table.columns.columns[1].column_type, ColumnType::Integer);
+        assert_eq!(table.columns.columns[2].column_type, ColumnType::BigInt);
+        assert_eq!(table.columns.columns[3].column_type, ColumnType::Boolean);
+        assert_eq!(table.columns.columns[4].column_type, ColumnType::Timestamp);
+        assert_eq!(table.columns.columns[5].column_type, ColumnType::Uuid);
+        assert_eq!(table.columns.columns[6].column_type, ColumnType::Bytea);
     }
 
     #[test]
@@ -1947,12 +1976,53 @@ mod tests {
         let col = &schema
             .get(&TableName::new("chunks"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Bytea))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea)
+            }
+        );
+    }
+
+    #[test]
+    fn parse_json_column_types() {
+        let sql = r#"
+            CREATE TABLE docs (
+                payload JSON NOT NULL,
+                typed_payload JSON('{"type":"object","properties":{"name":{"type":"string"}}}') NULL
+            );
+        "#;
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("docs")).unwrap();
+
+        assert_eq!(
+            table.columns.columns[0].column_type,
+            ColumnType::Json { schema: None }
+        );
+        assert_eq!(
+            table.columns.columns[1].column_type,
+            ColumnType::Json {
+                schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }))
+            }
+        );
+        assert!(table.columns.columns[1].nullable);
+    }
+
+    #[test]
+    fn reject_invalid_json_schema_payload() {
+        let sql = "CREATE TABLE docs (payload JSON('{not-json}') NOT NULL);";
+        let err = parse_schema(sql).expect_err("invalid schema payload should fail");
+        assert!(
+            err.to_string().contains("Invalid JSON schema payload"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1963,13 +2033,15 @@ mod tests {
         let col = &schema
             .get(&TableName::new("files"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(col.name.as_str(), "parts");
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Uuid))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid)
+            }
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
@@ -2005,10 +2077,14 @@ mod tests {
     fn parse_nested_array_column_type() {
         let sql = "CREATE TABLE t (matrix INTEGER[][] NOT NULL);";
         let schema = parse_schema(sql).unwrap();
-        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        let col = &schema.get(&TableName::new("t")).unwrap().columns.columns[0];
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Array(Box::new(ColumnType::Integer))))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                }),
+            }
         );
         assert!(!col.nullable);
     }
@@ -2020,16 +2096,18 @@ mod tests {
         let col = &schema
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(
             col.column_type,
-            ColumnType::Enum(vec![
-                "todo".to_string(),
-                "in_progress".to_string(),
-                "done".to_string(),
-            ])
+            ColumnType::Enum {
+                variants: vec![
+                    "todo".to_string(),
+                    "in_progress".to_string(),
+                    "done".to_string(),
+                ]
+            }
         );
         assert!(!col.nullable);
     }
@@ -2091,7 +2169,9 @@ mod tests {
                 assert_eq!(column, "status");
                 assert_eq!(
                     *column_type,
-                    ColumnType::Enum(vec!["todo".to_string(), "done".to_string()])
+                    ColumnType::Enum {
+                        variants: vec!["todo".to_string(), "done".to_string()]
+                    }
                 );
                 assert_eq!(*default, Value::Text("todo".to_string()));
             }
@@ -2106,7 +2186,7 @@ mod tests {
         let col = &schema
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(col.name.as_str(), "owner_id");
@@ -2122,7 +2202,7 @@ mod tests {
         let col = &schema
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(col.references, Some(TableName::new("todos")));
@@ -2134,7 +2214,7 @@ mod tests {
         // Order: REFERENCES then NOT NULL
         let sql = "CREATE TABLE t (fk UUID REFERENCES other NOT NULL);";
         let schema = parse_schema(sql).unwrap();
-        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        let col = &schema.get(&TableName::new("t")).unwrap().columns.columns[0];
 
         assert_eq!(col.references, Some(TableName::new("other")));
         assert!(!col.nullable);
@@ -2145,7 +2225,7 @@ mod tests {
         // Order: NOT NULL then REFERENCES (should also work)
         let sql = "CREATE TABLE t (fk UUID NOT NULL REFERENCES other);";
         let schema = parse_schema(sql).unwrap();
-        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        let col = &schema.get(&TableName::new("t")).unwrap().columns.columns[0];
 
         assert_eq!(col.references, Some(TableName::new("other")));
         assert!(!col.nullable);
@@ -2257,7 +2337,7 @@ mod tests {
         let col = &reparsed
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
         assert_eq!(col.references, Some(TableName::new("users")));
         assert!(!col.nullable);
@@ -2275,11 +2355,13 @@ mod tests {
         let col = &reparsed
             .get(&TableName::new("files"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Uuid))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid)
+            }
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
@@ -2297,11 +2379,13 @@ mod tests {
         let col = &reparsed
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
         assert_eq!(
             col.column_type,
-            ColumnType::Enum(vec!["todo".to_string(), "done".to_string()])
+            ColumnType::Enum {
+                variants: vec!["todo".to_string(), "done".to_string()]
+            }
         );
         assert!(!col.nullable);
     }
@@ -2334,20 +2418,20 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("todos")).unwrap();
 
-        assert_eq!(table.descriptor.columns.len(), 3);
+        assert_eq!(table.columns.columns.len(), 3);
 
-        let title = &table.descriptor.columns[0];
+        let title = &table.columns.columns[0];
         assert_eq!(title.name.as_str(), "title");
         assert_eq!(title.column_type, ColumnType::Text);
         assert!(title.references.is_none());
         assert!(!title.nullable);
 
-        let parent = &table.descriptor.columns[1];
+        let parent = &table.columns.columns[1];
         assert_eq!(parent.name.as_str(), "parent_id");
         assert_eq!(parent.references, Some(TableName::new("todos")));
         assert!(parent.nullable);
 
-        let owner = &table.descriptor.columns[2];
+        let owner = &table.columns.columns[2];
         assert_eq!(owner.name.as_str(), "owner_id");
         assert_eq!(owner.references, Some(TableName::new("users")));
         assert!(!owner.nullable);
@@ -2365,14 +2449,14 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("measurements")).unwrap();
 
-        assert_eq!(table.descriptor.columns.len(), 2);
+        assert_eq!(table.columns.columns.len(), 2);
 
-        let temp = &table.descriptor.columns[0];
+        let temp = &table.columns.columns[0];
         assert_eq!(temp.name.as_str(), "temperature");
         assert_eq!(temp.column_type, ColumnType::Double);
         assert!(!temp.nullable);
 
-        let humidity = &table.descriptor.columns[1];
+        let humidity = &table.columns.columns[1];
         assert_eq!(humidity.name.as_str(), "humidity");
         assert_eq!(humidity.column_type, ColumnType::Double);
         assert!(humidity.nullable);
@@ -2390,8 +2474,8 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("sensors")).unwrap();
 
-        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Double);
-        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Double);
+        assert_eq!(table.columns.columns[0].column_type, ColumnType::Double);
+        assert_eq!(table.columns.columns[1].column_type, ColumnType::Double);
     }
 
     #[test]
@@ -2408,21 +2492,18 @@ mod tests {
         let orig = schema.get(&TableName::new("measurements")).unwrap();
         let round = reparsed.get(&TableName::new("measurements")).unwrap();
 
+        assert_eq!(orig.columns.columns.len(), round.columns.columns.len());
         assert_eq!(
-            orig.descriptor.columns.len(),
-            round.descriptor.columns.len()
+            orig.columns.columns[0].column_type,
+            round.columns.columns[0].column_type
         );
         assert_eq!(
-            orig.descriptor.columns[0].column_type,
-            round.descriptor.columns[0].column_type
+            orig.columns.columns[1].column_type,
+            round.columns.columns[1].column_type
         );
         assert_eq!(
-            orig.descriptor.columns[1].column_type,
-            round.descriptor.columns[1].column_type
-        );
-        assert_eq!(
-            orig.descriptor.columns[1].nullable,
-            round.descriptor.columns[1].nullable
+            orig.columns.columns[1].nullable,
+            round.columns.columns[1].nullable
         );
     }
 
@@ -2479,12 +2560,14 @@ mod tests {
         let col = &schema
             .get(&TableName::new("timeseries"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Double))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Double)
+            }
         );
         assert!(!col.nullable);
     }

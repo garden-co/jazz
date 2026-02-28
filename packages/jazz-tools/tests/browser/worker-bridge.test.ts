@@ -30,22 +30,20 @@ interface DebugSchemaState {
 // ---------------------------------------------------------------------------
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: true,
-        },
-      ],
-    },
-    projects: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: true,
+      },
+    ],
+  },
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
   },
 };
 
@@ -121,25 +119,21 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 
 // Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
 const catalogueSchemaV1: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
 const catalogueSchemaV2: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-        { name: "description", column_type: { type: "Text" }, nullable: true },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+      { name: "description", column_type: { type: "Text" }, nullable: true },
+    ],
   },
 };
 
@@ -429,6 +423,27 @@ describe("Worker Bridge with OPFS", () => {
 
     const titles = after.map((r) => r.title).sort();
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
+  });
+
+  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete-storage") }));
+
+    await db.insertWithAck(todos, { title: "Should be deleted", done: false }, "worker");
+    const before = await db.all(allTodos, "worker");
+    expect(before.length).toBe(1);
+    expect(before[0].title).toBe("Should be deleted");
+
+    await db.deleteClientStorage();
+
+    const afterDelete = await db.all(allTodos, "worker");
+    expect(afterDelete).toEqual([]);
+
+    const id = db.insert(todos, { title: "Fresh after delete", done: true });
+    const afterReinsert = await db.all(allTodos, "worker");
+    expect(afterReinsert).toHaveLength(1);
+    expect(afterReinsert[0].id).toBe(id);
+    expect(afterReinsert[0].title).toBe("Fresh after delete");
+    expect(afterReinsert[0].done).toBe(true);
   });
 
   it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {

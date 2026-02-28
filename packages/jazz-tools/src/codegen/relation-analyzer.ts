@@ -49,11 +49,11 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
   const relations = new Map<string, Relation[]>();
 
   // Initialize empty arrays for all tables
-  for (const tableName of Object.keys(schema.tables)) {
+  for (const tableName of Object.keys(schema)) {
     relations.set(tableName, []);
   }
 
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     for (const col of table.columns) {
       if (col.references) {
         const isUuidRef =

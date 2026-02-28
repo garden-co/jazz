@@ -529,7 +529,7 @@ mod tests {
         let output_desc = schema
             .get(&TableName::new("teams"))
             .unwrap()
-            .descriptor
+            .columns
             .clone();
         let input_desc =
             TupleDescriptor::single_with_materialization("", output_desc.clone(), true);
@@ -558,7 +558,7 @@ mod tests {
         let output_desc = schema
             .get(&TableName::new("teams"))
             .unwrap()
-            .descriptor
+            .columns
             .clone();
         let input_desc =
             TupleDescriptor::single_with_materialization("", output_desc.clone(), true);
@@ -578,7 +578,7 @@ mod tests {
             schema.clone(),
         );
 
-        let seed_desc = &schema.get(&TableName::new("teams")).unwrap().descriptor;
+        let seed_desc = &schema.get(&TableName::new("teams")).unwrap().columns;
         let seed = encode_row(seed_desc, &[Value::Integer(1)]).unwrap();
         let seed_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),

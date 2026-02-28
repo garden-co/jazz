@@ -9,6 +9,7 @@
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
@@ -47,18 +48,18 @@ function relationColumnsForTable(
   scope: string,
   schema: WasmSchema,
 ): RelProjectColumn[] {
-  const tableSchema = schema.tables[table];
+  const tableSchema = schema[table];
   if (!tableSchema) {
     throw new Error(`Unknown table "${table}" in relation projection.`);
   }
   return [
     {
       alias: "id",
-      expr: { type: "Column", column: relColumn("id", scope) },
+      expr: { Column: relColumn("id", scope) },
     },
     ...tableSchema.columns.map((column) => ({
       alias: column.name,
-      expr: { type: "Column", column: relColumn(column.name, scope) } as const,
+      expr: { Column: relColumn(column.name, scope) } as const,
     })),
   ];
 }
@@ -66,7 +67,7 @@ function relationColumnsForTable(
 function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
   // All tables have an implicit UUID primary key `id`.
   if (column === "id") return { type: "Uuid" };
-  const tableSchema = schema.tables[table];
+  const tableSchema = schema[table];
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;
@@ -112,14 +113,17 @@ function toTimestampMs(value: unknown): number {
  */
 function toWasmValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
-    return { Null: null };
+    return { type: "Null" };
+  }
+  if (columnType.type === "Json") {
+    return { type: "Text", value: toJsonText(value) };
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
-    return { Timestamp: toTimestampMs(value) };
+    return { type: "Timestamp", value: toTimestampMs(value) };
   }
   if (columnType.type === "Bytea") {
     if (value instanceof Uint8Array) {
-      return { Bytea: [...value] };
+      return { type: "Bytea", value: [...value] };
     }
     if (Array.isArray(value)) {
       const bytes = value.map((entry) => {
@@ -129,7 +133,7 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
         }
         return n;
       });
-      return { Bytea: bytes };
+      return { type: "Bytea", value: bytes };
     }
     throw new Error("Bytea values must be Uint8Array or byte arrays");
   }
@@ -138,32 +142,33 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
       throw new Error("Unexpected array value for scalar column");
     }
     return {
-      Array: value.map((item) => toWasmValue(item, columnType.element)),
+      type: "Array",
+      value: value.map((item) => toWasmValue(item, columnType.element)),
     };
   }
   if (typeof value === "boolean") {
-    return { Boolean: value };
+    return { type: "Boolean", value };
   }
   if (typeof value === "number") {
     if (columnType?.type === "Timestamp") {
-      return { Timestamp: toTimestampMs(value) };
+      return { type: "Timestamp", value: toTimestampMs(value) };
     }
     // Use Integer for all numbers - WASM will handle type coercion
-    return { Integer: value };
+    return { type: "Integer", value };
   }
   if (typeof value === "string") {
     if (columnType?.type === "Timestamp") {
-      return { Timestamp: toTimestampMs(value) };
+      return { type: "Timestamp", value: toTimestampMs(value) };
     }
     if (columnType?.type === "Uuid") {
-      return { Uuid: value };
+      return { type: "Uuid", value };
     }
     if (columnType?.type === "Enum" && !columnType.variants.includes(value)) {
       throw new Error(
         `Invalid enum value "${value}". Expected one of: ${columnType.variants.join(", ")}`,
       );
     }
-    return { Text: value };
+    return { type: "Text", value };
   }
   throw new Error(`Unsupported value type: ${typeof value}`);
 }
@@ -251,10 +256,9 @@ function conditionToRelPredicate(
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const rightLiteral =
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
-      ? { type: "RowId" as const, source: "Frontier" as const }
+      ? { RowId: "Frontier" as const }
       : {
-          type: "Literal" as const,
-          value: toWasmValue(cond.value, valueTypeForCondition),
+          Literal: toWasmValue(cond.value, valueTypeForCondition),
         };
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
     throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
@@ -262,59 +266,67 @@ function conditionToRelPredicate(
   if (columnType.type === "Bytea" && cond.op === "contains") {
     throw new Error(`BYTEA column "${column}" does not support contains filters.`);
   }
+  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
+    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
+  }
   switch (cond.op) {
     case "eq":
-      return { type: "Cmp", left: columnRef, op: "Eq", right: rightLiteral };
+      return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
     case "ne":
       return {
-        type: "Cmp",
-        left: columnRef,
-        op: "Ne",
-        right: rightLiteral,
+        Cmp: {
+          left: columnRef,
+          op: "Ne",
+          right: rightLiteral,
+        },
       };
     case "gt":
       return {
-        type: "Cmp",
-        left: columnRef,
-        op: "Gt",
-        right: rightLiteral,
+        Cmp: {
+          left: columnRef,
+          op: "Gt",
+          right: rightLiteral,
+        },
       };
     case "gte":
       return {
-        type: "Cmp",
-        left: columnRef,
-        op: "Ge",
-        right: rightLiteral,
+        Cmp: {
+          left: columnRef,
+          op: "Ge",
+          right: rightLiteral,
+        },
       };
     case "lt":
       return {
-        type: "Cmp",
-        left: columnRef,
-        op: "Lt",
-        right: rightLiteral,
+        Cmp: {
+          left: columnRef,
+          op: "Lt",
+          right: rightLiteral,
+        },
       };
     case "lte":
       return {
-        type: "Cmp",
-        left: columnRef,
-        op: "Le",
-        right: rightLiteral,
+        Cmp: {
+          left: columnRef,
+          op: "Le",
+          right: rightLiteral,
+        },
       };
     case "isNull":
-      return { type: "IsNull", column: columnRef };
+      return { IsNull: { column: columnRef } };
     case "contains":
-      return { type: "Contains", left: columnRef, value: rightLiteral };
+      return { Contains: { left: columnRef, right: rightLiteral } };
     case "in":
       if (!Array.isArray(cond.value)) {
         throw new Error('"in" operator requires an array value');
       }
       return {
-        type: "In",
-        left: columnRef,
-        values: cond.value.map((value) => ({
-          type: "Literal",
-          value: toWasmValue(value, columnType),
-        })),
+        In: {
+          left: columnRef,
+          values: cond.value.map((value) => ({
+            Literal: toWasmValue(value, columnType),
+          })),
+        },
       };
     default:
       throw new Error(`Unknown operator: ${cond.op}`);
@@ -336,22 +348,21 @@ function conditionsToRelPredicate(
   scope?: string,
 ): RelPredicateExpr {
   if (conditions.length === 0) {
-    return { type: "True" };
+    return "True";
   }
   if (conditions.length === 1) {
     return conditionToRelPredicate(conditions[0], schema, table, scope);
   }
   return {
-    type: "And",
-    exprs: conditions.map((condition) => conditionToRelPredicate(condition, schema, table, scope)),
+    And: conditions.map((condition) => conditionToRelPredicate(condition, schema, table, scope)),
   };
 }
 
 function applyFilter(input: RelExpr, predicate: RelPredicateExpr): RelExpr {
-  if (predicate.type === "True") {
+  if (predicate === "True") {
     return input;
   }
-  return { type: "Filter", input, predicate };
+  return { Filter: { input, predicate } };
 }
 
 function lowerHopsToRelExpr(
@@ -389,11 +400,12 @@ function lowerHopsToRelExpr(
             right: relColumn(relation.toColumn, hopAlias),
           };
     currentExpr = {
-      type: "Join",
-      left: currentExpr,
-      right: { type: "TableScan", table: relation.toTable },
-      on: [joinOn],
-      joinKind: "Inner",
+      Join: {
+        left: currentExpr,
+        right: { TableScan: { table: relation.toTable } },
+        on: [joinOn],
+        join_kind: "Inner",
+      },
     };
 
     currentTable = relation.toTable;
@@ -401,9 +413,10 @@ function lowerHopsToRelExpr(
   }
 
   return {
-    type: "Project",
-    input: currentExpr,
-    columns: relationColumnsForTable(currentTable, currentScope, schema),
+    Project: {
+      input: currentExpr,
+      columns: relationColumnsForTable(currentTable, currentScope, schema),
+    },
   };
 }
 
@@ -414,7 +427,7 @@ function gatherToRelExpr(
   relations: Map<string, Relation[]>,
   schema: WasmSchema,
 ): RelExpr {
-  if (!schema.tables[gather.step_table]) {
+  if (!schema[gather.step_table]) {
     throw new Error(`Unknown gather step table "${gather.step_table}"`);
   }
   if (!Number.isInteger(gather.max_depth) || gather.max_depth <= 0) {
@@ -443,7 +456,7 @@ function gatherToRelExpr(
     );
   }
 
-  const stepBase: RelExpr = { type: "TableScan", table: gather.step_table };
+  const stepBase: RelExpr = { TableScan: { table: gather.step_table } };
   const stepConditions = Array.isArray(gather.step_conditions) ? gather.step_conditions : [];
   const stepScope = gather.step_table;
   const stepPredicateConditions = [
@@ -464,31 +477,34 @@ function gatherToRelExpr(
 
   const recursiveHopAlias = "__recursive_hop_0";
   const stepJoined: RelExpr = {
-    type: "Join",
-    left: stepFiltered,
-    right: { type: "TableScan", table: hopRelation.toTable },
-    on: [
-      {
-        left: relColumn(hopRelation.fromColumn, gather.step_table),
-        right: relColumn("id", recursiveHopAlias),
-      },
-    ],
-    joinKind: "Inner",
+    Join: {
+      left: stepFiltered,
+      right: { TableScan: { table: hopRelation.toTable } },
+      on: [
+        {
+          left: relColumn(hopRelation.fromColumn, gather.step_table),
+          right: relColumn("id", recursiveHopAlias),
+        },
+      ],
+      join_kind: "Inner",
+    },
   };
 
   const stepProjected: RelExpr = {
-    type: "Project",
-    input: stepJoined,
-    columns: relationColumnsForTable(seedTable, recursiveHopAlias, schema),
+    Project: {
+      input: stepJoined,
+      columns: relationColumnsForTable(seedTable, recursiveHopAlias, schema),
+    },
   };
 
   return {
-    type: "Gather",
-    seed: seedExpr,
-    step: stepProjected,
-    frontierKey: { type: "RowId", source: "Current" },
-    maxDepth: gather.max_depth,
-    dedupeKey: [{ type: "RowId", source: "Current" }],
+    Gather: {
+      seed: seedExpr,
+      step: stepProjected,
+      frontier_key: { RowId: "Current" },
+      max_depth: gather.max_depth,
+      dedupe_key: [{ RowId: "Current" }],
+    },
   };
 }
 
@@ -513,7 +529,7 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
     throw new Error("hopTo(...) does not yet support include(...).");
   }
 
-  let relation: RelExpr = { type: "TableScan", table: builder.table };
+  let relation: RelExpr = { TableScan: { table: builder.table } };
   relation = applyFilter(
     relation,
     conditionsToRelPredicate(builder.conditions ?? [], schema, builder.table, builder.table),
@@ -530,29 +546,35 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
       if (columnType?.type === "Bytea") {
         throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
       }
+      if (columnType?.type === "Json") {
+        throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
+      }
     }
     relation = {
-      type: "OrderBy",
-      input: relation,
-      terms: builder.orderBy.map(([column, direction]) => ({
-        column: relColumn(column),
-        direction: direction === "desc" ? "Desc" : "Asc",
-      })),
+      OrderBy: {
+        input: relation,
+        terms: builder.orderBy.map(([column, direction]) => ({
+          column: relColumn(column),
+          direction: direction === "desc" ? "Desc" : "Asc",
+        })),
+      },
     };
   }
 
   if (typeof builder.offset === "number" && builder.offset > 0) {
     relation = {
-      type: "Offset",
-      input: relation,
-      offset: builder.offset,
+      Offset: {
+        input: relation,
+        offset: builder.offset,
+      },
     };
   }
   if (typeof builder.limit === "number") {
     relation = {
-      type: "Limit",
-      input: relation,
-      limit: builder.limit,
+      Limit: {
+        input: relation,
+        limit: builder.limit,
+      },
     };
   }
 

@@ -9,20 +9,18 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
-use jazz_wasm::types::WasmValue;
+use jazz_wasm::types::Value;
 use jazz_wasm::WasmRuntime;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 fn test_schema_json() -> &'static str {
     r#"{
-        "tables": {
-            "todos": {
-                "columns": [
-                    {"name": "title", "column_type": {"type": "Text"}, "nullable": false},
-                    {"name": "completed", "column_type": {"type": "Boolean"}, "nullable": false}
-                ]
-            }
+        "todos": {
+            "columns": [
+                {"name": "title", "column_type": {"type": "Text"}, "nullable": false},
+                {"name": "completed", "column_type": {"type": "Boolean"}, "nullable": false}
+            ]
         }
     }"#
 }
@@ -64,10 +62,7 @@ async fn cleanup_opfs(db_name: &str) {
 }
 
 fn insert_todo(runtime: &WasmRuntime, title: &str, completed: bool) -> String {
-    let wasm_values = vec![
-        WasmValue::Text(title.to_string()),
-        WasmValue::Boolean(completed),
-    ];
+    let wasm_values = vec![Value::Text(title.to_string()), Value::Boolean(completed)];
     let values = serde_wasm_bindgen::to_value(&wasm_values).unwrap();
     runtime.insert("todos", values).unwrap()
 }
@@ -226,7 +221,7 @@ async fn opfs_runtime_core_e2e() {
 
     // Update → set completed=true
     let mut update_map = std::collections::HashMap::new();
-    update_map.insert("completed".to_string(), WasmValue::Boolean(true));
+    update_map.insert("completed".to_string(), Value::Boolean(true));
     let update_values = serde_wasm_bindgen::to_value(&update_map).unwrap();
     runtime.update(&id, update_values).unwrap();
 

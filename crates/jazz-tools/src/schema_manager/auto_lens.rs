@@ -54,11 +54,7 @@ pub fn generate_lens(old: &Schema, new: &Schema) -> Lens {
         let old_table = old.get(*table_name).unwrap();
         let new_table = new.get(*table_name).unwrap();
 
-        let ops = generate_column_ops(
-            table_name.as_str(),
-            &old_table.descriptor,
-            &new_table.descriptor,
-        );
+        let ops = generate_column_ops(table_name.as_str(), &old_table.columns, &new_table.columns);
         for (op, is_draft) in ops {
             transform.push(op, is_draft);
         }
@@ -190,7 +186,7 @@ fn default_for_type(column_type: &ColumnType, nullable: bool) -> Value {
         ColumnType::Double => Value::Double(0.0),
         ColumnType::Boolean => Value::Boolean(false),
         ColumnType::Text => Value::Text(String::new()),
-        ColumnType::Enum(variants) => variants
+        ColumnType::Enum { variants } => variants
             .first()
             .cloned()
             .map(Value::Text)
@@ -198,8 +194,9 @@ fn default_for_type(column_type: &ColumnType, nullable: bool) -> Value {
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
         ColumnType::Bytea => Value::Bytea(Vec::new()),
-        ColumnType::Array(_) => Value::Array(Vec::new()),
-        ColumnType::Row(_) => Value::Null, // Can't generate without schema
+        ColumnType::Json { schema: _ } => Value::Null, // Requires user-provided JSON that matches optional schema
+        ColumnType::Array { element: _ } => Value::Array(Vec::new()),
+        ColumnType::Row { columns: _ } => Value::Null, // Can't generate without schema
     }
 }
 

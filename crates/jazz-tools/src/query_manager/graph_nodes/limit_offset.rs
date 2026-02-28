@@ -1,6 +1,9 @@
 use ahash::AHashSet;
 
-use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
+use crate::query_manager::{
+    graph_nodes::tuple_delta::compute_tuple_delta,
+    types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor},
+};
 
 use super::RowNode;
 
@@ -59,56 +62,6 @@ impl LimitOffsetNode {
         self.current_tuples = self.windowed_tuples.iter().cloned().collect();
     }
 
-    /// Compute the delta between old and new tuple window.
-    fn compute_tuple_delta(&self, old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
-        let mut delta = TupleDelta::new();
-        let old_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
-            old_tuples.iter().map(|t| t.ids()).collect();
-        let new_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
-            new_tuples.iter().map(|t| t.ids()).collect();
-
-        // Find removed tuples (in old but not in new)
-        for old in old_tuples {
-            if !new_ids.contains(&old.ids()) {
-                delta.removed.push(old.clone());
-            }
-        }
-
-        // Find added tuples (in new but not in old)
-        for new in new_tuples {
-            if !old_ids.contains(&new.ids()) {
-                delta.added.push(new.clone());
-            }
-        }
-
-        // Find moved tuples (same IDs, different index)
-        let old_pos: std::collections::HashMap<Vec<crate::object::ObjectId>, usize> = old_tuples
-            .iter()
-            .enumerate()
-            .map(|(idx, t)| (t.ids(), idx))
-            .collect();
-        for (new_idx, new_tuple) in new_tuples.iter().enumerate() {
-            let ids = new_tuple.ids();
-            if let Some(old_idx) = old_pos.get(&ids)
-                && old_idx != &new_idx
-            {
-                delta.moved.push(new_tuple.clone());
-            }
-        }
-
-        // Find updated tuples (same IDs but different content)
-        for new in new_tuples {
-            if let Some(old) = old_tuples.iter().find(|t| *t == new) {
-                // Check if content changed (since == only compares IDs)
-                if has_tuple_content_changed(old, new) {
-                    delta.updated.push((old.clone(), new.clone()));
-                }
-            }
-        }
-
-        delta
-    }
-
     /// Rebuild state from a full ordered input (e.g. upstream SortNode output).
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
         let old_tuples = std::mem::take(&mut self.windowed_tuples);
@@ -116,23 +69,13 @@ impl LimitOffsetNode {
         self.all_tuples.extend_from_slice(ordered_tuples);
         self.recompute_tuple_window();
         self.dirty = false;
-        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples)
+        compute_tuple_delta(&old_tuples, &self.windowed_tuples)
     }
 
     /// Ordered tuples currently visible after applying offset/limit.
     pub fn windowed_tuples(&self) -> &[Tuple] {
         &self.windowed_tuples
     }
-}
-
-/// Check if tuple content changed (for tuples with same IDs).
-fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
-    old.iter()
-        .zip(new.iter())
-        .any(|(o, n)| match (o.content(), n.content()) {
-            (Some(oc), Some(nc)) => oc != nc,
-            _ => false,
-        })
 }
 
 impl RowNode for LimitOffsetNode {
@@ -173,7 +116,7 @@ impl RowNode for LimitOffsetNode {
         self.dirty = false;
 
         // Return the delta for the window
-        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples)
+        compute_tuple_delta(&old_tuples, &self.windowed_tuples)
     }
 
     fn current_tuples(&self) -> &AHashSet<Tuple> {
@@ -344,6 +287,7 @@ mod tests {
         assert!(contains_id(&result.removed, ids[0]));
         assert_eq!(result.added.len(), 1);
         assert!(contains_id(&result.added, ids[2])); // New tuple slides in
+        assert!(result.moved.is_empty());
 
         let windowed_ids = get_windowed_ids(&node);
         assert_eq!(windowed_ids.len(), 2);
@@ -368,5 +312,106 @@ mod tests {
         node.process(delta);
 
         assert!(node.windowed_tuples.is_empty());
+    }
+
+    #[test]
+    fn insertion_before_window_does_not_mark_window_as_moved() {
+        let mut node = make_limit_offset_node(Some(2), 1);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process(TupleDelta {
+            added: tuples[..3].to_vec(),
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+
+        let delta = node.process(TupleDelta {
+            added: vec![tuples[3].clone()],
+            removed: vec![],
+            moved: vec![tuples[0].clone()],
+            updated: vec![],
+        });
+
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_insert_does_not_mark_existing_as_moved() {
+        let mut node = make_limit_offset_node(None, 0);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let base: Vec<_> = ids
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&base);
+
+        let inserted = make_tuple(ids[3], 99, "Inserted");
+        let delta = node.process_with_ordered_input(&[
+            inserted.clone(),
+            base[0].clone(),
+            base[1].clone(),
+            base[2].clone(),
+        ]);
+
+        assert_eq!(delta.added.len(), 1);
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_remove_does_not_mark_following_as_moved() {
+        let mut node = make_limit_offset_node(None, 0);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        let delta = node.process_with_ordered_input(&[
+            tuples[0].clone(),
+            tuples[2].clone(),
+            tuples[3].clone(),
+        ]);
+
+        assert_eq!(delta.removed.len(), 1);
+        assert_eq!(delta.removed[0].first_id(), tuples[1].first_id());
+        assert!(delta.added.is_empty());
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_rotation_marks_only_reordered_tuple_as_moved() {
+        let mut node = make_limit_offset_node(None, 0);
+        let ids: Vec<_> = (0..3).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        let delta = node.process_with_ordered_input(&[
+            tuples[1].clone(),
+            tuples[2].clone(),
+            tuples[0].clone(),
+        ]);
+
+        assert!(delta.added.is_empty());
+        assert!(delta.removed.is_empty());
+        assert_eq!(delta.moved.len(), 1);
+        assert_eq!(delta.moved[0].first_id(), tuples[0].first_id());
     }
 }
