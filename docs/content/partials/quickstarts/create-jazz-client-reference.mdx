@@ -1,0 +1,11 @@
+| Field            | Required | Description                                                        |
+| ---------------- | -------- | ------------------------------------------------------------------ |
+| `appId`          | yes      | Application identifier. Isolates storage between apps.             |
+| `serverUrl`      | no       | Jazz sync server URL. Omit for fully local/offline mode.           |
+| `localAuthMode`  | no       | Local synthetic auth mode: `"anonymous"` or `"demo"`.              |
+| `localAuthToken` | no       | Explicit local synthetic token override.                           |
+| `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration. |
+| `adminSecret`    | no       | Admin secret for schema catalog sync.                              |
+| `dbName`         | no       | Local database name. Defaults to `appId`.                          |
+| `env`            | no       | Environment label (for example `"dev"`, `"prod"`).                 |
+| `userBranch`     | no       | Branch name. Defaults to `"main"`.                                 |

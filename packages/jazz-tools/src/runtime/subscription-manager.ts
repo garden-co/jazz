@@ -5,35 +5,31 @@
  * WASM row deltas into typed object deltas with full state tracking.
  */
 
-import type { WasmRow, RowDelta } from "../drivers/types.js";
+import type { WasmRow, RowDelta as WireRowDelta } from "../drivers/types.js";
 
-export interface IndexedItem<T> {
-  item: T;
-  index: number;
-}
+const RowChangeKind = {
+  Added: 0 as const,
+  Removed: 1 as const,
+  Updated: 2 as const,
+} as const;
+export type RowChangeKind = typeof RowChangeKind;
+export type RowChangeKindValue = (typeof RowChangeKind)[keyof typeof RowChangeKind];
 
-export interface UpdatedIndexedItem<T> {
-  oldItem: T;
-  newItem: T;
-  oldIndex: number;
-  newIndex: number;
-}
+export type RowDelta<T> =
+  | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
+  | { kind: RowChangeKind["Removed"]; id: string; index: number }
+  | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
 
 /**
  * Delta result from a subscription callback.
  *
- * Contains the full current state (`all`) plus granular changes
- * (`added`, `updated`, `removed`) for efficient UI updates.
+ * Contains the full current state (`all`) plus an ordered row-change stream.
  */
 export interface SubscriptionDelta<T> {
   /** Current full result set after applying this delta */
   all: T[];
-  /** Items added in this delta */
-  added: IndexedItem<T>[];
-  /** Items updated in this delta */
-  updated: UpdatedIndexedItem<T>[];
-  /** Items removed in this delta */
-  removed: IndexedItem<T>[];
+  /** Ordered list of changes for this delta */
+  delta: RowDelta<T>[];
 }
 
 /**
@@ -45,7 +41,20 @@ export interface SubscriptionDelta<T> {
  * @typeParam T - The typed object type (must have `id: string`)
  */
 export class SubscriptionManager<T extends { id: string }> {
-  private currentResults: T[] = [];
+  private currentResults = new Map<string, T>();
+  private orderedIds: string[] = [];
+
+  private removeId(id: string): void {
+    const index = this.orderedIds.indexOf(id);
+    if (index !== -1) {
+      this.orderedIds.splice(index, 1);
+    }
+  }
+
+  private insertIdAt(id: string, index: number): void {
+    const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
+    this.orderedIds.splice(clamped, 0, id);
+  }
 
   /**
    * Process a row delta and return typed object delta.
@@ -54,86 +63,35 @@ export class SubscriptionManager<T extends { id: string }> {
    * @param transform Function to convert WasmRow to typed object T
    * @returns Typed delta with full state and changes
    */
-  handleDelta(delta: RowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
-    const added: IndexedItem<T>[] = [];
-    const updated: UpdatedIndexedItem<T>[] = [];
-    const removed: IndexedItem<T>[] = [];
+  handleDelta(delta: WireRowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
+    delta.sort((a, b) => a.index - b.index);
 
-    for (const { row, index } of delta.added) {
-      added.push({ item: transform(row), index });
-    }
-
-    for (const { old_row, new_row, old_index, new_index } of delta.updated) {
-      const oldItem = transform(old_row);
-      const newItem = transform(new_row);
-      if (oldItem.id === newItem.id) {
-        updated.push({
-          oldItem,
-          newItem,
-          oldIndex: old_index,
-          newIndex: new_index,
-        });
-      } else {
-        // Identity changes are represented as remove+add for deterministic patching.
-        removed.push({ item: oldItem, index: old_index });
-        added.push({ item: newItem, index: new_index });
+    for (const change of delta) {
+      switch (change.kind) {
+        case RowChangeKind.Added:
+          this.currentResults.set(change.id, transform(change.row));
+          this.insertIdAt(change.id, change.index);
+          break;
+        case RowChangeKind.Removed:
+          this.currentResults.delete(change.id);
+          this.removeId(change.id);
+          break;
+        case RowChangeKind.Updated:
+          this.removeId(change.id);
+          this.insertIdAt(change.id, change.index);
+          if (change.row) {
+            this.currentResults.set(change.id, transform(change.row));
+          }
+          break;
       }
     }
-
-    for (const { row, index } of delta.removed) {
-      removed.push({ item: transform(row), index });
-    }
-
-    this.currentResults = this.buildPostState(this.currentResults, added, updated, removed);
 
     return {
-      all: [...this.currentResults],
-      added,
-      updated,
-      removed,
+      all: this.orderedIds
+        .map((id) => this.currentResults.get(id))
+        .filter((item): item is T => item !== undefined),
+      delta: delta as RowDelta<T>[],
     };
-  }
-
-  private buildPostState(
-    previous: T[],
-    added: IndexedItem<T>[],
-    updated: UpdatedIndexedItem<T>[],
-    removed: IndexedItem<T>[],
-  ): T[] {
-    const removedIds = new Set(removed.map(({ item }) => item.id));
-    const updatedOldIds = new Set(updated.map(({ oldItem }) => oldItem.id));
-
-    const unchanged = previous.filter(
-      (item) => !removedIds.has(item.id) && !updatedOldIds.has(item.id),
-    );
-    const expectedLength = previous.length - removed.length + added.length;
-    const post: Array<T | undefined> = new Array(Math.max(expectedLength, 0));
-
-    for (const { newItem, newIndex } of updated) {
-      if (newIndex >= 0) {
-        post[newIndex] = newItem;
-      }
-    }
-
-    for (const { item, index } of added) {
-      if (index >= 0) {
-        post[index] = item;
-      }
-    }
-
-    let unchangedCursor = 0;
-    for (let i = 0; i < post.length; i += 1) {
-      if (post[i] === undefined && unchangedCursor < unchanged.length) {
-        post[i] = unchanged[unchangedCursor++];
-      }
-    }
-
-    // Fallback for sparse / out-of-range index payloads.
-    while (unchangedCursor < unchanged.length) {
-      post.push(unchanged[unchangedCursor++]);
-    }
-
-    return post.filter((item): item is T => item !== undefined);
   }
 
   /**
@@ -142,13 +100,14 @@ export class SubscriptionManager<T extends { id: string }> {
    * Called when unsubscribing to free memory.
    */
   clear(): void {
-    this.currentResults = [];
+    this.currentResults.clear();
+    this.orderedIds = [];
   }
 
   /**
    * Get the current number of tracked items.
    */
   get size(): number {
-    return this.currentResults.length;
+    return this.currentResults.size;
   }
 }

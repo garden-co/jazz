@@ -281,6 +281,9 @@ describe("Vanilla TS Todo App E2E", () => {
       adminSecret: ADMIN_SECRET,
     });
 
+    // Let both app instances finish server/event-stream setup before mutating.
+    await new Promise((r) => setTimeout(r, 750));
+
     // Add a todo in app 1
     addTodo(el1, "Synced todo");
 

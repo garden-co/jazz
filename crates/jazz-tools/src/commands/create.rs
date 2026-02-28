@@ -1,6 +1,6 @@
 //! Create command implementations.
 
-use groove::schema_manager::AppId;
+use jazz_tools::schema_manager::AppId;
 
 /// Create a new application.
 ///

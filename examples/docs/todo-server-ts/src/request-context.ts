@@ -1,8 +1,8 @@
 import type { Request, Response } from "express";
-import type { JazzClient } from "jazz-tools/backend";
-import { app } from "../schema/app.js";
+import type { JazzContext } from "jazz-tools/backend";
+import { app as schemaApp } from "../schema/app.js";
 
-declare const client: JazzClient;
+declare const context: JazzContext;
 
 function sendQueryError(res: Response): void {
   res.status(500).json({ error: "Failed to query todos" });
@@ -11,7 +11,9 @@ function sendQueryError(res: Response): void {
 // #region backend-request-handler-ts
 export async function listTodosForRequester(req: Request, res: Response): Promise<void> {
   try {
-    const rows = await client.forRequest(req).query(app.todos.where({ done: true }));
+    const rows = await context
+      .forRequest(req, schemaApp)
+      .query(schemaApp.todos.where({ done: true }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -22,7 +24,9 @@ export async function listTodosForRequester(req: Request, res: Response): Promis
 // #region permissions-simple-ts
 export async function listTodosWithSimplePolicy(req: Request, res: Response): Promise<void> {
   try {
-    const rows = await client.forRequest(req).query(app.todos.where({ done: false }));
+    const rows = await context
+      .forRequest(req, schemaApp)
+      .query(schemaApp.todos.where({ done: false }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -36,9 +40,9 @@ export async function listTodosWithInheritedPolicy(
   res: Response,
 ): Promise<void> {
   try {
-    const rows = await client
-      .forRequest(req)
-      .query(app.todos.where({ project: req.params.projectId }));
+    const rows = await context
+      .forRequest(req, schemaApp)
+      .query(schemaApp.todos.where({ project: req.params.projectId }));
     res.json(rows);
   } catch {
     sendQueryError(res);

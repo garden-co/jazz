@@ -1,7 +1,7 @@
 const { spawnSync } = require("node:child_process");
 
 const release = process.env.JAZZ_NAPI_RELEASE !== "0";
-const args = ["build"];
+const args = ["build", "--platform"];
 if (release) {
   args.push("--release");
 }

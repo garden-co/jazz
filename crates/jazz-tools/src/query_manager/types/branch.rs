@@ -54,7 +54,7 @@ impl SchemaHash {
             hasher.update(&[0]); // delimiter
 
             // Hash row descriptor (columns sorted by name)
-            hash_row_descriptor(&mut hasher, &table_schema.descriptor);
+            hash_row_descriptor(&mut hasher, &table_schema.columns);
             hash_table_policies(&mut hasher, &table_schema.policies);
         }
 
@@ -149,6 +149,24 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
             hasher.update(column.as_bytes());
             hasher.update(&[0]);
         }
+        PolicyExpr::Contains { column, value } => {
+            hasher.update(&[14]);
+            hasher.update(column.as_bytes());
+            hasher.update(&[0]);
+            match value {
+                PolicyValue::Literal(v) => {
+                    hasher.update(&[1]);
+                    hash_value(hasher, v);
+                }
+                PolicyValue::SessionRef(path) => {
+                    hasher.update(&[2]);
+                    for part in path {
+                        hasher.update(part.as_bytes());
+                        hasher.update(&[0]);
+                    }
+                }
+            }
+        }
         PolicyExpr::In {
             column,
             session_path,
@@ -161,15 +179,46 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
                 hasher.update(&[0]);
             }
         }
+        PolicyExpr::InList { column, values } => {
+            hasher.update(&[15]);
+            hasher.update(column.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                match value {
+                    PolicyValue::Literal(v) => {
+                        hasher.update(&[1]);
+                        hash_value(hasher, v);
+                    }
+                    PolicyValue::SessionRef(path) => {
+                        hasher.update(&[2]);
+                        for part in path {
+                            hasher.update(part.as_bytes());
+                            hasher.update(&[0]);
+                        }
+                    }
+                }
+            }
+        }
         PolicyExpr::Exists { table, condition } => {
             hasher.update(&[5]);
             hasher.update(table.as_bytes());
             hasher.update(&[0]);
             hash_policy_expr(hasher, condition);
         }
+        PolicyExpr::ExistsRel { rel } => {
+            hasher.update(&[12]);
+            if let Ok(encoded) = serde_json::to_vec(rel) {
+                hasher.update(&(encoded.len() as u64).to_le_bytes());
+                hasher.update(&encoded);
+            } else {
+                hasher.update(&0u64.to_le_bytes());
+            }
+        }
         PolicyExpr::Inherits {
             operation,
             via_column,
+            max_depth,
         } => {
             hasher.update(&[6]);
             match operation {
@@ -188,6 +237,50 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
             }
             hasher.update(via_column.as_bytes());
             hasher.update(&[0]);
+            match max_depth {
+                Some(depth) => {
+                    hasher.update(&[1]);
+                    hasher.update(&(*depth as u64).to_le_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            max_depth,
+        } => {
+            hasher.update(&[13]);
+            match operation {
+                Operation::Select => {
+                    hasher.update(&[1]);
+                }
+                Operation::Insert => {
+                    hasher.update(&[2]);
+                }
+                Operation::Update => {
+                    hasher.update(&[3]);
+                }
+                Operation::Delete => {
+                    hasher.update(&[4]);
+                }
+            }
+            hasher.update(source_table.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(via_column.as_bytes());
+            hasher.update(&[0]);
+            match max_depth {
+                Some(depth) => {
+                    hasher.update(&[1]);
+                    hasher.update(&(*depth as u64).to_le_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
         }
         PolicyExpr::And(exprs) => {
             hasher.update(&[7]);
@@ -226,6 +319,10 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             hasher.update(&[2]);
             hasher.update(&v.to_le_bytes());
         }
+        Value::Double(v) => {
+            hasher.update(&[10]);
+            hasher.update(&v.to_le_bytes());
+        }
         Value::Boolean(v) => {
             hasher.update(&[3, *v as u8]);
         }
@@ -241,6 +338,11 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
         Value::Uuid(v) => {
             hasher.update(&[6]);
             hasher.update(v.uuid().as_bytes());
+        }
+        Value::Bytea(v) => {
+            hasher.update(&[10]);
+            hasher.update(&(v.len() as u64).to_le_bytes());
+            hasher.update(v);
         }
         Value::Array(values) => {
             hasher.update(&[7]);
@@ -329,11 +431,26 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::BigInt => {
             hasher.update(&[2]);
         }
+        ColumnType::Double => {
+            hasher.update(&[10]);
+        }
         ColumnType::Boolean => {
             hasher.update(&[3]);
         }
         ColumnType::Text => {
             hasher.update(&[4]);
+        }
+        ColumnType::Enum { variants } => {
+            hasher.update(&[9]);
+            // Enum variant ordering is normalized for hashing.
+            let mut normalized = variants.clone();
+            normalized.sort();
+            normalized.dedup();
+            hasher.update(&(normalized.len() as u64).to_le_bytes());
+            for variant in normalized {
+                hasher.update(variant.as_bytes());
+                hasher.update(&[0]);
+            }
         }
         ColumnType::Timestamp => {
             hasher.update(&[5]);
@@ -341,11 +458,31 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Uuid => {
             hasher.update(&[6]);
         }
-        ColumnType::Array(elem) => {
+        ColumnType::Bytea => {
+            hasher.update(&[10]);
+        }
+        ColumnType::Json { schema } => {
+            hasher.update(&[11]);
+            match schema {
+                Some(schema) => {
+                    hasher.update(&[1]);
+                    if let Ok(encoded) = serde_json::to_vec(schema) {
+                        hasher.update(&(encoded.len() as u64).to_le_bytes());
+                        hasher.update(&encoded);
+                    } else {
+                        hasher.update(&0u64.to_le_bytes());
+                    }
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
+        ColumnType::Array { element: elem } => {
             hasher.update(&[7]);
             hash_column_type(hasher, elem);
         }
-        ColumnType::Row(desc) => {
+        ColumnType::Row { columns: desc } => {
             hasher.update(&[8]);
             hash_row_descriptor(hasher, desc);
         }

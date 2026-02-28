@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use groove::jazz_transport::ServerEvent;
+use jazz_tools::jazz_transport::ServerEvent;
 use reqwest::Client;
 use tempfile::TempDir;
 
@@ -194,6 +194,7 @@ async fn test_stream_connection_receives_connected_event() {
         ServerEvent::Connected {
             connection_id,
             client_id,
+            ..
         } => {
             assert!(connection_id.0 > 0);
             assert!(!client_id.is_empty());

@@ -28,7 +28,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 describe("JazzRnRuntimeAdapter", () => {
   it("defers batched tick execution to avoid re-entrancy", async () => {
     const binding = createBinding();
-    new JazzRnRuntimeAdapter(binding, { tables: {} });
+    new JazzRnRuntimeAdapter(binding, {});
 
     const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
     const callbackObject = onBatchedTickNeeded.mock.calls[0][0];
@@ -42,7 +42,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("serializes mutation payloads and parses query responses", async () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const id = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
     expect(id).toBe("row-1");
@@ -65,7 +65,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("bridges sync and subscription callbacks with handle conversion", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const syncHandler = vi.fn();
     adapter.onSyncMessageToSend(syncHandler);
@@ -83,8 +83,13 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    subscriptionCallback.onUpdate('{"handle":7,"added":[],"removed":[],"updated":[]}');
-    expect(onUpdate).toHaveBeenCalledWith('{"handle":7,"added":[],"removed":[],"updated":[]}');
+    subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
@@ -92,7 +97,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     adapter.onSyncMessageToSend(() => {
       throw new Error("sync boom");
@@ -107,25 +112,57 @@ describe("JazzRnRuntimeAdapter", () => {
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    expect(() =>
-      subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}'),
-    ).not.toThrow();
+    expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
+  });
+
+  it("passes canonical subscription tuple updates through unchanged", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const onUpdate = vi.fn();
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+
+    subscriptionCallback.onUpdate(
+      JSON.stringify({
+        added: [],
+        removed: [],
+        updated: [
+          [
+            { id: "row-u", values: [{ type: "Text", value: "before" }] },
+            { id: "row-u", values: [{ type: "Text", value: "after" }] },
+          ],
+        ],
+        pending: false,
+      }),
+    );
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [
+        [
+          { id: "row-u", values: [{ type: "Text", value: "before" }] },
+          { id: "row-u", values: [{ type: "Text", value: "after" }] },
+        ],
+      ],
+      pending: false,
+    });
   });
 
   it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertPersisted("todos", [], "worker")).resolves.toBe("row-1");
+    await expect(adapter.insertWithAck("todos", [], "worker")).resolves.toBe("row-1");
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updatePersisted("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deletePersisted("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateWithAck("row-1", {}, "worker")).resolves.toBeUndefined();
+    await expect(adapter.deleteWithAck("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertPersisted("todos", [], "edge")).toThrow(
-      "supports only 'worker' tier",
-    );
+    expect(() => adapter.insertWithAck("todos", [], "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {
@@ -143,9 +180,25 @@ describe("JazzRnRuntimeAdapter", () => {
         throw objectNotFound;
       }),
     });
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     expect(() => adapter.update("row-1", { done: true })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
+  });
+
+  it("no-ops sync hooks after close", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.close();
+    adapter.addServer();
+    adapter.removeServer();
+    adapter.onSyncMessageReceived('{"Ping":{}}');
+    adapter.onSyncMessageReceivedFromClient("client-1", '{"Ping":{}}');
+
+    expect(binding.addServer).not.toHaveBeenCalled();
+    expect(binding.removeServer).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
   });
 });

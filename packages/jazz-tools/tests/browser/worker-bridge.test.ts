@@ -10,29 +10,40 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+
+interface DebugLensEdgeState {
+  sourceHash: string;
+  targetHash: string;
+}
+
+interface DebugSchemaState {
+  currentSchemaHash: string;
+  liveSchemaHashes: string[];
+  knownSchemaHashes: string[];
+  pendingSchemaHashes: string[];
+  lensEdges: DebugLensEdgeState[];
+}
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
 // ---------------------------------------------------------------------------
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: true,
-        },
-      ],
-    },
-    projects: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: true,
+      },
+    ],
+  },
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
   },
 };
 
@@ -51,11 +62,27 @@ interface TodoInit {
   tags?: string[];
 }
 
+interface Project {
+  id: string;
+  name: string;
+}
+
+interface ProjectInit {
+  name: string;
+}
+
 const todos: TableProxy<Todo, TodoInit> = {
   _table: "todos",
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as TodoInit,
+};
+
+const projects: TableProxy<Project, ProjectInit> = {
+  _table: "projects",
+  _schema: schema,
+  _rowType: {} as Project,
+  _initType: {} as ProjectInit,
 };
 
 /** QueryBuilder that selects all todos. */
@@ -90,6 +117,47 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
   };
 }
 
+// Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
+const catalogueSchemaV1: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+    ],
+  },
+};
+
+const catalogueSchemaV2: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+      { name: "description", column_type: { type: "Text" }, nullable: true },
+    ],
+  },
+};
+
+interface CatalogueTodo {
+  id: string;
+  title: string;
+  completed: boolean;
+  description?: string;
+}
+
+const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
+  _table: "todos",
+  _schema: catalogueSchemaV2,
+  _rowType: {} as CatalogueTodo,
+  _build() {
+    return JSON.stringify({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+    });
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -105,6 +173,7 @@ function uniqueDbName(label: string): string {
 
 describe("Worker Bridge with OPFS", () => {
   const dbs: Db[] = [];
+  const subscriptions: Array<() => void> = [];
 
   /** Track dbs for cleanup. */
   function track(db: Db): Db {
@@ -112,15 +181,122 @@ describe("Worker Bridge with OPFS", () => {
     return db;
   }
 
+  /** Track subscriptions so they are always cleaned up, even on assertion failures. */
+  function trackSubscription(unsubscribe: () => void): () => void {
+    subscriptions.push(unsubscribe);
+    return () => {
+      try {
+        unsubscribe();
+      } finally {
+        const index = subscriptions.indexOf(unsubscribe);
+        if (index >= 0) {
+          subscriptions.splice(index, 1);
+        }
+      }
+    };
+  }
+
+  async function createSyncedDb(label: string, localAuthToken: string): Promise<Db> {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    return track(
+      await createDb({
+        appId: APP_ID,
+        dbName: uniqueDbName(label),
+        serverUrl,
+        localAuthMode: "anonymous",
+        localAuthToken,
+        adminSecret: ADMIN_SECRET,
+      }),
+    );
+  }
+
+  function untrack(db: Db): void {
+    const index = dbs.indexOf(db);
+    if (index >= 0) {
+      dbs.splice(index, 1);
+    }
+  }
+
+  function getTabRole(db: Db): "leader" | "follower" | null {
+    const role = (db as any).tabRole;
+    if (role === "leader" || role === "follower") {
+      return role;
+    }
+    return null;
+  }
+
+  async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
+    await waitForCondition(
+      async () => {
+        const roleA = getTabRole(a);
+        const roleB = getTabRole(b);
+        return roleA === "leader" && roleB === "follower";
+      },
+      12000,
+      "Expected one elected leader and one follower",
+    ).catch(async () => {
+      await waitForCondition(
+        async () => {
+          const roleA = getTabRole(a);
+          const roleB = getTabRole(b);
+          return roleA === "follower" && roleB === "leader";
+        },
+        12000,
+        "Expected one elected leader and one follower",
+      );
+    });
+
+    const roleA = getTabRole(a);
+    const roleB = getTabRole(b);
+    if (roleA === "leader" && roleB === "follower") {
+      return { leader: a, follower: b };
+    }
+    if (roleA === "follower" && roleB === "leader") {
+      return { leader: b, follower: a };
+    }
+    throw new Error("Unable to determine leader/follower roles");
+  }
+
+  async function waitForSingleLeader(tabs: Db[]): Promise<Db> {
+    await waitForCondition(
+      async () => {
+        let leaders = 0;
+        let knownRoles = 0;
+        for (const tab of tabs) {
+          const role = getTabRole(tab);
+          if (!role) continue;
+          knownRoles += 1;
+          if (role === "leader") leaders += 1;
+        }
+        return knownRoles === tabs.length && leaders === 1;
+      },
+      12000,
+      "Expected exactly one elected leader across tabs",
+    );
+
+    const leader = tabs.find((tab) => getTabRole(tab) === "leader");
+    if (!leader) {
+      throw new Error("Expected one leader after convergence");
+    }
+    return leader;
+  }
+
   afterEach(async () => {
-    for (const db of dbs) {
+    for (const unsubscribe of subscriptions.splice(0)) {
+      try {
+        unsubscribe();
+      } catch {
+        // Best effort
+      }
+    }
+
+    for (const db of dbs.splice(0).reverse()) {
       try {
         await db.shutdown();
       } catch {
         // Best effort
       }
     }
-    dbs.length = 0;
   });
 
   // -------------------------------------------------------------------------
@@ -220,7 +396,7 @@ describe("Worker Bridge with OPFS", () => {
   it("recovers data from WAL after crash (no snapshot flush)", async () => {
     const dbName = uniqueDbName("crash-recovery");
 
-    const db1 = await createDb({ appId: "test-app", dbName });
+    const db1 = track(await createDb({ appId: "test-app", dbName }));
 
     // insertWithAck ensures data is in OPFS WAL before we crash
     await db1.insertWithAck(todos, { title: "Crash-proof", done: false }, "worker");
@@ -233,27 +409,12 @@ describe("Worker Bridge with OPFS", () => {
     await (db1 as any).ensureBridgeReady();
     const worker = (db1 as any).worker as Worker;
     worker.postMessage({ type: "simulate-crash" });
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error("simulate-crash: no shutdown-ok received"));
-      }, 5000);
-      const handler = (event: MessageEvent) => {
-        if (event.data.type === "shutdown-ok") {
-          cleanup();
-          resolve();
-        }
-      };
-      const cleanup = () => {
-        clearTimeout(timeout);
-        worker.removeEventListener("message", handler);
-      };
-      worker.addEventListener("message", handler);
-    });
+    await waitForWorkerMessageType(worker, "shutdown-ok", 5000, "simulate-crash");
     worker.terminate();
-    // Null out to prevent afterEach from trying clean shutdown on dead worker
+    // Null out dead worker bridge so Db shutdown only frees client-side resources.
     (db1 as any).worker = null;
     (db1 as any).workerBridge = null;
+    await db1.shutdown();
 
     // New Db with same dbName — worker must recover from OPFS WAL
     const db2 = track(await createDb({ appId: "test-app", dbName }));
@@ -263,6 +424,72 @@ describe("Worker Bridge with OPFS", () => {
     const titles = after.map((r) => r.title).sort();
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
   });
+
+  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete-storage") }));
+
+    await db.insertWithAck(todos, { title: "Should be deleted", done: false }, "worker");
+    const before = await db.all(allTodos, "worker");
+    expect(before.length).toBe(1);
+    expect(before[0].title).toBe("Should be deleted");
+
+    await db.deleteClientStorage();
+
+    const afterDelete = await db.all(allTodos, "worker");
+    expect(afterDelete).toEqual([]);
+
+    const id = db.insert(todos, { title: "Fresh after delete", done: true });
+    const afterReinsert = await db.all(allTodos, "worker");
+    expect(afterReinsert).toHaveLength(1);
+    expect(afterReinsert[0].id).toBe(id);
+    expect(afterReinsert[0].title).toBe("Fresh after delete");
+    expect(afterReinsert[0].done).toBe(true);
+  });
+
+  it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
+    const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
+    const seeded = track(await createDb({ appId: "test-app", dbName }));
+
+    // Initialize worker/main runtimes with schema v2 from client context.
+    await seeded.all(allCatalogueTodos, "worker");
+
+    // Seed historical v1 schema + auto lens v1->v2 directly into worker OPFS.
+    await seedWorkerLiveSchema(seeded, catalogueSchemaV1);
+
+    await waitForCondition(
+      async () => {
+        const state = await getWorkerDebugSchemaState(seeded);
+        return hasRestoredCatalogueState(state);
+      },
+      12_000,
+      "Seeded worker should hold schema/lens state beyond client context",
+    );
+
+    await seeded.shutdown();
+    untrack(seeded);
+
+    const offline = track(await createDb({ appId: "test-app", dbName }));
+    await offline.all(allCatalogueTodos, "worker");
+
+    await waitForCondition(
+      async () => {
+        const state = await getWorkerDebugSchemaState(offline);
+        return hasRestoredCatalogueState(state);
+      },
+      12_000,
+      "Offline worker should rehydrate schema/lens state from OPFS manifest",
+    );
+
+    await waitForCondition(
+      async () => {
+        await offline.all(allCatalogueTodos, "worker");
+        const mainState = getMainDebugSchemaState(offline, catalogueSchemaV2);
+        return hasRestoredCatalogueState(mainState);
+      },
+      12_000,
+      "Main thread should restore schema/lens state via worker catalogue sync",
+    );
+  }, 90_000);
 
   // -------------------------------------------------------------------------
   // 5. Acknowledged insert resolves at worker tier
@@ -291,9 +518,11 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const unsub = db.subscribeAll(allTodos as QueryBuilder<Todo & { id: string }>, (delta) => {
-      received.push([...delta.all]);
-    });
+    const unsub = trackSubscription(
+      db.subscribeAll(allTodos, (delta) => {
+        received.push([...delta.all]);
+      }),
+    );
 
     db.insert(todos, { title: "Observed", done: false });
 
@@ -316,16 +545,15 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const projectId = "00000000-0000-0000-0000-000000000123";
-    const unsub = db.subscribeAll(
-      todosByProject(projectId) as QueryBuilder<Todo & { id: string }>,
-      (delta) => {
+    const projectId = db.insert(projects, { name: "Observed Project" });
+    const unsub = trackSubscription(
+      db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
-      },
+      }),
     );
 
     db.insert(todos, { title: "Observed", done: false, project: projectId });
-    const anotherProjectId = "00000000-0000-0000-0000-000000000456";
+    const anotherProjectId = db.insert(projects, { name: "Ignored Project" });
     db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
 
     // Wait for subscription to fire
@@ -342,65 +570,179 @@ describe("Worker Bridge with OPFS", () => {
     unsub();
   });
 
+  it("forwards page lifecycle hints from main thread to worker bridge", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("lifecycle") }));
+
+    db.insert(todos, { title: "Prime bridge", done: false });
+    await (db as any).ensureBridgeReady();
+
+    const bridge = (db as any).workerBridge;
+    expect(bridge).toBeTruthy();
+
+    const seenEvents: string[] = [];
+    const originalSendLifecycleHint = bridge.sendLifecycleHint.bind(bridge);
+    bridge.sendLifecycleHint = (event: string) => {
+      seenEvents.push(event);
+      originalSendLifecycleHint(event);
+    };
+
+    (db as any).onPageHide();
+    (db as any).onPageFreeze();
+    (db as any).onPageResume();
+
+    expect(seenEvents).toEqual(["pagehide", "freeze", "resume"]);
+  });
+
   // -------------------------------------------------------------------------
   // 7. Server sync through worker
   // -------------------------------------------------------------------------
 
-  it("syncs data between two clients through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const token1 = await signJwt("user-a", JWT_SECRET);
+  it("propagates synced row from client A to client B", async () => {
+    const sharedLocalAuthToken = `sync-token-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb("sync-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb("sync-b", sharedLocalAuthToken);
 
-    const db1 = track(
-      await createDb({
-        appId: APP_ID,
-        dbName: uniqueDbName("sync-a"),
-        serverUrl,
-        jwtToken: token1,
-        adminSecret: ADMIN_SECRET,
-      }),
+    const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbA.insertWithAck(todos, { title, done: false }, "worker"),
+      10000,
+      "A insertWithAck(worker) did not resolve",
     );
 
-    // Insert and wait for server-tier acknowledgement
-    const id = await db1.insertWithAck(todos, { title: "Server-synced", done: false }, "edge");
-    expect(id).toBeTruthy();
+    const rowsOnB = await waitForTodos(
+      dbB,
+      (rows) => rows.some((row) => row.title === title),
+      "A -> B propagation",
+      20000,
+    );
+    expect(rowsOnB.some((row) => row.title === title)).toBe(true);
+  }, 60000);
 
-    // Query back from the server (edge-tier settlement)
-    const results = await db1.all(allTodos, "edge");
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0].title).toBe("Server-synced");
+  it("propagates synced row from client B to client A", async () => {
+    const sharedLocalAuthToken = `sync-token-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb("sync-a-reverse", sharedLocalAuthToken);
+    const dbB = await createSyncedDb("sync-b-reverse", sharedLocalAuthToken);
+
+    const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbB.insertWithAck(todos, { title, done: true }, "worker"),
+      10000,
+      "B insertWithAck(worker) did not resolve",
+    );
+
+    const rowsOnA = await waitForTodos(
+      dbA,
+      (rows) => rows.some((row) => row.title === title),
+      "B -> A propagation",
+      20000,
+    );
+    expect(rowsOnA.some((row) => row.title === title)).toBe(true);
+  }, 60000);
+
+  // -------------------------------------------------------------------------
+  // 8. Leader election + cross-tab peer routing
+  // -------------------------------------------------------------------------
+
+  it("routes follower writes through the elected leader", async () => {
+    const dbName = uniqueDbName("leader-route");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    const receivedByLeader: string[] = [];
+    const unsubscribe = leader.subscribeAll(
+      allTodos as QueryBuilder<Todo & { id: string }>,
+      (delta) => {
+        for (const todo of delta.all) {
+          receivedByLeader.push(todo.title);
+        }
+      },
+    );
+
+    follower.insert(todos, { title: "Routed via leader", done: false });
+
+    await waitForCondition(
+      async () => receivedByLeader.includes("Routed via leader"),
+      8000,
+      "Leader should receive follower write through peer routing",
+    );
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, "worker");
+        const followerRows = await follower.all(allTodos, "worker");
+        const leaderHas = leaderRows.some((row) => row.title === "Routed via leader");
+        const followerHas = followerRows.some((row) => row.title === "Routed via leader");
+        return leaderHas && followerHas;
+      },
+      8000,
+      "Both leader and follower should observe routed write",
+    );
+
+    unsubscribe();
+  });
+
+  it("fails over to follower after leader shutdown", async () => {
+    const dbName = uniqueDbName("leader-failover");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await leader.shutdown();
+    untrack(leader);
+
+    await waitForCondition(
+      async () => getTabRole(follower) === "leader",
+      12000,
+      "Follower should be promoted to leader after shutdown",
+    );
+
+    const id = follower.insert(todos, { title: "Post-failover", done: true });
+    await waitForCondition(
+      async () => {
+        const rows = await follower.all(allTodos, "worker");
+        return rows.some((row) => row.id === id && row.title === "Post-failover");
+      },
+      8000,
+      "New leader should continue processing writes after failover",
+    );
+  });
+
+  it("re-elects cleanly when a closed leader tab is reopened", async () => {
+    const dbName = uniqueDbName("leader-reopen");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const { leader: initialLeader, follower: survivor } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await initialLeader.shutdown();
+    untrack(initialLeader);
+
+    await waitForCondition(
+      async () => getTabRole(survivor) === "leader",
+      12000,
+      "Surviving tab should become leader after leader closes",
+    );
+
+    const reopened = track(await createDb({ appId: "test-app", dbName }));
+    const currentLeader = await waitForSingleLeader([survivor, reopened]);
+    const currentFollower = currentLeader === survivor ? reopened : survivor;
+
+    const marker = `reopen-${Date.now()}`;
+    currentFollower.insert(todos, { title: marker, done: false });
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await currentLeader.all(allTodos, "worker");
+        const followerRows = await currentFollower.all(allTodos, "worker");
+        const leaderHas = leaderRows.some((row) => row.title === marker);
+        const followerHas = followerRows.some((row) => row.title === marker);
+        return leaderHas && followerHas;
+      },
+      8000,
+      "Reopened tab and current leader should converge after re-election",
+    );
   });
 });
-
-// ---------------------------------------------------------------------------
-// JWT helper (Web Crypto — works in browser)
-// ---------------------------------------------------------------------------
-
-function base64url(input: string | Uint8Array): string {
-  const str = typeof input === "string" ? btoa(input) : btoa(String.fromCharCode(...input));
-  return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-async function signJwt(sub: string, secret: string): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = {
-    sub,
-    claims: {},
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  };
-  const enc = new TextEncoder();
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const data = enc.encode(`${headerB64}.${payloadB64}`);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, data);
-  return `${headerB64}.${payloadB64}.${base64url(new Uint8Array(sig))}`;
-}
 
 // ---------------------------------------------------------------------------
 // Polling helper
@@ -412,9 +754,207 @@ async function waitForCondition(
   message: string,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = undefined;
   while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((r) => setTimeout(r, 50));
+    try {
+      if (await check()) return;
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(50);
   }
-  throw new Error(`Timeout: ${message}`);
+
+  const lastErrorMessage =
+    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
+  throw new Error(`Timeout after ${timeoutMs}ms: ${message}; lastError=${lastErrorMessage}`);
+}
+
+async function waitForWorkerMessageType(
+  worker: Worker,
+  expectedType: string,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${label}: no ${expectedType} worker message within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { type?: string } | undefined;
+      if (data?.type === expectedType) {
+        cleanup();
+        resolve();
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+  });
+}
+
+async function waitForTodos(
+  db: Db,
+  predicate: (rows: Todo[]) => boolean,
+  label: string,
+  timeoutMs = 15000,
+  settledTier: "worker" | "edge" | undefined = undefined,
+): Promise<Todo[]> {
+  const deadline = Date.now() + timeoutMs;
+  let lastRows: Todo[] = [];
+  let lastError: unknown = undefined;
+
+  while (Date.now() < deadline) {
+    try {
+      const rows = await db.all(allTodos, settledTier);
+      if (predicate(rows)) {
+        return rows;
+      }
+      lastRows = rows;
+    } catch (error) {
+      lastError = error;
+    }
+
+    await sleep(150);
+  }
+
+  const rowPreview = JSON.stringify(
+    lastRows.slice(0, 10).map((row) => ({ id: row.id, title: row.title, done: row.done })),
+  );
+  const lastErrorMessage =
+    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
+  throw new Error(
+    `${label}: timed out after ${timeoutMs}ms (tier=${settledTier ?? "default"}); ` +
+      `lastRowsCount=${lastRows.length}; lastRows=${rowPreview}; lastError=${lastErrorMessage}`,
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasRestoredCatalogueState(state: DebugSchemaState): boolean {
+  return state.liveSchemaHashes.length > 1 && state.lensEdges.length > 0;
+}
+
+function getMainDebugSchemaState(db: Db, schemaForClient: WasmSchema): DebugSchemaState {
+  const client = (db as any).getClient(schemaForClient);
+  const runtime = client.getRuntime() as { __debugSchemaState?: () => DebugSchemaState };
+  if (typeof runtime.__debugSchemaState !== "function") {
+    throw new Error("Expected runtime.__debugSchemaState to be available");
+  }
+  return runtime.__debugSchemaState();
+}
+
+async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
+  await (db as any).ensureBridgeReady();
+  const worker = (db as any).worker as Worker | null;
+  if (!worker) {
+    throw new Error("Expected worker instance to exist");
+  }
+
+  return new Promise<DebugSchemaState>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`debug-schema-state: no response within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as
+        | { type?: string; state?: DebugSchemaState; message?: string }
+        | undefined;
+      if (!data?.type) return;
+
+      if (data.type === "debug-schema-state-ok" && data.state) {
+        cleanup();
+        resolve(data.state);
+        return;
+      }
+
+      if (
+        data.type === "error" &&
+        typeof data.message === "string" &&
+        data.message.includes("debug-schema-state")
+      ) {
+        cleanup();
+        reject(new Error(data.message));
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+    worker.postMessage({ type: "debug-schema-state" });
+  });
+}
+
+async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
+  await (db as any).ensureBridgeReady();
+  const worker = (db as any).worker as Worker | null;
+  if (!worker) {
+    throw new Error("Expected worker instance to exist");
+  }
+
+  const schemaJson = JSON.stringify(schema);
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`debug-seed-live-schema: no response within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { type?: string; message?: string } | undefined;
+      if (!data?.type) return;
+
+      if (data.type === "debug-seed-live-schema-ok") {
+        cleanup();
+        resolve();
+        return;
+      }
+
+      if (
+        data.type === "error" &&
+        typeof data.message === "string" &&
+        data.message.includes("debug-seed-live-schema")
+      ) {
+        cleanup();
+        reject(new Error(data.message));
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+    worker.postMessage({ type: "debug-seed-live-schema", schemaJson });
+  });
 }

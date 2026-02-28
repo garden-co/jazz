@@ -15,11 +15,16 @@ use crate::sync_manager::{
     SyncPayload,
 };
 
-use super::QueryManager;
-use super::encoding::encode_row;
-use super::policy::PolicyExpr;
-use super::session::Session;
-use super::types::{
+use crate::query_manager::encoding::encode_row;
+use crate::query_manager::manager::QueryError;
+use crate::query_manager::manager::QueryManager;
+use crate::query_manager::policy::Operation;
+use crate::query_manager::policy::PolicyExpr;
+use crate::query_manager::relation_ir::{
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+};
+use crate::query_manager::session::Session;
+use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TablePolicies, TableSchema,
     Value,
 };
@@ -74,6 +79,47 @@ fn rebac_test_schema() -> Schema {
     schema
 }
 
+fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
+    let mut schema = Schema::new();
+
+    let folders_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+
+    let select_policy = PolicyExpr::Or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column: "parent_id".into(),
+            max_depth,
+        },
+    ]);
+
+    let update_using = PolicyExpr::Or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent_id".into(),
+            max_depth,
+        },
+    ]);
+
+    let folders_policies = TablePolicies::new()
+        .with_select(select_policy)
+        .with_update(Some(update_using), PolicyExpr::True);
+
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(folders_descriptor, folders_policies),
+    );
+
+    schema
+}
+
 /// Helper to encode a document row
 fn encode_document(owner_id: &str, title: &str, folder_id: Option<ObjectId>) -> Vec<u8> {
     let docs_desc = RowDescriptor::new(vec![
@@ -100,6 +146,131 @@ fn document_metadata() -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     m.insert(MetadataKey::Table.to_string(), "documents".to_string());
     m
+}
+
+fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
+    let schema = recursive_folders_schema(max_depth);
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let root_handle = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+    let child_handle = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root_handle.row_id),
+            ],
+        )
+        .unwrap();
+    let grand_handle = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Grandchild".into()),
+                Value::Uuid(child_handle.row_id),
+            ],
+        )
+        .unwrap();
+
+    let grand_id = grand_handle.row_id;
+    let branch = get_branch(&qm);
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let mut scope = HashSet::new();
+    scope.insert((grand_id, branch.clone().into()));
+    qm.sync_manager_mut()
+        .set_client_query_scope(client_id, QueryId(100), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let folders_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+
+    let update_content = encode_row(
+        &folders_descriptor,
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Renamed by Alice".into()),
+            Value::Uuid(child_handle.row_id),
+        ],
+    )
+    .unwrap();
+
+    let update_commit = Commit {
+        parents: smallvec![grand_handle.row_commit_id],
+        content: update_content,
+        timestamp: 4200,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let object_metadata = qm
+        .sync_manager()
+        .object_manager
+        .get(grand_id)
+        .map(|obj| obj.metadata.clone())
+        .unwrap_or_default();
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: grand_id,
+            metadata: Some(ObjectMetadata {
+                id: grand_id,
+                metadata: object_metadata,
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![update_commit.clone()],
+        },
+    });
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
+                if *id == client_id
+        )
+    });
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(grand_id, &branch)
+        .unwrap();
+    let applied = tips.contains(&update_commit.id());
+
+    (denied, applied)
 }
 
 #[test]
@@ -803,7 +974,7 @@ fn rebac_update_denied_by_using_policy() {
 /// FIXED: PolicyFilterNode now properly evaluates INHERITS using PolicyGraph.
 #[test]
 fn rebac_inherits_filters_select_query_results() {
-    use super::query::QueryBuilder;
+    use crate::query_manager::query::QueryBuilder;
 
     // Schema with INHERITS policy
     let mut schema = Schema::new();
@@ -833,8 +1004,9 @@ fn rebac_inherits_filters_select_query_results() {
     let docs_policies = TablePolicies::new().with_select(PolicyExpr::Or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::Inherits {
-            operation: super::policy::Operation::Select,
+            operation: Operation::Select,
             via_column: "folder_id".into(),
+            max_depth: None,
         },
     ]));
     schema.insert(
@@ -932,6 +1104,247 @@ fn rebac_inherits_filters_select_query_results() {
         !has_rows,
         "Charlie should not see Bob's document - he owns neither the doc nor the folder. \
          INHERITS should have denied access, but currently it always returns true."
+    );
+}
+
+#[test]
+fn rebac_recursive_inherits_allows_ancestor_access() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let schema = recursive_folders_schema(None);
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let root = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let child = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let grand = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("carol".into()),
+                Value::Text("Grandchild".into()),
+                Value::Uuid(child),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("folders").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let result_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+
+    assert!(result_ids.contains(&root), "Root should be visible");
+    assert!(
+        result_ids.contains(&child),
+        "Child should be visible via recursive INHERITS"
+    );
+    assert!(
+        result_ids.contains(&grand),
+        "Grandchild should be visible via recursive INHERITS"
+    );
+}
+
+#[test]
+fn rebac_recursive_inherits_respects_depth_override() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let schema = recursive_folders_schema(Some(1));
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let root = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let child = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let grand = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("carol".into()),
+                Value::Text("Grandchild".into()),
+                Value::Uuid(child),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("folders").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let result_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+
+    assert!(result_ids.contains(&root), "Root should be visible");
+    assert!(
+        result_ids.contains(&child),
+        "Child should be visible at depth=1"
+    );
+    assert!(
+        !result_ids.contains(&grand),
+        "Grandchild should be hidden when max_depth=1"
+    );
+}
+
+#[test]
+fn rebac_recursive_inherits_write_checks_allow_and_deny() {
+    let (denied_shallow, applied_shallow) = run_recursive_folder_update(Some(1));
+    assert!(
+        denied_shallow,
+        "Update should be denied when recursive INHERITS max depth is too shallow"
+    );
+    assert!(
+        !applied_shallow,
+        "Denied update must not be applied to the row"
+    );
+
+    let (denied_deep, applied_deep) = run_recursive_folder_update(Some(2));
+    assert!(
+        !denied_deep,
+        "Update should be allowed when max depth reaches the ancestor owner"
+    );
+    assert!(applied_deep, "Allowed update should be applied");
+}
+
+#[test]
+fn rebac_recursive_inherits_cycle_does_not_overgrant() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let schema = recursive_folders_schema(Some(10));
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let a = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("A".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let b = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("carol".into()),
+                Value::Text("B".into()),
+                Value::Uuid(a),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    // Close the cycle: A.parent_id = B
+    let _ = qm
+        .update(
+            &mut storage,
+            a,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("A".into()),
+                Value::Uuid(b),
+            ],
+        )
+        .unwrap();
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("folders").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let result_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+
+    assert!(
+        result_ids.is_empty(),
+        "Cycle should not grant access when no ancestor is owned by session user"
     );
 }
 
@@ -1148,6 +1561,252 @@ fn rebac_update_denied_by_using_exists_policy() {
     );
 }
 
+#[test]
+fn local_insert_with_exists_rel_policy_denies_non_admin() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        },
+    });
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+
+    let bob_err = qm
+        .insert_with_session(
+            &mut storage,
+            "projects",
+            &[Value::Text("bob project".into())],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("non-admin insert should be denied");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("projects")
+    ));
+
+    qm.insert_with_session(
+        &mut storage,
+        "projects",
+        &[Value::Text("alice project".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("admin insert should be allowed");
+}
+
+#[test]
+fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+    let mut schema = Schema::new();
+    let folders_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let folders_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent_id".into(),
+            max_depth: Some(10),
+        },
+    );
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let root = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .expect("create root");
+    let child = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root.row_id),
+            ],
+        )
+        .expect("create child");
+
+    let update_err = qm
+        .update_with_session(
+            &mut storage,
+            child.row_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child renamed".into()),
+                Value::Uuid(root.row_id),
+            ],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("update should fail inherited WITH CHECK");
+    assert!(matches!(
+        update_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("folders")
+    ));
+}
+
+#[test]
+fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::Exists {
+            table: "admins".into(),
+            condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+
+    let bob_err = qm
+        .update_with_session(
+            &mut storage,
+            protected.row_id,
+            &[Value::Text("bob update".into())],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("non-admin update should be denied");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("protected")
+    ));
+
+    qm.update_with_session(
+        &mut storage,
+        protected.row_id,
+        &[Value::Text("alice update".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("admin update should be allowed");
+}
+
+#[test]
+fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        },
+    });
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+
+    let bob_err = qm
+        .delete_with_session(&mut storage, protected.row_id, Some(&Session::new("bob")))
+        .expect_err("non-admin delete should be denied");
+    assert!(matches!(
+        bob_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Delete
+        } if table == TableName::new("protected")
+    ));
+
+    qm.delete_with_session(&mut storage, protected.row_id, Some(&Session::new("alice")))
+        .expect("admin delete should be allowed");
+    assert!(qm.row_is_deleted(&storage, "protected", protected.row_id));
+}
+
 // ============================================================================
 // INHERITS Cycle Detection Tests
 // ============================================================================
@@ -1156,7 +1815,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 /// Cycle: A → B → A (direct cycle between two tables)
 #[test]
 fn rebac_inherits_cycle_detection() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1167,8 +1826,9 @@ fn rebac_inherits_cycle_detection() {
             .references("table_b"),
     ]);
     let a_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "b_id".into(),
+        max_depth: None,
     });
     schema.insert(
         TableName::new("table_a"),
@@ -1182,8 +1842,9 @@ fn rebac_inherits_cycle_detection() {
             .references("table_a"),
     ]);
     let b_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "a_id".into(),
+        max_depth: None,
     });
     schema.insert(
         TableName::new("table_b"),
@@ -1205,7 +1866,7 @@ fn rebac_inherits_cycle_detection() {
 /// Cycle: Folder → Folder (self-reference via parent_id)
 #[test]
 fn rebac_inherits_self_reference_detection() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1217,8 +1878,9 @@ fn rebac_inherits_self_reference_detection() {
             .references("folders"),
     ]);
     let folder_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "parent_id".into(),
+        max_depth: None,
     });
     schema.insert(
         TableName::new("folders"),
@@ -1242,7 +1904,7 @@ fn rebac_inherits_self_reference_detection() {
 /// Test that valid INHERITS chains (no cycles) pass validation.
 #[test]
 fn rebac_inherits_no_cycle_passes() {
-    use super::types::validate_no_inherits_cycles;
+    use crate::query_manager::types::validate_no_inherits_cycles;
 
     let mut schema = Schema::new();
 
@@ -1263,8 +1925,9 @@ fn rebac_inherits_no_cycle_passes() {
             .references("orgs"),
     ]);
     let team_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "org_id".into(),
+        max_depth: None,
     });
     schema.insert(
         TableName::new("teams"),
@@ -1279,8 +1942,9 @@ fn rebac_inherits_no_cycle_passes() {
             .references("teams"),
     ]);
     let project_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: super::policy::Operation::Select,
+        operation: Operation::Select,
         via_column: "team_id".into(),
+        max_depth: None,
     });
     schema.insert(
         TableName::new("projects"),
@@ -1293,5 +1957,429 @@ fn rebac_inherits_no_cycle_passes() {
         result.is_ok(),
         "Valid INHERITS chain should pass validation: {:?}",
         result
+    );
+}
+
+/// Test that bounded self-referential INHERITS is accepted by cycle validation.
+#[test]
+fn rebac_inherits_bounded_self_reference_passes_validation() {
+    use crate::query_manager::types::validate_no_inherits_cycles;
+
+    let mut schema = Schema::new();
+
+    let folder_desc = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let folder_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
+        operation: Operation::Select,
+        via_column: "parent_id".into(),
+        max_depth: Some(10),
+    });
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(folder_desc, folder_policy),
+    );
+
+    let result = validate_no_inherits_cycles(&schema);
+    assert!(
+        result.is_ok(),
+        "Bounded self-referential INHERITS should pass cycle validation: {:?}",
+        result
+    );
+}
+
+fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
+    let mut schema = Schema::new();
+
+    let source_fk_column = if array_edge { "images" } else { "image" };
+    let inherited_read = PolicyExpr::InheritsReferencing {
+        operation: Operation::Select,
+        source_table: "todos".into(),
+        via_column: source_fk_column.into(),
+        max_depth: None,
+    };
+    let inherited_update = PolicyExpr::InheritsReferencing {
+        operation: Operation::Update,
+        source_table: "todos".into(),
+        via_column: source_fk_column.into(),
+        max_depth: None,
+    };
+
+    let files_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let files_policies = TablePolicies::new()
+        .with_select(PolicyExpr::or(vec![
+            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+            inherited_read,
+        ]))
+        .with_update(
+            Some(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                inherited_update,
+            ])),
+            PolicyExpr::True,
+        );
+    schema.insert(
+        TableName::new("files"),
+        TableSchema::with_policies(files_descriptor, files_policies),
+    );
+
+    let image_column = if array_edge {
+        ColumnDescriptor::new(
+            "images",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
+        )
+        .references("files")
+    } else {
+        ColumnDescriptor::new("image", ColumnType::Uuid)
+            .nullable()
+            .references("files")
+    };
+    let todos_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        image_column,
+    ]);
+    let todos_policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+        .with_update(
+            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            PolicyExpr::True,
+        );
+    schema.insert(
+        TableName::new("todos"),
+        TableSchema::with_policies(todos_descriptor, todos_policies),
+    );
+
+    schema
+}
+
+#[test]
+fn rebac_declared_fk_inheritance_grants_select_access() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let schema = declared_file_inheritance_schema(false);
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let file_id = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Text("bob".into()), Value::Text("bob-file".into())],
+        )
+        .unwrap()
+        .row_id;
+    let _todo_id = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("todo".into()),
+                Value::Uuid(file_id),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("files").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let visible_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        visible_ids.contains(&file_id),
+        "alice should see file via allowedTo.readReferencing(policy.todos, \"image\")"
+    );
+}
+
+#[test]
+fn rebac_declared_fk_inheritance_grants_update_access() {
+    let schema = declared_file_inheritance_schema(false);
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let file_id = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Text("bob".into()), Value::Text("bob-file".into())],
+        )
+        .unwrap()
+        .row_id;
+    let _todo_id = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("todo".into()),
+                Value::Uuid(file_id),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let update = qm.update_with_session(
+        &mut storage,
+        file_id,
+        &[
+            Value::Text("bob".into()),
+            Value::Text("updated by alice".into()),
+        ],
+        Some(&Session::new("alice")),
+    );
+    assert!(
+        update.is_ok(),
+        "alice should update file via declared inherited access from todos row"
+    );
+}
+
+#[test]
+fn rebac_declared_fk_inheritance_array_membership_grants_access() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let schema = declared_file_inheritance_schema(true);
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let file_id = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Text("bob".into()), Value::Text("array-file".into())],
+        )
+        .unwrap()
+        .row_id;
+    let _todo_id = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("todo".into()),
+                Value::Array(vec![Value::Uuid(file_id), Value::Uuid(file_id)]),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("files").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let visible_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        visible_ids.contains(&file_id),
+        "array FK membership should grant inherited access when target id is present"
+    );
+}
+
+#[test]
+fn rebac_declared_fk_inheritance_cycle_fails_closed() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let mut schema = Schema::new();
+    let a_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("b_id", ColumnType::Uuid)
+            .nullable()
+            .references("table_b"),
+    ]);
+    let b_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("a_id", ColumnType::Uuid)
+            .nullable()
+            .references("table_a"),
+    ]);
+    let a_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Select,
+            source_table: "table_b".into(),
+            via_column: "a_id".into(),
+            max_depth: None,
+        },
+    ]));
+    let b_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Select,
+            source_table: "table_a".into(),
+            via_column: "b_id".into(),
+            max_depth: None,
+        },
+    ]));
+    schema.insert(
+        TableName::new("table_a"),
+        TableSchema::with_policies(a_descriptor.clone(), a_policies),
+    );
+    schema.insert(
+        TableName::new("table_b"),
+        TableSchema::with_policies(b_descriptor.clone(), b_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let a_id = qm
+        .insert(
+            &mut storage,
+            "table_a",
+            &[Value::Text("bob".into()), Value::Null],
+        )
+        .unwrap()
+        .row_id;
+    let b_id = qm
+        .insert(
+            &mut storage,
+            "table_b",
+            &[Value::Text("carol".into()), Value::Uuid(a_id)],
+        )
+        .unwrap()
+        .row_id;
+
+    qm.update(
+        &mut storage,
+        a_id,
+        &[Value::Text("bob".into()), Value::Uuid(b_id)],
+    )
+    .unwrap();
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("table_a").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let visible_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        visible_ids.is_empty(),
+        "cycle path should fail closed and not grant access"
+    );
+}
+
+#[test]
+fn rebac_declared_fk_inheritance_reacts_to_fk_updates() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let schema = declared_file_inheritance_schema(false);
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let file_id = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("delayed-link".into()),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let todo_id = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("todo".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("files").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+    let initially_visible: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        !initially_visible.contains(&file_id),
+        "file should be hidden before an inheriting reference exists"
+    );
+
+    qm.update(
+        &mut storage,
+        todo_id,
+        &[
+            Value::Text("alice".into()),
+            Value::Text("todo".into()),
+            Value::Uuid(file_id),
+        ],
+    )
+    .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+    let visible_after_link: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        visible_after_link.contains(&file_id),
+        "updating referencing FK should re-evaluate and grant access to linked target row"
     );
 }

@@ -156,7 +156,8 @@ export class JazzRnRuntimeAdapter implements Runtime {
       {
         onUpdate: (deltaJson: string) => {
           try {
-            on_update(deltaJson);
+            const parsed = JSON.parse(deltaJson) as unknown;
+            on_update(parsed);
           } catch (error) {
             swallowCallbackError("subscription", error);
           }
@@ -180,21 +181,21 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertPersisted(table: string, values: any, tier: string): Promise<string> {
+  insertWithAck(table: string, values: any, tier: string): Promise<string> {
     assertWorkerTier(tier);
     const id = this.insert(table, values);
     this.binding.flush();
     return Promise.resolve(id);
   }
 
-  updatePersisted(object_id: string, values: any, tier: string): Promise<void> {
+  updateWithAck(object_id: string, values: any, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
     return Promise.resolve();
   }
 
-  deletePersisted(object_id: string, tier: string): Promise<void> {
+  deleteWithAck(object_id: string, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.delete(object_id);
     this.binding.flush();
@@ -202,6 +203,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   onSyncMessageReceived(message_json: string): void {
+    if (this.closed) return;
     this.binding.onSyncMessageReceived(message_json);
   }
 
@@ -218,10 +220,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   addServer(): void {
+    if (this.closed) return;
     this.binding.addServer();
   }
 
   removeServer(): void {
+    if (this.closed) return;
     this.binding.removeServer();
   }
 
@@ -242,6 +246,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   onSyncMessageReceivedFromClient(client_id: string, message_json: string): void {
+    if (this.closed) return;
     this.binding.onSyncMessageReceivedFromClient(client_id, message_json);
   }
 

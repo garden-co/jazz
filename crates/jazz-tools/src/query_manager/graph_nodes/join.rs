@@ -1,8 +1,10 @@
 use ahash::{AHashMap, AHashSet};
 
 use crate::object::ObjectId;
-use crate::query_manager::encoding::column_bytes;
-use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
+use crate::query_manager::encoding::{column_bytes, decode_column, encode_value};
+use crate::query_manager::types::{
+    ColumnType, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
+};
 
 /// Join node for equi-joins.
 ///
@@ -16,18 +18,10 @@ pub struct JoinNode {
     left_descriptor: TupleDescriptor,
     /// Output tuple descriptor (concat of left and right).
     output_descriptor: TupleDescriptor,
-    /// Left side row descriptor (for column extraction).
-    left_row_descriptor: RowDescriptor,
-    /// Right side row descriptor (for column extraction).
-    right_row_descriptor: RowDescriptor,
-    /// Left element index that contains the join column.
-    left_element_index: usize,
-    /// Right element index that contains the join column.
-    right_element_index: usize,
-    /// Local column index within left element.
-    left_local_col_index: usize,
-    /// Local column index within right element.
-    right_local_col_index: usize,
+    /// Left side key extraction spec.
+    left_key_spec: JoinKeySpec,
+    /// Right side key extraction spec.
+    right_key_spec: JoinKeySpec,
 
     /// Current left tuples.
     left_tuples: AHashSet<Tuple>,
@@ -49,6 +43,55 @@ pub struct JoinNode {
     dirty: bool,
 }
 
+/// Parsed join column reference.
+///
+/// Supports either unqualified (`id`) or qualified (`users.id`, `u.id`) forms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinColumnRef {
+    /// Optional table/alias qualifier.
+    pub qualifier: Option<String>,
+    /// Column name.
+    pub column: String,
+}
+
+impl JoinColumnRef {
+    /// Parse a join column reference from a string.
+    pub fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        if let Some((qualifier, column)) = trimmed.rsplit_once('.') {
+            let qualifier = qualifier.trim();
+            let column = column.trim();
+            if !qualifier.is_empty() && !column.is_empty() {
+                return Self {
+                    qualifier: Some(qualifier.to_string()),
+                    column: column.to_string(),
+                };
+            }
+        }
+        Self {
+            qualifier: None,
+            column: trimmed.to_string(),
+        }
+    }
+
+    fn is_id_like(&self) -> bool {
+        self.column == "id" || self.column == "_id"
+    }
+}
+
+#[derive(Debug, Clone)]
+enum JoinKeySpec {
+    /// Join using the tuple element's object identity (implicit id).
+    TupleId { element_index: usize },
+    /// Join using an explicit column from a materialized row.
+    Column {
+        element_index: usize,
+        row_descriptor: RowDescriptor,
+        local_col_index: usize,
+        match_array_elements: bool,
+    },
+}
+
 impl JoinNode {
     /// Create a new join node with TupleDescriptors.
     ///
@@ -68,24 +111,23 @@ impl JoinNode {
         left_col: &str,
         right_col: &str,
     ) -> Option<Self> {
-        // Find left column global index
-        let left_col_index = left_desc.column_index(left_col)?;
-        // Find right column global index
-        let right_col_index = right_desc.column_index(right_col)?;
+        Self::new_with_refs(
+            left_desc,
+            right_desc,
+            JoinColumnRef::parse(left_col),
+            JoinColumnRef::parse(right_col),
+        )
+    }
 
-        // Resolve left column to element and local index
-        let (left_elem_idx, left_local_idx) = left_desc.resolve_column(left_col_index)?;
-        // Resolve right column to element and local index
-        let (right_elem_idx, right_local_idx) = right_desc.resolve_column(right_col_index)?;
-
-        // Validate: left join column must be materialized to extract join key
-        if !left_desc.materialization().is_materialized(left_elem_idx) {
-            return None;
-        }
-
-        // Get row descriptors for column extraction
-        let left_row_desc = left_desc.element(left_elem_idx)?.descriptor.clone();
-        let right_row_desc = right_desc.element(right_elem_idx)?.descriptor.clone();
+    /// Create a new join node from parsed column references.
+    pub fn new_with_refs(
+        left_desc: TupleDescriptor,
+        right_desc: TupleDescriptor,
+        left_ref: JoinColumnRef,
+        right_ref: JoinColumnRef,
+    ) -> Option<Self> {
+        let left_key_spec = Self::resolve_join_key_spec(&left_desc, &left_ref)?;
+        let right_key_spec = Self::resolve_join_key_spec(&right_desc, &right_ref)?;
 
         // Output descriptor is concat of left and right
         let output_descriptor = TupleDescriptor::concat(&left_desc, &right_desc);
@@ -93,12 +135,8 @@ impl JoinNode {
         Some(Self {
             left_descriptor: left_desc,
             output_descriptor,
-            left_row_descriptor: left_row_desc,
-            right_row_descriptor: right_row_desc,
-            left_element_index: left_elem_idx,
-            right_element_index: right_elem_idx,
-            left_local_col_index: left_local_idx,
-            right_local_col_index: right_local_idx,
+            left_key_spec,
+            right_key_spec,
             left_tuples: AHashSet::new(),
             right_tuples: AHashSet::new(),
             current_tuples: AHashSet::new(),
@@ -120,10 +158,11 @@ impl JoinNode {
         left_col: &str,
         right_col: &str,
     ) -> Option<Self> {
-        // Create tuple descriptors with left materialized, right as ID-only
+        // Create tuple descriptors with both sides materialized.
         let left_tuple_desc =
             TupleDescriptor::single_with_materialization(left_table, left_desc, true);
-        let right_tuple_desc = TupleDescriptor::single(right_table, right_desc);
+        let right_tuple_desc =
+            TupleDescriptor::single_with_materialization(right_table, right_desc, true);
         Self::new(left_tuple_desc, right_tuple_desc, left_col, right_col)
     }
 
@@ -132,32 +171,146 @@ impl JoinNode {
         &self.output_descriptor
     }
 
-    /// Extract join key from a left tuple.
-    fn extract_left_key(&self, tuple: &Tuple) -> Option<Vec<u8>> {
-        let element = tuple.get(self.left_element_index)?;
-        let content = element.content()?;
-        column_bytes(
-            &self.left_row_descriptor,
-            content,
-            self.left_local_col_index,
-        )
-        .ok()
-        .flatten()
-        .map(|b| b.to_vec())
+    /// Extract join keys from a left tuple.
+    fn extract_left_keys(&self, tuple: &Tuple) -> Vec<Vec<u8>> {
+        self.extract_keys(tuple, &self.left_key_spec)
     }
 
-    /// Extract join key from a right tuple.
-    fn extract_right_key(&self, tuple: &Tuple) -> Option<Vec<u8>> {
-        let element = tuple.get(self.right_element_index)?;
-        let content = element.content()?;
-        column_bytes(
-            &self.right_row_descriptor,
-            content,
-            self.right_local_col_index,
-        )
-        .ok()
-        .flatten()
-        .map(|b| b.to_vec())
+    /// Extract join keys from a right tuple.
+    fn extract_right_keys(&self, tuple: &Tuple) -> Vec<Vec<u8>> {
+        self.extract_keys(tuple, &self.right_key_spec)
+    }
+
+    fn encode_unique_values(values: &[Value]) -> Vec<Vec<u8>> {
+        let mut out = Vec::with_capacity(values.len());
+        let mut seen = AHashSet::new();
+        for value in values {
+            let encoded = encode_value(value);
+            if seen.insert(encoded.clone()) {
+                out.push(encoded);
+            }
+        }
+        out
+    }
+
+    fn extract_keys(&self, tuple: &Tuple, spec: &JoinKeySpec) -> Vec<Vec<u8>> {
+        match spec {
+            JoinKeySpec::TupleId { element_index } => {
+                let Some(id) = tuple.get(*element_index).map(|element| element.id()) else {
+                    return Vec::new();
+                };
+                vec![id.uuid().as_bytes().to_vec()]
+            }
+            JoinKeySpec::Column {
+                element_index,
+                row_descriptor,
+                local_col_index,
+                match_array_elements,
+            } => {
+                let Some(element) = tuple.get(*element_index) else {
+                    return Vec::new();
+                };
+                let Some(content) = element.content() else {
+                    return Vec::new();
+                };
+                if !match_array_elements {
+                    return column_bytes(row_descriptor, content, *local_col_index)
+                        .ok()
+                        .flatten()
+                        .map(|bytes| vec![bytes.to_vec()])
+                        .unwrap_or_default();
+                }
+
+                let Ok(Value::Array(values)) =
+                    decode_column(row_descriptor, content, *local_col_index)
+                else {
+                    return Vec::new();
+                };
+                Self::encode_unique_values(&values)
+            }
+        }
+    }
+
+    fn resolve_join_key_spec(
+        tuple_descriptor: &TupleDescriptor,
+        column_ref: &JoinColumnRef,
+    ) -> Option<JoinKeySpec> {
+        if let Some(qualifier) = column_ref.qualifier.as_deref() {
+            return Self::resolve_qualified_key_spec(tuple_descriptor, qualifier, column_ref);
+        }
+
+        Self::resolve_unqualified_key_spec(tuple_descriptor, column_ref)
+    }
+
+    fn resolve_qualified_key_spec(
+        tuple_descriptor: &TupleDescriptor,
+        qualifier: &str,
+        column_ref: &JoinColumnRef,
+    ) -> Option<JoinKeySpec> {
+        let mut matched_element_indices = tuple_descriptor
+            .iter()
+            .enumerate()
+            .filter_map(|(index, element)| (element.table == qualifier).then_some(index));
+        let element_index = matched_element_indices.next()?;
+        if matched_element_indices.next().is_some() {
+            return None;
+        }
+
+        let element = tuple_descriptor.element(element_index)?;
+        if let Some(local_col_index) = element.descriptor.column_index(&column_ref.column) {
+            let match_array_elements = matches!(
+                element.descriptor.columns[local_col_index].column_type,
+                ColumnType::Array { element: _ }
+            );
+            return Some(JoinKeySpec::Column {
+                element_index,
+                row_descriptor: element.descriptor.clone(),
+                local_col_index,
+                match_array_elements,
+            });
+        }
+
+        if column_ref.is_id_like() {
+            return Some(JoinKeySpec::TupleId { element_index });
+        }
+
+        None
+    }
+
+    fn resolve_unqualified_key_spec(
+        tuple_descriptor: &TupleDescriptor,
+        column_ref: &JoinColumnRef,
+    ) -> Option<JoinKeySpec> {
+        let matches: Vec<(usize, usize, RowDescriptor)> = tuple_descriptor
+            .iter()
+            .enumerate()
+            .filter_map(|(index, element)| {
+                element
+                    .descriptor
+                    .column_index(&column_ref.column)
+                    .map(|local_index| (index, local_index, element.descriptor.clone()))
+            })
+            .collect();
+
+        if matches.len() == 1 {
+            let (element_index, local_col_index, row_descriptor) = matches[0].clone();
+            let match_array_elements = matches!(
+                row_descriptor.columns[local_col_index].column_type,
+                ColumnType::Array { element: _ }
+            );
+            return Some(JoinKeySpec::Column {
+                element_index,
+                row_descriptor,
+                local_col_index,
+                match_array_elements,
+            });
+        }
+
+        if matches.is_empty() && column_ref.is_id_like() && tuple_descriptor.element_count() == 1 {
+            return Some(JoinKeySpec::TupleId { element_index: 0 });
+        }
+
+        None
     }
 
     /// Create a combined tuple from left and right tuples.
@@ -172,32 +325,33 @@ impl JoinNode {
     fn add_left_tuple(&mut self, tuple: Tuple) -> Vec<Tuple> {
         let mut new_outputs = Vec::new();
 
-        if let Some(key) = self.extract_left_key(&tuple) {
-            // Add to left index
+        let keys = self.extract_left_keys(&tuple);
+        let mut right_matches = AHashSet::new();
+        for key in &keys {
             self.left_by_key
                 .entry(key.clone())
                 .or_default()
                 .insert(tuple.clone());
-
-            // Find matching right tuples
-            if let Some(right_matches) = self.right_by_key.get(&key) {
-                for right_tuple in right_matches {
-                    let combined = self.combine_tuples(&tuple, right_tuple);
-
-                    // Track provenance
-                    self.left_to_output
-                        .entry(tuple.ids())
-                        .or_default()
-                        .insert(combined.clone());
-                    self.right_to_output
-                        .entry(right_tuple.ids())
-                        .or_default()
-                        .insert(combined.clone());
-
-                    self.current_tuples.insert(combined.clone());
-                    new_outputs.push(combined);
-                }
+            if let Some(matches_for_key) = self.right_by_key.get(key) {
+                right_matches.extend(matches_for_key.iter().cloned());
             }
+        }
+
+        for right_tuple in right_matches {
+            let combined = self.combine_tuples(&tuple, &right_tuple);
+
+            // Track provenance
+            self.left_to_output
+                .entry(tuple.ids())
+                .or_default()
+                .insert(combined.clone());
+            self.right_to_output
+                .entry(right_tuple.ids())
+                .or_default()
+                .insert(combined.clone());
+
+            self.current_tuples.insert(combined.clone());
+            new_outputs.push(combined);
         }
 
         self.left_tuples.insert(tuple);
@@ -208,8 +362,7 @@ impl JoinNode {
     fn remove_left_tuple(&mut self, tuple: &Tuple) -> Vec<Tuple> {
         let mut removed_outputs = Vec::new();
 
-        if let Some(key) = self.extract_left_key(tuple) {
-            // Remove from left index
+        for key in self.extract_left_keys(tuple) {
             if let Some(set) = self.left_by_key.get_mut(&key) {
                 set.remove(tuple);
                 if set.is_empty() {
@@ -245,32 +398,33 @@ impl JoinNode {
     fn add_right_tuple(&mut self, tuple: Tuple) -> Vec<Tuple> {
         let mut new_outputs = Vec::new();
 
-        if let Some(key) = self.extract_right_key(&tuple) {
-            // Add to right index
+        let keys = self.extract_right_keys(&tuple);
+        let mut left_matches = AHashSet::new();
+        for key in &keys {
             self.right_by_key
                 .entry(key.clone())
                 .or_default()
                 .insert(tuple.clone());
-
-            // Find matching left tuples
-            if let Some(left_matches) = self.left_by_key.get(&key) {
-                for left_tuple in left_matches {
-                    let combined = self.combine_tuples(left_tuple, &tuple);
-
-                    // Track provenance
-                    self.left_to_output
-                        .entry(left_tuple.ids())
-                        .or_default()
-                        .insert(combined.clone());
-                    self.right_to_output
-                        .entry(tuple.ids())
-                        .or_default()
-                        .insert(combined.clone());
-
-                    self.current_tuples.insert(combined.clone());
-                    new_outputs.push(combined);
-                }
+            if let Some(matches_for_key) = self.left_by_key.get(key) {
+                left_matches.extend(matches_for_key.iter().cloned());
             }
+        }
+
+        for left_tuple in left_matches {
+            let combined = self.combine_tuples(&left_tuple, &tuple);
+
+            // Track provenance
+            self.left_to_output
+                .entry(left_tuple.ids())
+                .or_default()
+                .insert(combined.clone());
+            self.right_to_output
+                .entry(tuple.ids())
+                .or_default()
+                .insert(combined.clone());
+
+            self.current_tuples.insert(combined.clone());
+            new_outputs.push(combined);
         }
 
         self.right_tuples.insert(tuple);
@@ -281,8 +435,7 @@ impl JoinNode {
     fn remove_right_tuple(&mut self, tuple: &Tuple) -> Vec<Tuple> {
         let mut removed_outputs = Vec::new();
 
-        if let Some(key) = self.extract_right_key(tuple) {
-            // Remove from right index
+        for key in self.extract_right_keys(tuple) {
             if let Some(set) = self.right_by_key.get_mut(&key) {
                 set.remove(tuple);
                 if set.is_empty() {
@@ -420,6 +573,30 @@ mod tests {
         ])
     }
 
+    fn users_without_explicit_id_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)])
+    }
+
+    fn posts_uuid_fk_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Uuid),
+        ])
+    }
+
+    fn files_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "parts",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
+        )])
+    }
+
+    fn file_parts_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)])
+    }
+
     fn make_user_tuple(id: ObjectId, user_id: i32, name: &str) -> Tuple {
         let descriptor = users_descriptor();
         let data = encode_row(
@@ -452,6 +629,131 @@ mod tests {
         }])
     }
 
+    fn make_user_tuple_without_explicit_id(id: ObjectId, name: &str) -> Tuple {
+        let descriptor = users_without_explicit_id_descriptor();
+        let data = encode_row(&descriptor, &[Value::Text(name.into())]).unwrap();
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn make_post_uuid_fk_tuple(id: ObjectId, title: &str, author_id: ObjectId) -> Tuple {
+        let descriptor = posts_uuid_fk_descriptor();
+        let data = encode_row(
+            &descriptor,
+            &[Value::Text(title.into()), Value::Uuid(author_id)],
+        )
+        .unwrap();
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn make_file_tuple(id: ObjectId, parts: Vec<ObjectId>) -> Tuple {
+        let descriptor = files_descriptor();
+        let data = encode_row(
+            &descriptor,
+            &[Value::Array(parts.into_iter().map(Value::Uuid).collect())],
+        )
+        .unwrap();
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn make_file_part_tuple(id: ObjectId, name: &str) -> Tuple {
+        let descriptor = file_parts_descriptor();
+        let data = encode_row(&descriptor, &[Value::Text(name.into())]).unwrap();
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    #[test]
+    fn join_matches_array_membership_for_forward_fk_hops() {
+        let mut node = JoinNode::from_row_descriptors(
+            "files",
+            files_descriptor(),
+            "file_parts",
+            file_parts_descriptor(),
+            "parts",
+            "id",
+        )
+        .expect("array-fk forward join should compile");
+
+        let file_id = ObjectId::new();
+        let part_a = ObjectId::new();
+        let part_b = ObjectId::new();
+
+        let file = make_file_tuple(file_id, vec![part_a, part_b, part_a]);
+        let row_a = make_file_part_tuple(part_a, "A");
+        let row_b = make_file_part_tuple(part_b, "B");
+
+        node.process_left(TupleDelta {
+            added: vec![file],
+            ..Default::default()
+        });
+        let delta = node.process_right(TupleDelta {
+            added: vec![row_a, row_b],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            delta.added.len(),
+            2,
+            "membership join should match both part ids"
+        );
+        assert_eq!(
+            node.current_tuples().len(),
+            2,
+            "join outputs are row-set semantics (deduped by tuple identity)"
+        );
+    }
+
+    #[test]
+    fn join_matches_array_membership_for_reverse_fk_hops() {
+        let mut node = JoinNode::from_row_descriptors(
+            "file_parts",
+            file_parts_descriptor(),
+            "files",
+            files_descriptor(),
+            "id",
+            "parts",
+        )
+        .expect("array-fk reverse join should compile");
+
+        let file_id = ObjectId::new();
+        let part_a = ObjectId::new();
+        let part_b = ObjectId::new();
+
+        let file = make_file_tuple(file_id, vec![part_a, part_b]);
+        let row_a = make_file_part_tuple(part_a, "A");
+        let row_b = make_file_part_tuple(part_b, "B");
+
+        node.process_right(TupleDelta {
+            added: vec![file],
+            ..Default::default()
+        });
+        let delta = node.process_left(TupleDelta {
+            added: vec![row_a, row_b],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            delta.added.len(),
+            2,
+            "reverse membership join should match file rows containing each part id"
+        );
+    }
+
     #[test]
     fn join_matches_on_key() {
         let mut node = JoinNode::from_row_descriptors(
@@ -474,6 +776,7 @@ mod tests {
         let result1 = node.process_left(TupleDelta {
             added: vec![user.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(result1.added.is_empty(), "No match yet");
@@ -482,6 +785,7 @@ mod tests {
         let result2 = node.process_right(TupleDelta {
             added: vec![post.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -512,12 +816,14 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
         let result = node.process_right(TupleDelta {
             added: vec![post],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -548,6 +854,7 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -555,6 +862,7 @@ mod tests {
         let result = node.process_right(TupleDelta {
             added: vec![post1, post2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -584,11 +892,13 @@ mod tests {
         node.process_left(TupleDelta {
             added: vec![user.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         node.process_right(TupleDelta {
             added: vec![post.clone()],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert_eq!(node.current_tuples().len(), 1);
@@ -597,6 +907,7 @@ mod tests {
         let result = node.process_right(TupleDelta {
             added: vec![],
             removed: vec![post],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -627,6 +938,7 @@ mod tests {
         let result1 = node.process_right(TupleDelta {
             added: vec![post],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
         assert!(result1.added.is_empty(), "No match yet");
@@ -635,10 +947,68 @@ mod tests {
         let result2 = node.process_left(TupleDelta {
             added: vec![user],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
         assert_eq!(result2.added.len(), 1);
         assert_eq!(node.current_tuples().len(), 1);
+    }
+
+    #[test]
+    fn join_supports_implicit_id_on_left() {
+        let mut node = JoinNode::from_row_descriptors(
+            "users",
+            users_without_explicit_id_descriptor(),
+            "posts",
+            posts_uuid_fk_descriptor(),
+            "users.id",
+            "posts.author_id",
+        )
+        .expect("Join with implicit id should compile");
+
+        let user_oid = ObjectId::new();
+        let post_oid = ObjectId::new();
+
+        let user = make_user_tuple_without_explicit_id(user_oid, "Alice");
+        let post = make_post_uuid_fk_tuple(post_oid, "Implicit Id Join", user_oid);
+
+        node.process_left(TupleDelta {
+            added: vec![user],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+        let result = node.process_right(TupleDelta {
+            added: vec![post],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+
+        assert_eq!(result.added.len(), 1, "Implicit id should match uuid FK");
+        assert_eq!(result.added[0].ids(), vec![user_oid, post_oid]);
+    }
+
+    #[test]
+    fn join_rejects_ambiguous_unqualified_implicit_id() {
+        let left = TupleDescriptor::from_tables(&[
+            ("users".to_string(), users_without_explicit_id_descriptor()),
+            ("teams".to_string(), users_without_explicit_id_descriptor()),
+        ])
+        .with_all_materialized();
+        let right =
+            TupleDescriptor::single_with_materialization("posts", posts_uuid_fk_descriptor(), true);
+
+        let node = JoinNode::new_with_refs(
+            left,
+            right,
+            JoinColumnRef::parse("id"),
+            JoinColumnRef::parse("author_id"),
+        );
+        assert!(
+            node.is_none(),
+            "Unqualified implicit id should fail when multiple left elements exist"
+        );
     }
 }

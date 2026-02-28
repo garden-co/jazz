@@ -51,12 +51,24 @@ function policyExprToSql(expr: PolicyExpr): string {
       return `${expr.column} IS NULL`;
     case "IsNotNull":
       return `${expr.column} IS NOT NULL`;
+    case "Contains":
+      return `${expr.column} CONTAINS ${policyValueToSql(expr.value)}`;
     case "In":
       return `${expr.column} IN @session.${expr.session_path.join(".")}`;
+    case "InList":
+      return `${expr.column} IN (${expr.values.map(policyValueToSql).join(", ")})`;
     case "Exists":
       return `EXISTS (SELECT FROM ${expr.table} WHERE ${policyExprToSql(expr.condition)})`;
+    case "ExistsRel":
+      return "EXISTS_REL(<relation_ir>)";
     case "Inherits":
-      return `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`;
+      return expr.max_depth === undefined
+        ? `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`
+        : `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column} MAX DEPTH ${expr.max_depth}`;
+    case "InheritsReferencing":
+      return expr.max_depth === undefined
+        ? `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${expr.source_table} VIA ${expr.via_column}`
+        : `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${expr.source_table} VIA ${expr.via_column} MAX DEPTH ${expr.max_depth}`;
     case "And":
       return expr.exprs.map((inner) => `(${policyExprToSql(inner)})`).join(" AND ");
     case "Or":
@@ -131,11 +143,18 @@ function tablePoliciesToSql(tableName: string, policies: TablePolicies | undefin
 }
 
 function formatDefaultValue(value: unknown): string {
+  if (value instanceof Uint8Array) {
+    const hex = [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `'\\\\x${hex}'`;
+  }
   if (typeof value === "string") {
     return `'${value.replace(/'/g, "''")}'`;
   }
   if (typeof value === "boolean") {
     return value ? "TRUE" : "FALSE";
+  }
+  if (value instanceof Date) {
+    return String(value.getTime());
   }
   if (typeof value === "number") {
     return String(value);

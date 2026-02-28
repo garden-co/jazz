@@ -2,13 +2,13 @@
 name = "jazz-wasm"
 version = "0.1.0"
 edition = "2021"
-description = "WebAssembly bindings for the Groove database engine"
+description = "WebAssembly bindings for the Jazz database engine"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-groove = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false }
+jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -43,3 +43,8 @@ web-sys = { version = "0.3", features = [
 
 [features]
 default = ["console_error_panic_hook"]
+
+# Even if the profiling profile is set, wasm-opt will strip off debug info unless the `-g` param is provided. 
+# See https://github.com/DataDog/js-instrumentation-wasm/pull/12
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ["-g"]

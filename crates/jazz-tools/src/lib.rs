@@ -1,5 +1,3 @@
-extern crate self as groove;
-
 pub mod commit;
 pub mod metadata;
 pub mod object;
@@ -9,11 +7,12 @@ pub mod runtime_core;
 pub mod schema_manager;
 pub mod storage;
 pub mod sync_manager;
+pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
-pub use runtime_tokio as groove_tokio;
+pub use runtime_tokio as jazz_tokio;
 
 #[cfg(feature = "transport")]
 pub mod transport_protocol;
@@ -44,7 +43,8 @@ pub use query_manager::query::{Query, QueryBuilder};
 pub use query_manager::session::Session;
 #[cfg(feature = "client")]
 pub use query_manager::types::{
-    ColumnType, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema, Value,
+    ColumnType, OrderedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,
+    Value,
 };
 #[cfg(feature = "client")]
 pub use schema_manager::AppId;
@@ -129,18 +129,18 @@ pub struct SubscriptionHandle(pub u64);
 /// Stream of row deltas from a subscription.
 #[cfg(feature = "client")]
 pub struct SubscriptionStream {
-    receiver: tokio::sync::mpsc::Receiver<RowDelta>,
+    receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>,
 }
 
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
-    pub(crate) fn new(receiver: tokio::sync::mpsc::Receiver<RowDelta>) -> Self {
+    pub(crate) fn new(receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>) -> Self {
         Self { receiver }
     }
 
     /// Get the next delta, waiting if necessary.
-    pub async fn next(&mut self) -> Option<RowDelta> {
+    pub async fn next(&mut self) -> Option<OrderedRowDelta> {
         self.receiver.recv().await
     }
 }

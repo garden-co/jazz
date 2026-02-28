@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
 use base64::Engine;
-use groove::query_manager::session::Session;
+use jazz_tools::query_manager::session::Session;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};

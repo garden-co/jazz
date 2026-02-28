@@ -1,15 +1,24 @@
 ---
 title: Overview
-description: Environment-switchable docs for Jazz 2 setup, schema, permissions, migration, and data APIs.
+description: The database that syncs.
 ---
 
-This docs site is built to keep examples executable and verifiable.
-Code snippets are sourced from real files in the repository and shown across TypeScript and Rust where possible.
+Jazz is a local-first relational database: your app reads and writes against a local replica first, then syncs with a server.
 
-## Sections
+You can use Jazz from React, Expo/React Native, and Svelte clients, plus backend/server contexts in TypeScript and Rust.
+
+## Quickstarts
 
 <Cards>
-  <Card title="React Quick Start" href="/docs/react-quick-start" />
+  <Card title="React Quick Start" href="/docs/quickstarts/react" />
+  <Card title="Expo Quick Start" href="/docs/quickstarts/expo" />
+  <Card title="Svelte Quick Start" href="/docs/quickstarts/svelte" />
+  <Card title="TypeScript Server Quick Start" href="/docs/quickstarts/typescript-server" />
+</Cards>
+
+## Reference
+
+<Cards>
   <Card title="Setup" href="/docs/setup" />
   <Card title="Authentication" href="/docs/authentication" />
   <Card title="Schemas" href="/docs/schemas" />
