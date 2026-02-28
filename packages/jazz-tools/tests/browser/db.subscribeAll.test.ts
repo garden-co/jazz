@@ -4,41 +4,54 @@ import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.j
 import type { WasmSchema } from "../../src/drivers/types.js";
 
 const schema: WasmSchema = {
-  tables: {
-    orgs: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
-    teams: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-        {
-          name: "parent_id",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "teams",
-        },
-      ],
-    },
-    users: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-      ],
-    },
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: false,
-        },
-      ],
-    },
+  orgs: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+    ],
+  },
+  file_parts: {
+    columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+  },
+  files: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "parts",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+        references: "file_parts",
+      },
+    ],
   },
 };
 
@@ -67,6 +80,18 @@ interface Todo {
   priority?: number;
   owner_id?: string;
   tags: string[];
+  payload?: Uint8Array;
+}
+
+interface FilePart {
+  id: string;
+  label: string;
+}
+
+interface File {
+  id: string;
+  name: string;
+  parts: string[];
 }
 
 const orgs: TableProxy<Org, Omit<Org, "id">> = {
@@ -95,6 +120,20 @@ const todos: TableProxy<Todo, Omit<Todo, "id">> = {
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as Omit<Todo, "id">,
+};
+
+const fileParts: TableProxy<FilePart, Omit<FilePart, "id">> = {
+  _table: "file_parts",
+  _schema: schema,
+  _rowType: {} as FilePart,
+  _initType: {} as Omit<FilePart, "id">,
+};
+
+const files: TableProxy<File, Omit<File, "id">> = {
+  _table: "files",
+  _schema: schema,
+  _rowType: {} as File,
+  _initType: {} as Omit<File, "id">,
 };
 
 function uniqueDbName(label: string): string {
@@ -151,6 +190,10 @@ async function waitForCondition(
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(errorMessage);
+}
+
+function hasChangeForId<T>(delta: SubscriptionDelta<T>, kind: 0 | 1 | 2, id: string): boolean {
+  return delta.delta.some((change) => change.kind === kind && change.id === id);
 }
 
 describe("db.subscribeAll browser integration", () => {
@@ -256,6 +299,20 @@ describe("db.subscribeAll browser integration", () => {
         tags: ["x"],
       },
     },
+    {
+      name: "eq-bytea",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
+      }),
+      insert: {
+        title: "eq-bytea-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+        payload: new Uint8Array([1, 2, 3]),
+      },
+    },
   ];
 
   function track(db: Db): Db {
@@ -293,7 +350,7 @@ describe("db.subscribeAll browser integration", () => {
     await conditionsDb.shutdown();
   });
 
-  it("emits added, updated, removed, and all", async () => {
+  it("emits add, update, remove changes and all", async () => {
     const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("delta") }));
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
@@ -317,7 +374,7 @@ describe("db.subscribeAll browser integration", () => {
     });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.added.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 0, id)),
       4000,
       "expected add delta",
     );
@@ -325,7 +382,7 @@ describe("db.subscribeAll browser integration", () => {
     db.update(todos, id, { title: "watch-me-updated" });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.updated.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 2, id)),
       4000,
       "expected update delta",
     );
@@ -333,7 +390,7 @@ describe("db.subscribeAll browser integration", () => {
     db.update(todos, id, { done: true });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.removed.some((row) => row.id === id)),
+      () => deltas.some((delta) => hasChangeForId(delta, 1, id)),
       4000,
       "expected remove delta",
     );
@@ -356,7 +413,7 @@ describe("db.subscribeAll browser integration", () => {
       const insertedId = conditionsDb.insert(todos, testCase.insert);
 
       await waitForCondition(
-        () => deltas.some((delta) => delta.added.some((row) => row.id === insertedId)),
+        () => deltas.some((delta) => hasChangeForId(delta, 0, insertedId)),
         4000,
         `expected add delta for ${testCase.name}`,
       );
@@ -364,6 +421,41 @@ describe("db.subscribeAll browser integration", () => {
       unsubscribe();
     });
   }
+
+  it("emits BYTEA columns as Uint8Array", async () => {
+    const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("bytea") }));
+
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<Todo>("todos", {
+          conditions: [{ column: "title", op: "eq", value: "bytes-hit" }],
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    const id = db.insert(todos, {
+      title: "bytes-hit",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+      payload: new Uint8Array([9, 8, 7, 0]),
+    });
+
+    await waitForCondition(
+      () => deltas.some((delta) => hasChangeForId(delta, 0, id)),
+      4000,
+      "expected bytea add delta",
+    );
+
+    const added = deltas.flatMap((delta) => delta.all).find((row) => row.id === id);
+    expect(added?.payload).toBeInstanceOf(Uint8Array);
+    expect(Array.from(added?.payload ?? [])).toEqual([9, 8, 7, 0]);
+
+    unsubscribe();
+  });
 
   it("supports orderBy + limit + offset", async () => {
     const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("order") }));
@@ -435,7 +527,7 @@ describe("db.subscribeAll browser integration", () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(deltas.some((delta) => delta.added.some((row) => row.id === insertedId))).toBe(false);
+    expect(deltas.some((delta) => hasChangeForId(delta, 0, insertedId))).toBe(false);
 
     unsubscribe();
   });
@@ -458,7 +550,7 @@ describe("db.subscribeAll browser integration", () => {
     const userId = db.insert(users, { name: "Owner", team_id: undefined });
 
     await waitForCondition(
-      () => deltas.some((delta) => delta.added.some((row) => row.id === userId)),
+      () => deltas.some((delta) => hasChangeForId(delta, 0, userId)),
       4000,
       "expected include query subscription delta",
     );
@@ -489,6 +581,100 @@ describe("db.subscribeAll browser integration", () => {
       4000,
       "expected hop query subscription result",
     );
+
+    unsubscribe();
+  });
+
+  it("reacts to scalar FK updates in hop subscriptions", async () => {
+    const db = track(
+      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("scalar-fk-update") }),
+    );
+
+    const orgAId = db.insert(orgs, { name: "Org A" });
+    const orgBId = db.insert(orgs, { name: "Org B" });
+    const teamAId = db.insert(teams, { name: "Team A", org_id: orgAId, parent_id: undefined });
+    const teamBId = db.insert(teams, { name: "Team B", org_id: orgBId, parent_id: undefined });
+    const userId = db.insert(users, { name: "Mover", team_id: teamAId });
+
+    const deltas: Array<SubscriptionDelta<Team>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<Team>("users", {
+          conditions: [{ column: "id", op: "eq", value: userId }],
+          hops: ["team"],
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return latestAll.length === 1 && latestAll[0]?.id === teamAId;
+      },
+      4000,
+      "expected initial team hop result",
+    );
+
+    db.update(users, userId, { team_id: teamBId });
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return latestAll.length === 1 && latestAll[0]?.id === teamBId;
+      },
+      4000,
+      "expected hop result to move after scalar FK update",
+    );
+
+    expect(deltas.some((delta) => delta.all.some((row) => row.id === teamAId))).toBe(true);
+    expect(deltas.some((delta) => delta.all.some((row) => row.id === teamBId))).toBe(true);
+
+    unsubscribe();
+  });
+
+  it("reacts to UUID[] FK updates in hop subscriptions", async () => {
+    const db = track(
+      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("array-fk-update") }),
+    );
+
+    const partAId = db.insert(fileParts, { label: "A" });
+    const partBId = db.insert(fileParts, { label: "B" });
+    const fileId = db.insert(files, { name: "File", parts: [partAId] });
+
+    const deltas: Array<SubscriptionDelta<FilePart>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<FilePart>("files", {
+          conditions: [{ column: "id", op: "eq", value: fileId }],
+          hops: ["parts"],
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return latestAll.length === 1 && latestAll[0]?.id === partAId;
+      },
+      4000,
+      "expected initial UUID[] hop result",
+    );
+
+    db.update(files, fileId, { parts: [partBId] });
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return latestAll.length === 1 && latestAll[0]?.id === partBId;
+      },
+      4000,
+      "expected hop result to move after UUID[] FK update",
+    );
+
+    expect(deltas.some((delta) => delta.all.some((row) => row.id === partAId))).toBe(true);
+    expect(deltas.some((delta) => delta.all.some((row) => row.id === partBId))).toBe(true);
 
     unsubscribe();
   });

@@ -13,7 +13,10 @@ import {
   generateClientId,
   buildEventsUrl,
   applyUserAuthHeaders,
+  isCataloguePayload,
+  isExpectedFetchAbortError,
 } from "../runtime/sync-transport.js";
+import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -37,12 +40,14 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let streamConnecting = false;
 let streamAttached = false;
+const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
 let pendingSyncPayloadsForMain: string[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
+let bootstrapCatalogueForwarding = false;
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
@@ -90,6 +95,7 @@ async function startup(): Promise<void> {
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
+    const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;
@@ -112,7 +118,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Open persistent OPFS-backed runtime with Worker tier
     runtime = await wasmModule.WasmRuntime.openPersistent(
-      msg.schemaJson,
+      schemaJson,
       msg.appId,
       msg.env,
       msg.userBranch,
@@ -155,10 +161,19 @@ async function handleInit(msg: InitMessage): Promise<void> {
           payload: [JSON.stringify(parsed.payload)],
         });
       } else if (parsed.destination && "Server" in parsed.destination) {
+        if (bootstrapCatalogueForwarding) {
+          if (isCataloguePayload(parsed.payload)) {
+            enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+          }
+          return;
+        }
+
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
           void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
-            console.error("[worker] Sync POST error:", error);
+            if (!isExpectedFetchAbortError(error)) {
+              console.error("[worker] Sync POST error:", error);
+            }
             detachServer();
             scheduleReconnect();
           });
@@ -185,6 +200,17 @@ async function handleInit(msg: InitMessage): Promise<void> {
       for (const payload of buffered.payload) {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
+    }
+
+    // Bootstrap catalogue-only sync from worker to main runtime.
+    // This sends persisted schema/lens objects (including rehydrated ones)
+    // without syncing user data rows.
+    bootstrapCatalogueForwarding = true;
+    try {
+      runtime.addServer();
+      runtime.removeServer();
+    } finally {
+      bootstrapCatalogueForwarding = false;
     }
 
     post({ type: "init-ok", clientId: mainClientId! });
@@ -263,14 +289,23 @@ async function connectStream(): Promise<void> {
   applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
 
   streamAbortController = new AbortController();
+  let streamConnectTimedOut = false;
+  const streamConnectTimeout = setTimeout(() => {
+    if (streamAbortController && !streamAbortController.signal.aborted) {
+      streamConnectTimedOut = true;
+      streamAbortController.abort();
+    }
+  }, streamConnectTimeoutMs);
 
   try {
     const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
+    console.log("[worker] Stream connect attempt", { eventsUrl });
 
     const response = await fetch(eventsUrl, {
       headers,
       signal: streamAbortController.signal,
     });
+    clearTimeout(streamConnectTimeout);
 
     if (!response.ok) {
       console.error(`[worker] Stream connect failed: ${response.status}`);
@@ -280,13 +315,26 @@ async function connectStream(): Promise<void> {
       return;
     }
 
-    const reader = response.body!.getReader();
+    if (!response.body || typeof response.body.getReader !== "function") {
+      console.error("[worker] Stream connect failed: fetch response body stream unavailable", {
+        hasBody: Boolean(response.body),
+        bodyType: response.body ? typeof response.body : "undefined",
+        url: eventsUrl,
+      });
+      detachServer();
+      streamConnecting = false;
+      scheduleReconnect();
+      return;
+    }
+
+    const reader = response.body.getReader();
     let connected = false;
     await readBinaryFrames(
       reader,
       {
         onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
         onConnected: (clientId) => {
+          console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;
           if (!connected) {
             connected = true;
@@ -297,9 +345,24 @@ async function connectStream(): Promise<void> {
       "[worker] ",
     );
   } catch (e: any) {
-    if (e?.name === "AbortError") return;
+    if (e?.name === "AbortError") {
+      if (streamConnectTimedOut) {
+        console.error(`[worker] Stream connect timeout after ${streamConnectTimeoutMs}ms`);
+        const fetchBaseHint = (globalThis.fetch as { __jazzRnFetchBaseHint?: string } | undefined)
+          ?.__jazzRnFetchBaseHint;
+        if (fetchBaseHint === "whatwg-fetch/xhr") {
+          console.error(
+            "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
+          );
+        }
+        detachServer();
+        scheduleReconnect();
+      }
+      return;
+    }
     console.error("[worker] Stream connect error:", e);
   } finally {
+    clearTimeout(streamConnectTimeout);
     streamConnecting = false;
   }
 
@@ -477,6 +540,41 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
+      break;
+
+    case "debug-schema-state":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "debug-schema-state requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        const state = runtime.__debugSchemaState();
+        post({ type: "debug-schema-state-ok", state });
+      } catch (error: any) {
+        post({ type: "error", message: `debug-schema-state failed: ${error?.message ?? error}` });
+      }
+      break;
+
+    case "debug-seed-live-schema":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "debug-seed-live-schema requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        runtime.__debugSeedLiveSchema(normalizeRuntimeSchemaJson(msg.schemaJson));
+        post({ type: "debug-seed-live-schema-ok" });
+      } catch (error: any) {
+        post({
+          type: "error",
+          message: `debug-seed-live-schema failed: ${error?.message ?? error}`,
+        });
+      }
       break;
   }
 };

@@ -2,23 +2,11 @@
  * Transform WASM row results to typed TypeScript objects.
  */
 
-import type { WasmRow, WasmSchema } from "../drivers/types.js";
+import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
+import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 
-/**
- * WasmValue union type - matches the tsify output from Rust.
- * Each variant has a type discriminator and optional value.
- */
-export type WasmValue =
-  | { type: "Text"; value: string }
-  | { type: "Uuid"; value: string }
-  | { type: "Boolean"; value: boolean }
-  | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
-  | { type: "Timestamp"; value: number }
-  | { type: "Null" }
-  | { type: "Array"; value: WasmValue[] }
-  | { type: "Row"; value: WasmValue[] };
+export type { WasmValue };
 
 export interface IncludeSpec {
   [relationName: string]: boolean | IncludeSpec;
@@ -28,6 +16,28 @@ type IncludePlan = {
   relation: Relation;
   nested: IncludePlan[];
 };
+
+function toByteArray(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    const bytes = value.map((entry) => {
+      if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0 || entry > 255) {
+        throw new Error("Invalid Bytea array value. Expected integers in range 0..255.");
+      }
+      return entry;
+    });
+    return new Uint8Array(bytes);
+  }
+
+  throw new Error("Invalid Bytea value. Expected Uint8Array or byte array.");
+}
 
 function buildIncludePlans(
   tableName: string,
@@ -78,7 +88,7 @@ function transformRowValues(
   includePlans: IncludePlan[],
   rowId?: string,
 ): Record<string, unknown> {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
@@ -92,7 +102,7 @@ function transformRowValues(
     const col = table.columns[i];
     const value = values[i];
     if (value !== undefined) {
-      obj[col.name] = unwrapValue(value);
+      obj[col.name] = unwrapValue(value, col.column_type);
     }
   }
 
@@ -106,26 +116,45 @@ function transformRowValues(
   return obj;
 }
 
-/**
- * Unwrap a WasmValue to its JavaScript equivalent.
- */
-export function unwrapValue(v: WasmValue): unknown {
+export function unwrapValue(v: WasmValue, columnType?: ColumnType): unknown {
   switch (v.type) {
     case "Text":
+      if (columnType?.type === "Json") {
+        try {
+          return JSON.parse(v.value);
+        } catch (error) {
+          throw new Error(
+            `Invalid stored JSON value: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      return v.value;
     case "Uuid":
       return v.value;
     case "Boolean":
       return v.value;
     case "Integer":
     case "BigInt":
-    case "Timestamp":
+    case "Double":
       return v.value;
+    case "Timestamp":
+      return new Date(v.value);
+    case "Bytea":
+      return toByteArray((v as { value: unknown }).value);
     case "Null":
       return undefined;
     case "Array":
-      return v.value.map(unwrapValue);
+      if (columnType?.type === "Array") {
+        return v.value.map((entry) => unwrapValue(entry, columnType.element));
+      }
+      return v.value.map((entry) => unwrapValue(entry));
     case "Row":
-      return v.value.map(unwrapValue);
+      if (columnType?.type === "Row") {
+        return v.value.map((entry, index) =>
+          unwrapValue(entry, columnType.columns[index]?.column_type),
+        );
+      }
+      return v.value.map((entry) => unwrapValue(entry));
   }
 }
 
@@ -144,7 +173,7 @@ export function transformRows<T>(
   tableName: string,
   includes: IncludeSpec = {},
 ): T[] {
-  if (!schema.tables[tableName]) {
+  if (!schema[tableName]) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
 

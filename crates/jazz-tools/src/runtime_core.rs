@@ -36,7 +36,7 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{RowDelta, Schema, TableName, Value};
+use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
@@ -178,8 +178,8 @@ pub struct TickOutput {
 pub struct SubscriptionDelta {
     /// The subscription handle.
     pub handle: SubscriptionHandle,
-    /// The row changes (binary encoded).
-    pub delta: RowDelta,
+    /// The row changes with position-annotated ordering.
+    pub ordered_delta: OrderedRowDelta,
     /// Output descriptor for decoding the binary row data.
     /// Use with `decode_row(&descriptor, &row.data)` to get `Vec<Value>`.
     pub descriptor: crate::query_manager::types::RowDescriptor,
@@ -328,6 +328,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Get mutable access to the underlying SchemaManager.
     pub fn schema_manager_mut(&mut self) -> &mut SchemaManager {
         &mut self.schema_manager
+    }
+
+    /// Add a historical live schema and persist both schema and lens catalogue objects.
+    pub fn add_live_schema_and_persist_catalogue(
+        &mut self,
+        schema: Schema,
+    ) -> Result<(), crate::schema_manager::context::SchemaError> {
+        let lens = self.schema_manager.add_live_schema(schema.clone())?.clone();
+        self.schema_manager
+            .persist_schema_object(&mut self.storage, &schema);
+        self.schema_manager.persist_lens(&mut self.storage, &lens);
+        Ok(())
     }
 
     /// Get access to the underlying SchemaManager.

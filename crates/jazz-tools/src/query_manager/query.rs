@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
-use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
+use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
@@ -480,10 +480,17 @@ impl Query {
         self.order_by
             .iter()
             .filter_map(|(col, dir)| {
-                descriptor.column_index(col).map(|idx| SortKey {
-                    col_index: idx,
-                    direction: *dir,
-                })
+                if col == "id" || col == "_id" {
+                    Some(SortKey {
+                        target: SortTarget::RowId,
+                        direction: *dir,
+                    })
+                } else {
+                    descriptor.column_index(col).map(|idx| SortKey {
+                        target: SortTarget::Column(idx),
+                        direction: *dir,
+                    })
+                }
             })
             .collect()
     }
@@ -1100,7 +1107,12 @@ mod tests {
     fn test_descriptor_with_array() -> RowDescriptor {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ])
     }
 
@@ -1228,10 +1240,21 @@ mod tests {
 
         let keys = query.sort_keys(&descriptor);
         assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0].col_index, 1); // name
+        assert_eq!(keys[0].target, SortTarget::Column(1)); // name
         assert_eq!(keys[0].direction, SortDirection::Ascending);
-        assert_eq!(keys[1].col_index, 2); // score
+        assert_eq!(keys[1].target, SortTarget::Column(2)); // score
         assert_eq!(keys[1].direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn query_sort_keys_supports_row_id() {
+        let descriptor = test_descriptor();
+        let query = QueryBuilder::new("users").order_by("id").build();
+
+        let keys = query.sort_keys(&descriptor);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].target, SortTarget::RowId);
+        assert_eq!(keys[0].direction, SortDirection::Ascending);
     }
 
     #[test]

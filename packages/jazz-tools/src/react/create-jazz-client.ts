@@ -4,6 +4,7 @@ import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { createDbFromInspectedPage } from "../dev-tools/index.js";
 
 export interface JazzClient {
   db: Db;
@@ -19,7 +20,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     resolveClientSession(resolvedConfig),
   ]);
 
-  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db);
+  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db, session);
   await manager.init();
 
   return {
@@ -35,4 +36,29 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {
   return trackPromise(createJazzClientInternal(config));
+}
+
+async function createExtensionJazzClientInternal(): Promise<JazzClient> {
+  const db = await createDbFromInspectedPage();
+  const connectedConfig = db.getConnectedConfig();
+  if (!connectedConfig) {
+    throw new Error("DevTools bridge did not provide an inspected page config.");
+  }
+
+  const manager = new SubscriptionsOrchestrator({ appId: connectedConfig.appId }, db);
+  await manager.init();
+
+  return {
+    db,
+    session: null,
+    manager,
+    async shutdown() {
+      await manager.shutdown();
+      await db.shutdown();
+    },
+  };
+}
+
+export function createExtensionJazzClient(): Promise<JazzClient> {
+  return trackPromise(createExtensionJazzClientInternal());
 }

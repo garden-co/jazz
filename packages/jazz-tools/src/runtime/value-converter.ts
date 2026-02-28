@@ -5,8 +5,16 @@
  * into the Value[] format expected by JazzClient.
  */
 
-import type { WasmSchema, ColumnType } from "../drivers/types.js";
-import type { WasmValue } from "./row-transformer.js";
+import type { WasmSchema, ColumnType, Value as WasmValue } from "../drivers/types.js";
+import { toJsonText } from "./json-text.js";
+
+function toTimestampMs(value: unknown): number {
+  const numeric = value instanceof Date ? value.getTime() : Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new Error("Invalid timestamp value. Expected Date or finite number.");
+  }
+  return numeric;
+}
 
 /**
  * Convert a JS value to WasmValue based on column type.
@@ -25,10 +33,30 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       return { type: "Integer", value: Number(value) };
     case "BigInt":
       return { type: "BigInt", value: Number(value) };
+    case "Double":
+      return { type: "Double", value: Number(value) };
     case "Timestamp":
-      return { type: "Timestamp", value: Number(value) };
+      return { type: "Timestamp", value: toTimestampMs(value) };
     case "Uuid":
       return { type: "Uuid", value: String(value) };
+    case "Bytea": {
+      if (value instanceof Uint8Array) {
+        return { type: "Bytea", value };
+      }
+      if (Array.isArray(value)) {
+        const bytes = value.map((entry) => {
+          const n = Number(entry);
+          if (!Number.isInteger(n) || n < 0 || n > 255) {
+            throw new Error("Bytea arrays must contain integers in range 0..255");
+          }
+          return n;
+        });
+        return { type: "Bytea", value: new Uint8Array(bytes) };
+      }
+      throw new Error("Expected Uint8Array or byte array for Bytea column type");
+    }
+    case "Json":
+      return { type: "Text", value: toJsonText(value) };
     case "Enum": {
       const enumValue = String(value);
       if (!columnType.variants.includes(enumValue)) {
@@ -78,7 +106,7 @@ export function toValueArray(
   schema: WasmSchema,
   tableName: string,
 ): WasmValue[] {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }
@@ -105,7 +133,7 @@ export function toUpdateRecord(
   schema: WasmSchema,
   tableName: string,
 ): Record<string, WasmValue> {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }

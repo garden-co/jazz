@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TabLeaderElection } from "./tab-leader-election.js";
+import type { LeaderLockStrategy } from "./leader-lock.js";
 
 class MockBroadcastChannel {
   static channels = new Map<string, Set<MockBroadcastChannel>>();
@@ -68,6 +69,31 @@ class MockBroadcastChannel {
 describe("TabLeaderElection", () => {
   const originalBroadcastChannel = (globalThis as { BroadcastChannel?: unknown }).BroadcastChannel;
   const elections: TabLeaderElection[] = [];
+  const lockOwners = new Map<string, string>();
+
+  function createLockStrategyForTab(
+    tabId: string,
+    canAcquire: () => boolean = () => true,
+  ): LeaderLockStrategy {
+    return {
+      async tryAcquire(lockName: string) {
+        if (!canAcquire()) return null;
+        const owner = lockOwners.get(lockName);
+        if (owner && owner !== tabId) return null;
+        lockOwners.set(lockName, tabId);
+        let released = false;
+        return {
+          release: () => {
+            if (released) return;
+            released = true;
+            if (lockOwners.get(lockName) === tabId) {
+              lockOwners.delete(lockName);
+            }
+          },
+        };
+      },
+    };
+  }
 
   function createElection(
     tabId: string,
@@ -78,8 +104,8 @@ describe("TabLeaderElection", () => {
       dbName: "test-db",
       heartbeatMs: 100,
       leaseMs: 280,
-      initialElectionDelayMs: 120,
       tabId,
+      lockStrategy: createLockStrategyForTab(tabId),
       ...options,
     });
     elections.push(election);
@@ -108,6 +134,7 @@ describe("TabLeaderElection", () => {
       election.stop();
     }
     MockBroadcastChannel.reset();
+    lockOwners.clear();
     (globalThis as { BroadcastChannel?: unknown }).BroadcastChannel = originalBroadcastChannel;
     vi.useRealTimers();
   });
@@ -172,7 +199,7 @@ describe("TabLeaderElection", () => {
     expect(nextState.term).toBeGreaterThan(0);
   });
 
-  it("uses a deterministic tie-breaker when claims happen in the same term", async () => {
+  it("converges to a single leader when two tabs start together", async () => {
     const a = createElection("tab-a");
     const z = createElection("tab-z");
 
@@ -182,8 +209,7 @@ describe("TabLeaderElection", () => {
 
     const stateA = a.snapshot();
     const stateZ = z.snapshot();
-    expect(stateA.leaderTabId).toBe("tab-z");
-    expect(stateZ.leaderTabId).toBe("tab-z");
+    expect(stateA.leaderTabId).toBe(stateZ.leaderTabId);
     expect(stateA.term).toBe(stateZ.term);
     expect([stateA.role, stateZ.role].sort()).toEqual(["follower", "leader"]);
   });
@@ -241,7 +267,7 @@ describe("TabLeaderElection", () => {
 
   it("waitForInitialLeader rejects if stopped before a leader is chosen", async () => {
     const election = createElection("tab-a", {
-      initialElectionDelayMs: 500,
+      lockStrategy: createLockStrategyForTab("tab-a", () => false),
     });
     election.start();
     const leaderPromise = election.waitForInitialLeader(2000);
@@ -263,5 +289,49 @@ describe("TabLeaderElection", () => {
     expect(state.role).toBe("leader");
     expect(state.leaderTabId).toBe("tab-a");
     expect(state.term).toBeGreaterThan(0);
+  });
+
+  it("uses take-then-ask-forgiveness startup: probe first, discover on failure", async () => {
+    const leader = createElection("tab-a", {
+      lockStrategy: createLockStrategyForTab("tab-a", () => true),
+    });
+    leader.start();
+    await advance(140);
+    expect(leader.snapshot().role).toBe("leader");
+
+    const follower = createElection("tab-b", {
+      lockStrategy: createLockStrategyForTab("tab-b", () => false),
+    });
+    follower.start();
+    await advance(220);
+
+    const state = follower.snapshot();
+    expect(state.role).toBe("follower");
+    expect(state.leaderTabId).toBe("tab-a");
+    expect(state.term).toBe(leader.snapshot().term);
+  });
+
+  it("re-probes on leader loss and promotes when lock probe succeeds", async () => {
+    const first = createElection("tab-a", {
+      lockStrategy: createLockStrategyForTab("tab-a", () => true),
+    });
+    let secondCanLead = false;
+    const second = createElection("tab-b", {
+      lockStrategy: createLockStrategyForTab("tab-b", () => secondCanLead),
+    });
+
+    first.start();
+    second.start();
+    await advance(260);
+    expect(first.snapshot().role).toBe("leader");
+    expect(second.snapshot().role).toBe("follower");
+
+    first.stop();
+    secondCanLead = true;
+    await advance(360);
+
+    const nextState = second.snapshot();
+    expect(nextState.role).toBe("leader");
+    expect(nextState.leaderTabId).toBe("tab-b");
   });
 });

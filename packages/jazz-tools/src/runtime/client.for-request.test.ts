@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
 
@@ -15,6 +15,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 function makeClient() {
   const queryCalls: Array<[string, string | undefined, string | undefined]> = [];
   const subscribeCalls: Array<[string, string | undefined, string | undefined]> = [];
+  const subscribeCallbacks: Array<Function> = [];
 
   const runtime: Runtime = {
     insert: () => "00000000-0000-0000-0000-000000000001",
@@ -26,11 +27,12 @@ function makeClient() {
     },
     subscribe: (
       queryJson: string,
-      _onUpdate: Function,
+      onUpdate: Function,
       sessionJson?: string | null,
       settledTier?: string | null,
     ) => {
       subscribeCalls.push([queryJson, sessionJson ?? undefined, settledTier ?? undefined]);
+      subscribeCallbacks.push(onUpdate);
       return 1;
     },
     unsubscribe: () => {},
@@ -42,13 +44,13 @@ function makeClient() {
     addServer: () => {},
     removeServer: () => {},
     addClient: () => "00000000-0000-0000-0000-000000000001",
-    getSchema: () => ({ tables: {} }),
+    getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };
 
   const context: AppContext = {
     appId: "test-app",
-    schema: { tables: {} },
+    schema: {},
     serverUrl: "http://localhost:1625",
     backendSecret: "test-backend-secret",
   };
@@ -60,6 +62,7 @@ function makeClient() {
     client: new JazzClientCtor(runtime, context),
     queryCalls,
     subscribeCalls,
+    subscribeCallbacks,
   };
 }
 
@@ -163,5 +166,60 @@ describe("JazzClient.forRequest", () => {
 
     expect(subId).toBe(1);
     expect(subscribeCalls[0][0]).toBe(builder._build());
+  });
+
+  it("forwards structured RN delta payloads to subscription callbacks", () => {
+    const { client, subscribeCallbacks } = makeClient();
+    const callback = vi.fn();
+    client.subscribe('{"table":"todos"}', callback);
+
+    subscribeCallbacks[0](
+      JSON.stringify({
+        added: [{ row: { id: "row-a", values: [] }, index: 0 }],
+        removed: [{ row: { id: "row-r", values: [] }, index: 1 }],
+        updated: [
+          {
+            old_row: { id: "row-u", values: [] },
+            new_row: { id: "row-u", values: [] },
+            old_index: 0,
+            new_index: 0,
+          },
+        ],
+        pending: false,
+      }),
+    );
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith({
+      added: [{ row: { id: "row-a", values: [] }, index: 0 }],
+      removed: [{ row: { id: "row-r", values: [] }, index: 1 }],
+      updated: [
+        {
+          old_row: { id: "row-u", values: [] },
+          new_row: { id: "row-u", values: [] },
+          old_index: 0,
+          new_index: 0,
+        },
+      ],
+      pending: false,
+    });
+  });
+
+  it("forwards partial structured deltas without throwing", () => {
+    const { client, subscribeCallbacks } = makeClient();
+    const callback = vi.fn();
+    client.subscribe('{"table":"todos"}', callback);
+
+    expect(() =>
+      subscribeCallbacks[0](
+        JSON.stringify({
+          pending: true,
+        }),
+      ),
+    ).not.toThrow();
+
+    expect(callback).toHaveBeenCalledWith({
+      pending: true,
+    });
   });
 });

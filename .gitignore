@@ -8,12 +8,16 @@ dist/
 
 # Build artifacts
 *.tsbuildinfo
+.svelte-kit/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# Agents
+.claude/settings.local.json
 
 # OS
 .DS_Store

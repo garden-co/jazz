@@ -1,0 +1,8 @@
+import { Callout } from "fumadocs-ui/components/callout";
+
+<Callout title="Chainable and immutable">
+  Queries are chainable, so you can build them step by step.
+
+Each call returns a new query object instead of mutating the previous one. That lets you extract reusable fragments (for example `const openTodos = app.todos.where({ done: false })`) and compose them into multiple derived queries without side effects.
+
+</Callout>

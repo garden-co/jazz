@@ -1,5 +1,5 @@
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { JazzProvider, useDb, useSession } from "../../src/react-core/provider.js";
 import { useAll, useAllSuspense } from "../../src/react-core/use-all.js";
@@ -56,10 +56,8 @@ type TestClientOptions = {
 const BASE_QUERY: QueryBuilder<Todo> = {
   _table: "todos",
   _schema: {
-    tables: {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
+    todos: {
+      columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
     },
   } as any,
   _rowType: {} as Todo,
@@ -259,7 +257,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Alpha|Beta");
   });
 
-  it("RCB-B10: delta update path (added/updated/removed) is reflected in rendered list", async () => {
+  it("RCB-B10: delta change stream is reflected in rendered list", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>({
       status: "fulfilled",
@@ -282,9 +280,7 @@ describe("react-core provider/hooks browser coverage", () => {
         { id: "a", title: "Alpha" },
         { id: "b", title: "Beta" },
       ],
-      added: [{ id: "b", title: "Beta" }],
-      updated: [],
-      removed: [],
+      delta: [{ kind: 0, id: "b", index: 1, item: { id: "b", values: [] } as any }],
     });
     await expectText("rows", "Alpha|Beta");
 
@@ -293,17 +289,13 @@ describe("react-core provider/hooks browser coverage", () => {
         { id: "b", title: "Beta*" },
         { id: "a", title: "Alpha" },
       ],
-      added: [],
-      updated: [{ id: "b", title: "Beta*" }],
-      removed: [],
+      delta: [{ kind: 2, id: "b", index: 0 }],
     });
     await expectText("rows", "Beta*|Alpha");
 
     entry.emitDelta({
       all: [{ id: "b", title: "Beta*" }],
-      added: [],
-      updated: [],
-      removed: [{ id: "a", title: "Alpha" }],
+      delta: [{ kind: 1, id: "a", index: 1 }],
     });
     await expectText("rows", "Beta*");
   });

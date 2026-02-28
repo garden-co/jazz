@@ -10,10 +10,11 @@ use crate::sync_manager::PersistenceTier;
 use crate::query_manager::types::Value;
 
 use super::key_codec::{
-    ack_key, branch_tips_key, commit_key, commit_prefix, index_entry_key, index_prefix,
-    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+    ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
+    commit_prefix, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
+    obj_meta_key, parse_uuid_from_index_key,
 };
-use super::{LoadedBranch, StorageError};
+use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, StorageError};
 
 fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -171,6 +172,60 @@ pub(super) fn store_ack_tier_core(
     set(&key, &json)
 }
 
+pub(super) fn append_catalogue_manifest_op_core(
+    app_id: ObjectId,
+    op: CatalogueManifestOp,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = catalogue_manifest_op_key(app_id, op.object_id());
+
+    if let Some(existing) = get(&key)? {
+        let existing_op: CatalogueManifestOp = decode_json(&existing, "catalogue manifest op")?;
+        if existing_op == op {
+            return Ok(());
+        }
+        return Err(StorageError::IoError(format!(
+            "conflicting catalogue manifest op for object {}",
+            op.object_id()
+        )));
+    }
+
+    let json = encode_json(&op, "catalogue manifest op")?;
+    set(&key, &json)
+}
+
+pub(super) fn append_catalogue_manifest_ops_core(
+    app_id: ObjectId,
+    ops: &[CatalogueManifestOp],
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    for op in ops {
+        append_catalogue_manifest_op_core(app_id, op.clone(), &mut get, &mut set)?;
+    }
+    Ok(())
+}
+
+pub(super) fn load_catalogue_manifest_core(
+    app_id: ObjectId,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Option<CatalogueManifest>, StorageError> {
+    let prefix = catalogue_manifest_op_prefix(app_id);
+    let entries = scan_prefix(&prefix)?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    let mut manifest = CatalogueManifest::default();
+    for (_key, data) in entries {
+        let op: CatalogueManifestOp = decode_json(&data, "catalogue manifest op")?;
+        manifest.apply(&op);
+    }
+
+    Ok(Some(manifest))
+}
+
 pub(super) fn index_insert_core(
     table: &str,
     column: &str,
@@ -202,6 +257,22 @@ pub(super) fn index_lookup_core(
     value: &Value,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Vec<ObjectId> {
+    // IEEE 754: -0.0 == 0.0, so scan both prefixes and merge.
+    if super::is_double_zero(value) {
+        let mut result = HashSet::new();
+        for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
+            let prefix = index_value_prefix(table, column, branch, zero);
+            if let Ok(keys) = scan_prefix_keys(&prefix) {
+                for key in &keys {
+                    if let Some(id) = parse_uuid_from_index_key(key) {
+                        result.insert(id);
+                    }
+                }
+            }
+        }
+        return result.into_iter().collect();
+    }
+
     let prefix = index_value_prefix(table, column, branch, value);
     scan_prefix_keys(&prefix)
         .map(|keys| {

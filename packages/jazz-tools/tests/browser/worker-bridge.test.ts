@@ -12,27 +12,38 @@ import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runt
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
+interface DebugLensEdgeState {
+  sourceHash: string;
+  targetHash: string;
+}
+
+interface DebugSchemaState {
+  currentSchemaHash: string;
+  liveSchemaHashes: string[];
+  knownSchemaHashes: string[];
+  pendingSchemaHashes: string[];
+  lensEdges: DebugLensEdgeState[];
+}
+
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
 // ---------------------------------------------------------------------------
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: true,
-        },
-      ],
-    },
-    projects: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: true,
+      },
+    ],
+  },
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
   },
 };
 
@@ -51,11 +62,27 @@ interface TodoInit {
   tags?: string[];
 }
 
+interface Project {
+  id: string;
+  name: string;
+}
+
+interface ProjectInit {
+  name: string;
+}
+
 const todos: TableProxy<Todo, TodoInit> = {
   _table: "todos",
   _schema: schema,
   _rowType: {} as Todo,
   _initType: {} as TodoInit,
+};
+
+const projects: TableProxy<Project, ProjectInit> = {
+  _table: "projects",
+  _schema: schema,
+  _rowType: {} as Project,
+  _initType: {} as ProjectInit,
 };
 
 /** QueryBuilder that selects all todos. */
@@ -89,6 +116,47 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
     },
   };
 }
+
+// Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
+const catalogueSchemaV1: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+    ],
+  },
+};
+
+const catalogueSchemaV2: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+      { name: "description", column_type: { type: "Text" }, nullable: true },
+    ],
+  },
+};
+
+interface CatalogueTodo {
+  id: string;
+  title: string;
+  completed: boolean;
+  description?: string;
+}
+
+const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
+  _table: "todos",
+  _schema: catalogueSchemaV2,
+  _rowType: {} as CatalogueTodo,
+  _build() {
+    return JSON.stringify({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+    });
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -357,6 +425,72 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
   });
 
+  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete-storage") }));
+
+    await db.insertWithAck(todos, { title: "Should be deleted", done: false }, "worker");
+    const before = await db.all(allTodos, "worker");
+    expect(before.length).toBe(1);
+    expect(before[0].title).toBe("Should be deleted");
+
+    await db.deleteClientStorage();
+
+    const afterDelete = await db.all(allTodos, "worker");
+    expect(afterDelete).toEqual([]);
+
+    const id = db.insert(todos, { title: "Fresh after delete", done: true });
+    const afterReinsert = await db.all(allTodos, "worker");
+    expect(afterReinsert).toHaveLength(1);
+    expect(afterReinsert[0].id).toBe(id);
+    expect(afterReinsert[0].title).toBe("Fresh after delete");
+    expect(afterReinsert[0].done).toBe(true);
+  });
+
+  it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
+    const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
+    const seeded = track(await createDb({ appId: "test-app", dbName }));
+
+    // Initialize worker/main runtimes with schema v2 from client context.
+    await seeded.all(allCatalogueTodos, "worker");
+
+    // Seed historical v1 schema + auto lens v1->v2 directly into worker OPFS.
+    await seedWorkerLiveSchema(seeded, catalogueSchemaV1);
+
+    await waitForCondition(
+      async () => {
+        const state = await getWorkerDebugSchemaState(seeded);
+        return hasRestoredCatalogueState(state);
+      },
+      12_000,
+      "Seeded worker should hold schema/lens state beyond client context",
+    );
+
+    await seeded.shutdown();
+    untrack(seeded);
+
+    const offline = track(await createDb({ appId: "test-app", dbName }));
+    await offline.all(allCatalogueTodos, "worker");
+
+    await waitForCondition(
+      async () => {
+        const state = await getWorkerDebugSchemaState(offline);
+        return hasRestoredCatalogueState(state);
+      },
+      12_000,
+      "Offline worker should rehydrate schema/lens state from OPFS manifest",
+    );
+
+    await waitForCondition(
+      async () => {
+        await offline.all(allCatalogueTodos, "worker");
+        const mainState = getMainDebugSchemaState(offline, catalogueSchemaV2);
+        return hasRestoredCatalogueState(mainState);
+      },
+      12_000,
+      "Main thread should restore schema/lens state via worker catalogue sync",
+    );
+  }, 90_000);
+
   // -------------------------------------------------------------------------
   // 5. Acknowledged insert resolves at worker tier
   // -------------------------------------------------------------------------
@@ -411,7 +545,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const projectId = "00000000-0000-0000-0000-000000000123";
+    const projectId = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
@@ -419,7 +553,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     db.insert(todos, { title: "Observed", done: false, project: projectId });
-    const anotherProjectId = "00000000-0000-0000-0000-000000000456";
+    const anotherProjectId = db.insert(projects, { name: "Ignored Project" });
     db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
 
     // Wait for subscription to fire
@@ -720,4 +854,107 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasRestoredCatalogueState(state: DebugSchemaState): boolean {
+  return state.liveSchemaHashes.length > 1 && state.lensEdges.length > 0;
+}
+
+function getMainDebugSchemaState(db: Db, schemaForClient: WasmSchema): DebugSchemaState {
+  const client = (db as any).getClient(schemaForClient);
+  const runtime = client.getRuntime() as { __debugSchemaState?: () => DebugSchemaState };
+  if (typeof runtime.__debugSchemaState !== "function") {
+    throw new Error("Expected runtime.__debugSchemaState to be available");
+  }
+  return runtime.__debugSchemaState();
+}
+
+async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
+  await (db as any).ensureBridgeReady();
+  const worker = (db as any).worker as Worker | null;
+  if (!worker) {
+    throw new Error("Expected worker instance to exist");
+  }
+
+  return new Promise<DebugSchemaState>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`debug-schema-state: no response within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as
+        | { type?: string; state?: DebugSchemaState; message?: string }
+        | undefined;
+      if (!data?.type) return;
+
+      if (data.type === "debug-schema-state-ok" && data.state) {
+        cleanup();
+        resolve(data.state);
+        return;
+      }
+
+      if (
+        data.type === "error" &&
+        typeof data.message === "string" &&
+        data.message.includes("debug-schema-state")
+      ) {
+        cleanup();
+        reject(new Error(data.message));
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+    worker.postMessage({ type: "debug-schema-state" });
+  });
+}
+
+async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
+  await (db as any).ensureBridgeReady();
+  const worker = (db as any).worker as Worker | null;
+  if (!worker) {
+    throw new Error("Expected worker instance to exist");
+  }
+
+  const schemaJson = JSON.stringify(schema);
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`debug-seed-live-schema: no response within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { type?: string; message?: string } | undefined;
+      if (!data?.type) return;
+
+      if (data.type === "debug-seed-live-schema-ok") {
+        cleanup();
+        resolve();
+        return;
+      }
+
+      if (
+        data.type === "error" &&
+        typeof data.message === "string" &&
+        data.message.includes("debug-seed-live-schema")
+      ) {
+        cleanup();
+        reject(new Error(data.message));
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.removeEventListener("message", handler);
+    };
+
+    worker.addEventListener("message", handler);
+    worker.postMessage({ type: "debug-seed-live-schema", schemaJson });
+  });
 }

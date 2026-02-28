@@ -6,30 +6,31 @@ export type RelColumnRef = {
 export type RelRowIdRef = "Current" | "Outer" | "Frontier";
 
 export type RelValueRef =
-  | { type: "Literal"; value: unknown }
-  | { type: "SessionRef"; path: string[] }
-  | { type: "OuterColumn"; column: RelColumnRef }
-  | { type: "FrontierColumn"; column: RelColumnRef }
-  | { type: "RowId"; source: RelRowIdRef };
+  | { Literal: unknown }
+  | { SessionRef: string[] }
+  | { OuterColumn: RelColumnRef }
+  | { FrontierColumn: RelColumnRef }
+  | { RowId: RelRowIdRef };
 
 export type RelPredicateCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
 
 export type RelPredicateExpr =
   | {
-      type: "Cmp";
-      left: RelColumnRef;
-      op: RelPredicateCmpOp;
-      right: RelValueRef;
+      Cmp: {
+        left: RelColumnRef;
+        op: RelPredicateCmpOp;
+        right: RelValueRef;
+      };
     }
-  | { type: "IsNull"; column: RelColumnRef }
-  | { type: "IsNotNull"; column: RelColumnRef }
-  | { type: "In"; left: RelColumnRef; values: RelValueRef[] }
-  | { type: "Contains"; left: RelColumnRef; value: RelValueRef }
-  | { type: "And"; exprs: RelPredicateExpr[] }
-  | { type: "Or"; exprs: RelPredicateExpr[] }
-  | { type: "Not"; expr: RelPredicateExpr }
-  | { type: "True" }
-  | { type: "False" };
+  | { IsNull: { column: RelColumnRef } }
+  | { IsNotNull: { column: RelColumnRef } }
+  | { In: { left: RelColumnRef; values: RelValueRef[] } }
+  | { Contains: { left: RelColumnRef; right: RelValueRef } }
+  | { And: RelPredicateExpr[] }
+  | { Or: RelPredicateExpr[] }
+  | { Not: RelPredicateExpr }
+  | "True"
+  | "False";
 
 export type RelJoinKind = "Inner" | "Left";
 
@@ -38,13 +39,9 @@ export type RelJoinCondition = {
   right: RelColumnRef;
 };
 
-export type RelKeyRef =
-  | { type: "Column"; column: RelColumnRef }
-  | { type: "RowId"; source: RelRowIdRef };
+export type RelKeyRef = { Column: RelColumnRef } | { RowId: RelRowIdRef };
 
-export type RelProjectExpr =
-  | { type: "Column"; column: RelColumnRef }
-  | { type: "RowId"; source: RelRowIdRef };
+export type RelProjectExpr = { Column: RelColumnRef } | { RowId: RelRowIdRef };
 
 export type RelProjectColumn = {
   alias: string;
@@ -59,36 +56,38 @@ export type RelOrderByExpr = {
 };
 
 export type RelExpr =
-  | { type: "TableScan"; table: string }
-  | { type: "Filter"; input: RelExpr; predicate: RelPredicateExpr }
-  | { type: "Join"; left: RelExpr; right: RelExpr; on: RelJoinCondition[]; joinKind: RelJoinKind }
-  | { type: "Project"; input: RelExpr; columns: RelProjectColumn[] }
+  | { TableScan: { table: string } }
+  | { Filter: { input: RelExpr; predicate: RelPredicateExpr } }
+  | { Join: { left: RelExpr; right: RelExpr; on: RelJoinCondition[]; join_kind: RelJoinKind } }
+  | { Project: { input: RelExpr; columns: RelProjectColumn[] } }
   | {
-      type: "Gather";
-      seed: RelExpr;
-      step: RelExpr;
-      frontierKey: RelKeyRef;
-      maxDepth: number;
-      dedupeKey: RelKeyRef[];
+      Gather: {
+        seed: RelExpr;
+        step: RelExpr;
+        frontier_key: RelKeyRef;
+        max_depth: number;
+        dedupe_key: RelKeyRef[];
+      };
     }
-  | { type: "Distinct"; input: RelExpr; key: RelKeyRef[] }
-  | { type: "OrderBy"; input: RelExpr; terms: RelOrderByExpr[] }
-  | { type: "Offset"; input: RelExpr; offset: number }
-  | { type: "Limit"; input: RelExpr; limit: number };
+  | { Distinct: { input: RelExpr; key: RelKeyRef[] } }
+  | { OrderBy: { input: RelExpr; terms: RelOrderByExpr[] } }
+  | { Offset: { input: RelExpr; offset: number } }
+  | { Limit: { input: RelExpr; limit: number } };
 
 export type PolicyOperationV2 = "Select" | "Insert" | "Update" | "Delete";
 
 export type PolicyExprV2 =
-  | { type: "Predicate"; predicate: RelPredicateExpr }
-  | { type: "ExistsRel"; rel: RelExpr }
+  | { Predicate: RelPredicateExpr }
+  | { ExistsRel: { rel: RelExpr } }
   | {
-      type: "Inherits";
-      operation: PolicyOperationV2;
-      viaColumn: string;
-      maxDepth?: number;
+      Inherits: {
+        operation: PolicyOperationV2;
+        via_column: string;
+        max_depth?: number;
+      };
     }
-  | { type: "And"; exprs: PolicyExprV2[] }
-  | { type: "Or"; exprs: PolicyExprV2[] }
-  | { type: "Not"; expr: PolicyExprV2 }
-  | { type: "True" }
-  | { type: "False" };
+  | { And: PolicyExprV2[] }
+  | { Or: PolicyExprV2[] }
+  | { Not: PolicyExprV2 }
+  | "True"
+  | "False";
