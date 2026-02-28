@@ -1,5 +1,12 @@
 # jazz-tools
 
+## 2.0.0-alpha.9
+
+### Patch Changes
+
+- eef9942: Fix WebAssembly fetch behavior in Next.js runtimes.
+  - jazz-wasm@2.0.0-alpha.9
+
 ## 2.0.0-alpha.8
 
 ### Patch Changes
