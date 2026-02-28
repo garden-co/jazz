@@ -17,6 +17,28 @@ type IncludePlan = {
   nested: IncludePlan[];
 };
 
+function toByteArray(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    const bytes = value.map((entry) => {
+      if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0 || entry > 255) {
+        throw new Error("Invalid Bytea array value. Expected integers in range 0..255.");
+      }
+      return entry;
+    });
+    return new Uint8Array(bytes);
+  }
+
+  throw new Error("Invalid Bytea value. Expected Uint8Array or byte array.");
+}
+
 function buildIncludePlans(
   tableName: string,
   includes: IncludeSpec,
@@ -118,7 +140,7 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType): unknown {
     case "Timestamp":
       return new Date(v.value);
     case "Bytea":
-      return v.value;
+      return toByteArray((v as { value: unknown }).value);
     case "Null":
       return undefined;
     case "Array":
