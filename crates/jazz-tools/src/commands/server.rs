@@ -6,12 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use groove::query_manager::query::QueryBuilder;
-use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
-use groove::runtime_tokio::TokioRuntime;
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::SurrealKvStorage;
-use groove::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
+use jazz_tools::query_manager::query::QueryBuilder;
+use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz_tools::runtime_tokio::TokioRuntime;
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
+use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
 use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
@@ -61,7 +61,7 @@ impl ExternalIdentityStore {
         )
         .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
 
-        let db_path = meta_dir.join("groove.surrealkv");
+        let db_path = meta_dir.join("jazz.surrealkv");
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
@@ -224,16 +224,19 @@ pub async fn run(
 
     // Create managers (server mode - no fixed current schema)
     let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
-    let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
+    let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
     // Create broadcast channel for SSE updates
     let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(256);
     let sync_tx_clone = sync_tx.clone();
 
     // Create persistent storage
-    let db_path = format!("{}/groove.surrealkv", data_dir);
+    let db_path = format!("{}/jazz.surrealkv", data_dir);
     let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
         .map_err(|e| format!("Failed to open storage: {:?}", e))?;
+
+    rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)
+        .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
 
     // Create runtime with sync callback that routes to SSE clients
     let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {

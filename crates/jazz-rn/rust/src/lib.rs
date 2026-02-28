@@ -10,18 +10,18 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 
-use groove::object::ObjectId;
-use groove::query_manager::encoding::decode_row;
-use groove::query_manager::graph_nodes::output::index_row_delta;
-use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, SchemaHash, Value};
-use groove::runtime_core::{
+use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::parse_query_json;
+use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::SurrealKvStorage;
-use groove::sync_manager::{
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
@@ -88,208 +88,17 @@ where
     }
 }
 
-// ============================================================================
-// JSON boundary types (mirrors groove-napi + jazz-wasm)
-// ============================================================================
-
-/// Tagged value type for the JS boundary, serde-serialized as:
-/// `{ "type": "Text", "value": "..." }`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", content = "value")]
-enum RnValue {
-    Integer(i32),
-    BigInt(i64),
-    Boolean(bool),
-    Text(String),
-    Timestamp(u64),
-    Uuid(String),
-    Array(Vec<RnValue>),
-    Row(Vec<RnValue>),
-    Null,
-}
-
-impl From<Value> for RnValue {
-    fn from(v: Value) -> Self {
-        match v {
-            Value::Integer(i) => RnValue::Integer(i),
-            Value::BigInt(i) => RnValue::BigInt(i),
-            Value::Boolean(b) => RnValue::Boolean(b),
-            Value::Text(s) => RnValue::Text(s),
-            Value::Timestamp(t) => RnValue::Timestamp(t),
-            Value::Uuid(id) => RnValue::Uuid(id.uuid().to_string()),
-            Value::Array(arr) => RnValue::Array(arr.into_iter().map(Into::into).collect()),
-            Value::Row(row) => RnValue::Row(row.into_iter().map(Into::into).collect()),
-            Value::Null => RnValue::Null,
-        }
-    }
-}
-
-impl TryFrom<RnValue> for Value {
-    type Error = JazzRnError;
-
-    fn try_from(v: RnValue) -> Result<Self, Self::Error> {
-        Ok(match v {
-            RnValue::Integer(i) => Value::Integer(i),
-            RnValue::BigInt(i) => Value::BigInt(i),
-            RnValue::Boolean(b) => Value::Boolean(b),
-            RnValue::Text(s) => Value::Text(s),
-            RnValue::Timestamp(t) => Value::Timestamp(t),
-            RnValue::Uuid(s) => {
-                let uuid = uuid::Uuid::parse_str(&s).map_err(|e| JazzRnError::InvalidUuid {
-                    message: e.to_string(),
-                })?;
-                Value::Uuid(ObjectId::from_uuid(uuid))
-            }
-            RnValue::Array(arr) => {
-                let converted = arr
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<Value>, _>>()?;
-                Value::Array(converted)
-            }
-            RnValue::Row(row) => {
-                let converted = row
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<Value>, _>>()?;
-                Value::Row(converted)
-            }
-            RnValue::Null => Value::Null,
-        })
-    }
-}
-
 fn convert_values(values_json: &str) -> Result<Vec<Value>, JazzRnError> {
-    let js_values: Vec<RnValue> = serde_json::from_str(values_json).map_err(json_err)?;
-    js_values.into_iter().map(TryInto::try_into).collect()
+    serde_json::from_str(values_json).map_err(json_err)
 }
 
 fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, JazzRnError> {
-    let partial: HashMap<String, RnValue> = serde_json::from_str(values_json).map_err(json_err)?;
-    partial
-        .into_iter()
-        .map(|(k, v)| Ok((k, v.try_into()?)))
-        .collect()
-}
-
-// ============================================================================
-// Schema types for JSON deserialization
-// ============================================================================
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsColumnType {
-    #[serde(rename = "type")]
-    type_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    element: Option<Box<JsColumnType>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    columns: Option<Vec<JsColumnDescriptor>>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsColumnDescriptor {
-    name: String,
-    column_type: JsColumnType,
-    nullable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    references: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsTableSchema {
-    columns: Vec<JsColumnDescriptor>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsSchema {
-    tables: HashMap<String, JsTableSchema>,
-}
-
-impl TryFrom<JsColumnType> for groove::query_manager::types::ColumnType {
-    type Error = JazzRnError;
-
-    fn try_from(ct: JsColumnType) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::{ColumnType, RowDescriptor};
-
-        match ct.type_name.as_str() {
-            "Integer" => Ok(ColumnType::Integer),
-            "BigInt" => Ok(ColumnType::BigInt),
-            "Boolean" => Ok(ColumnType::Boolean),
-            "Text" => Ok(ColumnType::Text),
-            "Timestamp" => Ok(ColumnType::Timestamp),
-            "Uuid" => Ok(ColumnType::Uuid),
-            "Array" => {
-                let elem = ct.element.ok_or_else(|| JazzRnError::Schema {
-                    message: "Array type requires element".to_string(),
-                })?;
-                let element: ColumnType = (*elem).try_into()?;
-                Ok(ColumnType::Array(Box::new(element)))
-            }
-            "Row" => {
-                let cols = ct.columns.ok_or_else(|| JazzRnError::Schema {
-                    message: "Row type requires columns".to_string(),
-                })?;
-                let descriptors = cols
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<groove::query_manager::types::ColumnDescriptor>, _>>()?;
-                Ok(ColumnType::Row(Box::new(RowDescriptor::new(descriptors))))
-            }
-            other => Err(JazzRnError::Schema {
-                message: format!("Unknown column type: {other}"),
-            }),
-        }
-    }
-}
-
-impl TryFrom<JsColumnDescriptor> for groove::query_manager::types::ColumnDescriptor {
-    type Error = JazzRnError;
-
-    fn try_from(c: JsColumnDescriptor) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::ColumnDescriptor;
-
-        let mut cd = ColumnDescriptor::new(&c.name, c.column_type.try_into()?);
-        if c.nullable {
-            cd = cd.nullable();
-        }
-        if let Some(ref_table) = c.references {
-            cd = cd.references(&ref_table);
-        }
-        Ok(cd)
-    }
-}
-
-impl TryFrom<JsTableSchema> for groove::query_manager::types::TableSchema {
-    type Error = JazzRnError;
-
-    fn try_from(js: JsTableSchema) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::{RowDescriptor, TableSchema};
-
-        let columns = js
-            .columns
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<Vec<groove::query_manager::types::ColumnDescriptor>, _>>()?;
-        Ok(TableSchema::new(RowDescriptor::new(columns)))
-    }
-}
-
-impl TryFrom<JsSchema> for Schema {
-    type Error = JazzRnError;
-
-    fn try_from(js: JsSchema) -> Result<Self, Self::Error> {
-        use groove::query_manager::types::TableName;
-
-        let mut schema = Schema::new();
-        for (table_name, table_schema) in js.tables {
-            schema.insert(TableName::new(&table_name), table_schema.try_into()?);
-        }
-        Ok(schema)
-    }
+    let partial: HashMap<String, Value> = serde_json::from_str(values_json).map_err(json_err)?;
+    Ok(partial.into_iter().collect())
 }
 
 fn parse_query(query_json: &str) -> Result<Query, JazzRnError> {
-    serde_json::from_str(query_json).map_err(json_err)
+    parse_query_json(query_json).map_err(|message| JazzRnError::InvalidJson { message })
 }
 
 fn parse_session(session_json: Option<String>) -> Result<Option<Session>, JazzRnError> {
@@ -313,70 +122,59 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JazzRnError> {
     }
 }
 
-fn build_rn_delta_json<F>(
-    delta: &SubscriptionDelta,
-    current_ids: &mut Vec<ObjectId>,
-    mut row_to_json: F,
-) -> serde_json::Value
+fn build_rn_delta_json<F>(delta: &SubscriptionDelta, mut row_to_json: F) -> serde_json::Value
 where
-    F: FnMut(&groove::query_manager::types::Row) -> serde_json::Value,
+    F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
 {
-    let indexed = index_row_delta(current_ids, &delta.delta);
-
-    let added = delta
-        .delta
-        .added
-        .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0);
-            serde_json::json!({
-                "row": row_json,
-                "index": index
-            })
-        })
-        .collect::<Vec<_>>();
-
     let removed = delta
-        .delta
+        .ordered_delta
         .removed
         .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0);
+        .map(|change| {
             serde_json::json!({
-                "row": row_json,
-                "index": index
+                "kind": 1,
+                "id": change.id.uuid().to_string(),
+                "index": change.index
             })
         })
         .collect::<Vec<_>>();
 
     let updated = delta
-        .delta
+        .ordered_delta
         .updated
         .iter()
-        .map(|(old, new)| {
-            let old_json = row_to_json(old);
-            let new_json = row_to_json(new);
-            let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
-            let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
+        .map(|change| {
             serde_json::json!({
-                "old_row": old_json,
-                "new_row": new_json,
-                "old_index": old_index,
-                "new_index": new_index
+                "kind": 2,
+                "id": change.id.uuid().to_string(),
+                "index": change.new_index,
+                "row": change.row.as_ref().map(&mut row_to_json)
             })
         })
         .collect::<Vec<_>>();
 
-    *current_ids = indexed.post_ids;
+    let added = delta
+        .ordered_delta
+        .added
+        .iter()
+        .map(|change| {
+            let row_json = row_to_json(&change.row);
+            serde_json::json!({
+                "kind": 0,
+                "id": change.id.uuid().to_string(),
+                "index": change.index,
+                "row": row_json
+            })
+        })
+        .collect::<Vec<_>>();
 
-    serde_json::json!({
-        "added": added,
-        "removed": removed,
-        "updated": updated,
-        "pending": false
-    })
+    let changes = removed
+        .into_iter()
+        .chain(updated)
+        .chain(added)
+        .collect::<Vec<_>>();
+
+    serde_json::Value::Array(changes)
 }
 
 // ============================================================================
@@ -495,14 +293,13 @@ impl RnRuntime {
     pub fn new(
         schema_json: String,
         app_id: String,
-        groove_env: String,
+        jazz_env: String,
         user_branch: String,
         tier: Option<String>,
         data_path: Option<String>,
     ) -> Result<Arc<Self>, JazzRnError> {
         with_panic_boundary("new", || {
-            let js_schema: JsSchema = serde_json::from_str(&schema_json).map_err(json_err)?;
-            let schema: Schema = js_schema.try_into()?;
+            let schema: Schema = serde_json::from_str(&schema_json).map_err(json_err)?;
 
             let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
 
@@ -514,7 +311,7 @@ impl RnRuntime {
             let app_id_obj =
                 AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
             let schema_manager =
-                SchemaManager::new(sync_manager, schema, app_id_obj, &groove_env, &user_branch)
+                SchemaManager::new(sync_manager, schema, app_id_obj, &jazz_env, &user_branch)
                     .map_err(|e| JazzRnError::Schema {
                         message: format!("{:?}", e),
                     })?;
@@ -670,10 +467,9 @@ impl RnRuntime {
             let rows_json: Vec<serde_json::Value> = results
                 .into_iter()
                 .map(|(id, values)| {
-                    let js_values: Vec<RnValue> = values.into_iter().map(Into::into).collect();
                     serde_json::json!({
                         "id": id.uuid().to_string(),
-                        "values": js_values,
+                        "values": values,
                     })
                 })
                 .collect();
@@ -702,20 +498,16 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
 
-            let ids = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
             let handle = core
                 .subscribe_with_settled_tier(
                     query,
                     {
-                        let ids = Arc::clone(&ids);
                         move |delta: SubscriptionDelta| {
                             let descriptor = &delta.descriptor;
                             let row_to_json =
-                                |row: &groove::query_manager::types::Row| -> serde_json::Value {
+                                |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
                                     let values = decode_row(descriptor, &row.data)
-                                        .map(|vals| {
-                                            vals.into_iter().map(RnValue::from).collect::<Vec<_>>()
-                                        })
+                                        .map(|vals| vals.into_iter().collect::<Vec<_>>())
                                         .unwrap_or_default();
                                     serde_json::json!({
                                         "id": row.id.uuid().to_string(),
@@ -723,11 +515,7 @@ impl RnRuntime {
                                     })
                                 };
 
-                            let Ok(mut current_ids) = ids.lock() else {
-                                return;
-                            };
-                            let payload =
-                                build_rn_delta_json(&delta, &mut current_ids, row_to_json);
+                            let payload = build_rn_delta_json(&delta, row_to_json);
 
                             if let Ok(json) = serde_json::to_string(&payload) {
                                 let _ =
@@ -861,7 +649,7 @@ impl RnRuntime {
 
     pub fn set_client_role(&self, client_id: String, role: String) -> Result<(), JazzRnError> {
         with_panic_boundary("set_client_role", || {
-            use groove::sync_manager::ClientRole;
+            use jazz_tools::sync_manager::ClientRole;
 
             let uuid = uuid::Uuid::parse_str(&client_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),

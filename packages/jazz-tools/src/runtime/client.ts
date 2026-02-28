@@ -7,17 +7,21 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
-  readBinaryFrames,
   generateClientId,
-  buildEventsUrl,
   buildEndpointUrl,
   applyUserAuthHeaders,
+  createRuntimeSyncStreamController,
+  createSyncOutboxRouter,
+  isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
+  type SyncStreamController,
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
+import { resolveJwtSession } from "./client-session.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -52,9 +56,9 @@ export interface Runtime {
     settled_tier?: string | null,
   ): number;
   unsubscribe(handle: number): void;
-  insertPersisted(table: string, values: any, tier: string): Promise<string>;
-  updatePersisted(object_id: string, values: any, tier: string): Promise<void>;
-  deletePersisted(object_id: string, tier: string): Promise<void>;
+  insertWithAck(table: string, values: any, tier: string): Promise<string>;
+  updateWithAck(object_id: string, values: any, tier: string): Promise<void>;
+  deleteWithAck(object_id: string, tier: string): Promise<void>;
   onSyncMessageReceived(message_json: string): void;
   onSyncMessageToSend(callback: Function): void;
   addServer(): void;
@@ -297,20 +301,28 @@ export class SessionClient {
  */
 export class JazzClient {
   private runtime: Runtime;
-  private streamAbortController: AbortController | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectAttempt = 0;
-  private streamConnecting = false;
-  private streamAttached = false;
+  private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private activeServerUrl: string | null = null;
-  private activeServerPathPrefix: string | undefined;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
+  private resolvedSession: Session | null;
 
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
+    this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
+    this.streamController = createRuntimeSyncStreamController({
+      getRuntime: () => this.runtime,
+      getAuth: () => ({
+        jwtToken: this.context.jwtToken,
+        localAuthMode: this.context.localAuthMode,
+        localAuthToken: this.context.localAuthToken,
+      }),
+      getClientId: () => this.serverClientId,
+      setClientId: (clientId) => {
+        this.serverClientId = clientId;
+      },
+    });
   }
 
   /**
@@ -326,7 +338,7 @@ export class JazzClient {
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
@@ -359,7 +371,7 @@ export class JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
@@ -460,14 +472,7 @@ export class JazzClient {
    * @returns Promise resolving to the new row's ID when the tier acknowledges
    */
   async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertPersisted(table, values, tier);
-  }
-
-  /**
-   * @deprecated Use createWithAck().
-   */
-  async createPersisted(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.createWithAck(table, values, tier);
+    return this.runtime.insertWithAck(table, values, tier);
   }
 
   /**
@@ -478,7 +483,11 @@ export class JazzClient {
    * @returns Array of matching rows
    */
   async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(resolveQueryJson(query), undefined, settledTier);
+    return this.queryInternal(
+      resolveQueryJson(query),
+      this.resolvedSession ?? undefined,
+      settledTier,
+    );
   }
 
   /**
@@ -513,18 +522,7 @@ export class JazzClient {
     updates: Record<string, Value>,
     tier: PersistenceTier,
   ): Promise<void> {
-    await this.runtime.updatePersisted(objectId, updates, tier);
-  }
-
-  /**
-   * @deprecated Use updateWithAck().
-   */
-  async updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.updateWithAck(objectId, updates, tier);
+    await this.runtime.updateWithAck(objectId, updates, tier);
   }
 
   /**
@@ -540,14 +538,7 @@ export class JazzClient {
    * Delete a row and wait for acknowledgement at the specified tier.
    */
   async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deletePersisted(objectId, tier);
-  }
-
-  /**
-   * @deprecated Use deleteWithAck().
-   */
-  async deletePersisted(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.deleteWithAck(objectId, tier);
+    await this.runtime.deleteWithAck(objectId, tier);
   }
 
   /**
@@ -563,7 +554,7 @@ export class JazzClient {
     callback: SubscriptionCallback,
     settledTier?: PersistenceTier,
   ): number {
-    return this.subscribeInternal(query, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, settledTier);
   }
 
   /**
@@ -607,7 +598,7 @@ export class JazzClient {
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    return this.runtime.getSchema();
+    return this.runtime.getSchema() as WasmSchema;
   }
 
   /**
@@ -641,7 +632,11 @@ export class JazzClient {
    * Get schema context for server requests.
    * @internal
    */
-  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+  getSchemaContext(): {
+    env: string;
+    schema_hash: string;
+    user_branch: string;
+  } {
     return {
       env: this.context.env ?? "dev",
       schema_hash: this.runtime.getSchemaHash(),
@@ -731,18 +726,7 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.activeServerUrl = null;
-    this.detachServer();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    // Abort stream connection
-    if (this.streamAbortController) {
-      this.streamAbortController.abort();
-      this.streamAbortController = null;
-    }
+    this.streamController.stop();
 
     // Close driver if it supports it
     if (this.context.driver?.close) {
@@ -756,134 +740,37 @@ export class JazzClient {
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
-    this.activeServerUrl = serverUrl;
-    this.activeServerPathPrefix = serverPathPrefix;
-
-    // Set up outgoing message handler
-    this.runtime.onSyncMessageToSend((envelope: string) => {
-      // Envelope is now {destination, payload}
-      const parsed = JSON.parse(envelope);
-      const payload = parsed.payload;
-
-      // Only send server-bound messages
-      if (parsed.destination && "Server" in parsed.destination) {
-        void this.sendSyncMessage(serverUrl, payload).catch((error) => {
-          console.error("Sync POST error:", error);
-          this.detachServer();
-          this.scheduleReconnect();
-        });
-      }
-    });
+    this.runtime.onSyncMessageToSend(
+      createSyncOutboxRouter({
+        logPrefix: "[client] ",
+        retryServerPayloads: true,
+        onServerPayload: (payload) => this.sendSyncMessage(payload),
+        onServerPayloadError: (error) => {
+          const isExpectedAbort = isExpectedFetchAbortError(error);
+          if (!isExpectedAbort) {
+            console.error("Sync POST error:", error);
+            this.streamController.notifyTransportFailure();
+          }
+        },
+      }),
+    );
 
     // Connect to binary stream for incoming messages
-    this.connectStream();
+    this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
+  private async sendSyncMessage(payload: unknown): Promise<void> {
+    const serverUrl = this.streamController.getServerUrl();
+    if (!serverUrl) return;
+
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
       localAuthMode: this.context.localAuthMode,
       localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
       clientId: this.serverClientId,
-      pathPrefix: this.activeServerPathPrefix,
+      pathPrefix: this.streamController.getPathPrefix(),
     });
-  }
-
-  private detachServer(): void {
-    if (!this.streamAttached) return;
-    this.runtime.removeServer();
-    this.streamAttached = false;
-  }
-
-  private attachServer(): void {
-    // Re-attach every time the stream reconnects so query subscriptions replay.
-    if (this.streamAttached) {
-      this.runtime.removeServer();
-    }
-    this.runtime.addServer();
-    this.streamAttached = true;
-    this.reconnectAttempt = 0;
-  }
-
-  private scheduleReconnect(): void {
-    if (!this.activeServerUrl) return;
-    if (this.reconnectTimer) return;
-
-    const baseMs = 300;
-    const maxMs = 10_000;
-    const jitterMs = Math.floor(Math.random() * 200);
-    const delayMs = Math.min(maxMs, baseMs * 2 ** this.reconnectAttempt) + jitterMs;
-    this.reconnectAttempt += 1;
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connectStream();
-    }, delayMs);
-  }
-
-  /**
-   * Connect to binary streaming endpoint for incoming messages.
-   *
-   * Uses length-prefixed binary frames over a long-lived HTTP response.
-   * Supports auth via Authorization header (unlike EventSource).
-   */
-  private async connectStream(): Promise<void> {
-    if (this.streamConnecting || !this.activeServerUrl) return;
-    this.streamConnecting = true;
-
-    const serverUrl = this.activeServerUrl;
-    const headers: Record<string, string> = {
-      Accept: "application/octet-stream",
-    };
-    applyUserAuthHeaders(headers, {
-      jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
-    });
-
-    this.streamAbortController = new AbortController();
-
-    try {
-      const eventsUrl = buildEventsUrl(serverUrl, this.serverClientId, this.activeServerPathPrefix);
-
-      const response = await fetch(eventsUrl, {
-        headers,
-        signal: this.streamAbortController.signal,
-      });
-
-      if (!response.ok) {
-        console.error(`Stream connect failed: ${response.status}`);
-        this.detachServer();
-        this.streamConnecting = false;
-        this.scheduleReconnect();
-        return;
-      }
-
-      const reader = response.body!.getReader();
-      let connected = false;
-      await readBinaryFrames(reader, {
-        onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
-        onConnected: (clientId) => {
-          this.serverClientId = clientId;
-          if (!connected) {
-            connected = true;
-            this.attachServer();
-          }
-        },
-      });
-    } catch (e: any) {
-      if (e?.name === "AbortError") return; // Intentional shutdown
-      console.error("Stream error:", e);
-    } finally {
-      this.streamConnecting = false;
-    }
-
-    // Reconnect after delay (unless aborted)
-    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
-      this.detachServer();
-      this.scheduleReconnect();
-    }
   }
 }
 

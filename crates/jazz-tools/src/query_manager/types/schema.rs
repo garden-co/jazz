@@ -71,7 +71,8 @@ impl PartialEq<String> for TableName {
 }
 
 /// Column data type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ColumnType {
     /// 4-byte signed integer (i32), like PostgreSQL INTEGER.
     Integer,
@@ -81,15 +82,26 @@ pub enum ColumnType {
     Boolean,
     /// Variable-length UTF-8 text.
     Text,
+    /// Enumerated text constrained to a closed set of variants.
+    Enum { variants: Vec<String> },
     /// 8-byte unsigned timestamp (microseconds since Unix epoch).
     Timestamp,
+    /// 8-byte IEEE 754 double-precision float (f64).
+    Double,
     /// 16-byte UUID (ObjectId).
     Uuid,
+    /// Variable-length binary payload.
+    Bytea,
+    /// JSON payload stored as UTF-8 text, optionally constrained by JSON Schema.
+    Json {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema: Option<serde_json::Value>,
+    },
     /// Homogeneous array of values.
-    Array(Box<ColumnType>),
+    Array { element: Box<ColumnType> },
     /// Heterogeneous row/tuple of values with a known schema.
     /// Used for nested rows (e.g., array of rows from subquery).
-    Row(Box<RowDescriptor>),
+    Row { columns: Box<RowDescriptor> },
 }
 
 impl ColumnType {
@@ -98,12 +110,16 @@ impl ColumnType {
         match self {
             ColumnType::Integer => Some(4),
             ColumnType::BigInt => Some(8),
+            ColumnType::Double => Some(8),
             ColumnType::Boolean => Some(1),
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
             ColumnType::Text => None,
-            ColumnType::Array(_) => None, // Arrays are variable-length
-            ColumnType::Row(_) => None,   // Rows are variable-length
+            ColumnType::Bytea => None,
+            ColumnType::Json { .. } => None,
+            ColumnType::Enum { .. } => None,
+            ColumnType::Array { .. } => None, // Arrays are variable-length
+            ColumnType::Row { .. } => None,   // Rows are variable-length
         }
     }
 
@@ -115,7 +131,7 @@ impl ColumnType {
     /// Returns the element type if this is an array, None otherwise.
     pub fn element_type(&self) -> Option<&ColumnType> {
         match self {
-            ColumnType::Array(elem) => Some(elem),
+            ColumnType::Array { element } => Some(element),
             _ => None,
         }
     }
@@ -123,7 +139,7 @@ impl ColumnType {
     /// Returns the row descriptor if this is a Row type, None otherwise.
     pub fn row_descriptor(&self) -> Option<&RowDescriptor> {
         match self {
-            ColumnType::Row(desc) => Some(desc),
+            ColumnType::Row { columns } => Some(columns),
             _ => None,
         }
     }
@@ -195,7 +211,7 @@ impl PartialEq<String> for ColumnName {
 }
 
 /// Descriptor for a single column in a row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnDescriptor {
     pub name: ColumnName,
     pub column_type: ColumnType,
@@ -231,7 +247,8 @@ impl ColumnDescriptor {
 }
 
 /// Descriptor for a row's schema, defining column order and types.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RowDescriptor {
     pub columns: Vec<ColumnDescriptor>,
 }
@@ -285,29 +302,31 @@ impl RowDescriptor {
 }
 
 /// Schema for a single table, including row structure and policies.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableSchema {
     /// Row structure definition.
-    pub descriptor: RowDescriptor,
+    pub columns: RowDescriptor,
     /// Access control policies.
+    #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
+}
+
+fn table_policies_are_default(policies: &TablePolicies) -> bool {
+    *policies == TablePolicies::default()
 }
 
 impl TableSchema {
     /// Create a new table schema with no policies (allow all).
-    pub fn new(descriptor: RowDescriptor) -> Self {
+    pub fn new(columns: RowDescriptor) -> Self {
         Self {
-            descriptor,
+            columns,
             policies: TablePolicies::default(),
         }
     }
 
     /// Create a table schema with policies.
-    pub fn with_policies(descriptor: RowDescriptor, policies: TablePolicies) -> Self {
-        Self {
-            descriptor,
-            policies,
-        }
+    pub fn with_policies(columns: RowDescriptor, policies: TablePolicies) -> Self {
+        Self { columns, policies }
     }
 
     /// Start building a new table schema.
@@ -317,8 +336,8 @@ impl TableSchema {
 }
 
 impl From<RowDescriptor> for TableSchema {
-    fn from(descriptor: RowDescriptor) -> Self {
-        Self::new(descriptor)
+    fn from(columns: RowDescriptor) -> Self {
+        Self::new(columns)
     }
 }
 
@@ -384,7 +403,7 @@ impl TableSchemaBuilder {
     /// Build the TableSchema (returns just the schema, not the name).
     pub fn build(self) -> TableSchema {
         TableSchema {
-            descriptor: RowDescriptor::new(self.columns),
+            columns: RowDescriptor::new(self.columns),
             policies: self.policies,
         }
     }
@@ -393,7 +412,7 @@ impl TableSchemaBuilder {
     pub fn build_named(self) -> (TableName, TableSchema) {
         let name = TableName::new(&self.name);
         let schema = TableSchema {
-            descriptor: RowDescriptor::new(self.columns),
+            columns: RowDescriptor::new(self.columns),
             policies: self.policies,
         };
         (name, schema)
@@ -456,7 +475,7 @@ pub fn validate_no_inherits_cycles(schema: &Schema) -> Result<(), String> {
                 validate_policy_no_cycles(
                     table_name,
                     policy,
-                    &table_schema.descriptor,
+                    &table_schema.columns,
                     schema,
                     &mut visited,
                 )?;
@@ -470,7 +489,7 @@ pub fn validate_no_inherits_cycles(schema: &Schema) -> Result<(), String> {
             validate_policy_no_cycles(
                 table_name,
                 policy,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 schema,
                 &mut visited,
             )?;
@@ -493,7 +512,22 @@ pub fn validate_policy_no_cycles(
         PolicyExpr::Inherits {
             via_column,
             operation,
+            max_depth,
         } => {
+            if let Some(requested_depth) = max_depth
+                && crate::query_manager::policy::normalize_recursive_max_depth(Some(
+                    *requested_depth,
+                ))
+                .is_none()
+            {
+                return Err(format!(
+                    "INHERITS max_depth {} exceeds hard cap {} for table '{}'",
+                    requested_depth,
+                    crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
+                    current_table.0
+                ));
+            }
+
             // Get target table from FK column
             let col_idx = descriptor.column_index(via_column).ok_or_else(|| {
                 format!(
@@ -513,8 +547,13 @@ pub fn validate_policy_no_cycles(
                         )
                     })?;
 
+            let bounded = max_depth.is_some();
+
             // Cycle check
             if visited.contains(target_table) {
+                if bounded {
+                    return Ok(());
+                }
                 let path: Vec<_> = visited.iter().map(|t| t.0.as_str()).collect();
                 return Err(format!(
                     "INHERITS cycle detected: {} → {} (path: {})",
@@ -522,6 +561,11 @@ pub fn validate_policy_no_cycles(
                     target_table.0,
                     path.join(" → ")
                 ));
+            }
+
+            // Bounded INHERITS is cycle-safe by runtime depth limit.
+            if bounded {
+                return Ok(());
             }
 
             // Recurse into target table's policy
@@ -545,12 +589,112 @@ pub fn validate_policy_no_cycles(
                     validate_policy_no_cycles(
                         target_table,
                         p,
-                        &target_schema.descriptor,
+                        &target_schema.columns,
                         schema,
                         visited,
                     )?;
                     visited.remove(target_table);
                 }
+            }
+        }
+        PolicyExpr::InheritsReferencing {
+            source_table,
+            via_column,
+            operation,
+            max_depth,
+        } => {
+            if let Some(requested_depth) = max_depth
+                && crate::query_manager::policy::normalize_recursive_max_depth(Some(
+                    *requested_depth,
+                ))
+                .is_none()
+            {
+                return Err(format!(
+                    "INHERITS REFERENCING max_depth {} exceeds hard cap {} for table '{}'",
+                    requested_depth,
+                    crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP,
+                    current_table.0
+                ));
+            }
+
+            let source_table_name = TableName::new(source_table);
+            let source_schema = schema.get(&source_table_name).ok_or_else(|| {
+                format!(
+                    "INHERITS REFERENCING source table '{}' not found (from table '{}')",
+                    source_table, current_table.0
+                )
+            })?;
+
+            let source_col_idx =
+                source_schema
+                    .columns
+                    .column_index(via_column)
+                    .ok_or_else(|| {
+                        format!(
+                            "INHERITS REFERENCING via_column '{}' not found in source table '{}'",
+                            via_column, source_table
+                        )
+                    })?;
+
+            let referenced_table = source_schema.columns.columns[source_col_idx]
+                .references
+                .as_ref()
+                .ok_or_else(|| {
+                    format!(
+                        "INHERITS REFERENCING via_column '{}' in source table '{}' has no FK reference",
+                        via_column, source_table
+                    )
+                })?;
+
+            if referenced_table != current_table {
+                return Err(format!(
+                    "INHERITS REFERENCING {}.{} must reference table '{}', found '{}'",
+                    source_table, via_column, current_table.0, referenced_table.0
+                ));
+            }
+
+            let bounded = max_depth.is_some();
+            if visited.contains(&source_table_name) {
+                if bounded {
+                    return Ok(());
+                }
+                let path: Vec<_> = visited.iter().map(|t| t.0.as_str()).collect();
+                return Err(format!(
+                    "INHERITS REFERENCING cycle detected: {} ← {} (path: {})",
+                    current_table.0,
+                    source_table,
+                    path.join(" → ")
+                ));
+            }
+
+            if bounded {
+                return Ok(());
+            }
+
+            let source_policy = match operation {
+                crate::query_manager::policy::Operation::Select => {
+                    source_schema.policies.select.using.as_ref()
+                }
+                crate::query_manager::policy::Operation::Update => {
+                    source_schema.policies.update.using.as_ref()
+                }
+                crate::query_manager::policy::Operation::Delete => {
+                    source_schema.policies.effective_delete_using()
+                }
+                crate::query_manager::policy::Operation::Insert => {
+                    source_schema.policies.insert.with_check.as_ref()
+                }
+            };
+            if let Some(p) = source_policy {
+                visited.insert(source_table_name);
+                validate_policy_no_cycles(
+                    &source_table_name,
+                    p,
+                    &source_schema.columns,
+                    schema,
+                    visited,
+                )?;
+                visited.remove(&source_table_name);
             }
         }
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {

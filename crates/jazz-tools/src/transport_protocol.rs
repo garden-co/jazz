@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use groove::sync_manager::{ClientId, QueryId, SyncPayload};
+use crate::sync_manager::{ClientId, QueryId, SyncPayload};
 
 /// Unique identifier for a client's streaming connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -62,13 +62,19 @@ pub enum ServerEvent {
         connection_id: ConnectionId,
         /// The client ID the server is using for this connection.
         client_id: String,
+        /// Next stream sequence expected from server for this connection.
+        next_sync_seq: Option<u64>,
     },
 
     /// Subscription created successfully.
     Subscribed { query_id: QueryId },
 
     /// Sync update - object data changed.
-    SyncUpdate { payload: Box<SyncPayload> },
+    SyncUpdate {
+        /// Per-connection stream sequence, if provided by the server.
+        seq: Option<u64>,
+        payload: Box<SyncPayload>,
+    },
 
     /// Error response.
     Error { message: String, code: ErrorCode },
@@ -210,6 +216,7 @@ mod tests {
         let event = ServerEvent::Connected {
             connection_id: ConnectionId(42),
             client_id: "test-client-id".to_string(),
+            next_sync_seq: None,
         };
 
         let frame = event.encode_frame();
@@ -252,9 +259,9 @@ mod tests {
 
     #[test]
     fn test_sync_payload_request_serialization() {
-        use groove::object::BranchName;
-        use groove::object::ObjectId;
-        use groove::sync_manager::ClientId;
+        use crate::object::BranchName;
+        use crate::object::ObjectId;
+        use crate::sync_manager::ClientId;
 
         let payload = SyncPayload::ObjectUpdated {
             object_id: ObjectId::new(),

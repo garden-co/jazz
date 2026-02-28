@@ -1,6 +1,6 @@
 ---
 title: Permissions
-description: Fast RLS (ReBAC), simple policies, and inherited access policies.
+description: Fast RLS (ReBAC), simple policies, combinators, and inherited access policies.
 ---
 
 ## Schema Policy Syntax
@@ -15,7 +15,7 @@ Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly 
       ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
     </include>
 
-    We can define permissions in a file called `schema/permissions.ts`:
+    Define permissions in `schema/permissions.ts`:
 
     <include cwd lang="ts">
       ../examples/docs/todo-server-ts/schema/permissions.ts
@@ -48,18 +48,18 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
 
 ## Combining Conditions (`allOf` / `anyOf`)
 
-In TypeScript permissions, combine multiple conditions with array-based combinators:
-
-```ts
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
-
-export default definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => [
-  policy.todos.allowRead.where(
-    anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
-  ),
-]);
-```
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#permissions-combinators-rust
+    </include>
+  </Tab>
+</Tabs>
 
 `allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
 
@@ -80,11 +80,30 @@ TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete
   </Tab>
 </Tabs>
 
-## Policy enforcement and request context
+## Advanced: Recursive INHERITS
+
+Use depth-bounded inherited access when foreign keys can form recursive chains.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#permissions-recursive-inherits-rust
+    </include>
+  </Tab>
+</Tabs>
+
+`maxDepth` must be a positive integer.
+
+## Policy Enforcement and Request Context
 
 Jazz permissions use relationship-based policy evaluation with requester session context.
 Backend endpoints should scope a client/session per request before reads and writes.
-Frontend clients are evaluated with the auth/session identity used to initialize context at the server boundary.
+Frontend clients are evaluated with the auth/session identity used to initialize context.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">

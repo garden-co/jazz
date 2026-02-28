@@ -7,6 +7,7 @@
 use crate::query_manager::graph::QueryGraph;
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::types::{RowDescriptor, Schema, Value};
+use crate::schema_manager::SchemaContext;
 
 /// Template for creating subgraph instances.
 ///
@@ -24,6 +25,8 @@ pub struct SubgraphTemplate {
     select_columns: Vec<String>,
     /// Output descriptor for individual result rows.
     output_descriptor: RowDescriptor,
+    /// Schema context inherited from the parent graph compile.
+    schema_context: SchemaContext,
 }
 
 impl SubgraphTemplate {
@@ -39,12 +42,14 @@ impl SubgraphTemplate {
         inner_column: String,
         select_columns: Vec<String>,
         output_descriptor: RowDescriptor,
+        schema_context: SchemaContext,
     ) -> Self {
         Self {
             base_query,
             inner_column,
             select_columns,
             output_descriptor,
+            schema_context,
         }
     }
 
@@ -59,6 +64,14 @@ impl SubgraphTemplate {
     ) -> Option<SubgraphInstance> {
         // Build query with correlation filter
         let mut query_builder = QueryBuilder::new(self.base_query.table);
+        if self.base_query.branches.is_empty() {
+            query_builder = query_builder.branch("main");
+        } else {
+            query_builder = query_builder.branches_owned(self.base_query.branches.clone());
+        }
+        if self.base_query.include_deleted {
+            query_builder = query_builder.include_deleted();
+        }
 
         // Add joins from base query
         for join_spec in &self.base_query.joins {
@@ -138,15 +151,16 @@ impl SubgraphTemplate {
             query_builder = query_builder.select(&cols);
         }
 
-        let mut query = query_builder.build();
+        query_builder =
+            query_builder.with_array_subqueries(self.base_query.array_subqueries.clone());
+        if let Some(index) = self.base_query.result_element_index {
+            query_builder = query_builder.result_element_index(index);
+        }
 
-        // Copy branches from base query (important for schema-aware branch names)
-        query.branches = self.base_query.branches.clone();
-
-        // Copy nested array subqueries from base query
-        query.array_subqueries = self.base_query.array_subqueries.clone();
-
-        let graph = QueryGraph::compile(&query, schema)?;
+        let query = query_builder.try_build().ok()?;
+        let graph =
+            QueryGraph::try_compile_with_schema_context(&query, schema, None, &self.schema_context)
+                .ok()?;
 
         Some(SubgraphInstance {
             graph,
@@ -256,7 +270,7 @@ impl SubgraphBuilder {
     pub fn build(self, schema: &Schema) -> Option<SubgraphTemplate> {
         let table_name = crate::query_manager::types::TableName::new(&self.table);
         let table_schema = schema.get(&table_name)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         // Build base query
         let mut query_builder = QueryBuilder::new(&self.table);
@@ -301,6 +315,7 @@ impl SubgraphBuilder {
             self.inner_column,
             self.select_columns,
             output_descriptor,
+            SchemaContext::with_defaults(schema.clone(), "main"),
         ))
     }
 }
@@ -310,7 +325,11 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::query_manager::graph::GraphNode;
+    use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName};
+    use crate::query_manager::types::{ComposedBranchName, SchemaBuilder, SchemaHash, TableSchema};
+    use crate::schema_manager::{Lens, LensOp, LensTransform};
 
     fn test_schema() -> Schema {
         let mut schema = HashMap::new();
@@ -384,6 +403,84 @@ mod tests {
         assert_eq!(
             array,
             Value::Array(vec![Value::Integer(10), Value::Integer(20)])
+        );
+    }
+
+    #[test]
+    fn subgraph_template_inherits_parent_schema_and_branch_context() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Integer)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Integer)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut schema_context = SchemaContext::new(v2.clone(), "dev", "main");
+        schema_context.add_live_schema(v1.clone(), lens);
+
+        let v1_branch = ComposedBranchName::new("dev", v1_hash, "main")
+            .to_branch_name()
+            .as_str()
+            .to_string();
+
+        let base_query = QueryBuilder::new("users")
+            .branches(&[v1_branch.as_str()])
+            .build();
+        let output_descriptor = v2.get(&TableName::new("users")).unwrap().columns.clone();
+        let template = SubgraphTemplate::new(
+            base_query,
+            "email_address".to_string(),
+            Vec::new(),
+            output_descriptor,
+            schema_context,
+        );
+
+        let instance = template
+            .instantiate(Value::Text("alice@example.com".to_string()), &v2)
+            .expect("subgraph should compile using inherited schema context");
+        assert_eq!(instance.graph.index_scan_nodes.len(), 1);
+
+        let (scan_id, _table, scan_column) = &instance.graph.index_scan_nodes[0];
+        assert_eq!(
+            scan_column.as_str(),
+            "email",
+            "index lookup should translate new column name to old-branch index column"
+        );
+
+        let scan_branch = instance
+            .graph
+            .nodes
+            .get(scan_id.0 as usize)
+            .and_then(|ctx| match &ctx.node {
+                GraphNode::IndexScan(scan) => Some(scan.branch.as_str()),
+                _ => None,
+            })
+            .expect("index scan node must exist");
+        assert_eq!(
+            scan_branch, v1_branch,
+            "subgraph should keep the parent branch list when instantiating"
         );
     }
 }

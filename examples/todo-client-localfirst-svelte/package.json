@@ -1,0 +1,26 @@
+{
+  "name": "todo-client-localfirst-svelte",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.browser.ts"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "^6.0.0",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "catalog:default"
+  }
+}

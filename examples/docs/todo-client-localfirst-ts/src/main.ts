@@ -86,13 +86,11 @@ export async function startApp(
   form.appendChild(btn);
   container.appendChild(form);
 
-  const selectedProjectId = "00000000-0000-0000-0000-000000000000";
-
   const list = document.createElement("ul");
   list.id = "todo-list";
   container.appendChild(list);
-  // Subscribe to the project & all its todos
-  const query = app.todos.where({ project: selectedProjectId });
+  // Subscribe to all todos.
+  const query = app.todos;
   db.subscribeAll(query, ({ all: todos }) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
@@ -126,7 +124,6 @@ export async function startApp(
     db.insert(app.todos, {
       title: input.value,
       done: false,
-      project: selectedProjectId,
       ...(selectedParentId ? { parent: selectedParentId } : {}),
     });
     input.value = "";

@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `OpfsBTreeStorage` provides synchronous storage (from groove::storage)
+//! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -19,6 +19,8 @@ use std::sync::Once;
 
 use js_sys::Function;
 use serde::Serialize;
+#[cfg(target_arch = "wasm32")]
+use tracing::warn;
 use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
@@ -27,36 +29,56 @@ fn init_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::TRACE)
+            .with_max_level(tracing::Level::WARN)
             .with_console_group_spans();
         let _ = wasm_tracing::set_as_global_default_with_config(config);
     });
 }
 
-use groove::object::ObjectId;
+use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
-use groove::query_manager::encoding::decode_row;
-#[cfg(any(target_arch = "wasm32", test))]
-use groove::query_manager::graph_nodes::output::index_row_delta;
-use groove::query_manager::session::Session;
-#[cfg(any(target_arch = "wasm32", test))]
-use groove::query_manager::types::Row;
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
-use groove::query_manager::types::RowDescriptor;
-use groove::query_manager::types::{Schema, SchemaHash, Value};
-#[cfg(any(target_arch = "wasm32", test))]
-use groove::runtime_core::SubscriptionDelta;
+use jazz_tools::query_manager::types::{Row, RowDescriptor};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
-use groove::runtime_core::SubscriptionHandle;
-use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
-use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::OpfsBTreeStorage;
-use groove::sync_manager::{
+use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::schema_manager::rehydrate_schema_manager_from_manifest;
+use jazz_tools::schema_manager::{AppId, SchemaManager};
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::storage::OpfsBTreeStorage;
+use jazz_tools::storage::{MemoryStorage, Storage};
+use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
 use crate::query::parse_query;
-use crate::types::{WasmSchema, WasmValue};
+use crate::types::SubscriptionRow;
+#[cfg(target_arch = "wasm32")]
+use crate::types::{
+    SubscriptionRowAdded, SubscriptionRowChange, SubscriptionRowDelta, SubscriptionRowRemoved,
+    SubscriptionRowUpdated,
+};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmSchemaStateDebug {
+    current_schema_hash: String,
+    live_schema_hashes: Vec<String>,
+    known_schema_hashes: Vec<String>,
+    pending_schema_hashes: Vec<String>,
+    lens_edges: Vec<WasmLensEdgeDebug>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmLensEdgeDebug {
+    source_hash: String,
+    target_hash: String,
+}
 
 /// Parse a persistence tier string from JS.
 fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
@@ -71,79 +93,12 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
-fn build_wasm_delta_json<F>(
-    delta: &SubscriptionDelta,
-    current_ids: &mut Vec<ObjectId>,
-    mut row_to_json: F,
-) -> serde_json::Value
-where
-    F: FnMut(&Row) -> serde_json::Value,
-{
-    let indexed = index_row_delta(current_ids, &delta.delta);
-
-    let added = delta
-        .delta
-        .added
-        .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0);
-            serde_json::json!({
-                "row": row_json,
-                "index": index
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let removed = delta
-        .delta
-        .removed
-        .iter()
-        .map(|row| {
-            let row_json = row_to_json(row);
-            let index = indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0);
-            serde_json::json!({
-                "row": row_json,
-                "index": index
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let updated = delta
-        .delta
-        .updated
-        .iter()
-        .map(|(old, new)| {
-            let old_json = row_to_json(old);
-            let new_json = row_to_json(new);
-            let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
-            let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
-            serde_json::json!({
-                "old_row": old_json,
-                "new_row": new_json,
-                "old_index": old_index,
-                "new_index": new_index
-            })
-        })
-        .collect::<Vec<_>>();
-
-    *current_ids = indexed.post_ids;
-
-    serde_json::json!({
-        "added": added,
-        "removed": removed,
-        "updated": updated,
-        "pending": false
-    })
-}
-
 // ============================================================================
 // Type alias
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
 
 // ============================================================================
 // WasmScheduler
@@ -173,21 +128,42 @@ impl WasmScheduler {
     }
 }
 
+fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
+    wasm_bindgen_futures::spawn_local(async move {
+        *flag.borrow_mut() = false;
+
+        let Some(core_rc) = core_ref.upgrade() else {
+            return;
+        };
+
+        let needs_retry = if let Ok(mut core) = core_rc.try_borrow_mut() {
+            core.batched_tick();
+            false
+        } else {
+            true
+        };
+
+        if needs_retry {
+            // Runtime is currently borrowed (e.g. during query/subscription setup).
+            // Keep one retry queued rather than panicking on RefCell reborrow.
+            let mut scheduled = flag.borrow_mut();
+            if *scheduled {
+                return;
+            }
+            *scheduled = true;
+            drop(scheduled);
+            schedule_batched_tick_task(core_ref.clone(), flag.clone());
+        }
+    });
+}
+
 impl Scheduler for WasmScheduler {
     fn schedule_batched_tick(&self) {
         let mut scheduled = self.scheduled.borrow_mut();
         if !*scheduled {
             *scheduled = true;
-
-            let core_ref = self.core_ref.clone();
-            let flag = self.scheduled.clone();
-
-            wasm_bindgen_futures::spawn_local(async move {
-                *flag.borrow_mut() = false;
-                if let Some(core_rc) = core_ref.upgrade() {
-                    core_rc.borrow_mut().batched_tick();
-                }
-            });
+            drop(scheduled);
+            schedule_batched_tick_task(self.core_ref.clone(), self.scheduled.clone());
         }
     }
 }
@@ -232,7 +208,7 @@ impl SyncSender for JsSyncSender {
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps `Rc<RefCell<RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>>>`.
+/// Wraps `Rc<RefCell<WasmCoreType>>`.
 /// All methods borrow the core, call RuntimeCore, and return.
 /// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
@@ -247,7 +223,7 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
-    /// Storage is synchronous (in-memory via OpfsBTreeStorage).
+    /// Storage is synchronous (in-memory via MemoryStorage).
     ///
     /// # Arguments
     /// * `schema_json` - JSON-encoded schema definition
@@ -285,12 +261,10 @@ impl WasmRuntime {
         info!("creating in-memory runtime");
 
         // Parse schema
-        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
-        let schema: Schema = wasm_schema
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
+        let schema: Schema = wasm_schema;
 
         // Parse optional tier
         let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
@@ -301,20 +275,14 @@ impl WasmRuntime {
             sync_manager = sync_manager.with_tier(t);
         }
 
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+
         // Create schema manager
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id)),
-            env,
-            user_branch,
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
+            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
-        const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32MB
-        let storage = OpfsBTreeStorage::memory(DEFAULT_CACHE_SIZE)
-            .map_err(|e| JsError::new(&format!("Storage init: {:?}", e)))?;
+        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
 
@@ -412,12 +380,8 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
-        let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<_, _>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values;
 
         let mut core = self.core.borrow_mut();
         let result = core
@@ -466,11 +430,11 @@ impl WasmRuntime {
             let wasm_results: Vec<_> = results
                 .into_iter()
                 .map(|(id, values)| {
-                    let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
-                    serde_json::json!({
-                        "id": id.uuid().to_string(),
-                        "values": wasm_values
-                    })
+                    let wasm_values: Vec<Value> = values;
+                    SubscriptionRow {
+                        id: id.uuid().to_string(),
+                        values: wasm_values,
+                    }
                 })
                 .collect();
 
@@ -491,16 +455,8 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
-
-        let updates: Vec<(String, Value)> = partial_values
-            .into_iter()
-            .map(|(k, v)| {
-                let groove_value: Value = v.try_into()?;
-                Ok((k, groove_value))
-            })
-            .collect::<Result<_, String>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
@@ -533,8 +489,8 @@ impl WasmRuntime {
     /// Insert a row and return a Promise that resolves when the tier acks.
     ///
     /// `tier` must be one of: "worker", "edge", "core".
-    #[wasm_bindgen(js_name = insertPersisted)]
-    pub fn insert_persisted(
+    #[wasm_bindgen(js_name = insertWithAck)]
+    pub fn insert_with_ack(
         &self,
         table: &str,
         values: JsValue,
@@ -542,12 +498,8 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<_, _>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values;
 
         let (object_id, receiver) = {
             let mut core = self.core.borrow_mut();
@@ -565,8 +517,8 @@ impl WasmRuntime {
     }
 
     /// Update a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = updatePersisted)]
-    pub fn update_persisted(
+    #[wasm_bindgen(js_name = updateWithAck)]
+    pub fn update_with_ack(
         &self,
         object_id: &str,
         values: JsValue,
@@ -578,15 +530,8 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
-        let updates: Vec<(String, Value)> = partial_values
-            .into_iter()
-            .map(|(k, v)| {
-                let groove_value: Value = v.try_into()?;
-                Ok((k, groove_value))
-            })
-            .collect::<Result<_, String>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let receiver = {
             let mut core = self.core.borrow_mut();
@@ -603,12 +548,8 @@ impl WasmRuntime {
     }
 
     /// Delete a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = deletePersisted)]
-    pub fn delete_persisted(
-        &self,
-        object_id: &str,
-        tier: &str,
-    ) -> Result<js_sys::Promise, JsError> {
+    #[wasm_bindgen(js_name = deleteWithAck)]
+    pub fn delete_with_ack(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -635,6 +576,12 @@ impl WasmRuntime {
 
     /// Subscribe to a query with a callback.
     ///
+    /// Default behavior matches RuntimeCore:
+    /// - with upstream server: first callback waits for protocol QuerySettled convergence
+    /// - without upstream server: first callback is local-immediate
+    ///
+    /// Pass `settled_tier` to override this default.
+    ///
     /// # Returns
     /// Subscription handle (f64) for later unsubscription.
     #[cfg(target_arch = "wasm32")]
@@ -660,26 +607,52 @@ impl WasmRuntime {
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
-        let current_ids: Rc<RefCell<Vec<ObjectId>>> = Rc::new(RefCell::new(Vec::new()));
-
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
+            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
                 let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().map(WasmValue::from).collect::<Vec<_>>())
+                    .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
                     .unwrap_or_default();
-                serde_json::json!({
-                    "id": row.id.uuid().to_string(),
-                    "values": values
-                })
+                SubscriptionRow {
+                    id: row.id.uuid().to_string(),
+                    values,
+                }
             };
 
             let descriptor = &delta.descriptor;
-            let mut ids = current_ids.borrow_mut();
-            let delta_json =
-                build_wasm_delta_json(&delta, &mut ids, |row| row_to_json(row, descriptor));
+            let wasm_delta = SubscriptionRowDelta(
+                delta
+                    .ordered_delta
+                    .removed
+                    .iter()
+                    .map(|change| {
+                        SubscriptionRowChange::Removed(SubscriptionRowRemoved {
+                            kind: 1,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                        })
+                    })
+                    .chain(delta.ordered_delta.updated.iter().map(|change| {
+                        SubscriptionRowChange::Updated(SubscriptionRowUpdated {
+                            kind: 2,
+                            id: change.id.uuid().to_string(),
+                            index: change.new_index,
+                            row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
+                        })
+                    }))
+                    .chain(delta.ordered_delta.added.iter().map(|change| {
+                        SubscriptionRowChange::Added(SubscriptionRowAdded {
+                            kind: 0,
+                            id: change.id.uuid().to_string(),
+                            index: change.index,
+                            row: row_to_wasm(&change.row, descriptor),
+                        })
+                    }))
+                    .collect::<Vec<_>>(),
+            );
 
-            if let Ok(json_str) = serde_json::to_string(&delta_json) {
-                let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+                let _ = on_update.call1(&JsValue::NULL, &delta_value);
             }
         };
 
@@ -762,7 +735,7 @@ impl WasmRuntime {
     /// * `role` - One of "user", "admin", "peer"
     #[wasm_bindgen(js_name = setClientRole)]
     pub fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
-        use groove::sync_manager::ClientRole;
+        use jazz_tools::sync_manager::ClientRole;
 
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
@@ -795,7 +768,7 @@ impl WasmRuntime {
     pub fn get_schema(&self) -> Result<JsValue, JsError> {
         let core = self.core.borrow();
         let schema = core.current_schema();
-        let wasm_schema = WasmSchema::from(schema);
+        let wasm_schema = schema.clone();
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
     }
 
@@ -805,6 +778,81 @@ impl WasmRuntime {
         let core = self.core.borrow();
         let schema = core.current_schema();
         SchemaHash::compute(schema).to_string()
+    }
+
+    /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
+    #[wasm_bindgen(js_name = __debugSchemaState)]
+    pub fn debug_schema_state(&self) -> Result<JsValue, JsError> {
+        let core = self.core.borrow();
+        let schema_manager = core.schema_manager();
+
+        let mut live_schema_hashes: Vec<String> = schema_manager
+            .all_live_hashes()
+            .into_iter()
+            .map(|hash| hash.to_string())
+            .collect();
+        live_schema_hashes.sort();
+
+        let mut known_schema_hashes: Vec<String> = schema_manager
+            .known_schema_hashes()
+            .into_iter()
+            .map(|hash| hash.to_string())
+            .collect();
+        known_schema_hashes.sort();
+
+        let mut pending_schema_hashes: Vec<String> = schema_manager
+            .pending_schema_hashes()
+            .into_iter()
+            .map(|hash| hash.to_string())
+            .collect();
+        pending_schema_hashes.sort();
+
+        let mut lens_edges: Vec<WasmLensEdgeDebug> = schema_manager
+            .lens_edges()
+            .into_iter()
+            .map(|(source_hash, target_hash)| WasmLensEdgeDebug {
+                source_hash: source_hash.to_string(),
+                target_hash: target_hash.to_string(),
+            })
+            .collect();
+        lens_edges.sort_by(|left, right| {
+            left.source_hash
+                .cmp(&right.source_hash)
+                .then(left.target_hash.cmp(&right.target_hash))
+        });
+
+        let state = WasmSchemaStateDebug {
+            current_schema_hash: schema_manager.current_hash().to_string(),
+            live_schema_hashes,
+            known_schema_hashes,
+            pending_schema_hashes,
+            lens_edges,
+        };
+
+        serde_wasm_bindgen::to_value(&state).map_err(|error| {
+            JsError::new(&format!(
+                "Failed to serialize debug schema state: {:?}",
+                error
+            ))
+        })
+    }
+
+    /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
+    #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
+    pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        let schema: Schema = wasm_schema;
+
+        let mut core = self.core.borrow_mut();
+        core.add_live_schema_and_persist_catalogue(schema)
+            .map_err(|e| JsError::new(&format!("Failed to seed live schema: {:?}", e)))?;
+
+        // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
+        core.immediate_tick();
+        core.batched_tick();
+
+        Ok(())
     }
 
     /// Flush all data to persistent storage (snapshot).
@@ -857,12 +905,10 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         // Parse schema
-        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
-        let schema: Schema = wasm_schema
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
+        let schema: Schema = wasm_schema;
 
         // Parse optional tier
         let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
@@ -873,20 +919,28 @@ impl WasmRuntime {
             sync_manager = sync_manager.with_tier(t);
         }
 
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+
         // Create schema manager
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id)),
-            env,
-            user_branch,
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let mut schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
+            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
-        let storage = OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
-            .await
-            .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?;
+        let mut storage: Box<dyn Storage> = Box::new(
+            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
+                .await
+                .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
+        );
+        if let Err(error) =
+            rehydrate_schema_manager_from_manifest(&mut schema_manager, storage.as_ref(), app_id)
+        {
+            warn!(
+                %app_id,
+                ?error,
+                "failed to rehydrate schema manager from catalogue manifest"
+            );
+        }
+        schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
@@ -914,169 +968,5 @@ impl WasmRuntime {
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use groove::commit::CommitId;
-    use groove::object::ObjectId;
-    use groove::query_manager::types::{Row, RowDelta, RowDescriptor};
-    use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
-
-    fn row(id: ObjectId) -> Row {
-        Row {
-            id,
-            data: vec![],
-            commit_id: CommitId([0; 32]),
-        }
-    }
-
-    fn delta(added: Vec<Row>, removed: Vec<Row>, updated: Vec<(Row, Row)>) -> SubscriptionDelta {
-        SubscriptionDelta {
-            handle: SubscriptionHandle(0),
-            delta: RowDelta {
-                added,
-                removed,
-                updated,
-            },
-            descriptor: RowDescriptor::new(vec![]),
-        }
-    }
-
-    #[test]
-    fn wasm_delta_json_add_uses_post_index_and_updates_state() {
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-
-        let mut current_ids = vec![id_a, id_b];
-        let d = delta(vec![row(id_c)], vec![], vec![]);
-
-        let json = build_wasm_delta_json(
-            &d,
-            &mut current_ids,
-            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
-        );
-
-        assert_eq!(json["added"][0]["index"], serde_json::json!(2));
-        assert_eq!(json["pending"], serde_json::json!(false));
-        assert_eq!(current_ids, vec![id_a, id_b, id_c]);
-    }
-
-    #[test]
-    fn wasm_delta_json_remove_uses_pre_index() {
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-
-        let mut current_ids = vec![id_a, id_b, id_c];
-        let d = delta(vec![], vec![row(id_b)], vec![]);
-
-        let json = build_wasm_delta_json(
-            &d,
-            &mut current_ids,
-            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
-        );
-
-        assert_eq!(json["removed"][0]["index"], serde_json::json!(1));
-        assert_eq!(current_ids, vec![id_a, id_c]);
-    }
-
-    #[test]
-    fn wasm_delta_json_updated_identity_change_has_old_and_new_indices() {
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-
-        let mut current_ids = vec![id_a, id_b];
-        let d = delta(vec![], vec![], vec![(row(id_b), row(id_c))]);
-
-        let json = build_wasm_delta_json(
-            &d,
-            &mut current_ids,
-            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
-        );
-
-        assert_eq!(json["updated"][0]["old_index"], serde_json::json!(1));
-        assert_eq!(json["updated"][0]["new_index"], serde_json::json!(1));
-        assert_eq!(current_ids, vec![id_a, id_c]);
-    }
-
-    #[test]
-    fn wasm_delta_json_updated_identity_preserving_moves_row_to_end() {
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-
-        // Pre: [A, B, C]
-        let mut current_ids = vec![id_a, id_b, id_c];
-
-        // Identity-preserving update for B.
-        // Expected post with current wasm delta semantics: [A, C, B]
-        let d = delta(vec![], vec![], vec![(row(id_b), row(id_b))]);
-
-        let json = build_wasm_delta_json(
-            &d,
-            &mut current_ids,
-            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
-        );
-
-        assert_eq!(json["updated"][0]["old_index"], serde_json::json!(1));
-        assert_eq!(json["updated"][0]["new_index"], serde_json::json!(2));
-        assert_eq!(current_ids, vec![id_a, id_c, id_b]);
-    }
-
-    #[test]
-    fn wasm_delta_json_add_and_move_via_readd() {
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_new = ObjectId::new();
-
-        // Initial: [A, B]
-        let mut current_ids = vec![id_a, id_b];
-
-        // Operation: Remove B, Add New, Add B.
-        // This simulates moving B to the end and inserting New before it.
-        // Result should be [A, New, B].
-        let d = delta(vec![row(id_new), row(id_b)], vec![row(id_b)], vec![]);
-
-        let json = build_wasm_delta_json(
-            &d,
-            &mut current_ids,
-            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
-        );
-
-        // Verify State
-        assert_eq!(current_ids, vec![id_a, id_new, id_b]);
-
-        // Verify JSON Output
-        // Removed B from index 1
-        let removed_b = json["removed"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["row"]["id"] == id_b.uuid().to_string())
-            .unwrap();
-        assert_eq!(removed_b["index"], 1);
-
-        // Added New at index 1
-        let added_new = json["added"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["row"]["id"] == id_new.uuid().to_string())
-            .unwrap();
-        assert_eq!(added_new["index"], 1);
-
-        // Added B at index 2 (Moved)
-        let added_b = json["added"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["row"]["id"] == id_b.uuid().to_string())
-            .unwrap();
-        assert_eq!(added_b["index"], 2);
     }
 }

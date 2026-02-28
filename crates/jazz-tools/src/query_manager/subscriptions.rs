@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
@@ -6,9 +9,11 @@ use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 
 #[cfg(test)]
 use super::encoding::decode_row;
-use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::manager::{CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QueryUpdate};
+use super::manager::{
+    CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QuerySubscriptionFailure,
+    QueryUpdate,
+};
 use super::query::{Query, QueryBuilder};
 use super::session::Session;
 #[cfg(test)]
@@ -63,13 +68,9 @@ impl QueryManager {
         };
 
         // Compile query graph with schema context
-        let graph = QueryGraph::compile_with_schema_context(
-            &query,
-            &self.schema,
-            session.clone(),
-            &self.schema_context,
-        )
-        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        let graph =
+            Self::compile_graph(&query, &self.schema, session.clone(), &self.schema_context)
+                .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -91,6 +92,7 @@ impl QueryManager {
                 settled_once: false,
                 settled_tier,
                 achieved_tiers: HashSet::new(),
+                current_ordered_ids: Vec::new(),
             },
         );
 
@@ -116,11 +118,6 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        let table_name = &query.table;
-        let _table_schema = schema
-            .get(table_name)
-            .ok_or(QueryError::TableNotFound(*table_name))?;
-
         // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -133,13 +130,8 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = QueryGraph::compile_with_schema_context(
-            &query,
-            schema,
-            session.clone(),
-            schema_context,
-        )
-        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        let graph = Self::compile_graph(&query, schema, session.clone(), schema_context)
+            .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -155,6 +147,7 @@ impl QueryManager {
                 settled_once: false,
                 settled_tier: None,
                 achieved_tiers: HashSet::new(),
+                current_ordered_ids: Vec::new(),
             },
         );
 
@@ -264,6 +257,11 @@ impl QueryManager {
         std::mem::take(&mut self.update_outbox)
     }
 
+    /// Take terminal local subscription failures.
+    pub fn take_failed_subscriptions(&mut self) -> Vec<QuerySubscriptionFailure> {
+        std::mem::take(&mut self.failed_subscriptions)
+    }
+
     /// Take pending catalogue updates (schemas/lenses received via sync).
     ///
     /// SchemaManager should call this to process new schemas and lenses
@@ -298,7 +296,7 @@ impl QueryManager {
     ///
     /// Called by SchemaManager.process() to sync the known_schemas map.
     /// This enables lazy branch activation when rows arrive with unknown branches.
-    pub fn set_known_schemas(&mut self, schemas: HashMap<SchemaHash, Schema>) {
+    pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
     }
 

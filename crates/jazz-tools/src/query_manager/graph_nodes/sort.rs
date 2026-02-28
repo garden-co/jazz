@@ -17,8 +17,19 @@ pub enum SortDirection {
 /// Sort specification for a single column.
 #[derive(Debug, Clone)]
 pub struct SortKey {
-    pub col_index: usize,
+    pub target: SortTarget,
     pub direction: SortDirection,
+}
+
+/// Field used by a sort key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortTarget {
+    Column(usize),
+    /// Virtual sort key for object identity (`id`/`_id`).
+    ///
+    /// This is needed because object ID is not part of row payload columns,
+    /// but query semantics allow `ORDER BY id|_id` (including desc and mixed keys).
+    RowId,
 }
 
 /// Sort node for ordering rows.
@@ -63,34 +74,33 @@ impl SortNode {
         let a_content = a.get(0).and_then(|e| e.content());
         let b_content = b.get(0).and_then(|e| e.content());
 
-        match (a_content, b_content) {
-            (Some(a_data), Some(b_data)) => {
-                for key in &self.sort_keys {
-                    let ord = compare_column(
-                        &self.descriptor,
-                        a_data,
-                        key.col_index,
-                        b_data,
-                        key.col_index,
-                    )
-                    .unwrap_or(Ordering::Equal);
-
-                    let ord = match key.direction {
-                        SortDirection::Ascending => ord,
-                        SortDirection::Descending => ord.reverse(),
-                    };
-
-                    if ord != Ordering::Equal {
-                        return ord;
+        for key in &self.sort_keys {
+            let ord = match key.target {
+                SortTarget::Column(col_index) => match (a_content, b_content) {
+                    (Some(a_data), Some(b_data)) => {
+                        compare_column(&self.descriptor, a_data, col_index, b_data, col_index)
+                            .unwrap_or(Ordering::Equal)
                     }
-                }
-                Ordering::Equal
+                    // Unmaterialized tuples sort to the end
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                },
+                SortTarget::RowId => a.ids().cmp(&b.ids()),
+            };
+
+            let ord = match key.direction {
+                SortDirection::Ascending => ord,
+                SortDirection::Descending => ord.reverse(),
+            };
+
+            if ord != Ordering::Equal {
+                return ord;
             }
-            // Unmaterialized tuples sort to the end
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
         }
+
+        // Stable tie-breaker for deterministic ordering.
+        a.ids().cmp(&b.ids())
     }
 
     /// Find the insertion position for a tuple (binary search).
@@ -104,6 +114,11 @@ impl SortNode {
     fn sync_hashset(&mut self) {
         self.current_tuples = self.sorted_tuples.iter().cloned().collect();
     }
+
+    /// Full current ordering after sort has been applied.
+    pub fn sorted_tuples(&self) -> &[Tuple] {
+        &self.sorted_tuples
+    }
 }
 
 impl RowNode for SortNode {
@@ -112,21 +127,10 @@ impl RowNode for SortNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        let input_size = input.added.len() + input.removed.len() + input.updated.len();
-        let old_sorted = self.sorted_tuples.clone();
-        let old_positions: ahash::AHashMap<_, _> = old_sorted
-            .iter()
-            .enumerate()
-            .map(|(idx, tuple)| (tuple.ids(), idx))
-            .collect();
-
         // Track which tuple IDs are added/removed
         let mut added_ids: AHashSet<_> = input.added.iter().map(|t| t.ids()).collect();
-        let added_ids_all = added_ids.clone();
         let mut removed_ids: AHashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
-        let removed_ids_all = removed_ids.clone();
         let updated_old_ids: AHashSet<_> = input.updated.iter().map(|(old, _)| old.ids()).collect();
-        let mut emitted_updated_ids = updated_old_ids.clone();
 
         // Handle removals - find and remove
         for tuple in &input.removed {
@@ -181,29 +185,6 @@ impl RowNode for SortNode {
                 result.updated.push((old_tuple.clone(), new_tuple.clone()));
             }
         }
-
-        // Emit identity-preserving updates when tuples shift position because of
-        // inserts/removals around them. This encodes move information for downstream
-        // nodes that only receive deltas.
-        for (new_idx, new_tuple) in self.sorted_tuples.iter().enumerate() {
-            let ids = new_tuple.ids();
-            if added_ids_all.contains(&ids) || removed_ids_all.contains(&ids) {
-                continue;
-            }
-            if emitted_updated_ids.contains(&ids) {
-                continue;
-            }
-            if let Some(old_idx) = old_positions.get(&ids)
-                && *old_idx != new_idx
-            {
-                let old_tuple = old_sorted[*old_idx].clone();
-                result.updated.push((old_tuple, new_tuple.clone()));
-                emitted_updated_ids.insert(ids);
-            }
-        }
-
-        let output_size = result.added.len() + result.removed.len() + result.updated.len();
-        tracing::trace!(input_size, output_size, "sort node processed");
 
         self.dirty = false;
         result
@@ -266,7 +247,7 @@ mod tests {
     #[test]
     fn sort_ascending() {
         let sort_keys = vec![SortKey {
-            col_index: 2, // score
+            target: SortTarget::Column(2), // score
             direction: SortDirection::Ascending,
         }];
         let mut node = make_sort_node(sort_keys);
@@ -302,6 +283,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -322,7 +304,7 @@ mod tests {
     #[test]
     fn sort_descending() {
         let sort_keys = vec![SortKey {
-            col_index: 2, // score
+            target: SortTarget::Column(2), // score
             direction: SortDirection::Descending,
         }];
         let mut node = make_sort_node(sort_keys);
@@ -358,6 +340,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -385,11 +368,11 @@ mod tests {
         ]);
         let sort_keys = vec![
             SortKey {
-                col_index: 0, // dept ascending
+                target: SortTarget::Column(0), // dept ascending
                 direction: SortDirection::Ascending,
             },
             SortKey {
-                col_index: 2, // score descending
+                target: SortTarget::Column(2), // score descending
                 direction: SortDirection::Descending,
             },
         ];
@@ -446,6 +429,7 @@ mod tests {
         let delta = TupleDelta {
             added: vec![tuple1, tuple2, tuple3, tuple4],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         };
 
@@ -470,7 +454,7 @@ mod tests {
     #[test]
     fn sort_maintains_order_on_insert() {
         let sort_keys = vec![SortKey {
-            col_index: 2,
+            target: SortTarget::Column(2),
             direction: SortDirection::Ascending,
         }];
         let mut node = make_sort_node(sort_keys);
@@ -489,6 +473,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple1],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -504,6 +489,7 @@ mod tests {
         node.process(TupleDelta {
             added: vec![tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
@@ -512,273 +498,52 @@ mod tests {
         assert_eq!(sorted_ids[1], id1); // 100 second
     }
 
-    // Scenario: insert at front shifts existing survivors.
-    //
-    // ASCII:
-    // pre:    [A:10, B:20]
-    // delta:  +C:0
-    // post:   [C:0, A:10, B:20]
-    // moves:  A, B => emitted as identity updates
     #[test]
-    fn sort_emits_move_updates_when_insert_shifts_positions() {
+    fn sort_by_row_id() {
         let sort_keys = vec![SortKey {
-            col_index: 2, // score asc
+            target: SortTarget::RowId,
             direction: SortDirection::Ascending,
         }];
         let mut node = make_sort_node(sort_keys);
 
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-        let a = make_tuple(
-            id_a,
+        let id1 = ObjectId::new();
+        let id2 = ObjectId::new();
+        let id3 = ObjectId::new();
+        let tuple1 = make_tuple(
+            id1,
             &[
                 Value::Integer(1),
                 Value::Text("A".into()),
-                Value::Integer(10),
+                Value::Integer(5),
             ],
         );
-        let b = make_tuple(
-            id_b,
+        let tuple2 = make_tuple(
+            id2,
             &[
                 Value::Integer(2),
                 Value::Text("B".into()),
-                Value::Integer(20),
+                Value::Integer(5),
             ],
         );
-        let c = make_tuple(
-            id_c,
+        let tuple3 = make_tuple(
+            id3,
             &[
                 Value::Integer(3),
                 Value::Text("C".into()),
-                Value::Integer(0),
-            ],
-        );
-
-        // Seed: [A, B]
-        node.process(TupleDelta {
-            added: vec![a.clone(), b.clone()],
-            removed: vec![],
-            updated: vec![],
-        });
-
-        // Insert C at front => [C, A, B]. A and B should be emitted as move updates.
-        let delta = node.process(TupleDelta {
-            added: vec![c],
-            removed: vec![],
-            updated: vec![],
-        });
-
-        assert_eq!(delta.added.len(), 1);
-        assert_eq!(delta.added[0].ids()[0], id_c);
-        assert_eq!(delta.updated.len(), 2);
-        assert_eq!(delta.updated[0].0.ids()[0], id_a);
-        assert_eq!(delta.updated[0].1.ids()[0], id_a);
-        assert_eq!(delta.updated[1].0.ids()[0], id_b);
-        assert_eq!(delta.updated[1].1.ids()[0], id_b);
-    }
-
-    // Scenario: removing first row shifts remaining survivors left.
-    //
-    // ASCII:
-    // pre:    [A:10, B:20, C:30]
-    // delta:  -A
-    // post:   [B:20, C:30]
-    // moves:  B, C => emitted as identity updates
-    #[test]
-    fn sort_emits_move_updates_when_remove_shifts_positions() {
-        let sort_keys = vec![SortKey {
-            col_index: 2, // score asc
-            direction: SortDirection::Ascending,
-        }];
-        let mut node = make_sort_node(sort_keys);
-
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-        let a = make_tuple(
-            id_a,
-            &[
-                Value::Integer(1),
-                Value::Text("A".into()),
-                Value::Integer(10),
-            ],
-        );
-        let b = make_tuple(
-            id_b,
-            &[
-                Value::Integer(2),
-                Value::Text("B".into()),
-                Value::Integer(20),
-            ],
-        );
-        let c = make_tuple(
-            id_c,
-            &[
-                Value::Integer(3),
-                Value::Text("C".into()),
-                Value::Integer(30),
-            ],
-        );
-
-        // Seed: [A, B, C]
-        node.process(TupleDelta {
-            added: vec![a.clone(), b.clone(), c.clone()],
-            removed: vec![],
-            updated: vec![],
-        });
-
-        // Remove A => [B, C]. B and C must be emitted as move updates.
-        let delta = node.process(TupleDelta {
-            added: vec![],
-            removed: vec![a],
-            updated: vec![],
-        });
-
-        assert_eq!(delta.removed.len(), 1);
-        assert_eq!(delta.removed[0].ids()[0], id_a);
-        assert_eq!(delta.updated.len(), 2);
-        assert_eq!(delta.updated[0].0.ids()[0], id_b);
-        assert_eq!(delta.updated[0].1.ids()[0], id_b);
-        assert_eq!(delta.updated[1].0.ids()[0], id_c);
-        assert_eq!(delta.updated[1].1.ids()[0], id_c);
-    }
-
-    // Scenario: explicit update should not be duplicated by move-emitter.
-    //
-    // ASCII:
-    // pre:    [A:10, B:20]
-    // delta:  upd(B:20 -> B:25)
-    // post:   [A:10, B:25]
-    // expect: one updated entry for B only
-    #[test]
-    fn sort_does_not_emit_extra_move_update_for_explicit_updated_row() {
-        let sort_keys = vec![SortKey {
-            col_index: 2, // score asc
-            direction: SortDirection::Ascending,
-        }];
-        let mut node = make_sort_node(sort_keys);
-
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let a = make_tuple(
-            id_a,
-            &[
-                Value::Integer(1),
-                Value::Text("A".into()),
-                Value::Integer(10),
-            ],
-        );
-        let b_old = make_tuple(
-            id_b,
-            &[
-                Value::Integer(2),
-                Value::Text("B".into()),
-                Value::Integer(20),
-            ],
-        );
-        let b_new = make_tuple(
-            id_b,
-            &[
-                Value::Integer(2),
-                Value::Text("B".into()),
-                Value::Integer(25),
-            ],
-        );
-
-        // Seed: [A, B]
-        node.process(TupleDelta {
-            added: vec![a, b_old.clone()],
-            removed: vec![],
-            updated: vec![],
-        });
-
-        // Explicit update for B, no position shift.
-        let delta = node.process(TupleDelta {
-            added: vec![],
-            removed: vec![],
-            updated: vec![(b_old, b_new)],
-        });
-
-        // Should emit exactly the explicit update (no duplicate move update for same id).
-        assert_eq!(delta.updated.len(), 1);
-        assert_eq!(delta.updated[0].0.ids()[0], id_b);
-        assert_eq!(delta.updated[0].1.ids()[0], id_b);
-    }
-
-    // Scenario: mixed add/remove emits moves only for shifted survivors.
-    //
-    // ASCII:
-    // pre:    [A:10, B:20, C:30]
-    // delta:  -B, +D:5
-    // post:   [D:5, A:10, C:30]
-    // moves:  A (shifted), not C (same index), not D/B (added/removed)
-    #[test]
-    fn sort_mixed_add_remove_emits_moves_for_shifted_survivors_only() {
-        let sort_keys = vec![SortKey {
-            col_index: 2, // score asc
-            direction: SortDirection::Ascending,
-        }];
-        let mut node = make_sort_node(sort_keys);
-
-        let id_a = ObjectId::new();
-        let id_b = ObjectId::new();
-        let id_c = ObjectId::new();
-        let id_d = ObjectId::new();
-        let a = make_tuple(
-            id_a,
-            &[
-                Value::Integer(1),
-                Value::Text("A".into()),
-                Value::Integer(10),
-            ],
-        );
-        let b = make_tuple(
-            id_b,
-            &[
-                Value::Integer(2),
-                Value::Text("B".into()),
-                Value::Integer(20),
-            ],
-        );
-        let c = make_tuple(
-            id_c,
-            &[
-                Value::Integer(3),
-                Value::Text("C".into()),
-                Value::Integer(30),
-            ],
-        );
-        let d = make_tuple(
-            id_d,
-            &[
-                Value::Integer(4),
-                Value::Text("D".into()),
                 Value::Integer(5),
             ],
         );
 
-        // Seed: [A, B, C]
         node.process(TupleDelta {
-            added: vec![a.clone(), b.clone(), c.clone()],
+            added: vec![tuple3, tuple1, tuple2],
             removed: vec![],
+            moved: vec![],
             updated: vec![],
         });
 
-        // Remove B, add D(5) => [D, A, C].
-        // A shifts from index 0 -> 1 and should be emitted as move update.
-        let delta = node.process(TupleDelta {
-            added: vec![d],
-            removed: vec![b],
-            updated: vec![],
-        });
-
-        assert_eq!(delta.added.len(), 1);
-        assert_eq!(delta.added[0].ids()[0], id_d);
-        assert_eq!(delta.removed.len(), 1);
-        assert_eq!(delta.removed[0].ids()[0], id_b);
-        assert_eq!(delta.updated.len(), 1);
-        assert_eq!(delta.updated[0].0.ids()[0], id_a);
-        assert_eq!(delta.updated[0].1.ids()[0], id_a);
+        let sorted_ids = get_sorted_ids(&node);
+        let mut expected = vec![id1, id2, id3];
+        expected.sort();
+        assert_eq!(sorted_ids, expected);
     }
 }

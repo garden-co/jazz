@@ -187,6 +187,8 @@ pub enum SyncError {
         object_id: ObjectId,
         branch_name: BranchName,
     },
+    /// Query subscription was rejected (e.g. query compilation failed).
+    QuerySubscriptionRejected { query_id: QueryId, reason: String },
 }
 
 // ============================================================================
@@ -222,7 +224,7 @@ pub enum SyncPayload {
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
         query_id: QueryId,
-        query: Query,
+        query: Box<Query>,
         session: Option<Session>,
     },
 
@@ -241,6 +243,8 @@ pub enum SyncPayload {
     QuerySettled {
         query_id: QueryId,
         tier: PersistenceTier,
+        /// Highest stream sequence known to be emitted before this notification.
+        through_seq: u64,
     },
 
     /// Error response.

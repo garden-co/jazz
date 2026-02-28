@@ -1,0 +1,101 @@
+---
+title: TypeScript Server
+description: Build a server-side TypeScript API with Jazz. Schema, request-scoped queries, streaming, and mutations.
+---
+
+import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
+import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
+import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
+
+## Install
+
+Install dependencies in your server app:
+
+`pnpm add jazz-tools jazz-napi express`
+
+For full environment and server setup options, see [Setup](/docs/setup).
+
+## Define your schema
+
+Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+
+<include cwd lang="ts" title="schema/current.ts">
+  ../examples/docs/todo-server-ts/schema/current.ts
+</include>
+
+<QuickstartSchemaTypesSummary />
+
+### Run codegen
+
+<RunCodegen />
+
+Deep dive: [Schemas](/docs/schemas).
+
+## Create a server context
+
+Initialize a Jazz context once at process startup and lazily create a shared server client:
+
+<include cwd lang="ts" title="src/quickstart-snippets.ts">
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-context-ts
+</include>
+
+- `appId` identifies the app namespace for storage and sync.
+- `app` is your generated schema DSL export (`app.wasmSchema` is loaded for runtime setup).
+- `serverUrl` + `backendSecret` enable request-scoped API operations via `context.forRequest(req)`.
+- Runtime storage path controls where local server state persists.
+
+For more server context options, see [Setup](/docs/setup#backend-context-setup).
+
+## Read data in API handlers
+
+Use `context.forRequest(req)` so each request is scoped to the requester session.
+
+### One-shot reads
+
+<include cwd lang="ts" title="src/quickstart-snippets.ts">
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-oneshot-ts
+</include>
+
+### Streaming reads (SSE + subscriptions)
+
+<include cwd lang="ts" title="src/quickstart-snippets.ts">
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-streaming-ts
+</include>
+
+Deep dive: [Reading Data](/docs/reading-data).
+
+## Write data behind API routes
+
+Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context.
+
+<include cwd lang="ts" title="src/quickstart-snippets.ts">
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
+</include>
+
+Route wiring example:
+
+<include cwd lang="ts" title="src/quickstart-snippets.ts">
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-register-routes-ts
+</include>
+
+Mutation API details: [Writing Data](/docs/writing-data).
+
+## Authentication
+
+<ServerAuthConfig />
+
+<include cwd lang="bash">
+  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
+</include>
+
+Full auth flows and session resolution: [Authentication](/docs/authentication).
+
+## Permissions
+
+Define row-level policies in `schema/permissions.ts`:
+
+<include cwd lang="ts" title="schema/permissions.ts">
+  ../examples/docs/todo-server-ts/schema/permissions.ts
+</include>
+
+For advanced policy patterns, see [Permissions](/docs/permissions).

@@ -1,10 +1,15 @@
 // DSL for defining schemas and migrations
 
+import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import type {
   Column,
   Schema,
   Table,
   SqlType,
+  EnumSqlType,
+  JsonSqlType,
+  JsonSchema,
+  JsonValue,
   Lens,
   LensOp,
   AddOp,
@@ -15,6 +20,64 @@ import type {
   ScalarSqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
+
+function normalizeEnumVariants(variants: readonly string[]): string[] {
+  if (variants.length === 0) {
+    throw new Error("Enum columns require at least one variant.");
+  }
+  for (const variant of variants) {
+    if (variant.length === 0) {
+      throw new Error("Enum variants cannot be empty strings.");
+    }
+  }
+  const unique = new Set(variants);
+  if (unique.size !== variants.length) {
+    throw new Error("Enum variants must be unique.");
+  }
+  return [...unique].sort((a, b) => a.localeCompare(b));
+}
+
+type JsonSchemaSource<Output = JsonValue> = StandardJSONSchemaV1<unknown, Output> | JsonSchema;
+
+function isJsonObject(value: unknown): value is JsonSchema {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeJsonSchema<Output>(schema: JsonSchemaSource<Output>): JsonSchema {
+  const maybeStandard = (
+    schema as {
+      "~standard"?: {
+        jsonSchema?: {
+          input?: (options: { target: string }) => unknown;
+        };
+      };
+    }
+  )["~standard"];
+  const converter = maybeStandard?.jsonSchema?.input;
+  if (typeof converter === "function") {
+    const converted = converter({ target: "draft-07" });
+    if (!isJsonObject(converted)) {
+      throw new Error(
+        "JSON schema conversion failed: expected an object from ~standard.jsonSchema.input(...).",
+      );
+    }
+    return converted;
+  }
+
+  if (!isJsonObject(schema)) {
+    throw new Error("JSON schema must be an object or implement ~standard.jsonSchema.");
+  }
+  return schema;
+}
+
+function jsonColumn(): JsonBuilder<JsonValue>;
+function jsonColumn<Schema extends StandardJSONSchemaV1<unknown, unknown>>(
+  schema: Schema,
+): JsonBuilder<StandardJSONSchemaV1.InferOutput<Schema>>;
+function jsonColumn(schema: JsonSchema): JsonBuilder<JsonValue>;
+function jsonColumn(schema?: JsonSchemaSource): JsonBuilder {
+  return new JsonBuilder(schema);
+}
 
 // ============================================================================
 // Column Builder (for schema context)
@@ -31,6 +94,60 @@ class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
 
   constructor(public _sqlType: ScalarSqlType) {}
+
+  optional(): this {
+    this._nullable = true;
+    return this;
+  }
+
+  _build(name: string): Column {
+    return {
+      name,
+      sqlType: this._sqlType,
+      nullable: this._nullable,
+    };
+  }
+
+  get _references(): string | undefined {
+    return undefined;
+  }
+}
+
+class EnumBuilder implements ColumnBuilder {
+  private _nullable = false;
+  public _sqlType: EnumSqlType;
+
+  constructor(...variants: string[]) {
+    this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
+  }
+
+  optional(): this {
+    this._nullable = true;
+    return this;
+  }
+
+  _build(name: string): Column {
+    return {
+      name,
+      sqlType: this._sqlType,
+      nullable: this._nullable,
+    };
+  }
+
+  get _references(): string | undefined {
+    return undefined;
+  }
+}
+
+class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
+  private _nullable = false;
+  public _sqlType: JsonSqlType<Output>;
+
+  constructor(schema?: JsonSchemaSource<Output>) {
+    this._sqlType = schema
+      ? { kind: "JSON", schema: normalizeJsonSchema(schema) }
+      : { kind: "JSON" };
+  }
 
   optional(): this {
     this._nullable = true;
@@ -125,12 +242,42 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
+  timestamp(opts: { default: MaybeOptional<Date | number, Optional> }): AddOp {
+    return { _type: "add", sqlType: "TIMESTAMP", default: opts.default };
+  }
+
   boolean(opts: { default: MaybeOptional<boolean, Optional> }): AddOp {
     return { _type: "add", sqlType: "BOOLEAN", default: opts.default };
   }
 
   float(opts: { default: MaybeOptional<number, Optional> }): AddOp {
     return { _type: "add", sqlType: "REAL", default: opts.default };
+  }
+
+  bytes(opts: { default: MaybeOptional<Uint8Array, Optional> }): AddOp {
+    return { _type: "add", sqlType: "BYTEA", default: opts.default };
+  }
+
+  json(opts: { default: MaybeOptional<string, Optional>; schema?: JsonSchemaSource }): AddOp {
+    return {
+      _type: "add",
+      sqlType: opts.schema
+        ? { kind: "JSON", schema: normalizeJsonSchema(opts.schema) }
+        : { kind: "JSON" },
+      default: opts.default,
+    };
+  }
+
+  enum<const Variants extends readonly [string, ...string[]]>(
+    ...args: [...variants: Variants, opts: { default: MaybeOptional<Variants[number], Optional> }]
+  ): AddOp {
+    const opts = args[args.length - 1] as { default: MaybeOptional<Variants[number], Optional> };
+    const variants = normalizeEnumVariants(args.slice(0, -1) as string[]);
+    return {
+      _type: "add",
+      sqlType: { kind: "ENUM", variants },
+      default: opts.default,
+    };
   }
 
   array<T extends SqlType>(opts: {
@@ -162,12 +309,42 @@ class DropBuilder {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
+  timestamp(opts: { backwardsDefault: Date | number }): DropOp {
+    return { _type: "drop", sqlType: "TIMESTAMP", backwardsDefault: opts.backwardsDefault };
+  }
+
   boolean(opts: { backwardsDefault: boolean }): DropOp {
     return { _type: "drop", sqlType: "BOOLEAN", backwardsDefault: opts.backwardsDefault };
   }
 
   float(opts: { backwardsDefault: number }): DropOp {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
+  }
+
+  bytes(opts: { backwardsDefault: Uint8Array }): DropOp {
+    return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
+  }
+
+  json(opts: { backwardsDefault: string; schema?: JsonSchemaSource }): DropOp {
+    return {
+      _type: "drop",
+      sqlType: opts.schema
+        ? { kind: "JSON", schema: normalizeJsonSchema(opts.schema) }
+        : { kind: "JSON" },
+      backwardsDefault: opts.backwardsDefault,
+    };
+  }
+
+  enum<const Variants extends readonly [string, ...string[]]>(
+    ...args: [...variants: Variants, opts: { backwardsDefault: Variants[number] }]
+  ): DropOp {
+    const opts = args[args.length - 1] as { backwardsDefault: Variants[number] };
+    const variants = normalizeEnumVariants(args.slice(0, -1) as string[]);
+    return {
+      _type: "drop",
+      sqlType: { kind: "ENUM", variants },
+      backwardsDefault: opts.backwardsDefault,
+    };
   }
 
   array<T extends SqlType>(opts: { of: T; backwardsDefault: TSTypeFromSqlType<T>[] }): DropOp {
@@ -188,7 +365,11 @@ export const col = {
   string: () => new ScalarBuilder("TEXT"),
   boolean: () => new ScalarBuilder("BOOLEAN"),
   int: () => new ScalarBuilder("INTEGER"),
+  timestamp: () => new ScalarBuilder("TIMESTAMP"),
   float: () => new ScalarBuilder("REAL"),
+  bytes: () => new ScalarBuilder("BYTEA"),
+  json: jsonColumn,
+  enum: (...variants: string[]) => new EnumBuilder(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
   array: (element: ColumnBuilder) => new ArrayBuilder(element),
 

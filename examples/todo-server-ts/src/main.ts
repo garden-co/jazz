@@ -10,10 +10,8 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { JazzClient } from "jazz-tools";
-import type { Value } from "jazz-tools";
-import { NapiRuntime } from "jazz-napi";
-import { wasmSchema as schema } from "../schema/app.js";
+import { createJazzContext, translateQuery, type JazzClient, type Value } from "jazz-tools/backend";
+import { app as schemaApp, wasmSchema as schema } from "../schema/app.js";
 
 // ============================================================================
 // Types
@@ -75,16 +73,15 @@ function rowToTodo(id: string, values: Value[]): Todo | null {
 }
 
 function buildQuery(table: string) {
-  return JSON.stringify({
-    table,
-    branches: [],
-    disjuncts: [{ conditions: [] }],
-    order_by: [],
-    offset: 0,
-    include_deleted: false,
-    array_subqueries: [],
-    joins: [],
-  });
+  return translateQuery(
+    JSON.stringify({
+      table,
+      conditions: [],
+      includes: {},
+      orderBy: [],
+    }),
+    schema,
+  );
 }
 
 // ============================================================================
@@ -98,18 +95,17 @@ function buildQuery(table: string) {
  * @returns TodoServer with app, client, and shutdown function
  */
 export async function createServer(dataPath?: string): Promise<TodoServer> {
-  // Create SurrealKV-backed runtime via NAPI
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
   const appId = process.env.JAZZ_APP_ID ?? "todo-server-ts";
 
-  const runtime = new NapiRuntime(JSON.stringify(schema), appId, "dev", "main", dbPath);
-
-  const client = JazzClient.connectWithRuntime(runtime, {
+  const context = createJazzContext({
     appId,
-    schema,
+    app: schemaApp,
+    dataPath: dbPath,
     env: "dev",
     userBranch: "main",
   });
+  const client = context.client();
 
   // Create Express app
   const app = express();
@@ -195,9 +191,11 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // List todos as a specific session user (for policy verification/testing)
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const sessionJson = JSON.stringify({ user_id: req.params.userId, claims: {} });
-      const rows = await runtime.query(buildQuery("todos"), sessionJson, null);
-      const todos = (rows as Array<{ id: string; values: Value[] }>)
+      const rows = await client.queryInternal(buildQuery("todos"), {
+        user_id: req.params.userId,
+        claims: {},
+      });
+      const todos = rows
         .map((row) => rowToTodo(row.id, row.values))
         .filter((t): t is Todo => t !== null);
       res.json(todos);
@@ -339,10 +337,10 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     app,
     client,
     shutdown: async () => {
-      await client.shutdown();
+      await context.shutdown();
     },
     flush: () => {
-      runtime.flush();
+      context.flush();
     },
   };
 }

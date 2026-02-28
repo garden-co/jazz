@@ -28,7 +28,27 @@ export type {
   AddOp,
   DropOp,
   RenameOp,
+  JsonValue,
+  JsonSchema,
+  JsonSchemaToTs,
 } from "./schema.js";
+export type {
+  RelColumnRef,
+  RelRowIdRef,
+  RelValueRef,
+  RelPredicateCmpOp,
+  RelPredicateExpr,
+  RelJoinKind,
+  RelJoinCondition,
+  RelKeyRef,
+  RelProjectExpr,
+  RelProjectColumn,
+  RelOrderDirection,
+  RelOrderByExpr,
+  RelExpr,
+  PolicyOperationV2,
+  PolicyExprV2,
+} from "./ir.js";
 
 // Codegen
 export { generateClient, schemaToWasm, generateTypes } from "./codegen/index.js";
@@ -41,6 +61,7 @@ export * from "./runtime/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
+export * from "./dev-tools/index.js";
 
 // Local synthetic users and vanilla switcher UI
 export {

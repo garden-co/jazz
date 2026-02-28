@@ -1,10 +1,14 @@
+import * as React from "react";
 import {
+  createJazzClient,
   JazzProvider,
-  SyntheticUserSwitcher,
   getActiveSyntheticAuth,
-  type JazzProviderProps,
+  attachDevTools,
 } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
+import { app } from "../schema/app.js";
+
+type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -13,9 +17,9 @@ function readEnvAppId(): string | undefined {
 
 // #region context-setup-react
 function defaultConfig(
-  overrides: Partial<JazzProviderProps["config"]> = {},
-): NonNullable<JazzProviderProps["config"]> {
-  const appId = overrides.appId ?? readEnvAppId() ?? "todo-react-example";
+  overrides: Partial<JazzProviderClientConfig> = {},
+): JazzProviderClientConfig {
+  const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
@@ -29,16 +33,64 @@ function defaultConfig(
 }
 // #endregion context-setup-react
 
-export function App({ config, fallback }: Partial<JazzProviderProps> = {}) {
+type AppProps = {
+  config?: Partial<JazzProviderClientConfig>;
+  fallback?: React.ReactNode;
+};
+
+// #region context-setup-react
+export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(config);
+  const configKey = JSON.stringify(resolvedConfig);
+  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
+    null,
+  );
+  const [error, setError] = React.useState<unknown>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    const pending = createJazzClient(resolvedConfig);
+
+    void pending.then(
+      (resolved) => {
+        if (!active) {
+          void resolved.shutdown();
+          return;
+        }
+        setClient(resolved);
+        attachDevTools(resolved, app.wasmSchema);
+        if (location.origin.includes("localhost")) {
+          Object.defineProperty(window, "jazzClient", {
+            value: resolved,
+            writable: true,
+          });
+        }
+      },
+      (reason) => {
+        if (!active) return;
+        setError(reason);
+      },
+    );
+
+    return () => {
+      active = false;
+      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
+    };
+  }, [configKey]);
+
+  if (error) {
+    throw error;
+  }
+
+  if (!client) {
+    return <>{fallback ?? <p>Loading...</p>}</>;
+  }
 
   return (
-    <>
-      <SyntheticUserSwitcher appId={resolvedConfig.appId} defaultMode="demo" />
-      <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
-        <h1>Todos</h1>
-        <TodoList />
-      </JazzProvider>
-    </>
+    <JazzProvider client={client}>
+      <h1>Todos</h1>
+      <TodoList />
+    </JazzProvider>
   );
 }
+// #endregion context-setup-react

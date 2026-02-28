@@ -1,6 +1,6 @@
-//! jazz-wasm - WebAssembly bindings for the Groove database engine.
+//! jazz-wasm - WebAssembly bindings for the Jazz database engine.
 //!
-//! This crate provides JavaScript bindings for the Groove local-first database engine,
+//! This crate provides JavaScript bindings for the Jazz local-first database engine,
 //! enabling TypeScript/JavaScript applications to use Jazz with custom storage backends.
 //!
 //! # Architecture
@@ -24,7 +24,7 @@
 //! };
 //!
 //! // Create runtime
-//! const schema = { tables: { todos: { columns: [...] } } };
+//! const schema = { todos: { columns: [...] } };
 //! const runtime = new WasmRuntime(driver, JSON.stringify(schema), 'my-app', 'dev', 'main');
 //!
 //! // Insert a row
@@ -71,9 +71,9 @@ pub fn init() {
 /// Returns the schema as a JsValue for inspection.
 #[wasm_bindgen(js_name = parseSchema)]
 pub fn parse_schema(json: &str) -> Result<JsValue, JsError> {
-    let wasm_schema: types::WasmSchema =
+    let schema: types::Schema =
         serde_json::from_str(json).map_err(|e| JsError::new(&format!("Parse error: {}", e)))?;
-    Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
+    Ok(serde_wasm_bindgen::to_value(&schema)?)
 }
 
 /// Generate a new UUID v7 (time-ordered).

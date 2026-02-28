@@ -2,18 +2,80 @@
  * Generate TypeScript interfaces from WasmSchema.
  */
 
+import pluralize from "pluralize-esm";
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "./relation-analyzer.js";
 import {
-  generateWhereInputTypes,
+  generateWhereInputTypesWithMapper,
   generateQueryBuilderClasses,
   generateAppExport,
 } from "./query-builder-generator.js";
 
+type JsonSchemaObject = Record<string, unknown>;
+
+interface JsonSchemaTypeBinding {
+  key: string;
+  constName: string;
+  typeName: string;
+  schema: JsonSchemaObject;
+}
+
 /**
  * Convert a WasmColumnType to TypeScript type string.
  */
-function wasmTypeToTs(colType: ColumnType): string {
+function arrayType(elementTs: string): string {
+  return elementTs.includes("|") ? `(${elementTs})[]` : `${elementTs}[]`;
+}
+
+function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function collectJsonSchemaBindings(schema: WasmSchema): JsonSchemaTypeBinding[] {
+  const bindings = new Map<string, JsonSchemaTypeBinding>();
+
+  const visit = (colType: ColumnType): void => {
+    switch (colType.type) {
+      case "Json": {
+        if (!isJsonSchemaObject(colType.schema)) {
+          return;
+        }
+        const key = JSON.stringify(colType.schema);
+        if (bindings.has(key)) {
+          return;
+        }
+        const index = bindings.size + 1;
+        bindings.set(key, {
+          key,
+          constName: `__jsonSchema${index}`,
+          typeName: `__JsonType${index}`,
+          schema: colType.schema,
+        });
+        return;
+      }
+      case "Array":
+        visit(colType.element);
+        return;
+      case "Row":
+        for (const nested of colType.columns) {
+          visit(nested.column_type);
+        }
+        return;
+      default:
+        return;
+    }
+  };
+
+  for (const table of Object.values(schema)) {
+    for (const column of table.columns) {
+      visit(column.column_type);
+    }
+  }
+
+  return [...bindings.values()];
+}
+
+function wasmTypeToTs(colType: ColumnType, jsonTypeBySchemaKey: Map<string, string>): string {
   switch (colType.type) {
     case "Text":
       return "string";
@@ -21,18 +83,34 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "boolean";
     case "Integer":
     case "BigInt":
-    case "Timestamp":
+    case "Double":
       return "number";
+    case "Timestamp":
+      return "Date";
     case "Uuid":
       return "string";
+    case "Bytea":
+      return "Uint8Array";
+    case "Json": {
+      if (isJsonSchemaObject(colType.schema)) {
+        const key = JSON.stringify(colType.schema);
+        const boundType = jsonTypeBySchemaKey.get(key);
+        if (boundType) {
+          return boundType;
+        }
+      }
+      return "JsonValue";
+    }
+    case "Enum":
+      return colType.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
-      return `${wasmTypeToTs(colType.element)}[]`;
+      return arrayType(wasmTypeToTs(colType.element, jsonTypeBySchemaKey));
     case "Row":
       // Nested row - generate inline type
       const fields = colType.columns
-        .map((c) => {
+        .map((c: { name: string; nullable: boolean; column_type: ColumnType }) => {
           const opt = c.nullable ? "?" : "";
-          return `${c.name}${opt}: ${wasmTypeToTs(c.column_type)}`;
+          return `${c.name}${opt}: ${wasmTypeToTs(c.column_type, jsonTypeBySchemaKey)}`;
         })
         .join("; ");
       return `{ ${fields} }`;
@@ -41,40 +119,8 @@ function wasmTypeToTs(colType: ColumnType): string {
   }
 }
 
-/**
- * Singularize a word using simple heuristics.
- *
- * Examples:
- *   todos -> todo
- *   categories -> category
- *   users -> user
- *   data -> data (unchanged)
- */
 function singularize(word: string): string {
-  if (word.endsWith("ies")) {
-    // categories -> category
-    return word.slice(0, -3) + "y";
-  }
-  if (word.endsWith("es") && word.length > 3) {
-    // Some words ending in 'es' - be conservative
-    const stem = word.slice(0, -2);
-    // Only apply if it ends with common patterns like 'sses', 'xes', 'ches', 'shes'
-    if (
-      word.endsWith("sses") ||
-      word.endsWith("xes") ||
-      word.endsWith("ches") ||
-      word.endsWith("shes")
-    ) {
-      return stem;
-    }
-    // Otherwise just remove 's'
-    return word.slice(0, -1);
-  }
-  if (word.endsWith("s") && !word.endsWith("ss")) {
-    // todos -> todo, users -> user
-    return word.slice(0, -1);
-  }
-  return word;
+  return pluralize.singular(word);
 }
 
 /**
@@ -228,39 +274,64 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
  * 9. App export with table proxies
  */
 export function generateTypes(schema: WasmSchema): string {
+  const jsonSchemaBindings = collectJsonSchemaBindings(schema);
+  const jsonTypeBySchemaKey = new Map(
+    jsonSchemaBindings.map((binding) => [binding.key, binding.typeName]),
+  );
+
+  const importNames = ["WasmSchema", "QueryBuilder"];
+  if (jsonSchemaBindings.length > 0) {
+    importNames.push("JsonSchemaToTs");
+  }
+
   const lines: string[] = [
     "// AUTO-GENERATED FILE - DO NOT EDIT",
-    'import type { WasmSchema, QueryBuilder } from "jazz-tools";',
+    `import type { ${importNames.join(", ")} } from "jazz-tools";`,
+    "export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];",
     "",
   ];
 
+  if (jsonSchemaBindings.length > 0) {
+    for (const binding of jsonSchemaBindings) {
+      lines.push(
+        `const ${binding.constName} = ${JSON.stringify(binding.schema, null, 2)} as const;`,
+      );
+      lines.push(`type ${binding.typeName} = JsonSchemaToTs<typeof ${binding.constName}>;`);
+      lines.push("");
+    }
+  }
+
   // Base types (with id)
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName);
     lines.push(`export interface ${interfaceName} {`);
     lines.push("  id: string;");
     for (const col of table.columns) {
       const opt = col.nullable ? "?" : "";
-      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type)};`);
+      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type, jsonTypeBySchemaKey)};`);
     }
     lines.push("}");
     lines.push("");
   }
 
   // Init types (without id, for inserts)
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName) + "Init";
     lines.push(`export interface ${interfaceName} {`);
     for (const col of table.columns) {
       const opt = col.nullable ? "?" : "";
-      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type)};`);
+      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type, jsonTypeBySchemaKey)};`);
     }
     lines.push("}");
     lines.push("");
   }
 
   // WhereInput types (for type-safe filtering)
-  lines.push(...generateWhereInputTypes(schema));
+  lines.push(
+    ...generateWhereInputTypesWithMapper(schema, (columnType) =>
+      wasmTypeToTs(columnType, jsonTypeBySchemaKey),
+    ),
+  );
 
   // Analyze relations and generate relation types
   const relations = analyzeRelations(schema);

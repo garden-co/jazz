@@ -10,48 +10,12 @@ This file replaces the old test-quality subsection from `general_cleanup.md` and
 
 ## Remaining Weak Assertions
 
-## 1. Ambiguous Pass Conditions (high priority)
+## 4. Broader Sweep (medium priority) - Partially done but needs more work
 
-- `crates/groove/src/query_manager/manager_tests.rs:update_passes_filter_emits_addition`
-  - Current: allows either no initial update or empty-added update (`updates.is_empty() || updates[0].delta.added.is_empty()`).
-  - Needed: one deterministic expected initial state.
-
-- `crates/groove/src/query_manager/manager_tests.rs:update_to_untracked_row_is_silent`
-  - Current: allows either no update or empty delta payload.
-  - Needed: assert one deterministic no-op path.
-
-## 2. Shape-Only Assertions (high priority)
-
-- `crates/groove/src/query_manager/manager_tests.rs:insert_and_query`
-  - Current: mostly count checks (`len()`).
-  - Needed: verify row identities and key values for both unfiltered and filtered results.
-
-- `crates/groove/src/sync_manager/tests.rs:local_commit_syncs_to_server`
-  - Current: validates commit count/id only.
-  - Needed: also assert destination server, object id, and branch.
-
-## 3. Test Stub / Non-Behavioral Case (high priority)
-
-- `crates/groove/src/schema_manager/integration_tests.rs:query_manager_queues_catalogue_updates`
-  - Current: asserts only initial empty queue and then stops.
-  - Needed: inject a real catalogue payload via sync path and assert pending catalogue update enqueue/dequeue behavior.
-
-## 4. Broader Sweep (medium priority)
-
-- Continue reducing `len()`-only checks in older tests (especially early `sync_manager/tests.rs` and legacy `manager_tests.rs` cases) where object identity/content can be asserted cheaply.
+- Continue reducing `len()`-only checks in older tests (especially early `sync_manager/tests.rs` and older `manager_tests.rs` cases) where object identity/content can be asserted cheaply.
 - Avoid broad `matches!` patterns that do not validate key payload fields.
 
 ## Missing Schema/Catalogue Negative Paths
-
-## 5. Catalogue metadata filtering
-
-- Add tests that non-matching `app_id` catalogue objects are ignored without side effects.
-- Add tests that unknown catalogue `type` is ignored without side effects.
-
-## 6. Malformed payload handling
-
-- Add malformed schema-content test for `process_catalogue_update(... CatalogueSchema ...)` decode failure path.
-- Add malformed lens-content test for `process_catalogue_update(... CatalogueLens ...)` decode failure path.
 
 ## 7. Invalid/missing lens metadata
 

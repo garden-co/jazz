@@ -48,10 +48,62 @@ describe("toValue", () => {
     expect(toValue(now, colType)).toEqual({ type: "Timestamp", value: now });
   });
 
+  it("converts Date objects for Timestamp columns", () => {
+    const colType: ColumnType = { type: "Timestamp" };
+    const ts = 1704067200000;
+    const date = new Date(ts);
+    expect(toValue(date, colType)).toEqual({ type: "Timestamp", value: ts });
+  });
+
+  it("throws for invalid Date in Timestamp columns", () => {
+    const colType: ColumnType = { type: "Timestamp" };
+    expect(() => toValue(new Date("not-a-date"), colType)).toThrow("Invalid timestamp value");
+  });
+
   it("converts Uuid values", () => {
     const colType: ColumnType = { type: "Uuid" };
     const uuid = "550e8400-e29b-41d4-a716-446655440000";
     expect(toValue(uuid, colType)).toEqual({ type: "Uuid", value: uuid });
+  });
+
+  it("converts Bytea Uint8Array values", () => {
+    const colType: ColumnType = { type: "Bytea" };
+    const bytes = new Uint8Array([0, 10, 255]);
+    const converted = toValue(bytes, colType);
+    expect(converted.type).toBe("Bytea");
+    if (converted.type !== "Bytea") {
+      throw new Error("expected Bytea value");
+    }
+    expect(converted.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(converted.value)).toEqual([0, 10, 255]);
+  });
+
+  it("rejects invalid Bytea values", () => {
+    const colType: ColumnType = { type: "Bytea" };
+    expect(() => toValue("abc", colType)).toThrow("Expected Uint8Array or byte array");
+    expect(() => toValue([0, 256], colType)).toThrow("Bytea arrays must contain integers");
+  });
+
+  it("converts Json values", () => {
+    const colType: ColumnType = { type: "Json" };
+    expect(toValue('{"a":1}', colType)).toEqual({ type: "Text", value: '{"a":1}' });
+    expect(toValue({ a: 1, b: ["x"] }, colType)).toEqual({
+      type: "Text",
+      value: '{"a":1,"b":["x"]}',
+    });
+  });
+
+  it("rejects non-serializable Json values", () => {
+    const colType: ColumnType = { type: "Json" };
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => toValue(circular, colType)).toThrow("JSON values must be serializable");
+  });
+
+  it("converts Enum values and validates variants", () => {
+    const colType = { type: "Enum", variants: ["done", "todo"] } as ColumnType;
+    expect(toValue("todo", colType)).toEqual({ type: "Text", value: "todo" });
+    expect(() => toValue("invalid", colType)).toThrow("Invalid enum value");
   });
 
   it("converts Array values", () => {
@@ -88,6 +140,13 @@ describe("toValue", () => {
     });
   });
 
+  it("converts Double values", () => {
+    const colType: ColumnType = { type: "Double" };
+    expect(toValue(23.456, colType)).toEqual({ type: "Double", value: 23.456 });
+    expect(toValue(-0.001, colType)).toEqual({ type: "Double", value: -0.001 });
+    expect(toValue(0, colType)).toEqual({ type: "Double", value: 0 });
+  });
+
   it("throws for unsupported column type", () => {
     const colType = { type: "Unknown" } as unknown as ColumnType;
     expect(() => toValue("test", colType)).toThrow("Unsupported column type");
@@ -96,14 +155,12 @@ describe("toValue", () => {
 
 describe("toValueArray", () => {
   const schema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      ],
     },
   };
 
@@ -147,14 +204,12 @@ describe("toValueArray", () => {
 
 describe("toUpdateRecord", () => {
   const schema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      ],
     },
   };
 

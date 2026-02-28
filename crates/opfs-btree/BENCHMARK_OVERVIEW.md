@@ -277,7 +277,7 @@ Interpretation: coalescing reduced call overhead substantially while writing the
 
 Changes in this phase:
 
-- Added `BTreeOptions.read_coalesce_pages` (default `1`), and enabled `read_coalesce_pages=4` in groove OPFS storage + wasm bench defaults.
+- Added `BTreeOptions.read_coalesce_pages` (default `1`), and enabled `read_coalesce_pages=4` in jazz OPFS storage + wasm bench defaults.
 - `ensure_page_loaded` now reads a contiguous on-disk page run (up to configured run length) and caches decoded pages.
 - Added unit coverage for read-call reduction and eviction safety around prefetched pages.
 

@@ -6,13 +6,16 @@ use serde_json::json;
 use smallvec::smallvec;
 
 use crate::metadata::MetadataKey;
-use crate::storage::MemoryStorage;
-use crate::sync_manager::SyncManager;
-
-use super::{
-    ColumnDescriptor, ColumnType, PolicyExpr, QueryError, QueryManager, RowDescriptor, Schema,
-    Session as PolicySession, TableName, TablePolicies, TableSchema, Value, decode_row,
+use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::manager::{QueryError, QueryManager};
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::Session as PolicySession;
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
+    TableSchema, Value,
 };
+use crate::storage::{MemoryStorage, Storage};
+use crate::sync_manager::SyncManager;
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -21,6 +24,40 @@ fn test_schema() -> Schema {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("name", ColumnType::Text),
             ColumnDescriptor::new("score", ColumnType::Integer),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn recursive_team_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("team_id", ColumnType::Integer)]).into(),
+    );
+    schema.insert(
+        TableName::new("team_edges"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("child_team", ColumnType::Integer),
+            ColumnDescriptor::new("parent_team", ColumnType::Integer),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn recursive_hop_team_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("team_edges"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("child_team", ColumnType::Uuid),
+            ColumnDescriptor::new("parent_team", ColumnType::Uuid),
         ])
         .into(),
     );
@@ -45,6 +82,19 @@ fn get_branch(qm: &QueryManager) -> String {
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 
+fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
+    let mut out = Schema::new();
+    out.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "payload",
+            ColumnType::Json { schema },
+        )])
+        .into(),
+    );
+    out
+}
+
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
 /// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
 fn execute_query(
@@ -57,6 +107,111 @@ fn execute_query(
     let results = qm.get_subscription_results(sub_id);
     qm.unsubscribe_with_sync(sub_id);
     Ok(results)
+}
+
+#[test]
+fn insert_json_preserves_original_text() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let raw = "{\n  \"name\": \"Ada\",\n  \"active\": true\n}";
+    qm.insert(&mut storage, "documents", &[Value::Text(raw.to_string())])
+        .expect("insert valid json");
+
+    let query = qm.query("documents").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query inserted row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, vec![Value::Text(raw.to_string())]);
+}
+
+#[test]
+fn insert_rejects_invalid_json_text() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let err = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":true".to_string())],
+        )
+        .expect_err("invalid JSON must be rejected");
+
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("invalid JSON for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn insert_rejects_json_schema_violation() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(Some(json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })));
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let err = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":123}".to_string())],
+        )
+        .expect_err("schema-invalid JSON must be rejected");
+
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("JSON schema validation failed for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn update_rejects_json_schema_violation() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(Some(json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })));
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":\"ok\"}".to_string())],
+        )
+        .expect("insert valid row first");
+
+    let err = qm
+        .update(
+            &mut storage,
+            inserted.row_id,
+            &[Value::Text("{\"name\":42}".to_string())],
+        )
+        .expect_err("invalid update payload must be rejected");
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("JSON schema validation failed for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+
+    let query = qm.query("documents").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query existing row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("{\"name\":\"ok\"}".to_string())]
+    );
 }
 
 #[test]
@@ -87,29 +242,41 @@ fn insert_and_query() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Bob".into()), Value::Integer(50)],
-    )
-    .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Charlie".into()), Value::Integer(75)],
-    )
-    .unwrap();
+    let alice = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let bob = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let charlie = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
 
     // Query all
     let query = qm.query("users").build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 3);
+    assert!(results.iter().any(|(id, values)| {
+        *id == alice.row_id && values == &vec![Value::Text("Alice".into()), Value::Integer(100)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == bob.row_id && values == &vec![Value::Text("Bob".into()), Value::Integer(50)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == charlie.row_id && values == &vec![Value::Text("Charlie".into()), Value::Integer(75)]
+    }));
 
     // Query with filter
     let query = qm
@@ -118,6 +285,225 @@ fn insert_and_query() {
         .build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 2);
+    assert!(results.iter().any(|(id, values)| {
+        *id == alice.row_id && values == &vec![Value::Text("Alice".into()), Value::Integer(100)]
+    }));
+    assert!(results.iter().any(|(id, values)| {
+        *id == charlie.row_id && values == &vec![Value::Text("Charlie".into()), Value::Integer(75)]
+    }));
+    assert!(
+        results.iter().all(|(id, _)| *id != bob.row_id),
+        "Bob should not match score >= 75 filter"
+    );
+}
+
+#[test]
+fn recursive_query_expands_transitive_team_edges() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_team_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Seed team and edge data:
+    // 1 -> 2 -> 3 -> 1 (cycle)
+    qm.insert(&mut storage, "teams", &[Value::Integer(1)])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Integer(1), Value::Integer(2)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Integer(2), Value::Integer(3)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Integer(3), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("teams")
+        .select(&["team_id"])
+        .filter_eq("team_id", Value::Integer(1))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "team_id")
+                .select(&["parent_team"])
+                .max_depth(10)
+        })
+        .build();
+
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    let mut ids: Vec<i32> = results
+        .into_iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Integer(i)) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable();
+
+    assert_eq!(ids, vec![1, 2, 3], "Should compute recursive closure");
+}
+
+#[test]
+fn recursive_query_with_hop_expands_transitive_closure() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_hop_team_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let team1 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-1".into())])
+        .unwrap();
+    let team2 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-2".into())])
+        .unwrap();
+    let team3 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-3".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Uuid(team1.row_id), Value::Uuid(team2.row_id)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Uuid(team2.row_id), Value::Uuid(team3.row_id)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("teams")
+        .filter_eq("name", Value::Text("team-1".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .select(&["parent_team"])
+                .hop("teams", "parent_team")
+                .max_depth(10)
+        })
+        .build();
+
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    let mut names: Vec<String> = results
+        .into_iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["team-1", "team-2", "team-3"]);
+}
+
+#[test]
+fn recursive_query_with_join_project_step_is_rejected() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_hop_team_schema();
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let query_result = qm
+        .query("teams")
+        .filter_eq("name", Value::Text("team-1".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .join("teams")
+                .alias("__recursive_hop_0")
+                .on("team_edges.parent_team", "__recursive_hop_0.id")
+                .result_element_index(1)
+                .max_depth(10)
+        })
+        .try_build();
+
+    assert!(
+        query_result.is_err(),
+        "recursive join-projection shape should be rejected"
+    );
+}
+
+#[test]
+fn recursive_hop_query_subscriptions_receive_expansion_updates() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_hop_team_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let team1 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-1".into())])
+        .unwrap();
+    let team2 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-2".into())])
+        .unwrap();
+    let team3 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-3".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Uuid(team1.row_id), Value::Uuid(team2.row_id)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("teams")
+        .filter_eq("name", Value::Text("team-1".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .select(&["parent_team"])
+                .hop("teams", "parent_team")
+                .max_depth(10)
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let _initial_updates = qm.take_updates();
+
+    qm.insert(
+        &mut storage,
+        "team_edges",
+        &[Value::Uuid(team2.row_id), Value::Uuid(team3.row_id)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Recursive hop subscription should receive updates");
+    let team_descriptor = qm
+        .schema_context()
+        .current_schema
+        .get(&TableName::new("teams"))
+        .unwrap();
+    let added_names: Vec<String> = delta
+        .added
+        .iter()
+        .filter_map(|row| {
+            match decode_row(&team_descriptor.columns, &row.data)
+                .ok()?
+                .first()
+            {
+                Some(Value::Text(name)) => Some(name.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(
+        added_names.contains(&"team-3".to_string()),
+        "team-3 should be added when edge team-2 -> team-3 is inserted"
+    );
 }
 
 #[test]
@@ -151,6 +537,82 @@ fn query_with_sort_and_limit() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
     assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
+}
+
+#[test]
+fn query_order_by_id_is_deterministic() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let h1 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let h2 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let h3 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+    let query = qm.query("users").order_by("id").build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 3);
+
+    let actual: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    let mut expected = vec![h1.row_id, h2.row_id, h3.row_id];
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn query_without_order_by_defaults_to_id_ascending() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let h1 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let h2 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
+    let h3 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+    let query = qm.query("users").build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 3);
+
+    let actual: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    let mut expected = vec![h1.row_id, h2.row_id, h3.row_id];
+    expected.sort();
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -202,7 +664,12 @@ fn table_not_found_error() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let result = qm.insert(&mut storage, "nonexistent", &[Value::Text("test".into())]);
-    assert!(matches!(result, Err(QueryError::TableNotFound(_))));
+    match result {
+        Err(QueryError::TableNotFound(table)) => {
+            assert_eq!(table, TableName::new("nonexistent"));
+        }
+        other => panic!("Expected TableNotFound(nonexistent), got {other:?}"),
+    }
 }
 
 #[test]
@@ -212,10 +679,13 @@ fn column_count_mismatch_error() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let result = qm.insert(&mut storage, "users", &[Value::Text("Alice".into())]);
-    assert!(matches!(
-        result,
-        Err(QueryError::ColumnCountMismatch { .. })
-    ));
+    match result {
+        Err(QueryError::ColumnCountMismatch { expected, actual }) => {
+            assert_eq!(expected, 2, "users table has two columns in test_schema()");
+            assert_eq!(actual, 1, "insert call provided one value");
+        }
+        other => panic!("Expected ColumnCountMismatch, got {other:?}"),
+    }
 }
 
 #[test]
@@ -347,12 +817,13 @@ fn subscription_updates_after_insert_and_process() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Insert a row
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
 
     // Process - should settle subscriptions
     qm.process(&mut storage);
@@ -362,6 +833,141 @@ fn subscription_updates_after_insert_and_process() {
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(
+        updates[0].delta.added[0].id, handle.row_id,
+        "Delta should identify the inserted row"
+    );
+}
+
+#[test]
+fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm.query("users").order_by_desc("score").limit(2).build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Charlie".into()), Value::Integer(75)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+    let _initial_updates = qm.take_updates();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Diana".into()), Value::Integer(125)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("sorted/limited subscription should emit update for new top row");
+
+    assert_eq!(delta.added.len(), 1);
+    assert_eq!(delta.removed.len(), 1);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].1[0], Value::Text("Diana".into())); // 125
+    assert_eq!(results[1].1[0], Value::Text("Alice".into())); // 100
+}
+
+#[test]
+fn offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm
+        .query("users")
+        .order_by("score")
+        .offset(1)
+        .limit(2)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle_a = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("A".into()), Value::Integer(1)],
+        )
+        .unwrap();
+    let handle_b = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("B".into()), Value::Integer(2)],
+        )
+        .unwrap();
+    let handle_c = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("C".into()), Value::Integer(3)],
+        )
+        .unwrap();
+    let handle_d = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("D".into()), Value::Integer(4)],
+        )
+        .unwrap();
+
+    qm.process(&mut storage);
+    let _initial_updates = qm.take_updates();
+
+    let initial_results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        initial_results
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![handle_b.row_id, handle_c.row_id]
+    );
+
+    qm.delete(&mut storage, handle_a.row_id).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("offset/limit subscription should emit update when leading row is deleted");
+
+    assert_eq!(delta.removed.len(), 1);
+    assert_eq!(delta.removed[0].id, handle_b.row_id);
+    assert_eq!(delta.added.len(), 1);
+    assert_eq!(delta.added[0].id, handle_d.row_id);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![handle_c.row_id, handle_d.row_id]
+    );
 }
 
 #[test]
@@ -665,6 +1271,128 @@ fn synced_update_updates_column_indices() {
         results.len(),
         1,
         "New score value should be in index after sync update"
+    );
+}
+
+#[test]
+#[should_panic(expected = "missing old_content for historical sync update")]
+fn synced_update_missing_old_content_panics_fail_fast() {
+    use crate::object::BranchName;
+    use crate::object_manager::AllObjectUpdate;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    // Simulate a historical sync update where ObjectManager couldn't provide
+    // old_content. We should fail-fast rather than accept index staleness.
+    qm.handle_object_update(
+        &mut storage,
+        AllObjectUpdate {
+            object_id: handle.row_id,
+            metadata,
+            branch_name: BranchName::new(&branch),
+            commit_ids: vec![],
+            is_new_object: false,
+            previous_commit_ids: vec![handle.row_commit_id],
+            old_content: None,
+        },
+    );
+}
+
+#[test]
+fn lens_transform_failure_drops_row_instead_of_fallback() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
+
+    // Build a live schema without registering a lens path to current.
+    // Rows from that branch should be dropped at materialization time.
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut live_schema = Schema::new();
+    live_schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+            ColumnDescriptor::new("email", ColumnType::Text),
+        ])
+        .into(),
+    );
+    let live_descriptor = live_schema
+        .get(&TableName::new("users"))
+        .expect("live schema table should exist")
+        .columns
+        .clone();
+    qm.add_live_schema(live_schema);
+
+    let current_branch = get_branch(&qm);
+    let live_branch = qm
+        .all_query_branches()
+        .into_iter()
+        .find(|b| b != &current_branch)
+        .expect("live schema branch should exist");
+
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let live_data = encode_row(
+        &live_descriptor,
+        &[
+            Value::Text("Alice".into()),
+            Value::Integer(100),
+            Value::Text("alice@example.com".into()),
+        ],
+    )
+    .unwrap();
+    let commit = Commit {
+        parents: smallvec![],
+        content: live_data,
+        timestamp: 1000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &live_branch, commit)
+        .unwrap();
+    qm.process(&mut storage);
+
+    assert!(
+        qm.row_is_indexed_on_branch(&storage, "users", &live_branch, row_id),
+        "row should be indexed on live branch before subscription settle"
+    );
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        0,
+        "row from branch with failed lens transform should be dropped"
     );
 }
 
@@ -1216,11 +1944,13 @@ fn update_fails_filter_emits_removal() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(
         updates[0].delta.added.len(),
         1,
         "Row should be added initially"
     );
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
 
     // Update score to 30 (fails filter)
     qm.update(
@@ -1240,6 +1970,7 @@ fn update_fails_filter_emits_removal() {
         1,
         "Row should be removed when it fails filter"
     );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
 }
 
 #[test]
@@ -1268,8 +1999,12 @@ fn update_passes_filter_emits_addition() {
 
     qm.process(&mut storage);
     let updates = qm.take_updates();
-    // Row doesn't match filter, so no delta or empty delta
-    assert!(updates.is_empty() || updates[0].delta.added.is_empty());
+    // Row doesn't match filter, so no addition/removals, but we should still get an update for the subscription
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 
     // Update score to 100 (passes filter)
     qm.update(
@@ -1289,6 +2024,9 @@ fn update_passes_filter_emits_addition() {
         1,
         "Row should be added when it now passes filter"
     );
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 }
 
 #[test]
@@ -1336,6 +2074,8 @@ fn update_still_passes_filter_emits_update() {
         1,
         "Row should be updated when it still passes filter"
     );
+    assert_eq!(updates[0].delta.updated[0].0.id, handle.row_id);
+    assert_eq!(updates[0].delta.updated[0].1.id, handle.row_id);
 }
 
 #[test]
@@ -1363,7 +2103,11 @@ fn update_to_untracked_row_is_silent() {
     let _sub_id = qm.subscribe(query).unwrap();
 
     qm.process(&mut storage);
-    let _updates = qm.take_updates();
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+    assert!(updates[0].delta.removed.is_empty());
 
     // Update score to 40 (still fails filter)
     qm.update(
@@ -1376,13 +2120,10 @@ fn update_to_untracked_row_is_silent() {
     qm.process(&mut storage);
 
     let updates = qm.take_updates();
-    // Should be no updates (or empty delta)
+    // No updates should be emitted since the row doesn't match the filter before or after the update
     assert!(
-        updates.is_empty()
-            || (updates[0].delta.added.is_empty()
-                && updates[0].delta.removed.is_empty()
-                && updates[0].delta.updated.is_empty()),
-        "No delta for row that doesn't match filter before or after update"
+        updates.is_empty(),
+        "No updates for row that doesn't match filter before or after update"
     );
 }
 
@@ -1851,7 +2592,10 @@ fn delete_already_deleted_row_fails() {
 
     // Try to delete again - should fail
     let result = qm.delete(&mut storage, handle.row_id);
-    assert!(matches!(result, Err(QueryError::RowAlreadyDeleted(_))));
+    match result {
+        Err(QueryError::RowAlreadyDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowAlreadyDeleted for deleted row, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1896,7 +2640,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .schema()
         .get(&TableName::new("users"))
         .unwrap()
-        .descriptor
+        .columns
         .clone();
 
     // Commit A: lower timestamp, content "TipA"
@@ -2125,7 +2869,10 @@ fn undelete_nondeleted_row_fails() {
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
-    assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    match result {
+        Err(QueryError::RowNotDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowNotDeleted for non-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2252,7 +2999,10 @@ fn undelete_hard_deleted_row_fails() {
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
-    assert!(matches!(result, Err(QueryError::RowHardDeleted(_))));
+    match result {
+        Err(QueryError::RowHardDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowHardDeleted for hard-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2303,7 +3053,10 @@ fn truncate_nondeleted_row_fails() {
 
     // Try to truncate a non-deleted row - should fail
     let result = qm.truncate(&mut storage, handle.row_id);
-    assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    match result {
+        Err(QueryError::RowNotDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowNotDeleted for non-deleted row, got {other:?}"),
+    }
 }
 
 // ========================================================================
@@ -2371,12 +3124,13 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
             &[Value::Text("Alice".into()), Value::Integer(100)],
         )
         .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Text("Bob".into()), Value::Integer(50)],
-    )
-    .unwrap();
+    let bob_handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
+        .unwrap();
 
     // Hard delete Alice
     qm.hard_delete(&mut storage, handle1.row_id).unwrap();
@@ -2385,6 +3139,7 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
     let query = qm.query("users").include_deleted().build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, bob_handle.row_id);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
 
@@ -2415,7 +3170,9 @@ fn soft_delete_emits_removal_delta() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1); // Alice added
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
 
     // Delete Alice
     qm.delete(&mut storage, handle.row_id).unwrap();
@@ -2427,6 +3184,8 @@ fn soft_delete_emits_removal_delta() {
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.removed.len(), 1);
     assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 #[test]
@@ -2452,7 +3211,9 @@ fn hard_delete_emits_removal_delta() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1); // Alice added
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
 
     // Hard delete Alice
     qm.hard_delete(&mut storage, handle.row_id).unwrap();
@@ -2464,6 +3225,8 @@ fn hard_delete_emits_removal_delta() {
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.removed.len(), 1);
     assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 #[test]
@@ -2498,7 +3261,9 @@ fn delete_row_not_in_subscription_no_delta() {
     qm.process(&mut storage);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.added.len(), 1); // Only Alice
+    assert_eq!(updates[0].delta.added[0].id, alice_handle.row_id);
 
     // Delete Alice (who IS in subscription) - should emit removal delta
     qm.delete(&mut storage, alice_handle.row_id).unwrap();
@@ -2509,6 +3274,9 @@ fn delete_row_not_in_subscription_no_delta() {
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].delta.removed.len(), 1);
+    assert_eq!(updates[0].delta.removed[0].id, alice_handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 // ========================================================================
@@ -2537,6 +3305,23 @@ fn join_schema() -> Schema {
     schema
 }
 
+fn join_schema_with_implicit_base_id() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Uuid),
+        ])
+        .into(),
+    );
+    schema
+}
+
 #[test]
 fn join_compiles_but_not_executed_yet() {
     // This test validates that join queries compile and don't panic,
@@ -2544,7 +3329,7 @@ fn join_compiles_but_not_executed_yet() {
     // Once execute() supports joins, this test can be extended.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Build a join query
     let query = qm
@@ -2562,7 +3347,7 @@ fn join_compiles_but_not_executed_yet() {
 fn join_query_with_projection_compiles() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("users")
@@ -2582,7 +3367,7 @@ fn join_query_with_projection_compiles() {
 fn join_query_with_alias_compiles() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("users")
@@ -2612,7 +3397,7 @@ fn self_join_query_compiles() {
     );
 
     let sync_manager = SyncManager::new();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("employees")
@@ -2659,7 +3444,7 @@ fn multi_join_query_compiles() {
     );
 
     let sync_manager = SyncManager::new();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("orders")
@@ -2676,17 +3461,15 @@ fn multi_join_query_compiles() {
 }
 
 #[test]
-fn join_subscription_fails_without_on_clause() {
+fn join_without_on_clause_fails_query_build() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let (mut qm, _storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
-    let query = qm.query("users").join("posts").build();
-    let result = qm.subscribe(query);
-
+    let result = qm.query("users").join("posts").try_build();
     assert!(
-        matches!(result, Err(QueryError::QueryCompilationError(_))),
-        "Join queries without ON should fail during subscription compilation"
+        result.is_err(),
+        "Join queries without ON should fail at build time"
     );
 }
 
@@ -2703,10 +3486,17 @@ fn join_subscription_fails_for_invalid_join_column() {
         .build();
     let result = qm.subscribe(query);
 
-    assert!(
-        matches!(result, Err(QueryError::QueryCompilationError(_))),
-        "Join queries with invalid join columns should fail during subscription compilation"
-    );
+    match result {
+        Err(QueryError::QueryCompilationError(msg)) => {
+            assert_eq!(
+                msg,
+                "invalid relation plan: unsupported relation_ir shape for schema-context query compilation"
+            );
+        }
+        other => panic!(
+            "Join queries with invalid join columns should fail with QueryCompilationError, got {other:?}"
+        ),
+    }
 }
 
 #[test]
@@ -2724,10 +3514,17 @@ fn join_subscription_fails_for_circular_join_chain() {
         .build();
     let result = qm.subscribe(query);
 
-    assert!(
-        matches!(result, Err(QueryError::QueryCompilationError(_))),
-        "Circular/self join chains are not supported and should fail compilation"
-    );
+    match result {
+        Err(QueryError::QueryCompilationError(msg)) => {
+            assert_eq!(
+                msg,
+                "invalid relation plan: unsupported relation_ir shape for schema-context query compilation"
+            );
+        }
+        other => panic!(
+            "Circular/self join chains should fail with QueryCompilationError, got {other:?}"
+        ),
+    }
 }
 
 #[test]
@@ -2964,6 +3761,114 @@ fn join_filter_on_joined_table_column() {
 }
 
 #[test]
+fn join_subscription_can_project_joined_element_output() {
+    let sync_manager = SyncManager::new();
+    let schema = join_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    let post = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Hello World".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("id", "author_id")
+        .result_element_index(1)
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Expected projected join update");
+
+    assert_eq!(delta.added.len(), 1);
+    let row = &delta.added[0];
+    assert_eq!(
+        row.id, post.row_id,
+        "Projected join output should be keyed by joined row id"
+    );
+    assert!(
+        row.data
+            .windows("Hello World".len())
+            .any(|window| window == "Hello World".as_bytes()),
+        "Projected join output should contain joined-table payload"
+    );
+}
+
+#[test]
+fn join_subscription_supports_implicit_base_id_keys() {
+    let sync_manager = SyncManager::new();
+    let schema = join_schema_with_implicit_base_id();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(&mut storage, "users", &[Value::Text("Alice".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("Hello".into()),
+            Value::Uuid(alice.row_id), // FK to implicit users.id
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.id", "posts.author_id")
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have join subscription update");
+
+    assert_eq!(delta.added.len(), 1, "Expected implicit-id join match");
+    let row = &delta.added[0];
+    assert_eq!(
+        row.id, alice.row_id,
+        "Join result should remain keyed by base row identity"
+    );
+    assert!(
+        row.data
+            .windows("Alice".len())
+            .any(|window| window == "Alice".as_bytes()),
+        "Joined row should include base-table value"
+    );
+    assert!(
+        row.data
+            .windows("Hello".len())
+            .any(|window| window == "Hello".as_bytes()),
+        "Joined row should include joined-table value"
+    );
+}
+
+#[test]
 fn deleting_parent_row_does_not_cascade_to_joined_rows() {
     // Deleting a parent row should not implicitly delete rows in other tables.
     // Child-table data should remain.
@@ -3029,6 +3934,453 @@ fn deleting_parent_row_does_not_cascade_to_joined_rows() {
 // Array subquery (correlated subquery) tests
 // ========================================================================
 
+fn file_storage_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("file_parts"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("files"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "parts",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+            .references("file_parts"),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn scalar_fk_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Uuid).references("users"),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn files_with_parts_descriptor() -> RowDescriptor {
+    let part_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]);
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new(
+            "parts",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
+        ),
+        ColumnDescriptor::new(
+            "part_rows",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(part_descriptor),
+                }),
+            },
+        ),
+    ])
+}
+
+#[test]
+fn scalar_uuid_fk_insert_and_update_validation() {
+    let sync_manager = SyncManager::new();
+    let schema = scalar_fk_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let missing_author = ObjectId::new();
+    let insert_missing = qm.insert(
+        &mut storage,
+        "posts",
+        &[Value::Text("missing".into()), Value::Uuid(missing_author)],
+    );
+    assert!(
+        matches!(
+            insert_missing,
+            Err(QueryError::UuidForeignKeyViolation { ref column, .. }) if column == "author_id"
+        ),
+        "insert with missing UUID reference should fail: {insert_missing:?}"
+    );
+
+    let author = qm
+        .insert(&mut storage, "users", &[Value::Text("Alice".into())])
+        .unwrap();
+    let post = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[Value::Text("ok".into()), Value::Uuid(author.row_id)],
+        )
+        .unwrap();
+
+    qm.update(
+        &mut storage,
+        post.row_id,
+        &[Value::Text("still-ok".into()), Value::Uuid(author.row_id)],
+    )
+    .unwrap();
+
+    let update_missing = qm.update(
+        &mut storage,
+        post.row_id,
+        &[Value::Text("broken".into()), Value::Uuid(ObjectId::new())],
+    );
+    assert!(
+        matches!(
+            update_missing,
+            Err(QueryError::UuidForeignKeyViolation { .. })
+        ),
+        "update with missing UUID reference should fail: {update_missing:?}"
+    );
+}
+
+#[test]
+fn uuid_array_fk_insert_and_update_validation() {
+    let sync_manager = SyncManager::new();
+    let schema = file_storage_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let missing = ObjectId::new();
+    let insert_missing = qm.insert(
+        &mut storage,
+        "files",
+        &[Value::Array(vec![Value::Uuid(missing)])],
+    );
+    assert!(
+        matches!(
+            insert_missing,
+            Err(QueryError::UuidArrayForeignKeyViolation { ref column, .. }) if column == "parts"
+        ),
+        "insert with missing UUID[] reference should fail: {insert_missing:?}"
+    );
+
+    let part = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .unwrap();
+    let file = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Array(vec![
+                Value::Uuid(part.row_id),
+                Value::Uuid(part.row_id),
+            ])],
+        )
+        .unwrap();
+    qm.update(
+        &mut storage,
+        file.row_id,
+        &[Value::Array(vec![Value::Uuid(part.row_id)])],
+    )
+    .unwrap();
+
+    let update_missing = qm.update(
+        &mut storage,
+        file.row_id,
+        &[Value::Array(vec![Value::Uuid(ObjectId::new())])],
+    );
+    assert!(
+        matches!(
+            update_missing,
+            Err(QueryError::UuidArrayForeignKeyViolation { .. })
+        ),
+        "update with missing UUID[] reference should fail: {update_missing:?}"
+    );
+}
+
+#[test]
+fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
+    let sync_manager = SyncManager::new();
+    let schema = file_storage_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let part_a = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .unwrap();
+    let part_b = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("B".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "files",
+        &[Value::Array(vec![
+            Value::Uuid(part_b.row_id),
+            Value::Uuid(part_a.row_id),
+            Value::Uuid(part_b.row_id),
+        ])],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("files")
+        .with_array("part_rows", |sub| {
+            sub.from("file_parts").correlate("id", "files.parts")
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let update = qm
+        .take_updates()
+        .into_iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("files subscription should produce one update");
+    let row_values =
+        decode_row(&files_with_parts_descriptor(), &update.delta.added[0].data).unwrap();
+    let part_rows = row_values[1]
+        .as_array()
+        .expect("part_rows should be an array");
+    let labels: Vec<String> = part_rows
+        .iter()
+        .map(|row| {
+            let values = row.as_row().expect("part row");
+            match &values[0] {
+                Value::Text(label) => label.clone(),
+                other => panic!("expected text label, got {other:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(labels, vec!["B", "A", "B"]);
+}
+
+#[test]
+fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
+    let sync_manager = SyncManager::new();
+    let schema = file_storage_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let part_a = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .unwrap();
+    let part_b = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("B".into())])
+        .unwrap();
+    let file = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Array(vec![
+                Value::Uuid(part_a.row_id),
+                Value::Uuid(part_b.row_id),
+                Value::Uuid(part_b.row_id),
+            ])],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("file_parts")
+        .with_array("files", |sub| {
+            sub.from("files").correlate("parts", "file_parts.id")
+        })
+        .build();
+    let before = execute_query(&mut qm, &mut storage, query.clone()).unwrap();
+    let before_counts: std::collections::HashMap<String, usize> = before
+        .iter()
+        .map(|(_, values)| {
+            let label = match &values[0] {
+                Value::Text(label) => label.clone(),
+                other => panic!("expected label text, got {other:?}"),
+            };
+            let count = values[1]
+                .as_array()
+                .expect("files include should be array")
+                .len();
+            (label, count)
+        })
+        .collect();
+    assert_eq!(before_counts.get("A"), Some(&1));
+    assert_eq!(before_counts.get("B"), Some(&1));
+
+    let ids_for_a_before =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_a.row_id));
+    let ids_for_b_before =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_b.row_id));
+    assert!(ids_for_a_before.contains(&file.row_id));
+    assert!(ids_for_b_before.contains(&file.row_id));
+
+    qm.update(
+        &mut storage,
+        file.row_id,
+        &[Value::Array(vec![Value::Uuid(part_b.row_id)])],
+    )
+    .unwrap();
+
+    let after = execute_query(&mut qm, &mut storage, query).unwrap();
+    let after_counts: std::collections::HashMap<String, usize> = after
+        .iter()
+        .map(|(_, values)| {
+            let label = match &values[0] {
+                Value::Text(label) => label.clone(),
+                other => panic!("expected label text, got {other:?}"),
+            };
+            let count = values[1]
+                .as_array()
+                .expect("files include should be array")
+                .len();
+            (label, count)
+        })
+        .collect();
+    assert_eq!(after_counts.get("A"), Some(&0));
+    assert_eq!(after_counts.get("B"), Some(&1));
+
+    let ids_for_a_after =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_a.row_id));
+    let ids_for_b_after =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(part_b.row_id));
+    assert!(
+        !ids_for_a_after.contains(&file.row_id),
+        "removed array members should be removed from membership index"
+    );
+    assert!(ids_for_b_after.contains(&file.row_id));
+}
+
+#[test]
+fn server_permission_checks_reject_missing_scalar_fk_writes() {
+    use crate::commit::{Commit, StoredState};
+    use crate::sync_manager::{
+        ClientId, ClientRole, InboxEntry, ObjectMetadata, Source, SyncError, SyncPayload,
+    };
+
+    let sync_manager = SyncManager::new();
+    let schema = scalar_fk_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_role(client_id, ClientRole::User);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, PolicySession::new("alice"));
+
+    let post_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("author_id", ColumnType::Uuid),
+    ]);
+
+    let missing_author = ObjectId::new();
+    let inserted_post_id = ObjectId::new();
+    let insert_metadata =
+        std::collections::HashMap::from([(MetadataKey::Table.to_string(), "posts".to_string())]);
+    qm.sync_manager_mut().object_manager.receive_object(
+        &mut storage,
+        inserted_post_id,
+        insert_metadata.clone(),
+    );
+    let insert_payload = SyncPayload::ObjectUpdated {
+        object_id: inserted_post_id,
+        metadata: Some(ObjectMetadata {
+            id: inserted_post_id,
+            metadata: insert_metadata,
+        }),
+        branch_name: branch.clone().into(),
+        commits: vec![Commit {
+            parents: smallvec![],
+            content: encode_row(
+                &post_descriptor,
+                &[
+                    Value::Text("from-client".into()),
+                    Value::Uuid(missing_author),
+                ],
+            )
+            .unwrap(),
+            timestamp: 1000,
+            author: inserted_post_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        }],
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: insert_payload,
+    });
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let insert_rejection = outbox.iter().find_map(|entry| match &entry.payload {
+        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => Some(reason.as_str()),
+        _ => None,
+    });
+    assert!(
+        matches!(insert_rejection, Some(reason) if reason.contains("uuid foreign key violation")),
+        "insert should be rejected for missing scalar FK: {outbox:?}"
+    );
+
+    let author = qm
+        .insert(&mut storage, "users", &[Value::Text("Author".into())])
+        .unwrap();
+    let post = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[Value::Text("seed".into()), Value::Uuid(author.row_id)],
+        )
+        .unwrap();
+    let seed_row = qm.get_row(post.row_id).expect("seed post should exist");
+    assert_eq!(seed_row.1[1], Value::Uuid(author.row_id));
+
+    let update_payload = SyncPayload::ObjectUpdated {
+        object_id: post.row_id,
+        metadata: None,
+        branch_name: branch.clone().into(),
+        commits: vec![Commit {
+            parents: smallvec![post.row_commit_id],
+            content: encode_row(
+                &post_descriptor,
+                &[
+                    Value::Text("update-attempt".into()),
+                    Value::Uuid(ObjectId::new()),
+                ],
+            )
+            .unwrap(),
+            timestamp: 2000,
+            author: post.row_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        }],
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: update_payload,
+    });
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let update_rejection = outbox.iter().find_map(|entry| match &entry.payload {
+        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => Some(reason.as_str()),
+        _ => None,
+    });
+    assert!(
+        matches!(update_rejection, Some(reason) if reason.contains("uuid foreign key violation")),
+        "update should be rejected for missing scalar FK: {outbox:?}"
+    );
+
+    let post_after = qm.get_row(post.row_id).expect("post should still exist");
+    assert_eq!(
+        post_after.1[1],
+        Value::Uuid(author.row_id),
+        "rejected update must not overwrite existing scalar FK value"
+    );
+}
+
 fn users_posts_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
@@ -3064,7 +4416,11 @@ fn users_with_posts_descriptor() -> RowDescriptor {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ])
 }
@@ -3154,6 +4510,80 @@ fn array_subquery_single_user_with_posts() {
             "Post author_id should be 1 (Alice)"
         );
     }
+}
+
+#[test]
+fn array_subquery_update_descriptor_includes_array_column() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Hello world".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts").correlate("author_id", "users.id")
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("should have subscription update");
+
+    assert_eq!(
+        update.descriptor.columns.len(),
+        3,
+        "Update descriptor should have 3 columns (base + array), got {}: {:?}",
+        update.descriptor.columns.len(),
+        update
+            .descriptor
+            .columns
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
+    );
+
+    let row_data = &update.delta.added[0].data;
+    let values =
+        decode_row(&update.descriptor, row_data).expect("should decode with update descriptor");
+
+    assert_eq!(values[0], Value::Integer(1), "user id");
+    assert_eq!(
+        values[1],
+        Value::Text("Alice".into()),
+        "user name should be 'Alice', not corrupted"
+    );
+
+    // The included posts array should contain the post we inserted
+    let posts = values[2]
+        .as_array()
+        .expect("third column should be the posts array");
+    assert_eq!(posts.len(), 1, "Alice should have 1 post");
+    let post_row = posts[0].as_row().expect("post element should be a Row");
+    assert_eq!(post_row[0], Value::Integer(100), "post id");
+    assert_eq!(post_row[1], Value::Text("Hello world".into()), "post title");
+    assert_eq!(post_row[2], Value::Integer(1), "post author_id");
 }
 
 #[test]
@@ -3727,7 +5157,11 @@ fn array_subquery_with_select_columns() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -3878,7 +5312,11 @@ fn array_subquery_with_join() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "post_comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(joined_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(joined_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -4039,7 +5477,11 @@ fn array_subquery_nested() {
         ColumnDescriptor::new("author_id", ColumnType::Integer),
         ColumnDescriptor::new(
             "comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(comments_row_desc),
+                }),
+            },
         ),
     ]);
     // users row with posts array: [id, name, posts[]]
@@ -4048,7 +5490,11 @@ fn array_subquery_nested() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -4244,11 +5690,19 @@ fn array_subquery_multiple_columns() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
         ColumnDescriptor::new(
             "comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(comments_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -4302,6 +5756,26 @@ fn policy_schema() -> Schema {
                     PolicyExpr::in_session("team_id", vec!["claims".into(), "teams".into()]),
                 ]),
             ),
+        ),
+    );
+    schema
+}
+
+fn join_policy_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_name", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
         ),
     );
     schema
@@ -4485,6 +5959,55 @@ fn table_without_policy_returns_all_rows() {
     );
 }
 
+#[test]
+fn join_query_applies_policy_filter_on_joined_table() {
+    let sync_manager = SyncManager::new();
+    let schema = join_policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
+        .unwrap();
+    qm.insert(&mut storage, "users", &[Value::Text("bob".into())])
+        .unwrap();
+
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("Alice post".into()),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[Value::Text("bob".into()), Value::Text("Bob post".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("join subscription should emit initial delta");
+    assert_eq!(
+        update.delta.added.len(),
+        1,
+        "join query should apply policy filter on joined table rows"
+    );
+}
+
 // ========================================================================
 // Branch-aware query tests
 // ========================================================================
@@ -4587,7 +6110,7 @@ fn query_multi_branch_requires_explicit_branch() {
     // Verify Query.branches field exists and works
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Multi-branch query with explicit branches
     let query = qm.query("users").branches(&["main", "draft"]).build();
@@ -4599,6 +6122,59 @@ fn query_multi_branch_requires_explicit_branch() {
     let query = qm.query("users").build();
     assert!(query.branches.is_empty());
     assert!(!query.is_multi_branch());
+}
+
+#[test]
+fn join_query_with_multiple_branches_reads_all_branches() {
+    let sync_manager = SyncManager::new();
+    let schema = join_policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let main_branch = get_branch(&qm);
+    let draft_branch = "draft";
+
+    qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[Value::Text("alice".into()), Value::Text("main post".into())],
+    )
+    .unwrap();
+
+    qm.insert_on_branch(
+        &mut storage,
+        "users",
+        draft_branch,
+        &[Value::Text("dora".into())],
+    )
+    .unwrap();
+    qm.insert_on_branch(
+        &mut storage,
+        "posts",
+        draft_branch,
+        &[Value::Text("dora".into()), Value::Text("draft post".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .branches(&[main_branch.as_str(), draft_branch])
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("join subscription should emit initial delta");
+    assert_eq!(
+        update.delta.added.len(),
+        2,
+        "join query across branches should include rows from each branch"
+    );
 }
 
 #[test]
@@ -4900,7 +6476,7 @@ fn server_builds_query_graph_on_subscription() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -4928,7 +6504,7 @@ fn server_builds_query_graph_on_subscription() {
         .iter()
         .filter_map(|e| {
             if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                Some(*object_id)
+                Some(object_id)
             } else {
                 None
             }
@@ -4937,6 +6513,184 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn local_stale_recompile_failure_drops_subscription_and_reports_failure() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    {
+        let sub = qm
+            .subscriptions
+            .get_mut(&sub_id)
+            .expect("subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    qm.process(&mut storage);
+
+    assert!(
+        !qm.subscriptions.contains_key(&sub_id),
+        "failed stale recompile should drop the local subscription"
+    );
+
+    let failures = qm.take_failed_subscriptions();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected exactly one reported local subscription failure"
+    );
+    assert_eq!(failures[0].subscription_id, sub_id);
+    assert!(
+        failures[0].reason.contains("no_such_table"),
+        "failure reason should include compile context: {}",
+        failures[0].reason
+    );
+}
+
+#[test]
+fn server_sends_error_for_uncompilable_query_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    // Query references a table that does not exist in schema.
+    let invalid_query = QueryBuilder::new("no_such_table").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(42),
+            query: Box::new(invalid_query),
+            session: None,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let error_reason = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
+            ) if *id == client_id && *query_id == QueryId(42) => Some(reason.clone()),
+            _ => None,
+        });
+    let reason = error_reason
+        .expect("Server should send an error payload when query subscription compilation fails");
+    assert!(
+        reason.contains("query_id 42"),
+        "error reason should include query id context: {reason}"
+    );
+    assert!(
+        reason.contains("no_such_table"),
+        "error reason should include compile error context: {reason}"
+    );
+}
+
+#[test]
+fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, ServerId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_server(upstream_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    let valid_query = server_qm.query("users").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(7),
+            query: Box::new(valid_query),
+            session: None,
+        },
+    });
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    {
+        let sub = server_qm
+            .server_subscriptions
+            .get_mut(&(client_id, QueryId(7)))
+            .expect("server subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    server_qm.process(&mut storage);
+
+    assert!(
+        !server_qm
+            .server_subscriptions
+            .contains_key(&(client_id, QueryId(7))),
+        "failed stale recompile should drop the server subscription"
+    );
+    assert!(
+        !server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .expect("client should still exist")
+            .queries
+            .contains_key(&QueryId(7)),
+        "client query scope should be cleared after fail-fast drop"
+    );
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let rejection_reason = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
+            ) if *id == client_id && *query_id == QueryId(7) => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("client should receive QuerySubscriptionRejected on stale recompile failure");
+    assert!(
+        rejection_reason.contains("query recompilation failed for query_id 7"),
+        "rejection should include query id context: {rejection_reason}"
+    );
+    assert!(
+        rejection_reason.contains("no_such_table"),
+        "rejection should include compile error context: {rejection_reason}"
+    );
+
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Server(id),
+                SyncPayload::QueryUnsubscription { query_id }
+            ) if *id == upstream_id && *query_id == QueryId(7)
+        )),
+        "stale recompile failure should forward QueryUnsubscription upstream"
+    );
 }
 
 #[test]
@@ -4971,7 +6725,7 @@ fn server_pushes_new_matches() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5034,7 +6788,7 @@ fn server_does_not_push_non_matching() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5079,7 +6833,7 @@ fn subscribe_with_sync_sends_to_servers() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let (mut client_qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5166,7 +6920,7 @@ fn unsubscribe_with_sync_sends_to_servers() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let (mut client_qm, mut storage) = create_query_manager(sync_manager, schema);
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5238,7 +6992,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5291,7 +7045,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id,
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5368,7 +7122,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
-            query,
+            query: Box::new(query),
             session: None,
         },
     });
@@ -5380,8 +7134,8 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // Now receive an update for the existing object from upstream
     // (simulating upstream sending fresh data)
     let table_schema = schema.get(&TableName::new("users")).unwrap();
-    let row_data = super::encode_row(
-        &table_schema.descriptor,
+    let row_data = encode_row(
+        &table_schema.columns,
         &[Value::Text("Alice".into()), Value::Integer(80)],
     )
     .unwrap();
@@ -5492,6 +7246,83 @@ fn pump_messages(
             });
         }
         client.process(client_io);
+    }
+}
+
+/// Helper to exchange messages in a 3-tier topology: client <-> edge <-> core.
+/// Runs multiple rounds until no more routable messages are produced.
+#[allow(clippy::too_many_arguments)]
+fn pump_messages_three_tier(
+    client: &mut QueryManager,
+    edge: &mut QueryManager,
+    core: &mut QueryManager,
+    client_io: &mut MemoryStorage,
+    edge_io: &mut MemoryStorage,
+    core_io: &mut MemoryStorage,
+    client_id_on_edge: crate::sync_manager::ClientId,
+    edge_server_id_for_client: crate::sync_manager::ServerId,
+    edge_id_on_core: crate::sync_manager::ClientId,
+    core_server_id_for_edge: crate::sync_manager::ServerId,
+) {
+    use crate::sync_manager::{Destination, InboxEntry, Source};
+
+    for _ in 0..20 {
+        let mut moved = false;
+
+        // Client -> Edge
+        let client_outbox = client.sync_manager_mut().take_outbox();
+        for entry in client_outbox {
+            if matches!(entry.destination, Destination::Server(id) if id == edge_server_id_for_client)
+            {
+                moved = true;
+                edge.sync_manager_mut().push_inbox(InboxEntry {
+                    source: Source::Client(client_id_on_edge),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        // Edge -> (Client or Core)
+        let edge_outbox = edge.sync_manager_mut().take_outbox();
+        for entry in edge_outbox {
+            match entry.destination {
+                Destination::Client(id) if id == client_id_on_edge => {
+                    moved = true;
+                    client.sync_manager_mut().push_inbox(InboxEntry {
+                        source: Source::Server(edge_server_id_for_client),
+                        payload: entry.payload,
+                    });
+                }
+                Destination::Server(id) if id == core_server_id_for_edge => {
+                    moved = true;
+                    core.sync_manager_mut().push_inbox(InboxEntry {
+                        source: Source::Client(edge_id_on_core),
+                        payload: entry.payload,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Core -> Edge
+        let core_outbox = core.sync_manager_mut().take_outbox();
+        for entry in core_outbox {
+            if matches!(entry.destination, Destination::Client(id) if id == edge_id_on_core) {
+                moved = true;
+                edge.sync_manager_mut().push_inbox(InboxEntry {
+                    source: Source::Server(core_server_id_for_edge),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        if !moved {
+            break;
+        }
+
+        client.process(client_io);
+        edge.process(edge_io);
+        core.process(core_io);
     }
 }
 
@@ -5738,7 +7569,7 @@ fn e2e_permissions_prevent_sync() {
     schema.insert(
         TableName::new("documents"),
         TableSchema {
-            descriptor: RowDescriptor::new(vec![
+            columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),
@@ -5826,7 +7657,7 @@ fn e2e_permissions_prevent_new_row_sync() {
     schema.insert(
         TableName::new("documents"),
         TableSchema {
-            descriptor: RowDescriptor::new(vec![
+            columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),
@@ -5915,4 +7746,242 @@ fn e2e_permissions_prevent_new_row_sync() {
     let results = client.get_subscription_results(sub_id);
     assert_eq!(results.len(), 1, "Client should NOT receive Bob's doc");
     assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
+}
+
+/// E2E: In a 3-tier topology, upstream must sync policy-evaluation dependencies.
+///
+/// Scenario:
+/// - documents SELECT policy: owner_id = @session.user_id OR INHERITS SELECT VIA folder_id
+/// - core has folder(owner=alice) and document(owner=bob, folder=alice_folder)
+/// - alice queries documents from downstream client via edge
+///
+/// Expected:
+/// - core deems the document visible (via INHERITS)
+/// - edge must receive enough rows to re-evaluate the same policy and relay to client
+#[test]
+fn e2e_three_tier_policy_dependencies_must_sync_downstream() {
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, ClientRole, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    );
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("folders"),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                PolicyExpr::inherits(Operation::Select, "folder_id"),
+            ])),
+        ),
+    );
+
+    // Core (upstream) has data.
+    let (mut core, mut core_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let folder_id = core
+        .insert(
+            &mut core_io,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Alice folder".into()),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    core.insert(
+        &mut core_io,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Bob doc in Alice folder".into()),
+            Value::Uuid(folder_id),
+        ],
+    )
+    .unwrap();
+    core.process(&mut core_io);
+
+    // Edge (mid-tier) starts empty.
+    let (mut edge, mut edge_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    // Downstream client starts empty.
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    // Topology: client <-> edge <-> core
+    let edge_server_id_for_client = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id_on_edge = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let core_server_id_for_edge = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let edge_id_on_core = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client
+        .sync_manager_mut()
+        .add_server(edge_server_id_for_client);
+    edge.sync_manager_mut().add_client(client_id_on_edge);
+    edge.sync_manager_mut()
+        .set_client_role(client_id_on_edge, ClientRole::Peer);
+    edge.sync_manager_mut().add_server(core_server_id_for_edge);
+    core.sync_manager_mut().add_client(edge_id_on_core);
+    core.sync_manager_mut()
+        .set_client_role(edge_id_on_core, ClientRole::Peer);
+
+    // Clear non-query bootstrap traffic.
+    let _ = client.sync_manager_mut().take_outbox();
+    let _ = edge.sync_manager_mut().take_outbox();
+    let _ = core.sync_manager_mut().take_outbox();
+
+    // Client subscribes as alice.
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    pump_messages_three_tier(
+        &mut client,
+        &mut edge,
+        &mut core,
+        &mut client_io,
+        &mut edge_io,
+        &mut core_io,
+        client_id_on_edge,
+        edge_server_id_for_client,
+        edge_id_on_core,
+        core_server_id_for_edge,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "Client should receive docs visible via INHERITS through edge in 3-tier sync"
+    );
+}
+
+/// E2E: Untrusted downstream clients keep result-set-only scope (no policy context rows).
+#[test]
+fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    );
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("folders"),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                PolicyExpr::inherits(Operation::Select, "folder_id"),
+            ])),
+        ),
+    );
+
+    let (mut core, mut core_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let folder_id = core
+        .insert(
+            &mut core_io,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Alice folder".into()),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    core.insert(
+        &mut core_io,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Bob doc in Alice folder".into()),
+            Value::Uuid(folder_id),
+        ],
+    )
+    .unwrap();
+    core.process(&mut core_io);
+
+    let (mut edge, mut edge_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    let edge_server_id_for_client = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id_on_edge = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let core_server_id_for_edge = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let edge_id_on_core = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client
+        .sync_manager_mut()
+        .add_server(edge_server_id_for_client);
+    edge.sync_manager_mut().add_client(client_id_on_edge);
+    edge.sync_manager_mut().add_server(core_server_id_for_edge);
+    core.sync_manager_mut().add_client(edge_id_on_core);
+
+    let _ = client.sync_manager_mut().take_outbox();
+    let _ = edge.sync_manager_mut().take_outbox();
+    let _ = core.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    pump_messages_three_tier(
+        &mut client,
+        &mut edge,
+        &mut core,
+        &mut client_io,
+        &mut edge_io,
+        &mut core_io,
+        client_id_on_edge,
+        edge_server_id_for_client,
+        edge_id_on_core,
+        core_server_id_for_edge,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        0,
+        "Untrusted downstream should keep current result-only sync behavior"
+    );
 }

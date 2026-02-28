@@ -64,7 +64,7 @@ mod tests {
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let id = ObjectId::new();
         let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Transform to v2 using LensTransformer
         let v1_hash = SchemaHash::compute(&v1);
@@ -77,7 +77,7 @@ mod tests {
 
         // Verify result can be decoded as v2
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let v2_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(v2_values.len(), 3);
         assert_eq!(v2_values[0], Value::Uuid(id));
@@ -125,7 +125,7 @@ mod tests {
         let id = ObjectId::new();
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Cache the row (simulating loading from storage)
         writer.cache_row(id, &v1_branch, v1_data, make_commit_id(1));
@@ -153,7 +153,7 @@ mod tests {
 
         // Verify result
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let final_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let final_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(final_values[0], Value::Uuid(id));
         assert_eq!(final_values[1], Value::Text("Alice Updated".to_string()));
@@ -215,7 +215,7 @@ mod tests {
             Value::Uuid(id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         let transformer = manager.transformer("users");
         let result = transformer
@@ -226,7 +226,7 @@ mod tests {
 
         // Verify - column value should be preserved under new name
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let v2_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(v2_values[0], Value::Uuid(id));
         assert_eq!(v2_values[1], Value::Text("alice@example.com".to_string()));
@@ -275,7 +275,7 @@ mod tests {
         let v1_users = v1.get(&TableName::new("users")).unwrap();
         let user_id = ObjectId::new();
         let v1_user = vec![Value::Uuid(user_id), Value::Text("Alice".to_string())];
-        let v1_user_data = encode_row(&v1_users.descriptor, &v1_user).unwrap();
+        let v1_user_data = encode_row(&v1_users.columns, &v1_user).unwrap();
 
         let user_transformer = manager.transformer("users");
         let user_result = user_transformer
@@ -291,7 +291,7 @@ mod tests {
             Value::Uuid(user_id),
             Value::Text("Hello World".to_string()),
         ];
-        let v1_post_data = encode_row(&v1_posts.descriptor, &v1_post).unwrap();
+        let v1_post_data = encode_row(&v1_posts.columns, &v1_post).unwrap();
 
         let post_transformer = manager.transformer("posts");
         let post_result = post_transformer
@@ -301,7 +301,7 @@ mod tests {
 
         // Verify post has new body column
         let v2_posts = v2.get(&TableName::new("posts")).unwrap();
-        let v2_post_values = decode_row(&v2_posts.descriptor, &post_result.data).unwrap();
+        let v2_post_values = decode_row(&v2_posts.columns, &post_result.data).unwrap();
         assert_eq!(v2_post_values.len(), 4);
         assert_eq!(v2_post_values[3], Value::Null); // body column
     }
@@ -426,6 +426,34 @@ mod tests {
         qm.sync_manager_mut()
             .object_manager
             .receive_commit(storage, object_id, branch, commit)
+            .unwrap();
+    }
+
+    /// Ingest a remote catalogue object on the `main` branch through sync path.
+    fn ingest_remote_catalogue_object(
+        qm: &mut QueryManager,
+        storage: &mut MemoryStorage,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        content: Vec<u8>,
+        timestamp: u64,
+    ) {
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(storage, object_id, metadata);
+
+        let commit = Commit {
+            parents: Default::default(),
+            content,
+            timestamp,
+            author: object_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(storage, object_id, "main", commit)
             .unwrap();
     }
 
@@ -602,7 +630,7 @@ mod tests {
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let old_row_id = ObjectId::new();
         let old_row_values = vec![Value::Uuid(old_row_id), Value::Text("Alice".to_string())];
-        let old_row_data = encode_row(&v1_table.descriptor, &old_row_values).unwrap();
+        let old_row_data = encode_row(&v1_table.columns, &old_row_values).unwrap();
         ingest_remote_row(
             &mut qm,
             &mut storage,
@@ -749,7 +777,7 @@ mod tests {
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let row1_id = ObjectId::new();
         let row1_values = vec![Value::Uuid(row1_id), Value::Text("Alice".to_string())];
-        let row1_data = encode_row(&v1_table.descriptor, &row1_values).unwrap();
+        let row1_data = encode_row(&v1_table.columns, &row1_values).unwrap();
         ingest_remote_row(
             &mut qm,
             &mut storage,
@@ -768,7 +796,7 @@ mod tests {
             Value::Text("Bob".to_string()),
             Value::Text("bob@example.com".to_string()),
         ];
-        let row2_data = encode_row(&v2_table.descriptor, &row2_values).unwrap();
+        let row2_data = encode_row(&v2_table.columns, &row2_values).unwrap();
         ingest_remote_row(
             &mut qm,
             &mut storage,
@@ -935,7 +963,7 @@ mod tests {
             Value::Uuid(row_id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
 
         let mut storage = MemoryStorage::new();
         ingest_remote_row(
@@ -1022,7 +1050,7 @@ mod tests {
             Value::Uuid(row_id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
 
         ingest_remote_row(
             &mut qm,
@@ -1281,13 +1309,401 @@ mod tests {
 
         let mut qm = QueryManager::new(SyncManager::new());
         qm.set_current_schema(v1.clone(), "dev", "main");
+        let mut storage = MemoryStorage::new();
 
         // Initially no pending catalogue updates
         assert!(qm.take_pending_catalogue_updates().is_empty());
 
-        // Simulate a catalogue object being received via sync
-        // For this to work, we'd need to inject via the object manager and process
-        // This is more of a unit test showing the API exists
+        // Inject two real catalogue schema objects via sync path.
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+        let v2_hash = SchemaHash::compute(&v2);
+        let object_id_v2 = v2_hash.to_object_id();
+        let encoded_schema_v2 = encode_schema(&v2);
+
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text)
+                    .nullable_column("role", ColumnType::Text),
+            )
+            .build();
+        let v3_hash = SchemaHash::compute(&v3);
+        let object_id_v3 = v3_hash.to_object_id();
+        let encoded_schema_v3 = encode_schema(&v3);
+
+        let mut metadata_v2 = HashMap::new();
+        metadata_v2.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata_v2.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata_v2.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+
+        let mut metadata_v3 = HashMap::new();
+        metadata_v3.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata_v3.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata_v3.insert(MetadataKey::SchemaHash.to_string(), v3_hash.to_string());
+
+        ingest_remote_catalogue_object(
+            &mut qm,
+            &mut storage,
+            object_id_v2,
+            metadata_v2,
+            encoded_schema_v2.clone(),
+            1,
+        );
+        ingest_remote_catalogue_object(
+            &mut qm,
+            &mut storage,
+            object_id_v3,
+            metadata_v3,
+            encoded_schema_v3.clone(),
+            2,
+        );
+
+        qm.process(&mut storage);
+
+        let pending = qm.take_pending_catalogue_updates();
+        assert_eq!(pending.len(), 2, "two catalogue objects should be queued");
+        assert_eq!(pending[0].object_id, object_id_v2);
+        assert_eq!(pending[1].object_id, object_id_v3);
+
+        for update in &pending {
+            assert_eq!(
+                update.metadata.get(MetadataKey::Type.as_str()),
+                Some(&ObjectType::CatalogueSchema.to_string())
+            );
+            assert_eq!(
+                update.metadata.get(MetadataKey::AppId.as_str()),
+                Some(&test_app_id().uuid().to_string())
+            );
+        }
+        assert_eq!(pending[0].content, encoded_schema_v2);
+        assert_eq!(pending[1].content, encoded_schema_v3);
+
+        // Queue should be drained after take().
+        assert!(qm.take_pending_catalogue_updates().is_empty());
+    }
+
+    /// Non-matching app_id catalogue objects must be ignored for all schema-shape variants.
+    #[test]
+    fn catalogue_non_matching_app_id_is_ignored() {
+        // v1: id, name, birthday(Timestamp)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        // v2: id, name, birthday(Text)
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Text),
+            )
+            .build();
+        // v3: id, name, birthday(nullable Text)
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("birthday", ColumnType::Text),
+            )
+            .build();
+        // v4: id, name, email(Text)
+        let v4 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+
+        for schema in [v1, v2, v3, v4] {
+            let hash = SchemaHash::compute(&schema);
+            let before = (
+                manager.all_branches().len(),
+                manager.context().is_live(&hash),
+                manager.context().is_pending(&hash),
+                manager.is_schema_known(&hash),
+            );
+
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            );
+            metadata.insert(
+                MetadataKey::AppId.to_string(),
+                AppId::from_name("other-app").uuid().to_string(),
+            );
+            metadata.insert(MetadataKey::SchemaHash.to_string(), hash.to_string());
+
+            manager
+                .process_catalogue_update(hash.to_object_id(), &metadata, &encode_schema(&schema))
+                .unwrap();
+
+            let after = (
+                manager.all_branches().len(),
+                manager.context().is_live(&hash),
+                manager.context().is_pending(&hash),
+                manager.is_schema_known(&hash),
+            );
+            assert_eq!(
+                after,
+                before,
+                "mismatched app_id should not mutate schema state for hash {}",
+                hash.short()
+            );
+        }
+    }
+
+    /// Unknown catalogue type must be ignored even for materially different schema payloads.
+    #[test]
+    fn catalogue_unknown_type_is_ignored() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        let before_branches = manager.all_branches().len();
+
+        let mut metadata = HashMap::new();
+        // Unknown type should be ignored
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            "CatalogueBogusType".to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+
+        manager
+            .process_catalogue_update(v2_hash.to_object_id(), &metadata, &encode_schema(&v2))
+            .unwrap();
+
+        assert_eq!(manager.all_branches().len(), before_branches);
+        assert!(!manager.context().is_pending(&v2_hash));
+        assert!(!manager.context().is_live(&v2_hash));
+        assert!(!manager.is_schema_known(&v2_hash));
+    }
+
+    /// Pushing the exact same schema (same hash/content) should be a no-op.
+    #[test]
+    fn catalogue_same_schema_push_is_noop() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+
+        let before = (
+            manager.all_branches().len(),
+            manager.context().is_live(&v1_hash),
+            manager.context().is_pending(&v1_hash),
+            manager.is_schema_known(&v1_hash),
+        );
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SchemaHash.to_string(), v1_hash.to_string());
+
+        manager
+            .process_catalogue_update(v1_hash.to_object_id(), &metadata, &encode_schema(&v1))
+            .unwrap();
+        manager
+            .process_catalogue_update(v1_hash.to_object_id(), &metadata, &encode_schema(&v1))
+            .unwrap();
+
+        let after = (
+            manager.all_branches().len(),
+            manager.context().is_live(&v1_hash),
+            manager.context().is_pending(&v1_hash),
+            manager.is_schema_known(&v1_hash),
+        );
+        assert_eq!(after, before, "same-schema pushes should be idempotent");
+    }
+
+    /// Malformed schema payload should fail decode path deterministically.
+    #[test]
+    fn catalogue_schema_malformed_payload_errors_deterministically() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1, test_app_id(), "dev", "main").unwrap();
+
+        let target_hash = SchemaHash::from_bytes([9; 32]);
+        let before_branches = manager.all_branches().len();
+        let before = (
+            manager.context().is_live(&target_hash),
+            manager.context().is_pending(&target_hash),
+            manager.is_schema_known(&target_hash),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SchemaHash.to_string(), target_hash.to_string());
+
+        let err = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("malformed schema payload should return decode-path error");
+        assert_eq!(
+            err,
+            crate::schema_manager::SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32]))
+        );
+        let err_again = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("second malformed schema payload should fail identically");
+        assert_eq!(err_again, err);
+        assert_eq!(
+            manager.all_branches().len(),
+            before_branches,
+            "failed decode must not mutate branch state"
+        );
+        let after = (
+            manager.context().is_live(&target_hash),
+            manager.context().is_pending(&target_hash),
+            manager.is_schema_known(&target_hash),
+        );
+        assert_eq!(
+            after, before,
+            "failed schema decode must not change known/pending/live state"
+        );
+    }
+
+    /// Malformed lens payload should fail decode path deterministically.
+    #[test]
+    fn catalogue_lens_malformed_payload_errors_deterministically() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("birthday", ColumnType::Timestamp),
+            )
+            .build();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v1, test_app_id(), "dev", "main").unwrap();
+
+        let before_branches = manager.all_branches().len();
+        let source = SchemaHash::from_bytes([1; 32]);
+        let target = SchemaHash::from_bytes([2; 32]);
+        let before = (
+            manager.context().is_live(&target),
+            manager.context().is_pending(&target),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SourceHash.to_string(), source.to_string());
+        metadata.insert(MetadataKey::TargetHash.to_string(), target.to_string());
+
+        let err = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("malformed lens payload should return decode-path error");
+        assert_eq!(
+            err,
+            crate::schema_manager::SchemaError::LensNotFound { source, target }
+        );
+        let err_again = manager
+            .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
+            .expect_err("second malformed lens payload should fail identically");
+        assert_eq!(err_again, err);
+        assert!(
+            manager.get_lens(&source, &target).is_none(),
+            "failed lens decode must not register any lens"
+        );
+        assert_eq!(
+            manager.all_branches().len(),
+            before_branches,
+            "failed lens decode must not mutate branch state"
+        );
+        let after = (
+            manager.context().is_live(&target),
+            manager.context().is_pending(&target),
+        );
+        assert_eq!(
+            after, before,
+            "failed lens decode must not activate any schema"
+        );
     }
 
     /// E2E test: Full catalogue sync flow with data query.
@@ -2373,7 +2789,7 @@ mod tests {
 
         // Build values in the correct column order (alphabetical)
         let row_values: Vec<Value> = v2_table
-            .descriptor
+            .columns
             .columns
             .iter()
             .map(|col| match col.name.as_str() {
@@ -2383,7 +2799,7 @@ mod tests {
                 _ => panic!("unexpected column"),
             })
             .collect();
-        let row_data = encode_row(&v2_table.descriptor, &row_values).unwrap();
+        let row_data = encode_row(&v2_table.columns, &row_values).unwrap();
 
         ingest_remote_row(
             client.query_manager_mut(),
@@ -2491,13 +2907,13 @@ mod tests {
         let v1_encoded_decoded = decode_schema(&encode_schema(&v1)).unwrap();
         let v1_table = v1_encoded_decoded.get(&TableName::new("users")).unwrap();
         let id_idx = v1_table
-            .descriptor
+            .columns
             .columns
             .iter()
             .position(|c| c.name.as_str() == "id")
             .unwrap();
         let name_idx = v1_table
-            .descriptor
+            .columns
             .columns
             .iter()
             .position(|c| c.name.as_str() == "name")
@@ -2761,6 +3177,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client_a.process(&mut io_a);
@@ -2784,6 +3201,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::EdgeServer,
+                    through_seq: 0,
                 },
             });
         client_a.process(&mut io_a);
@@ -2862,6 +3280,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client.process(&mut storage);
@@ -2942,6 +3361,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client.process(&mut storage);
@@ -3013,6 +3433,7 @@ mod tests {
                 payload: SyncPayload::QuerySettled {
                     query_id,
                     tier: PersistenceTier::Worker,
+                    through_seq: 0,
                 },
             });
         client.process(&mut storage);
