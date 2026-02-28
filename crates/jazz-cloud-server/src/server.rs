@@ -22,11 +22,11 @@ use jazz_tools::jazz_transport::{
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
-use jazz_tools::runtime_tokio::TokioRuntime;
-use jazz_tools::schema_manager::{
-    AppId, CatalogueSchemaResponse, SchemaManager, rehydrate_schema_manager_from_manifest,
+use jazz_tools::query_manager::types::{
+    ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchema, Value,
 };
+use jazz_tools::runtime_tokio::TokioRuntime;
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
@@ -145,7 +145,7 @@ enum WorkerCommand {
     GetCatalogueSchema {
         app_id: AppId,
         schema_hash: SchemaHash,
-        response: tokio::sync::oneshot::Sender<Result<Option<CatalogueSchemaResponse>, String>>,
+        response: tokio::sync::oneshot::Sender<Result<Option<Schema>, String>>,
     },
     GetSchemaHashes {
         app_id: AppId,
@@ -366,7 +366,7 @@ impl WorkerPool {
         &self,
         app_id: AppId,
         schema_hash: SchemaHash,
-    ) -> Result<Option<CatalogueSchemaResponse>, WorkerDispatchError> {
+    ) -> Result<Option<Schema>, WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::GetCatalogueSchema {
             app_id,
@@ -1165,7 +1165,7 @@ async fn run_worker_loop(
                                 .runtime
                                 .known_schema(&schema_hash)
                                 .map_err(|err| err.to_string())?;
-                            Ok(maybe_schema.as_ref().map(CatalogueSchemaResponse::from))
+                            Ok(maybe_schema.as_ref().cloned())
                         });
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "schema response receiver dropped");

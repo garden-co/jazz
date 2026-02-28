@@ -44,13 +44,13 @@ function makeClient() {
     addServer: () => {},
     removeServer: () => {},
     addClient: () => "00000000-0000-0000-0000-000000000001",
-    getSchema: () => ({ tables: {} }),
+    getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };
 
   const context: AppContext = {
     appId: "test-app",
-    schema: { tables: {} },
+    schema: {},
     serverUrl: "http://localhost:1625",
     backendSecret: "test-backend-secret",
   };

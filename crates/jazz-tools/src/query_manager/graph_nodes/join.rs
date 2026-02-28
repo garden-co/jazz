@@ -260,7 +260,7 @@ impl JoinNode {
         if let Some(local_col_index) = element.descriptor.column_index(&column_ref.column) {
             let match_array_elements = matches!(
                 element.descriptor.columns[local_col_index].column_type,
-                ColumnType::Array(_)
+                ColumnType::Array { element: _ }
             );
             return Some(JoinKeySpec::Column {
                 element_index,
@@ -296,7 +296,7 @@ impl JoinNode {
             let (element_index, local_col_index, row_descriptor) = matches[0].clone();
             let match_array_elements = matches!(
                 row_descriptor.columns[local_col_index].column_type,
-                ColumnType::Array(_)
+                ColumnType::Array { element: _ }
             );
             return Some(JoinKeySpec::Column {
                 element_index,
@@ -587,7 +587,9 @@ mod tests {
     fn files_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![ColumnDescriptor::new(
             "parts",
-            ColumnType::Array(Box::new(ColumnType::Uuid)),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
         )])
     }
 

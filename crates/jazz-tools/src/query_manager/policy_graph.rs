@@ -64,7 +64,7 @@ impl PolicyGraph {
         initial_depth: usize,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         let mut graph = QueryGraph::new(*table, descriptor.clone());
 
@@ -152,7 +152,7 @@ impl PolicyGraph {
         branch: &str,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         let mut graph = QueryGraph::new(*table, descriptor.clone());
 

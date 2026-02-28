@@ -16,7 +16,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "name",
       column_type: { type: "Text" },
       nullable: false,
@@ -28,7 +28,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "active",
       column_type: { type: "Boolean" },
       nullable: false,
@@ -40,7 +40,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "count",
       column_type: { type: "Integer" },
       nullable: false,
@@ -52,7 +52,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "created_at",
       column_type: { type: "Timestamp" },
       nullable: false,
@@ -64,7 +64,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "price",
       column_type: { type: "Double" },
       nullable: false,
@@ -76,7 +76,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "owner_id",
       column_type: { type: "Uuid" },
       nullable: false,
@@ -89,7 +89,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "description",
       column_type: { type: "Text" },
       nullable: true,
@@ -101,7 +101,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.todos.columns[0]).toEqual({
+    expect(wasm.todos.columns[0]).toEqual({
       name: "parent_id",
       column_type: { type: "Uuid" },
       nullable: true,
@@ -114,7 +114,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "tags",
       column_type: { type: "Array", element: { type: "Text" } },
       nullable: false,
@@ -126,7 +126,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "matrix",
       column_type: {
         type: "Array",
@@ -141,7 +141,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "owner_ids",
       column_type: { type: "Array", element: { type: "Uuid" } },
       nullable: false,
@@ -154,7 +154,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.tasks.columns[0]).toEqual({
+    expect(wasm.tasks.columns[0]).toEqual({
       name: "status",
       column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
       nullable: false,
@@ -166,7 +166,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.documents.columns[0]).toEqual({
+    expect(wasm.documents.columns[0]).toEqual({
       name: "payload",
       column_type: { type: "Json", schema: undefined },
       nullable: false,
@@ -186,7 +186,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.documents.columns[0]).toEqual({
+    expect(wasm.documents.columns[0]).toEqual({
       name: "payload",
       column_type: {
         type: "Json",
@@ -211,7 +211,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    const column = wasm.tables.documents.columns[0];
+    const column = wasm.documents.columns[0];
     expect(column?.column_type.type).toBe("Json");
     if (column?.column_type.type !== "Json") {
       throw new Error("expected Json column type");
@@ -229,9 +229,9 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(Object.keys(wasm.tables)).toEqual(["users", "todos"]);
-    expect(wasm.tables.users.columns).toHaveLength(1);
-    expect(wasm.tables.todos.columns).toHaveLength(2);
+    expect(Object.keys(wasm)).toEqual(["users", "todos"]);
+    expect(wasm.users.columns).toHaveLength(1);
+    expect(wasm.todos.columns).toHaveLength(2);
   });
 
   it("carries table permissions into wasm schema", () => {
@@ -253,7 +253,7 @@ describe("schemaToWasm", () => {
 
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.todos.policies).toEqual({
+    expect(wasm.todos.policies).toEqual({
       select: {
         using: {
           type: "Cmp",
@@ -310,7 +310,7 @@ describe("schemaToWasm", () => {
     };
 
     const wasm = schemaToWasm(schema);
-    expect(wasm.tables.files.policies).toEqual({
+    expect(wasm.files.policies).toEqual({
       select: {
         using: {
           type: "InheritsReferencing",
@@ -319,6 +319,9 @@ describe("schemaToWasm", () => {
           via_column: "image",
         },
       },
+      insert: {},
+      update: {},
+      delete: {},
     });
   });
 });
@@ -504,8 +507,8 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export const wasmSchema: WasmSchema = {");
-    expect(output).toContain('"tables"');
     expect(output).toContain('"todos"');
+    expect(output).toContain('"columns"');
   });
 
   it("imports WasmSchema and QueryBuilder from jazz-tools", () => {
@@ -570,19 +573,17 @@ describe("generateClient", () => {
 describe("analyzeRelations", () => {
   it("derives forward relations from references", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        users: { columns: [] },
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
       },
+      users: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -601,19 +602,17 @@ describe("analyzeRelations", () => {
 
   it("derives reverse relations", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        users: { columns: [] },
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
       },
+      users: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -631,19 +630,17 @@ describe("analyzeRelations", () => {
 
   it("marks forward UUID[] references as array relations", () => {
     const schema: WasmSchema = {
-      tables: {
-        files: {
-          columns: [
-            {
-              name: "parts",
-              column_type: { type: "Array", element: { type: "Uuid" } },
-              nullable: false,
-              references: "file_parts",
-            },
-          ],
-        },
-        file_parts: { columns: [] },
+      files: {
+        columns: [
+          {
+            name: "parts",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: false,
+            references: "file_parts",
+          },
+        ],
       },
+      file_parts: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -661,17 +658,15 @@ describe("analyzeRelations", () => {
 
   it("handles self-referential relations", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "parent_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "todos",
-            },
-          ],
-        },
+      todos: {
+        columns: [
+          {
+            name: "parent_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "todos",
+          },
+        ],
       },
     };
 
@@ -690,25 +685,23 @@ describe("analyzeRelations", () => {
 
   it("handles multiple relations on same table", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-            {
-              name: "assignee_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "users",
-            },
-          ],
-        },
-        users: { columns: [] },
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+          {
+            name: "assignee_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "users",
+          },
+        ],
       },
+      users: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -726,19 +719,17 @@ describe("analyzeRelations", () => {
 
   it("throws error when referencing unknown table", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        // Note: "users" table is NOT defined
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
       },
+      // Note: "users" table is NOT defined
     };
 
     expect(() => analyzeRelations(schema)).toThrow(
@@ -748,19 +739,17 @@ describe("analyzeRelations", () => {
 
   it("throws for non-UUID references", () => {
     const schema: WasmSchema = {
-      tables: {
-        files: {
-          columns: [
-            {
-              name: "parts",
-              column_type: { type: "Array", element: { type: "Text" } },
-              nullable: false,
-              references: "file_parts",
-            },
-          ],
-        },
-        file_parts: { columns: [] },
+      files: {
+        columns: [
+          {
+            name: "parts",
+            column_type: { type: "Array", element: { type: "Text" } },
+            nullable: false,
+            references: "file_parts",
+          },
+        ],
       },
+      file_parts: { columns: [] },
     };
 
     expect(() => analyzeRelations(schema)).toThrow(
@@ -1065,7 +1054,7 @@ describe("generateAppExport", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export const app = {");
+    expect(output).toContain("export const app: GeneratedApp = {");
     expect(output).toContain("todos: new TodoQueryBuilder(),");
     expect(output).toContain("users: new UserQueryBuilder(),");
     expect(output).toContain("wasmSchema,");
@@ -1079,7 +1068,7 @@ describe("generateAppExport", () => {
 
     // Verify wasmSchema is defined before app and included in app
     const wasmSchemaIndex = output.indexOf("export const wasmSchema");
-    const appIndex = output.indexOf("export const app = {");
+    const appIndex = output.indexOf("export const app: GeneratedApp = {");
     expect(wasmSchemaIndex).toBeLessThan(appIndex);
     expect(output).toContain("wasmSchema,");
   });

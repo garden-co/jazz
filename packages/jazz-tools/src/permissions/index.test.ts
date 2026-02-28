@@ -6,6 +6,10 @@ import {
   type PermissionRelation,
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
+import {
+  toLegacyPolicyExprWithRelForTest,
+  toLegacyRelExprForTest,
+} from "../testing/relation-ir-test-helpers.js";
 
 interface Todo {
   id: string;
@@ -186,82 +190,80 @@ const app = {
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
-    tables: {
-      todos: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-          { name: "archived", column_type: { type: "Boolean" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          {
-            name: "projectId",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "projects",
-          },
-        ],
-      },
-      projects: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
-      todoShares: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "todoId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "todos",
-          },
-          { name: "userId", column_type: { type: "Text" }, nullable: false },
-          { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
-        ],
-      },
-      teams: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "kind", column_type: { type: "Text" }, nullable: false },
-          { name: "identity_key", column_type: { type: "Text" }, nullable: true },
-        ],
-      },
-      team_team_edges: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "child_team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-          {
-            name: "parent_team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-        ],
-      },
-      resource_access_edges: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-          {
-            name: "resource",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "todos",
-          },
-          { name: "grant_role", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        { name: "archived", column_type: { type: "Boolean" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        {
+          name: "projectId",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "projects",
+        },
+      ],
+    },
+    projects: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+    todoShares: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "todoId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "todos",
+        },
+        { name: "userId", column_type: { type: "Text" }, nullable: false },
+        { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
+      ],
+    },
+    teams: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "kind", column_type: { type: "Text" }, nullable: false },
+        { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+      ],
+    },
+    team_team_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "child_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "parent_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+      ],
+    },
+    resource_access_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "resource",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "todos",
+        },
+        { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+      ],
     },
   },
 };
@@ -280,38 +282,36 @@ const socialApp = {
   people: new PersonQueryBuilder(),
   friendships: new FriendshipQueryBuilder(),
   wasmSchema: {
-    tables: {
-      profiles: {
-        columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
-      },
-      people: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "profileId",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "profiles",
-          },
-        ],
-      },
-      friendships: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "personAId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "people",
-          },
-          {
-            name: "personBId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "people",
-          },
-        ],
-      },
+    profiles: {
+      columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
+    },
+    people: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "profileId",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "profiles",
+        },
+      ],
+    },
+    friendships: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "personAId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+        {
+          name: "personBId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+      ],
     },
   },
 };
@@ -590,12 +590,13 @@ describe("permissions DSL", () => {
       if (branch.type !== "ExistsRel") {
         throw new Error("Expected OR branch to be ExistsRel.");
       }
-      expect(branch.rel.type).toBe("Filter");
-      if (branch.rel.type !== "Filter") {
+      const rel = toLegacyRelExprForTest(branch.rel);
+      expect(rel.type).toBe("Filter");
+      if (rel.type !== "Filter") {
         throw new Error("Expected ExistsRel relation to be Filter.");
       }
-      expect(branch.rel.input.type).toBe("Join");
-      expect(JSON.stringify(branch.rel)).toContain('"type":"OuterColumn"');
+      expect(rel.input.type).toBe("Join");
+      expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
     }
   });
 
@@ -630,16 +631,17 @@ describe("permissions DSL", () => {
       if (branch.type !== "ExistsRel") {
         throw new Error("Expected OR branch to be ExistsRel.");
       }
-      expect(branch.rel.type).toBe("Project");
-      if (branch.rel.type !== "Project") {
+      const rel = toLegacyRelExprForTest(branch.rel);
+      expect(rel.type).toBe("Project");
+      if (rel.type !== "Project") {
         throw new Error("Expected ExistsRel relation to be Project.");
       }
-      expect(branch.rel.input.type).toBe("Filter");
-      if (branch.rel.input.type !== "Filter") {
+      expect(rel.input.type).toBe("Filter");
+      if (rel.input.type !== "Filter") {
         throw new Error("Expected hop relation filter.");
       }
-      expect(branch.rel.input.input.type).toBe("Join");
-      expect(JSON.stringify(branch.rel)).toContain('"type":"OuterColumn"');
+      expect(rel.input.input.type).toBe("Join");
+      expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
     }
   });
 
@@ -687,7 +689,7 @@ describe("permissions DSL", () => {
       return [policy.todos.allowRead.where((todo) => hasResourceRole(todo.id, "viewer"))];
     });
 
-    const using = compiled.todos.select?.using;
+    const using = toLegacyPolicyExprWithRelForTest(compiled.todos.select?.using);
     expect(using?.type).toBe("ExistsRel");
     if (!using || using.type !== "ExistsRel") {
       throw new Error("Expected compiled recursive expression to be ExistsRel.");
@@ -717,7 +719,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation to be initialized.");
     }
 
-    const ir = relationToIr(relation);
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected relation IR project.");
@@ -769,7 +771,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = relationToIr(relation);
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected projected recursive relation IR.");
@@ -784,7 +786,7 @@ describe("permissions DSL", () => {
     }
     expect(ir.input.input.left.type).toBe("Gather");
 
-    const existsExpr = relationExistsToPolicy(relation);
+    const existsExpr = toLegacyPolicyExprWithRelForTest(relationExistsToPolicy(relation));
     expect(existsExpr).toMatchObject({
       type: "ExistsRel",
       rel: {
@@ -817,7 +819,8 @@ describe("permissions DSL", () => {
       ];
     });
 
-    expect(compiled.todos.select?.using).toMatchObject({
+    const using = toLegacyPolicyExprWithRelForTest(compiled.todos.select?.using);
+    expect(using).toMatchObject({
       type: "ExistsRel",
       rel: {
         type: "Project",

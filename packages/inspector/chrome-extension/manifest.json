@@ -1,0 +1,16 @@
+{
+  "name": "Jazz Inspector",
+  "description": "Jazz inspector panel for Chrome DevTools.",
+  "version": "0.0.0",
+  "manifest_version": 3,
+  "permissions": ["scripting"],
+  "devtools_page": "devtools.html",
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

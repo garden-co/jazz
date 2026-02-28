@@ -98,106 +98,104 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [
-        {
-          name: "name",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+  projects: {
+    columns: [
+      {
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-      ],
-    },
-    todos: {
-      columns: [
-        {
-          name: "title",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+        nullable: false,
+      },
+    ],
+  },
+  todos: {
+    columns: [
+      {
+        name: "title",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "done",
-          column_type: {
-            type: "Boolean",
-          },
-          nullable: false,
+        nullable: false,
+      },
+      {
+        name: "done",
+        column_type: {
+          type: "Boolean",
         },
-        {
-          name: "description",
-          column_type: {
-            type: "Text",
-          },
-          nullable: true,
+        nullable: false,
+      },
+      {
+        name: "description",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "parent",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: true,
-          references: "todos",
+        nullable: true,
+      },
+      {
+        name: "parent",
+        column_type: {
+          type: "Uuid",
         },
-        {
-          name: "project",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: true,
-          references: "projects",
+        nullable: true,
+        references: "todos",
+      },
+      {
+        name: "project",
+        column_type: {
+          type: "Uuid",
         },
-      ],
-      policies: {
-        select: {
-          using: {
-            type: "True",
-          },
+        nullable: true,
+        references: "projects",
+      },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "True",
         },
-        insert: {
-          with_check: {
-            type: "Cmp",
-            column: "done",
-            op: "Eq",
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
             value: {
-              type: "Literal",
-              value: {
-                type: "Boolean",
-                value: false,
-              },
+              type: "Boolean",
+              value: false,
             },
           },
         },
-        update: {
-          using: {
-            type: "Cmp",
-            column: "done",
-            op: "Eq",
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
             value: {
-              type: "Literal",
-              value: {
-                type: "Boolean",
-                value: false,
-              },
+              type: "Boolean",
+              value: false,
             },
           },
-          with_check: {
-            type: "True",
-          },
         },
-        delete: {
-          using: {
-            type: "Cmp",
-            column: "done",
-            op: "Eq",
+        with_check: {
+          type: "True",
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
             value: {
-              type: "Literal",
-              value: {
-                type: "Boolean",
-                value: false,
-              },
+              type: "Boolean",
+              value: false,
             },
           },
         },
@@ -564,7 +562,13 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
   }
 }
 
-export const app = {
+export interface GeneratedApp {
+  projects: ProjectQueryBuilder;
+  todos: TodoQueryBuilder;
+  wasmSchema: WasmSchema;
+}
+
+export const app: GeneratedApp = {
   projects: new ProjectQueryBuilder(),
   todos: new TodoQueryBuilder(),
   wasmSchema,

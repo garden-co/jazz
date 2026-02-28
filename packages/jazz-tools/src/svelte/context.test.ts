@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 // Mock svelte context functions
 const contextStore = new Map<unknown, unknown>();
@@ -7,10 +7,16 @@ vi.mock("svelte", () => ({
   getContext: (key: unknown) => contextStore.get(key),
 }));
 
+let contextModule: typeof import("./context.svelte.js");
+
+beforeAll(async () => {
+  contextModule = await import("./context.svelte.js");
+});
+
 describe("context", () => {
-  it("initJazzContext sets a context and returns reactive object", async () => {
+  it("initJazzContext sets a context and returns reactive object", () => {
     contextStore.clear();
-    const { initJazzContext, getJazzContext } = await import("./context.svelte.js");
+    const { initJazzContext, getJazzContext } = contextModule;
 
     const ctx = initJazzContext();
 
@@ -21,24 +27,24 @@ describe("context", () => {
     expect(retrieved).toBe(ctx);
   });
 
-  it("getJazzContext throws when no context is set", async () => {
+  it("getJazzContext throws when no context is set", () => {
     contextStore.clear();
-    const { getJazzContext } = await import("./context.svelte.js");
+    const { getJazzContext } = contextModule;
 
     expect(() => getJazzContext()).toThrow("getDb/getSession must be used within");
   });
 
-  it("getDb throws when db is null", async () => {
+  it("getDb throws when db is null", () => {
     contextStore.clear();
-    const { initJazzContext, getDb } = await import("./context.svelte.js");
+    const { initJazzContext, getDb } = contextModule;
 
     initJazzContext();
     expect(() => getDb()).toThrow("Jazz database is not yet initialised");
   });
 
-  it("getDb returns db when set", async () => {
+  it("getDb returns db when set", () => {
     contextStore.clear();
-    const { initJazzContext, getDb } = await import("./context.svelte.js");
+    const { initJazzContext, getDb } = contextModule;
 
     const ctx = initJazzContext();
     const mockDb = { shutdown: vi.fn() } as any;
@@ -47,17 +53,17 @@ describe("context", () => {
     expect(getDb()).toBe(mockDb);
   });
 
-  it("getSession returns null initially", async () => {
+  it("getSession returns null initially", () => {
     contextStore.clear();
-    const { initJazzContext, getSession } = await import("./context.svelte.js");
+    const { initJazzContext, getSession } = contextModule;
 
     initJazzContext();
     expect(getSession()).toBe(null);
   });
 
-  it("getSession returns session when set", async () => {
+  it("getSession returns session when set", () => {
     contextStore.clear();
-    const { initJazzContext, getSession } = await import("./context.svelte.js");
+    const { initJazzContext, getSession } = contextModule;
 
     const ctx = initJazzContext();
     const session = { user_id: "alice", claims: { role: "admin" } };
