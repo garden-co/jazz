@@ -1,6 +1,7 @@
 import {
   JazzClient,
   PersistenceTier,
+  QueryExecutionOptions,
   QueryInput,
   RequestLike,
   Row,
@@ -443,16 +444,16 @@ class DevToolsJazzClient implements JazzClient {
   createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
     throw new Error("Method not implemented.");
   }
-  async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
-    const payload = { query, settledTier };
+    const payload = { query, options, settledTier: options?.settledTier };
     const rows = await sendDevtoolsRequest<Row[]>(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload);
     return rows;
   }
   queryInternal(
     queryJson: string,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     throw new Error("Method not implemented.");
   }
@@ -475,7 +476,7 @@ class DevToolsJazzClient implements JazzClient {
   subscribe(
     query: string | QueryInput,
     callback: SubscriptionCallback,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number {
     const handle = nextSubscriptionHandle++;
     const bridgeSubscriptionId = randomId();
@@ -486,7 +487,8 @@ class DevToolsJazzClient implements JazzClient {
       .then(() =>
         sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
           query,
-          settledTier,
+          options,
+          settledTier: options?.settledTier,
           subscriptionId: bridgeSubscriptionId,
         }),
       )
@@ -501,12 +503,12 @@ class DevToolsJazzClient implements JazzClient {
     query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number {
     if (session) {
       throw new Error("DevTools subscribe does not support session-scoped subscriptions.");
     }
-    return this.subscribe(query, callback, settledTier);
+    return this.subscribe(query, callback, options);
   }
   unsubscribe(subscriptionId: number): void {
     const bridgeSubscriptionId = pendingSubscriptionBridgeIds.get(subscriptionId);

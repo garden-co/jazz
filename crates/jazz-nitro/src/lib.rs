@@ -29,6 +29,7 @@ use groove::runtime_core::{
 };
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::SurrealKvStorage;
+use groove::sync_manager::QueryPropagation;
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -66,6 +67,28 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, String> {
         "core" => Ok(PersistenceTier::CoreServer),
         _ => Err(format!(
             "Invalid tier '{tier}'. Must be 'worker', 'edge', or 'core'."
+        )),
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct QueryExecutionOptionsWire {
+    propagation: Option<String>,
+}
+
+fn parse_propagation(options_json: Option<String>) -> Result<QueryPropagation, String> {
+    let Some(raw) = options_json else {
+        return Ok(QueryPropagation::Full);
+    };
+
+    let options: QueryExecutionOptionsWire =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid query options JSON: {e}"))?;
+
+    match options.propagation.as_deref() {
+        None | Some("full") => Ok(QueryPropagation::Full),
+        Some("local-only") => Ok(QueryPropagation::LocalOnly),
+        Some(other) => Err(format!(
+            "Invalid propagation '{other}'. Must be 'full' or 'local-only'."
         )),
     }
 }
@@ -406,12 +429,16 @@ impl JazzRuntimeImpl {
         query_json: String,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> Result<String, String> {
         let query = parse_query(&query_json)?;
         let session = parse_session(session_json)?;
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
-        let fut = self.with_core("query", |core| core.query(query, session, tier))?;
+        let fut = self.with_core("query", |core| {
+            core.query_with_propagation(query, session, tier, propagation)
+        })?;
 
         let results = block_on(fut).map_err(|e| format!("Query failed: {e}"))?;
 
@@ -434,7 +461,7 @@ impl JazzRuntimeImpl {
         session_json: Option<String>,
         settled_tier: Option<String>,
     ) -> String {
-        self.query_inner(query_json, session_json, settled_tier)
+        self.query_inner(query_json, session_json, settled_tier, None)
             .unwrap_or_else(error_json)
     }
 
@@ -446,10 +473,12 @@ impl JazzRuntimeImpl {
         on_update: Box<dyn Fn(String)>,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> Result<f64, String> {
         let query = parse_query(&query_json)?;
         let session = parse_session(session_json)?;
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         // The generated Func_void_std__string wrapper implements Send + Sync,
         // so this transmute is safe — the underlying closure is already
@@ -464,7 +493,7 @@ impl JazzRuntimeImpl {
         >::new()));
 
         let handle = self.with_core("subscribe", |core| {
-            core.subscribe_with_settled_tier(
+            core.subscribe_with_settled_tier_and_propagation(
                 query,
                 {
                     let rows_by_id = Arc::clone(&rows_by_id);
@@ -482,6 +511,7 @@ impl JazzRuntimeImpl {
                 },
                 session,
                 tier,
+                propagation,
             )
             .map_err(|e| format!("Subscribe failed: {e}"))
         })??;
@@ -496,7 +526,7 @@ impl JazzRuntimeImpl {
         session_json: Option<String>,
         settled_tier: Option<String>,
     ) -> f64 {
-        self.subscribe_inner(query_json, on_update, session_json, settled_tier)
+        self.subscribe_inner(query_json, on_update, session_json, settled_tier, None)
             .unwrap_or_else(|e| {
                 log::error!("subscribe failed: {e}");
                 -1.0

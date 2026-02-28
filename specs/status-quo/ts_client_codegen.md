@@ -110,8 +110,13 @@ Generates fluent, immutable query builders per table:
 
 ### Queries
 
-- `db.all<T>(query)` — translates query → WasmQueryBuilder, transforms rows to typed objects
-- `db.one<T>(query)` — wraps `all()` with `[0] ?? null`
+- `db.all<T>(query, options?)` — translates query → WasmQueryBuilder, transforms rows to typed objects
+- `db.one<T>(query, options?)` — wraps `all()` with `[0] ?? null`
+
+`options` supports:
+
+- `settledTier?: "worker" | "edge" | "core"`
+- `propagation?: "full" | "local-only"` (default `full`)
 
 ### Mutations (Synchronous)
 
@@ -123,7 +128,7 @@ Also: `insertPersisted()`, `updatePersisted()`, `deleteFromPersisted()` — asyn
 
 ### Subscriptions
 
-`db.subscribeAll(query, callback)` — the local-first alternative to polling. The callback fires whenever the query's results change (local writes, sync updates). It receives `{ all, added, updated, removed }` — the full result set plus a delta.
+`db.subscribeAll(query, callback, options?)` — the local-first alternative to polling. The callback fires whenever the query's results change (local writes, sync updates). It receives `{ all, added, updated, removed }` — the full result set plus a delta.
 
 The SubscriptionManager preserves object identity for unchanged items: if a new todo is added, existing todo objects in the array keep the same JavaScript reference. This makes React's `useMemo`/referential equality checks work naturally.
 

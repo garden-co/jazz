@@ -30,6 +30,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{Storage, SurrealKvStorage};
+use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -40,6 +41,29 @@ fn convert_values(values: Vec<Value>) -> Vec<Value> {
 
 fn convert_updates(partial: HashMap<String, Value>) -> Vec<(String, Value)> {
     partial.into_iter().collect()
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct QueryExecutionOptionsWire {
+    propagation: Option<String>,
+}
+
+fn parse_propagation(options_json: Option<String>) -> napi::Result<QueryPropagation> {
+    let Some(raw) = options_json else {
+        return Ok(QueryPropagation::Full);
+    };
+
+    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid query options JSON: {}", e)))?;
+
+    match options.propagation.as_deref() {
+        None | Some("full") => Ok(QueryPropagation::Full),
+        Some("local-only") => Ok(QueryPropagation::LocalOnly),
+        Some(other) => Err(napi::Error::from_reason(format!(
+            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
+            other
+        ))),
+    }
 }
 
 // ============================================================================
@@ -338,6 +362,7 @@ impl NapiRuntime {
         query_json: String,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> napi::Result<napi::JsObject> {
         let query = parse_query(&query_json)?;
 
@@ -351,13 +376,14 @@ impl NapiRuntime {
             };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         let future = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.query(query, session, tier)
+            core.query_with_propagation(query, session, tier, propagation)
         };
 
         // Create a deferred/promise pair
@@ -401,6 +427,7 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: napi::JsFunction,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> napi::Result<f64> {
         let query = parse_query(&query_json)?;
 
@@ -414,6 +441,7 @@ impl NapiRuntime {
             };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         // Create a ThreadsafeFunction for the JS callback.
         // The closure converts our serde_json::Value into a JsUnknown to pass to JS.
@@ -477,7 +505,13 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let handle = core
-            .subscribe_with_settled_tier(query, callback, session, tier)
+            .subscribe_with_settled_tier_and_propagation(
+                query,
+                callback,
+                session,
+                tier,
+                propagation,
+            )
             .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
 
         Ok(handle.0 as f64)
