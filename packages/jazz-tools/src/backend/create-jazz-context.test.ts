@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
@@ -76,8 +77,8 @@ vi.mock("../runtime/local-auth.js", () => ({
   resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
 }));
 
-const SCHEMA_A: WasmSchema = { tables: {} };
-const SCHEMA_B: WasmSchema = { tables: { todos: {} as any } };
+const SCHEMA_A: WasmSchema = {};
+const SCHEMA_B: WasmSchema = { todos: { columns: [] } };
 
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
@@ -102,7 +103,7 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.runtimeCtor).toHaveBeenCalledTimes(1);
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      JSON.stringify(SCHEMA_A),
+      serializeRuntimeSchema(SCHEMA_A),
       "server-app",
       "dev",
       "main",

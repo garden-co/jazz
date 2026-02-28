@@ -119,8 +119,8 @@ impl<'a> LensTransformer<'a> {
             .get(&crate::query_manager::types::TableName::new(&self.table))
             .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
 
-        let source_desc = &source_table.descriptor;
-        let target_desc = &target_table.descriptor;
+        let source_desc = &source_table.columns;
+        let target_desc = &target_table.columns;
 
         // Get lens path and apply transforms
         let lens_path =
@@ -154,7 +154,7 @@ impl<'a> LensTransformer<'a> {
             let next_table = next_schema
                 .get(&crate::query_manager::types::TableName::new(&self.table))
                 .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
-            let next_desc = &next_table.descriptor;
+            let next_desc = &next_table.columns;
 
             // Apply lens with the appropriate direction
             values = lens.apply(&values, &current_desc, next_desc, direction);
@@ -291,7 +291,7 @@ mod tests {
             Value::Text("Alice".to_string()),
             Value::Null,
         ];
-        let data = encode_row(&table.descriptor, &values).unwrap();
+        let data = encode_row(&table.columns, &values).unwrap();
 
         let result = transformer
             .transform(&data, make_commit_id(1), v2_hash)
@@ -319,7 +319,7 @@ mod tests {
             .unwrap();
         let id = ObjectId::new();
         let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Transform to v2
         let result = transformer
@@ -332,7 +332,7 @@ mod tests {
         let v2_table = v2
             .get(&crate::query_manager::types::TableName::new("users"))
             .unwrap();
-        let v2_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(v2_values.len(), 3);
         assert_eq!(v2_values[0], Value::Uuid(id));
@@ -435,7 +435,7 @@ mod tests {
             .unwrap();
         let id = ObjectId::new();
         let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Transform from v1 to v3 (2 hops)
         let result = transformer
@@ -448,7 +448,7 @@ mod tests {
         let v3_table = v3
             .get(&crate::query_manager::types::TableName::new("users"))
             .unwrap();
-        let v3_values = decode_row(&v3_table.descriptor, &result.data).unwrap();
+        let v3_values = decode_row(&v3_table.columns, &result.data).unwrap();
 
         assert_eq!(v3_values.len(), 4);
         assert_eq!(v3_values[0], Value::Uuid(id));
@@ -485,7 +485,7 @@ mod tests {
             Value::Text("Bob".to_string()),
             Value::Text("bob@example.com".to_string()),
         ];
-        let v2_data = encode_row(&v2_table.descriptor, &v2_values).unwrap();
+        let v2_data = encode_row(&v2_table.columns, &v2_values).unwrap();
 
         // Transform from v2 to v3 (1 hop)
         let result = transformer
@@ -498,7 +498,7 @@ mod tests {
         let v3_table = v3
             .get(&crate::query_manager::types::TableName::new("users"))
             .unwrap();
-        let v3_values = decode_row(&v3_table.descriptor, &result.data).unwrap();
+        let v3_values = decode_row(&v3_table.columns, &result.data).unwrap();
 
         assert_eq!(v3_values.len(), 4);
         assert_eq!(v3_values[0], Value::Uuid(id));
@@ -702,7 +702,7 @@ mod tests {
             Value::Uuid(id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Transform v1 -> v3
         let result = transformer
@@ -715,7 +715,7 @@ mod tests {
         let v3_table = v3
             .get(&crate::query_manager::types::TableName::new("users"))
             .unwrap();
-        let v3_values = decode_row(&v3_table.descriptor, &result.data).unwrap();
+        let v3_values = decode_row(&v3_table.columns, &result.data).unwrap();
 
         assert_eq!(v3_values.len(), 3);
         assert_eq!(v3_values[0], Value::Uuid(id));

@@ -11,7 +11,7 @@ impl QueryManager {
         if column.references.is_some()
             && matches!(
                 &column.column_type,
-                ColumnType::Array(element_type) if matches!(element_type.as_ref(), ColumnType::Uuid)
+                ColumnType::Array { element: element_type } if matches!(element_type.as_ref(), ColumnType::Uuid)
             )
             && let Value::Array(elements) = value
         {

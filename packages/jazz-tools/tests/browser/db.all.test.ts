@@ -3,56 +3,54 @@ import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src
 import type { WasmSchema } from "../../src/drivers/types.js";
 
 const schema: WasmSchema = {
-  tables: {
-    orgs: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
-    teams: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-        {
-          name: "parent_id",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "teams",
-        },
-      ],
-    },
-    users: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-      ],
-    },
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: false,
-        },
-        { name: "payload", column_type: { type: "Bytea" }, nullable: true },
-      ],
-    },
-    file_parts: {
-      columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
-    },
-    files: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        {
-          name: "parts",
-          column_type: { type: "Array", element: { type: "Uuid" } },
-          nullable: false,
-          references: "file_parts",
-        },
-      ],
-    },
+  orgs: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+    ],
+  },
+  file_parts: {
+    columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+  },
+  files: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "parts",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+        references: "file_parts",
+      },
+    ],
   },
 };
 

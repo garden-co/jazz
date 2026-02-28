@@ -23,11 +23,6 @@ export {
   type FetchStoredWasmSchemaOptions,
 } from "./schema-fetch.js";
 export { resolveLocalAuthDefaults } from "./local-auth.js";
-export {
-  fetchSchemaHashes,
-  fetchStoredWasmSchema,
-  type FetchStoredWasmSchemaOptions,
-} from "./schema-fetch.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
 export { toValue, toValueArray, toUpdateRecord } from "./value-converter.js";

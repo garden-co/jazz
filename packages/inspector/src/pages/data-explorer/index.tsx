@@ -7,7 +7,7 @@ export function DataExplorer() {
   const schema = useDevtoolsContext().wasmSchema;
   const { table } = useParams();
 
-  const tableNames = useMemo(() => Object.keys(schema.tables ?? {}).sort(), [schema]);
+  const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
 
   return (
     <div className={styles.layout}>

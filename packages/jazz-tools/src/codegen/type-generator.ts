@@ -66,7 +66,7 @@ function collectJsonSchemaBindings(schema: WasmSchema): JsonSchemaTypeBinding[] 
     }
   };
 
-  for (const table of Object.values(schema.tables)) {
+  for (const table of Object.values(schema)) {
     for (const column of table.columns) {
       visit(column.column_type);
     }
@@ -302,7 +302,7 @@ export function generateTypes(schema: WasmSchema): string {
   }
 
   // Base types (with id)
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName);
     lines.push(`export interface ${interfaceName} {`);
     lines.push("  id: string;");
@@ -315,7 +315,7 @@ export function generateTypes(schema: WasmSchema): string {
   }
 
   // Init types (without id, for inserts)
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName) + "Init";
     lines.push(`export interface ${interfaceName} {`);
     for (const col of table.columns) {

@@ -18,7 +18,7 @@ export function TableSchemaSql() {
     return <p>No schema loaded for this connection.</p>;
   }
 
-  const tableSchema = (schema.tables as Record<string, WasmTableSchemaLike | undefined>)[table];
+  const tableSchema = (schema as Record<string, WasmTableSchemaLike | undefined>)[table];
 
   if (!tableSchema) {
     return <p>Unknown table: {table}</p>;
