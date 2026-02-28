@@ -220,11 +220,14 @@ impl QueryManager {
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
-            self.sync_manager.send_query_subscription_to_servers(
-                sub.query_id,
-                sub.query.clone(),
-                session_for_policy.clone(),
-            );
+            if sub.propagation == crate::sync_manager::QueryPropagation::Full {
+                self.sync_manager.send_query_subscription_to_servers(
+                    sub.query_id,
+                    sub.query.clone(),
+                    session_for_policy.clone(),
+                    sub.propagation,
+                );
+            }
 
             // Store the server subscription for reactive updates
             self.server_subscriptions.insert(
@@ -237,6 +240,7 @@ impl QueryManager {
                     last_scope: scope,
                     needs_recompile: false,
                     settled_once: false,
+                    propagation: sub.propagation,
                 },
             );
         }
@@ -257,13 +261,17 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_unsubscriptions();
 
         for unsub in pending {
-            // Remove the server subscription
-            self.server_subscriptions
-                .remove(&(unsub.client_id, unsub.query_id));
+            let propagation = self
+                .server_subscriptions
+                .remove(&(unsub.client_id, unsub.query_id))
+                .map(|sub| sub.propagation)
+                .unwrap_or(crate::sync_manager::QueryPropagation::Full);
 
-            // Forward unsubscription to upstream servers
-            self.sync_manager
-                .send_query_unsubscription_to_servers(unsub.query_id);
+            if propagation == crate::sync_manager::QueryPropagation::Full {
+                // Forward unsubscription to upstream servers
+                self.sync_manager
+                    .send_query_unsubscription_to_servers(unsub.query_id);
+            }
         }
     }
 
@@ -433,7 +441,7 @@ impl QueryManager {
             && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 new_content,
                 &branch,
             )
@@ -491,8 +499,7 @@ impl QueryManager {
         };
 
         // Evaluate simple parts of the policy
-        let result =
-            evaluate_simple_parts(&policy, content, &table_schema.descriptor, &check.session);
+        let result = evaluate_simple_parts(&policy, content, &table_schema.columns, &check.session);
 
         if !result.passed {
             // Simple parts failed - reject immediately
@@ -567,7 +574,7 @@ impl QueryManager {
         let graphs = self.create_policy_graphs_for_complex_clauses(
             &graph_clauses,
             content,
-            &table_schema.descriptor,
+            &table_schema.columns,
             &table_name,
             &check.session,
         );
@@ -609,7 +616,7 @@ impl QueryManager {
             && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 new_content,
                 branch,
             )
@@ -647,7 +654,7 @@ impl QueryManager {
             };
 
             let result =
-                evaluate_simple_parts(using, old_content, &table_schema.descriptor, &check.session);
+                evaluate_simple_parts(using, old_content, &table_schema.columns, &check.session);
 
             if !result.passed {
                 // USING check failed - session cannot see the old row
@@ -679,7 +686,7 @@ impl QueryManager {
             let result = evaluate_simple_parts(
                 with_check,
                 new_content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &check.session,
             );
 
@@ -765,7 +772,7 @@ impl QueryManager {
             let clause_graphs = self.create_policy_graphs_for_complex_clauses(
                 std::slice::from_ref(clause),
                 content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &table_name,
                 &check.session,
             );

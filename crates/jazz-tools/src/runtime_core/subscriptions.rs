@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync_manager::QueryPropagation;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     // =========================================================================
@@ -16,7 +17,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + Send + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, None)
+        self.subscribe_impl(
+            query,
+            Box::new(callback),
+            session,
+            None,
+            QueryPropagation::Full,
+        )
     }
 
     /// Subscribe to a query with a callback (WASM version - no Send required).
@@ -30,7 +37,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, None)
+        self.subscribe_impl(
+            query,
+            Box::new(callback),
+            session,
+            None,
+            QueryPropagation::Full,
+        )
     }
 
     /// Subscribe with optional settled tier.
@@ -45,7 +58,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + Send + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, settled_tier)
+        self.subscribe_with_settled_tier_and_propagation(
+            query,
+            callback,
+            session,
+            settled_tier,
+            QueryPropagation::Full,
+        )
     }
 
     /// Subscribe with settled tier (WASM version - no Send required).
@@ -60,7 +79,57 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + 'static,
     {
-        self.subscribe_impl(query, Box::new(callback), session, settled_tier)
+        self.subscribe_with_settled_tier_and_propagation(
+            query,
+            callback,
+            session,
+            settled_tier,
+            QueryPropagation::Full,
+        )
+    }
+
+    /// Subscribe with settled tier and explicit propagation mode.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn subscribe_with_settled_tier_and_propagation<F>(
+        &mut self,
+        query: Query,
+        callback: F,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        propagation: QueryPropagation,
+    ) -> Result<SubscriptionHandle, RuntimeError>
+    where
+        F: Fn(SubscriptionDelta) + Send + 'static,
+    {
+        self.subscribe_impl(
+            query,
+            Box::new(callback),
+            session,
+            settled_tier,
+            propagation,
+        )
+    }
+
+    /// Subscribe with settled tier and explicit propagation mode (WASM version).
+    #[cfg(target_arch = "wasm32")]
+    pub fn subscribe_with_settled_tier_and_propagation<F>(
+        &mut self,
+        query: Query,
+        callback: F,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        propagation: QueryPropagation,
+    ) -> Result<SubscriptionHandle, RuntimeError>
+    where
+        F: Fn(SubscriptionDelta) + 'static,
+    {
+        self.subscribe_impl(
+            query,
+            Box::new(callback),
+            session,
+            settled_tier,
+            propagation,
+        )
     }
 
     /// Internal subscribe implementation.
@@ -70,12 +139,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         callback: SubscriptionCallback,
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
+        propagation: QueryPropagation,
     ) -> Result<SubscriptionHandle, RuntimeError> {
         let _span = debug_span!("subscribe", table = query.table.as_str()).entered();
         let query_sub_id = self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync(query, session, settled_tier)
+            .subscribe_with_sync_and_propagation(query, session, settled_tier, propagation)
             .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
 
         let handle = SubscriptionHandle(self.next_subscription_handle);
@@ -132,14 +202,24 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> QueryFuture {
+        self.query_with_propagation(query, session, settled_tier, QueryPropagation::Full)
+    }
+
+    pub fn query_with_propagation(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        propagation: QueryPropagation,
+    ) -> QueryFuture {
         let _span = debug_span!("query", table = query.table.as_str(), ?settled_tier).entered();
         let (sender, receiver) = oneshot::channel();
 
-        let sub_id = match self.schema_manager.query_manager_mut().subscribe_with_sync(
-            query,
-            session,
-            settled_tier,
-        ) {
+        let sub_id = match self
+            .schema_manager
+            .query_manager_mut()
+            .subscribe_with_sync_and_propagation(query, session, settled_tier, propagation)
+        {
             Ok(id) => id,
             Err(e) => {
                 let _ = sender.send(Err(RuntimeError::QueryError(format!("{:?}", e))));

@@ -105,68 +105,66 @@ const app = {
   team_team_edges: new TeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceGrantQueryBuilder(),
   wasmSchema: {
-    tables: {
-      todos: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          {
-            name: "projectId",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "projects",
-          },
-        ],
-      },
-      projects: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
-      teams: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          { name: "kind", column_type: { type: "Text" }, nullable: false },
-          { name: "identity_key", column_type: { type: "Text" }, nullable: true },
-        ],
-      },
-      team_team_edges: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "child_team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-          {
-            name: "parent_team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-        ],
-      },
-      resource_access_edges: {
-        columns: [
-          { name: "id", column_type: { type: "Uuid" }, nullable: false },
-          {
-            name: "team",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "teams",
-          },
-          {
-            name: "resource",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "todos",
-          },
-          { name: "grant_role", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        {
+          name: "projectId",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "projects",
+        },
+      ],
+    },
+    projects: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+    teams: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "kind", column_type: { type: "Text" }, nullable: false },
+        { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+      ],
+    },
+    team_team_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "child_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "parent_team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+      ],
+    },
+    resource_access_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        {
+          name: "team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        {
+          name: "resource",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "todos",
+        },
+        { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+      ],
     },
   },
 } as const;

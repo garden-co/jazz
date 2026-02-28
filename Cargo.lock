@@ -1761,6 +1761,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2",
  "small-map",

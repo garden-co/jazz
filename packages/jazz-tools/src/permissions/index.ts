@@ -21,11 +21,18 @@ type QueryBuilderLike = {
   where(input: unknown): unknown;
 };
 
-type AppLike = Record<string, QueryBuilderLike | unknown> & {
-  wasmSchema?: unknown;
-};
+type AppLike = object;
 
-type TableKey<TApp extends AppLike> = Exclude<keyof TApp, "wasmSchema">;
+type TableKey<TApp extends AppLike> = Extract<
+  {
+    [K in keyof TApp]-?: K extends "wasmSchema"
+      ? never
+      : TApp[K] extends QueryBuilderLike
+        ? K
+        : never;
+  }[keyof TApp],
+  string
+>;
 type QueryBuilderFor<TApp extends AppLike, K extends TableKey<TApp>> = Extract<
   TApp[K],
   QueryBuilderLike
@@ -288,15 +295,15 @@ class PermissionRelationBuilder implements PermissionRelation {
     const stepPredicates = [
       ...stepFilters.flatMap((filter) => relationFilterToPredicates(filter, stepState.outputTable)),
       {
-        type: "Cmp",
-        left: {
-          scope: stepState.outputTable,
-          column: stripQualifier(currentFilter.column),
-        },
-        op: "Eq",
-        right: {
-          type: "RowId",
-          source: "Frontier",
+        Cmp: {
+          left: {
+            scope: stepState.outputTable,
+            column: stripQualifier(currentFilter.column),
+          },
+          op: "Eq",
+          right: {
+            RowId: "Frontier",
+          },
         },
       } satisfies RelPredicateExpr,
     ];
@@ -304,26 +311,29 @@ class PermissionRelationBuilder implements PermissionRelation {
 
     const recursiveHopScope = "__recursive_hop_0";
     const stepProjected: RelExpr = {
-      type: "Project",
-      input: {
-        type: "Join",
-        left: stepFiltered,
-        right: {
-          type: "TableScan",
-          table: this.state.outputTable,
-        },
-        on: [
-          {
-            left: {
-              scope: stepState.outputTable,
-              column: stripQualifier(stepJoin.left),
+      Project: {
+        input: {
+          Join: {
+            left: stepFiltered,
+            right: {
+              TableScan: {
+                table: this.state.outputTable,
+              },
             },
-            right: { scope: recursiveHopScope, column: "id" },
+            on: [
+              {
+                left: {
+                  scope: stepState.outputTable,
+                  column: stripQualifier(stepJoin.left),
+                },
+                right: { scope: recursiveHopScope, column: "id" },
+              },
+            ],
+            join_kind: "Inner",
           },
-        ],
-        joinKind: "Inner",
+        },
+        columns: projectHopResult(recursiveHopScope),
       },
-      columns: projectHopResult(recursiveHopScope),
     };
 
     const maxDepth = normalizeRecursiveRelationDepth(options.maxDepth);
@@ -332,12 +342,13 @@ class PermissionRelationBuilder implements PermissionRelation {
         kind: "recursive",
         outputTable: this.state.outputTable,
         base: {
-          type: "Gather",
-          seed,
-          step: stepProjected,
-          frontierKey: { type: "RowId", source: "Current" },
-          maxDepth,
-          dedupeKey: [{ type: "RowId", source: "Current" }],
+          Gather: {
+            seed,
+            step: stepProjected,
+            frontier_key: { RowId: "Current" },
+            max_depth: maxDepth,
+            dedupe_key: [{ RowId: "Current" }],
+          },
         },
         initialScope: this.state.outputTable,
         filters: [],
@@ -554,13 +565,12 @@ function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, strin
   }
 
   const typedSchema = schema as WasmSchema;
-  if (!typedSchema.tables || typeof typedSchema.tables !== "object") {
-    return result;
-  }
-
-  for (const [tableName, table] of Object.entries(typedSchema.tables)) {
+  for (const [tableName, table] of Object.entries(typedSchema)) {
+    if (!table || typeof table !== "object" || !Array.isArray(table.columns)) {
+      continue;
+    }
     const fkColumns = new Map<string, string>();
-    for (const column of table.columns ?? []) {
+    for (const column of table.columns) {
       if (column.references) {
         fkColumns.set(column.name, column.references);
       }
@@ -578,10 +588,6 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   }
 
   const typedSchema = schema as WasmSchema;
-  if (!typedSchema.tables || typeof typedSchema.tables !== "object") {
-    return new Map();
-  }
-
   try {
     return analyzeRelations(typedSchema);
   } catch {
@@ -680,8 +686,9 @@ function createTableRelation(
       kind: "table",
       outputTable: table,
       base: {
-        type: "TableScan",
-        table,
+        TableScan: {
+          table,
+        },
       },
       initialScope: table,
       filters: [],
@@ -804,18 +811,17 @@ function relationColumnRef(column: string, defaultScope: string): RelColumnRef {
 
 function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelValueRef {
   if (isSessionRefValue(value)) {
-    return { type: "SessionRef", path: value.path };
+    return { SessionRef: value.path };
   }
   if (isRowRefValue(value)) {
     if (!options.allowRowRefs) {
       throw new Error("Row references are only valid inside exists() clauses.");
     }
     return {
-      type: "OuterColumn",
-      column: { column: value.column },
+      OuterColumn: { column: value.column },
     };
   }
-  return { type: "Literal", value };
+  return { Literal: value };
 }
 
 function relationFilterToPredicates(
@@ -826,25 +832,27 @@ function relationFilterToPredicates(
   const raw = filter.raw;
 
   if (raw === null) {
-    return [{ type: "IsNull", column: left }];
+    return [{ IsNull: { column: left } }];
   }
   if (isSessionRefValue(raw) || isRowRefValue(raw)) {
     return [
       {
-        type: "Cmp",
-        left,
-        op: "Eq",
-        right: toRelValueRef(raw, { allowRowRefs: true }),
+        Cmp: {
+          left,
+          op: "Eq",
+          right: toRelValueRef(raw, { allowRowRefs: true }),
+        },
       },
     ];
   }
   if (!isPlainObject(raw)) {
     return [
       {
-        type: "Cmp",
-        left,
-        op: "Eq",
-        right: { type: "Literal", value: raw },
+        Cmp: {
+          left,
+          op: "Eq",
+          right: { Literal: raw },
+        },
       },
     ];
   }
@@ -857,83 +865,89 @@ function relationFilterToPredicates(
     switch (op) {
       case "eq":
         if (value === null) {
-          predicates.push({ type: "IsNull", column: left });
+          predicates.push({ IsNull: { column: left } });
         } else {
           predicates.push({
-            type: "Cmp",
-            left,
-            op: "Eq",
-            right: toRelValueRef(value, { allowRowRefs: true }),
+            Cmp: {
+              left,
+              op: "Eq",
+              right: toRelValueRef(value, { allowRowRefs: true }),
+            },
           });
         }
         break;
       case "ne":
         if (value === null) {
-          predicates.push({ type: "IsNotNull", column: left });
+          predicates.push({ IsNotNull: { column: left } });
         } else {
           predicates.push({
-            type: "Cmp",
-            left,
-            op: "Ne",
-            right: toRelValueRef(value, { allowRowRefs: true }),
+            Cmp: {
+              left,
+              op: "Ne",
+              right: toRelValueRef(value, { allowRowRefs: true }),
+            },
           });
         }
         break;
       case "gt":
         predicates.push({
-          type: "Cmp",
-          left,
-          op: "Gt",
-          right: toRelValueRef(value, { allowRowRefs: true }),
+          Cmp: {
+            left,
+            op: "Gt",
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          },
         });
         break;
       case "gte":
         predicates.push({
-          type: "Cmp",
-          left,
-          op: "Ge",
-          right: toRelValueRef(value, { allowRowRefs: true }),
+          Cmp: {
+            left,
+            op: "Ge",
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          },
         });
         break;
       case "lt":
         predicates.push({
-          type: "Cmp",
-          left,
-          op: "Lt",
-          right: toRelValueRef(value, { allowRowRefs: true }),
+          Cmp: {
+            left,
+            op: "Lt",
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          },
         });
         break;
       case "lte":
         predicates.push({
-          type: "Cmp",
-          left,
-          op: "Le",
-          right: toRelValueRef(value, { allowRowRefs: true }),
+          Cmp: {
+            left,
+            op: "Le",
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          },
         });
         break;
       case "isNull":
         if (typeof value !== "boolean") {
           throw new Error(`"${filter.column}.isNull" expects a boolean value.`);
         }
-        predicates.push(
-          value ? { type: "IsNull", column: left } : { type: "IsNotNull", column: left },
-        );
+        predicates.push(value ? { IsNull: { column: left } } : { IsNotNull: { column: left } });
         break;
       case "in":
         if (!Array.isArray(value)) {
           throw new Error(`"${filter.column}.in" expects an array value.`);
         }
         predicates.push({
-          type: "In",
-          left,
-          values: value.map((entry) => toRelValueRef(entry, { allowRowRefs: true })),
+          In: {
+            left,
+            values: value.map((entry) => toRelValueRef(entry, { allowRowRefs: true })),
+          },
         });
         break;
       case "contains":
         predicates.push({
-          type: "Contains",
-          left,
-          value: toRelValueRef(value, { allowRowRefs: true }),
+          Contains: {
+            left,
+            right: toRelValueRef(value, { allowRowRefs: true }),
+          },
         });
         break;
       default:
@@ -941,28 +955,29 @@ function relationFilterToPredicates(
     }
   }
 
-  return predicates.length > 0 ? predicates : [{ type: "True" }];
+  return predicates.length > 0 ? predicates : ["True"];
 }
 
 function andRelPredicates(predicates: RelPredicateExpr[]): RelPredicateExpr {
   if (predicates.length === 0) {
-    return { type: "True" };
+    return "True";
   }
   if (predicates.length === 1) {
     return predicates[0];
   }
-  return { type: "And", exprs: predicates };
+  return { And: predicates };
 }
 
 function applyRelFilter(input: RelExpr, predicates: RelPredicateExpr[]): RelExpr {
   const predicate = andRelPredicates(predicates);
-  if (predicate.type === "True") {
+  if (predicate === "True") {
     return input;
   }
   return {
-    type: "Filter",
-    input,
-    predicate,
+    Filter: {
+      input,
+      predicate,
+    },
   };
 }
 
@@ -982,8 +997,7 @@ function projectHopResult(scope: string): RelProjectColumn[] {
     {
       alias: "id",
       expr: {
-        type: "Column",
-        column: { scope, column: "id" },
+        Column: { scope, column: "id" },
       },
     },
   ];
@@ -1005,14 +1019,16 @@ function applyRelationTail(options: {
     const join = options.joins[i];
     const rightScope = options.joinAlias(join, i);
     relation = {
-      type: "Join",
-      left: relation,
-      right: {
-        type: "TableScan",
-        table: join.table,
+      Join: {
+        left: relation,
+        right: {
+          TableScan: {
+            table: join.table,
+          },
+        },
+        on: [joinConditionFromSpec(join, defaultScope, rightScope)],
+        join_kind: "Inner",
       },
-      on: [joinConditionFromSpec(join, defaultScope, rightScope)],
-      joinKind: "Inner",
     };
     defaultScope = rightScope;
     hasHopJoin ||= Boolean(join.viaHop);
@@ -1028,21 +1044,22 @@ function applyRelationTail(options: {
       ([alias, column]) => ({
         alias,
         expr: {
-          type: "Column",
-          column: relationColumnRef(column, defaultScope),
+          Column: relationColumnRef(column, defaultScope),
         },
       }),
     );
     relation = {
-      type: "Project",
-      input: relation,
-      columns,
+      Project: {
+        input: relation,
+        columns,
+      },
     };
   } else if (hasHopJoin) {
     relation = {
-      type: "Project",
-      input: relation,
-      columns: projectHopResult(defaultScope),
+      Project: {
+        input: relation,
+        columns: projectHopResult(defaultScope),
+      },
     };
   }
 
@@ -1423,7 +1440,7 @@ function compileRules(
   for (const ruleLike of rules) {
     const rule = isUpdateRuleBuilder(ruleLike) ? ruleLike.toRule() : ruleLike;
     if (!compiled[rule.table]) {
-      compiled[rule.table] = {};
+      compiled[rule.table] = emptyTablePolicies();
     }
     const tablePolicies = compiled[rule.table];
     switch (rule.action) {
@@ -1453,6 +1470,19 @@ function compileRules(
     }
   }
   return compiled;
+}
+
+function emptyOperationPolicy(): OperationPolicy {
+  return {};
+}
+
+function emptyTablePolicies(): TablePolicies {
+  return {
+    select: emptyOperationPolicy(),
+    insert: emptyOperationPolicy(),
+    update: emptyOperationPolicy(),
+    delete: emptyOperationPolicy(),
+  };
 }
 
 function mergeOperationPolicy(

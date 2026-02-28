@@ -30,22 +30,20 @@ interface DebugSchemaState {
 // ---------------------------------------------------------------------------
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: true,
-        },
-      ],
-    },
-    projects: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: true,
+      },
+    ],
+  },
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
   },
 };
 
@@ -121,25 +119,21 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 
 // Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
 const catalogueSchemaV1: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
 const catalogueSchemaV2: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-        { name: "description", column_type: { type: "Text" }, nullable: true },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+      { name: "description", column_type: { type: "Text" }, nullable: true },
+    ],
   },
 };
 
@@ -393,7 +387,7 @@ describe("Worker Bridge with OPFS", () => {
     // Using "worker" settled tier makes the query wait for the worker's
     // QuerySettled response, ensuring OPFS data arrives before resolving.
     const db2 = track(await createDb({ appId: "test-app", dbName }));
-    const after = await db2.all(allTodos, "worker");
+    const after = await db2.all(allTodos, { settledTier: "worker" });
     expect(after.length).toBe(1);
     expect(after[0].title).toBe("Survive reload");
     expect(after[0].done).toBe(true);
@@ -424,7 +418,7 @@ describe("Worker Bridge with OPFS", () => {
 
     // New Db with same dbName — worker must recover from OPFS WAL
     const db2 = track(await createDb({ appId: "test-app", dbName }));
-    const after = await db2.all(allTodos, "worker");
+    const after = await db2.all(allTodos, { settledTier: "worker" });
     expect(after.length).toBe(2);
 
     const titles = after.map((r) => r.title).sort();
@@ -435,17 +429,17 @@ describe("Worker Bridge with OPFS", () => {
     const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete-storage") }));
 
     await db.insertWithAck(todos, { title: "Should be deleted", done: false }, "worker");
-    const before = await db.all(allTodos, "worker");
+    const before = await db.all(allTodos, { settledTier: "worker" });
     expect(before.length).toBe(1);
     expect(before[0].title).toBe("Should be deleted");
 
     await db.deleteClientStorage();
 
-    const afterDelete = await db.all(allTodos, "worker");
+    const afterDelete = await db.all(allTodos, { settledTier: "worker" });
     expect(afterDelete).toEqual([]);
 
     const id = db.insert(todos, { title: "Fresh after delete", done: true });
-    const afterReinsert = await db.all(allTodos, "worker");
+    const afterReinsert = await db.all(allTodos, { settledTier: "worker" });
     expect(afterReinsert).toHaveLength(1);
     expect(afterReinsert[0].id).toBe(id);
     expect(afterReinsert[0].title).toBe("Fresh after delete");
@@ -457,7 +451,7 @@ describe("Worker Bridge with OPFS", () => {
     const seeded = track(await createDb({ appId: "test-app", dbName }));
 
     // Initialize worker/main runtimes with schema v2 from client context.
-    await seeded.all(allCatalogueTodos, "worker");
+    await seeded.all(allCatalogueTodos, { settledTier: "worker" });
 
     // Seed historical v1 schema + auto lens v1->v2 directly into worker OPFS.
     await seedWorkerLiveSchema(seeded, catalogueSchemaV1);
@@ -475,7 +469,7 @@ describe("Worker Bridge with OPFS", () => {
     untrack(seeded);
 
     const offline = track(await createDb({ appId: "test-app", dbName }));
-    await offline.all(allCatalogueTodos, "worker");
+    await offline.all(allCatalogueTodos, { settledTier: "worker" });
 
     await waitForCondition(
       async () => {
@@ -488,7 +482,7 @@ describe("Worker Bridge with OPFS", () => {
 
     await waitForCondition(
       async () => {
-        await offline.all(allCatalogueTodos, "worker");
+        await offline.all(allCatalogueTodos, { settledTier: "worker" });
         const mainState = getMainDebugSchemaState(offline, catalogueSchemaV2);
         return hasRestoredCatalogueState(mainState);
       },
@@ -645,6 +639,106 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
+  it("local-only subscriptions receive rows from opfs", async () => {
+    const dbName = uniqueDbName("sync-local-only");
+    const dbA = track(await createDb({ appId: "test-app", dbName }));
+
+    const snapshots: Todo[][] = [];
+    const unsub = trackSubscription(
+      dbA.subscribeAll(
+        allTodos,
+        (delta) => {
+          snapshots.push([...delta.all]);
+        },
+        { propagation: "local-only" },
+      ),
+    );
+
+    await dbA.insertWithAck(todos, { title: "local-only-local-1", done: true }, "worker");
+
+    // Wait for initial local-only snapshot.
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      5000,
+      "local-only subscription should receive in-memory insert",
+    );
+
+    unsub();
+
+    // Simulate a page refresh: close first instance, then reopen same namespace.
+    await dbA.shutdown();
+    untrack(dbA);
+
+    const dbB = track(await createDb({ appId: "test-app", dbName }));
+
+    await waitForCondition(
+      async () => {
+        const rows = await dbB.all(allTodos, { propagation: "local-only" });
+        return rows.some((row) => row.title === "local-only-local-1");
+      },
+      8000,
+      "local-only query should retrieve persisted OPFS rows after reopen",
+    );
+
+    const snapshotsB = await dbB.all(allTodos, { propagation: "local-only" });
+    expect(snapshotsB.length).toBe(1);
+    expect(snapshotsB[0].title).toBe("local-only-local-1");
+  }, 60000);
+
+  it("local-only subscriptions do not receive rows from sync server", async () => {
+    const sharedLocalAuthToken = `sync-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb("sync-local-only-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb("sync-local-only-b", sharedLocalAuthToken);
+
+    const snapshots: Todo[][] = [];
+    const unsub = trackSubscription(
+      dbB.subscribeAll(
+        allTodos,
+        (delta) => {
+          snapshots.push([...delta.all]);
+        },
+        { propagation: "local-only" },
+      ),
+    );
+
+    // Wait for initial local-only snapshot.
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      5000,
+      "local-only subscription should produce an initial snapshot",
+    );
+
+    const remoteTitle = `remote-for-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbA.insertWithAck(todos, { title: remoteTitle, done: false }, "worker"),
+      10000,
+      "A insertWithAck(worker) did not resolve",
+    );
+
+    // Give sync enough time; local-only must still not see remote data.
+    await sleep(3000);
+    const latestAfterRemote = snapshots[snapshots.length - 1] ?? [];
+    expect(latestAfterRemote.some((row) => row.title === remoteTitle)).toBe(false);
+
+    const localTitle = `local-only-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbB.insert(todos, { title: localTitle, done: true });
+
+    await waitForCondition(
+      async () => {
+        const latest = snapshots[snapshots.length - 1] ?? [];
+        return latest.some((row) => row.title === localTitle);
+      },
+      8000,
+      "local-only subscription should still include local inserts",
+    );
+
+    const latest = snapshots[snapshots.length - 1] ?? [];
+    expect(latest.some((row) => row.title === localTitle)).toBe(true);
+    expect(latest.some((row) => row.title === remoteTitle)).toBe(false);
+
+    unsub();
+  }, 60000);
+
   // -------------------------------------------------------------------------
   // 8. Leader election + cross-tab peer routing
   // -------------------------------------------------------------------------
@@ -675,8 +769,8 @@ describe("Worker Bridge with OPFS", () => {
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, "worker");
-        const followerRows = await follower.all(allTodos, "worker");
+        const leaderRows = await leader.all(allTodos, { settledTier: "worker" });
+        const followerRows = await follower.all(allTodos, { settledTier: "worker" });
         const leaderHas = leaderRows.some((row) => row.title === "Routed via leader");
         const followerHas = followerRows.some((row) => row.title === "Routed via leader");
         return leaderHas && followerHas;
@@ -706,7 +800,7 @@ describe("Worker Bridge with OPFS", () => {
     const id = follower.insert(todos, { title: "Post-failover", done: true });
     await waitForCondition(
       async () => {
-        const rows = await follower.all(allTodos, "worker");
+        const rows = await follower.all(allTodos, { settledTier: "worker" });
         return rows.some((row) => row.id === id && row.title === "Post-failover");
       },
       8000,
@@ -738,8 +832,8 @@ describe("Worker Bridge with OPFS", () => {
 
     await waitForCondition(
       async () => {
-        const leaderRows = await currentLeader.all(allTodos, "worker");
-        const followerRows = await currentFollower.all(allTodos, "worker");
+        const leaderRows = await currentLeader.all(allTodos, { settledTier: "worker" });
+        const followerRows = await currentFollower.all(allTodos, { settledTier: "worker" });
         const leaderHas = leaderRows.some((row) => row.title === marker);
         const followerHas = followerRows.some((row) => row.title === marker);
         return leaderHas && followerHas;
@@ -817,7 +911,7 @@ async function waitForTodos(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await db.all(allTodos, settledTier);
+      const rows = await db.all(allTodos, { settledTier });
       if (predicate(rows)) {
         return rows;
       }

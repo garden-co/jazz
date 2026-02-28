@@ -5,7 +5,9 @@ export {
   SessionClient,
   loadWasmModule,
   type PersistenceTier,
+  type QueryExecutionOptions,
   type QueryInput,
+  type QueryPropagation,
   type RequestLike,
   type Row,
   type Runtime,
@@ -14,7 +16,14 @@ export {
 } from "./client.js";
 export type { AppContext, LocalAuthMode, Session } from "./context.js";
 export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transport.js";
-export { createDb, Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
+export {
+  createDb,
+  Db,
+  type DbConfig,
+  type QueryBuilder,
+  type QueryOptions,
+  type TableProxy,
+} from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
 export {

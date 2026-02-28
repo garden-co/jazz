@@ -7,6 +7,7 @@ pub mod runtime_core;
 pub mod schema_manager;
 pub mod storage;
 pub mod sync_manager;
+pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;

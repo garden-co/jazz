@@ -30,726 +30,43 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{Storage, SurrealKvStorage};
+use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
 
-// ============================================================================
-// Value conversion (mirrors jazz-wasm/src/types.rs WasmValue)
-// ============================================================================
-
-/// Tagged value type for JS boundary. Serde-serialized as `{ type: "Text", value: "..." }`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", content = "value")]
-enum NapiValue {
-    Integer(i32),
-    BigInt(i64),
-    Double(f64),
-    Boolean(bool),
-    Text(String),
-    Timestamp(u64),
-    Uuid(String),
-    Bytea(Vec<u8>),
-    Array(Vec<NapiValue>),
-    Row(Vec<NapiValue>),
-    Null,
+fn convert_values(values: Vec<Value>) -> Vec<Value> {
+    values
 }
 
-impl From<Value> for NapiValue {
-    fn from(v: Value) -> Self {
-        match v {
-            Value::Integer(i) => NapiValue::Integer(i),
-            Value::BigInt(i) => NapiValue::BigInt(i),
-            Value::Double(f) => NapiValue::Double(f),
-            Value::Boolean(b) => NapiValue::Boolean(b),
-            Value::Text(s) => NapiValue::Text(s),
-            Value::Timestamp(t) => NapiValue::Timestamp(t),
-            Value::Uuid(id) => NapiValue::Uuid(id.uuid().to_string()),
-            Value::Bytea(bytes) => NapiValue::Bytea(bytes),
-            Value::Array(arr) => NapiValue::Array(arr.into_iter().map(Into::into).collect()),
-            Value::Row(row) => NapiValue::Row(row.into_iter().map(Into::into).collect()),
-            Value::Null => NapiValue::Null,
-        }
-    }
+fn convert_updates(partial: HashMap<String, Value>) -> Vec<(String, Value)> {
+    partial.into_iter().collect()
 }
 
-fn napi_value_to_groove(v: NapiValue) -> Result<Value, String> {
-    Ok(match v {
-        NapiValue::Integer(i) => Value::Integer(i),
-        NapiValue::BigInt(i) => Value::BigInt(i),
-        NapiValue::Double(f) => Value::Double(f),
-        NapiValue::Boolean(b) => Value::Boolean(b),
-        NapiValue::Text(s) => Value::Text(s),
-        NapiValue::Timestamp(t) => Value::Timestamp(t),
-        NapiValue::Uuid(s) => {
-            let uuid = uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {}", e))?;
-            Value::Uuid(ObjectId::from_uuid(uuid))
-        }
-        NapiValue::Bytea(bytes) => Value::Bytea(bytes),
-        NapiValue::Array(arr) => {
-            let converted: Result<Vec<_>, _> = arr.into_iter().map(napi_value_to_groove).collect();
-            Value::Array(converted?)
-        }
-        NapiValue::Row(row) => {
-            let converted: Result<Vec<_>, _> = row.into_iter().map(napi_value_to_groove).collect();
-            Value::Row(converted?)
-        }
-        NapiValue::Null => Value::Null,
-    })
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct QueryExecutionOptionsWire {
+    propagation: Option<String>,
 }
 
-fn convert_values(js_values: Vec<NapiValue>) -> napi::Result<Vec<Value>> {
-    js_values
-        .into_iter()
-        .map(|v| napi_value_to_groove(v).map_err(napi::Error::from_reason))
-        .collect()
-}
-
-fn convert_updates(partial: HashMap<String, NapiValue>) -> napi::Result<Vec<(String, Value)>> {
-    partial
-        .into_iter()
-        .map(|(k, v)| {
-            let groove_value = napi_value_to_groove(v).map_err(napi::Error::from_reason)?;
-            Ok((k, groove_value))
-        })
-        .collect()
-}
-
-// ============================================================================
-// Schema types for JSON deserialization
-// ============================================================================
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsColumnType {
-    #[serde(rename = "type")]
-    type_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    element: Option<Box<JsColumnType>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    variants: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    columns: Option<Vec<JsColumnDescriptor>>,
-    // Optional JSON Schema metadata; valid only for `type: "Json"` columns.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    schema: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsColumnDescriptor {
-    name: String,
-    column_type: JsColumnType,
-    nullable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    references: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-enum JsPolicyValue {
-    Literal { value: NapiValue },
-    SessionRef { path: Vec<String> },
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-enum JsCmpOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-enum JsPolicyOperation {
-    Select,
-    Insert,
-    Update,
-    Delete,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-enum JsPolicyExpr {
-    Cmp {
-        column: String,
-        op: JsCmpOp,
-        value: JsPolicyValue,
-    },
-    IsNull {
-        column: String,
-    },
-    IsNotNull {
-        column: String,
-    },
-    Contains {
-        column: String,
-        value: JsPolicyValue,
-    },
-    In {
-        column: String,
-        session_path: Vec<String>,
-    },
-    InList {
-        column: String,
-        values: Vec<JsPolicyValue>,
-    },
-    Exists {
-        table: String,
-        condition: Box<JsPolicyExpr>,
-    },
-    ExistsRel {
-        rel: serde_json::Value,
-    },
-    Inherits {
-        operation: JsPolicyOperation,
-        via_column: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_depth: Option<usize>,
-    },
-    InheritsReferencing {
-        operation: JsPolicyOperation,
-        source_table: String,
-        via_column: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_depth: Option<usize>,
-    },
-    And {
-        exprs: Vec<JsPolicyExpr>,
-    },
-    Or {
-        exprs: Vec<JsPolicyExpr>,
-    },
-    Not {
-        expr: Box<JsPolicyExpr>,
-    },
-    True,
-    False,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct JsOperationPolicy {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    using: Option<JsPolicyExpr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    with_check: Option<JsPolicyExpr>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct JsTablePolicies {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    select: Option<JsOperationPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    insert: Option<JsOperationPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    update: Option<JsOperationPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    delete: Option<JsOperationPolicy>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsTableSchema {
-    columns: Vec<JsColumnDescriptor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policies: Option<JsTablePolicies>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JsSchema {
-    tables: HashMap<String, JsTableSchema>,
-}
-
-fn js_column_type_to_groove(ct: JsColumnType) -> jazz_tools::query_manager::types::ColumnType {
-    use jazz_tools::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor};
-
-    let JsColumnType {
-        type_name,
-        element,
-        variants,
-        columns,
-        schema,
-    } = ct;
-
-    fn ensure_schema_absent(schema: &Option<serde_json::Value>, column_type: &str) {
-        assert!(
-            schema.is_none(),
-            "Only Json columns can include `schema` metadata. Received schema for {}.",
-            column_type
-        );
-    }
-
-    match type_name.as_str() {
-        "Integer" => {
-            ensure_schema_absent(&schema, "Integer");
-            ColumnType::Integer
-        }
-        "BigInt" => {
-            ensure_schema_absent(&schema, "BigInt");
-            ColumnType::BigInt
-        }
-        "Double" => {
-            ensure_schema_absent(&schema, "Double");
-            ColumnType::Double
-        }
-        "Boolean" => {
-            ensure_schema_absent(&schema, "Boolean");
-            ColumnType::Boolean
-        }
-        "Text" => {
-            ensure_schema_absent(&schema, "Text");
-            ColumnType::Text
-        }
-        "Enum" => {
-            ensure_schema_absent(&schema, "Enum");
-            let variants = variants.expect("Enum type requires variants");
-            ColumnType::Enum(variants)
-        }
-        "Timestamp" => {
-            ensure_schema_absent(&schema, "Timestamp");
-            ColumnType::Timestamp
-        }
-        "Uuid" => {
-            ensure_schema_absent(&schema, "Uuid");
-            ColumnType::Uuid
-        }
-        "Bytea" => {
-            ensure_schema_absent(&schema, "Bytea");
-            ColumnType::Bytea
-        }
-        "Json" => ColumnType::Json(schema),
-        "Array" => {
-            ensure_schema_absent(&schema, "Array");
-            let elem = element.expect("Array type requires element");
-            ColumnType::Array(Box::new(js_column_type_to_groove(*elem)))
-        }
-        "Row" => {
-            ensure_schema_absent(&schema, "Row");
-            let cols = columns.expect("Row type requires columns");
-            let descriptors = cols
-                .into_iter()
-                .map(|c| {
-                    let mut cd =
-                        ColumnDescriptor::new(&c.name, js_column_type_to_groove(c.column_type));
-                    if c.nullable {
-                        cd = cd.nullable();
-                    }
-                    if let Some(ref_table) = c.references {
-                        cd = cd.references(&ref_table);
-                    }
-                    cd
-                })
-                .collect();
-            ColumnType::Row(Box::new(RowDescriptor::new(descriptors)))
-        }
-        other => panic!("Unknown column type: {}", other),
-    }
-}
-
-fn js_schema_to_groove(js: JsSchema) -> Schema {
-    use jazz_tools::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-    use jazz_tools::query_manager::types::{
-        ColumnDescriptor, OperationPolicy, RowDescriptor, TableName, TablePolicies, TableSchema,
+fn parse_propagation(options_json: Option<String>) -> napi::Result<QueryPropagation> {
+    let Some(raw) = options_json else {
+        return Ok(QueryPropagation::Full);
     };
 
-    fn js_policy_value_to_groove(value: JsPolicyValue) -> PolicyValue {
-        match value {
-            JsPolicyValue::Literal { value } => {
-                PolicyValue::Literal(napi_value_to_groove(value).expect("invalid policy literal"))
-            }
-            JsPolicyValue::SessionRef { path } => PolicyValue::SessionRef(path),
-        }
-    }
+    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid query options JSON: {}", e)))?;
 
-    fn js_policy_expr_to_groove(expr: JsPolicyExpr) -> PolicyExpr {
-        match expr {
-            JsPolicyExpr::Cmp { column, op, value } => PolicyExpr::Cmp {
-                column,
-                op: match op {
-                    JsCmpOp::Eq => CmpOp::Eq,
-                    JsCmpOp::Ne => CmpOp::Ne,
-                    JsCmpOp::Lt => CmpOp::Lt,
-                    JsCmpOp::Le => CmpOp::Le,
-                    JsCmpOp::Gt => CmpOp::Gt,
-                    JsCmpOp::Ge => CmpOp::Ge,
-                },
-                value: js_policy_value_to_groove(value),
-            },
-            JsPolicyExpr::IsNull { column } => PolicyExpr::IsNull { column },
-            JsPolicyExpr::IsNotNull { column } => PolicyExpr::IsNotNull { column },
-            JsPolicyExpr::Contains { column, value } => PolicyExpr::Contains {
-                column,
-                value: js_policy_value_to_groove(value),
-            },
-            JsPolicyExpr::In {
-                column,
-                session_path,
-            } => PolicyExpr::In {
-                column,
-                session_path,
-            },
-            JsPolicyExpr::InList { column, values } => PolicyExpr::InList {
-                column,
-                values: values.into_iter().map(js_policy_value_to_groove).collect(),
-            },
-            JsPolicyExpr::Exists { table, condition } => PolicyExpr::Exists {
-                table,
-                condition: Box::new(js_policy_expr_to_groove(*condition)),
-            },
-            JsPolicyExpr::ExistsRel { rel } => match serde_json::from_value(rel) {
-                Ok(rel) => PolicyExpr::ExistsRel { rel },
-                Err(_) => PolicyExpr::False,
-            },
-            JsPolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth,
-            } => PolicyExpr::Inherits {
-                operation: match operation {
-                    JsPolicyOperation::Select => Operation::Select,
-                    JsPolicyOperation::Insert => Operation::Insert,
-                    JsPolicyOperation::Update => Operation::Update,
-                    JsPolicyOperation::Delete => Operation::Delete,
-                },
-                via_column,
-                max_depth,
-            },
-            JsPolicyExpr::InheritsReferencing {
-                operation,
-                source_table,
-                via_column,
-                max_depth,
-            } => PolicyExpr::InheritsReferencing {
-                operation: match operation {
-                    JsPolicyOperation::Select => Operation::Select,
-                    JsPolicyOperation::Insert => Operation::Insert,
-                    JsPolicyOperation::Update => Operation::Update,
-                    JsPolicyOperation::Delete => Operation::Delete,
-                },
-                source_table,
-                via_column,
-                max_depth,
-            },
-            JsPolicyExpr::And { exprs } => {
-                PolicyExpr::And(exprs.into_iter().map(js_policy_expr_to_groove).collect())
-            }
-            JsPolicyExpr::Or { exprs } => {
-                PolicyExpr::Or(exprs.into_iter().map(js_policy_expr_to_groove).collect())
-            }
-            JsPolicyExpr::Not { expr } => {
-                PolicyExpr::Not(Box::new(js_policy_expr_to_groove(*expr)))
-            }
-            JsPolicyExpr::True => PolicyExpr::True,
-            JsPolicyExpr::False => PolicyExpr::False,
-        }
+    match options.propagation.as_deref() {
+        None | Some("full") => Ok(QueryPropagation::Full),
+        Some("local-only") => Ok(QueryPropagation::LocalOnly),
+        Some(other) => Err(napi::Error::from_reason(format!(
+            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
+            other
+        ))),
     }
-
-    fn js_operation_policy_to_groove(policy: JsOperationPolicy) -> OperationPolicy {
-        OperationPolicy {
-            using: policy.using.map(js_policy_expr_to_groove),
-            with_check: policy.with_check.map(js_policy_expr_to_groove),
-        }
-    }
-
-    fn js_table_policies_to_groove(policies: Option<JsTablePolicies>) -> TablePolicies {
-        let Some(policies) = policies else {
-            return TablePolicies::default();
-        };
-
-        TablePolicies {
-            select: policies
-                .select
-                .map(js_operation_policy_to_groove)
-                .unwrap_or_default(),
-            insert: policies
-                .insert
-                .map(js_operation_policy_to_groove)
-                .unwrap_or_default(),
-            update: policies
-                .update
-                .map(js_operation_policy_to_groove)
-                .unwrap_or_default(),
-            delete: policies
-                .delete
-                .map(js_operation_policy_to_groove)
-                .unwrap_or_default(),
-        }
-    }
-
-    let mut schema = Schema::new();
-    for (table_name, table_schema) in js.tables {
-        let columns = table_schema
-            .columns
-            .into_iter()
-            .map(|c| {
-                let mut cd =
-                    ColumnDescriptor::new(&c.name, js_column_type_to_groove(c.column_type));
-                if c.nullable {
-                    cd = cd.nullable();
-                }
-                if let Some(ref_table) = c.references {
-                    cd = cd.references(&ref_table);
-                }
-                cd
-            })
-            .collect();
-        let policies = js_table_policies_to_groove(table_schema.policies);
-        schema.insert(
-            TableName::new(&table_name),
-            TableSchema::with_policies(RowDescriptor::new(columns), policies),
-        );
-    }
-    schema
 }
 
-fn groove_schema_to_js(schema: &Schema) -> JsSchema {
-    use jazz_tools::query_manager::{
-        policy::{CmpOp, Operation, PolicyExpr, PolicyValue},
-        types::{ColumnType, OperationPolicy, TablePolicies},
-    };
-
-    fn ct_to_js(ct: &ColumnType) -> JsColumnType {
-        match ct {
-            ColumnType::Integer => JsColumnType {
-                type_name: "Integer".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::BigInt => JsColumnType {
-                type_name: "BigInt".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Double => JsColumnType {
-                type_name: "Double".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Boolean => JsColumnType {
-                type_name: "Boolean".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Text => JsColumnType {
-                type_name: "Text".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Enum(variants) => JsColumnType {
-                type_name: "Enum".into(),
-                element: None,
-                variants: Some(variants.clone()),
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Timestamp => JsColumnType {
-                type_name: "Timestamp".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Uuid => JsColumnType {
-                type_name: "Uuid".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Bytea => JsColumnType {
-                type_name: "Bytea".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Json(schema) => JsColumnType {
-                type_name: "Json".into(),
-                element: None,
-                variants: None,
-                columns: None,
-                schema: schema.clone(),
-            },
-            ColumnType::Array(elem) => JsColumnType {
-                type_name: "Array".into(),
-                element: Some(Box::new(ct_to_js(elem))),
-                variants: None,
-                columns: None,
-                schema: None,
-            },
-            ColumnType::Row(desc) => JsColumnType {
-                type_name: "Row".into(),
-                element: None,
-                variants: None,
-                columns: Some(
-                    desc.columns
-                        .iter()
-                        .map(|c| JsColumnDescriptor {
-                            name: c.name.as_str().to_string(),
-                            column_type: ct_to_js(&c.column_type),
-                            nullable: c.nullable,
-                            references: c.references.map(|r| r.as_str().to_string()),
-                        })
-                        .collect(),
-                ),
-                schema: None,
-            },
-        }
-    }
-
-    fn policy_value_to_js(value: &PolicyValue) -> JsPolicyValue {
-        match value {
-            PolicyValue::Literal(value) => JsPolicyValue::Literal {
-                value: NapiValue::from(value.clone()),
-            },
-            PolicyValue::SessionRef(path) => JsPolicyValue::SessionRef { path: path.clone() },
-        }
-    }
-
-    fn policy_expr_to_js(expr: &PolicyExpr) -> JsPolicyExpr {
-        match expr {
-            PolicyExpr::Cmp { column, op, value } => JsPolicyExpr::Cmp {
-                column: column.clone(),
-                op: match op {
-                    CmpOp::Eq => JsCmpOp::Eq,
-                    CmpOp::Ne => JsCmpOp::Ne,
-                    CmpOp::Lt => JsCmpOp::Lt,
-                    CmpOp::Le => JsCmpOp::Le,
-                    CmpOp::Gt => JsCmpOp::Gt,
-                    CmpOp::Ge => JsCmpOp::Ge,
-                },
-                value: policy_value_to_js(value),
-            },
-            PolicyExpr::IsNull { column } => JsPolicyExpr::IsNull {
-                column: column.clone(),
-            },
-            PolicyExpr::IsNotNull { column } => JsPolicyExpr::IsNotNull {
-                column: column.clone(),
-            },
-            PolicyExpr::Contains { column, value } => JsPolicyExpr::Contains {
-                column: column.clone(),
-                value: policy_value_to_js(value),
-            },
-            PolicyExpr::In {
-                column,
-                session_path,
-            } => JsPolicyExpr::In {
-                column: column.clone(),
-                session_path: session_path.clone(),
-            },
-            PolicyExpr::InList { column, values } => JsPolicyExpr::InList {
-                column: column.clone(),
-                values: values.iter().map(policy_value_to_js).collect(),
-            },
-            PolicyExpr::Exists { table, condition } => JsPolicyExpr::Exists {
-                table: table.clone(),
-                condition: Box::new(policy_expr_to_js(condition)),
-            },
-            PolicyExpr::ExistsRel { rel } => JsPolicyExpr::ExistsRel {
-                rel: serde_json::to_value(rel).unwrap_or(serde_json::Value::Null),
-            },
-            PolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth,
-            } => JsPolicyExpr::Inherits {
-                operation: match operation {
-                    Operation::Select => JsPolicyOperation::Select,
-                    Operation::Insert => JsPolicyOperation::Insert,
-                    Operation::Update => JsPolicyOperation::Update,
-                    Operation::Delete => JsPolicyOperation::Delete,
-                },
-                via_column: via_column.clone(),
-                max_depth: *max_depth,
-            },
-            PolicyExpr::InheritsReferencing {
-                operation,
-                source_table,
-                via_column,
-                max_depth,
-            } => JsPolicyExpr::InheritsReferencing {
-                operation: match operation {
-                    Operation::Select => JsPolicyOperation::Select,
-                    Operation::Insert => JsPolicyOperation::Insert,
-                    Operation::Update => JsPolicyOperation::Update,
-                    Operation::Delete => JsPolicyOperation::Delete,
-                },
-                source_table: source_table.clone(),
-                via_column: via_column.clone(),
-                max_depth: *max_depth,
-            },
-            PolicyExpr::And(exprs) => JsPolicyExpr::And {
-                exprs: exprs.iter().map(policy_expr_to_js).collect(),
-            },
-            PolicyExpr::Or(exprs) => JsPolicyExpr::Or {
-                exprs: exprs.iter().map(policy_expr_to_js).collect(),
-            },
-            PolicyExpr::Not(expr) => JsPolicyExpr::Not {
-                expr: Box::new(policy_expr_to_js(expr)),
-            },
-            PolicyExpr::True => JsPolicyExpr::True,
-            PolicyExpr::False => JsPolicyExpr::False,
-        }
-    }
-
-    fn operation_policy_to_js(policy: &OperationPolicy) -> Option<JsOperationPolicy> {
-        if policy.using.is_none() && policy.with_check.is_none() {
-            return None;
-        }
-        Some(JsOperationPolicy {
-            using: policy.using.as_ref().map(policy_expr_to_js),
-            with_check: policy.with_check.as_ref().map(policy_expr_to_js),
-        })
-    }
-
-    fn table_policies_to_js(policies: &TablePolicies) -> Option<JsTablePolicies> {
-        if *policies == TablePolicies::default() {
-            return None;
-        }
-
-        Some(JsTablePolicies {
-            select: operation_policy_to_js(&policies.select),
-            insert: operation_policy_to_js(&policies.insert),
-            update: operation_policy_to_js(&policies.update),
-            delete: operation_policy_to_js(&policies.delete),
-        })
-    }
-
-    let tables = schema
-        .iter()
-        .map(|(name, ts)| {
-            let columns = ts
-                .descriptor
-                .columns
-                .iter()
-                .map(|c| JsColumnDescriptor {
-                    name: c.name.as_str().to_string(),
-                    column_type: ct_to_js(&c.column_type),
-                    nullable: c.nullable,
-                    references: c.references.map(|r| r.as_str().to_string()),
-                })
-                .collect();
-            (
-                name.as_str().to_string(),
-                JsTableSchema {
-                    columns,
-                    policies: table_policies_to_js(&ts.policies),
-                },
-            )
-        })
-        .collect();
-    JsSchema { tables }
-}
-
+// ============================================================================
 fn parse_tier(tier: &str) -> napi::Result<PersistenceTier> {
     match tier {
         "worker" => Ok(PersistenceTier::Worker),
@@ -876,9 +193,8 @@ impl NapiRuntime {
         tier: Option<String>,
     ) -> napi::Result<Self> {
         // Parse schema
-        let js_schema: JsSchema = serde_json::from_str(&schema_json)
+        let schema: Schema = serde_json::from_str(&schema_json)
             .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-        let schema = js_schema_to_groove(js_schema);
 
         // Parse optional tier
         let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
@@ -980,9 +296,9 @@ impl NapiRuntime {
         table: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
     ) -> napi::Result<String> {
-        let js_values: Vec<NapiValue> = serde_json::from_value(values)
+        let js_values: Vec<Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let groove_values = convert_values(js_values)?;
+        let groove_values = convert_values(js_values);
 
         let mut core = self
             .core
@@ -1005,9 +321,9 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, NapiValue> = serde_json::from_value(values)
+        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let updates = convert_updates(partial_values)?;
+        let updates = convert_updates(partial_values);
 
         let mut core = self
             .core
@@ -1046,6 +362,7 @@ impl NapiRuntime {
         query_json: String,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> napi::Result<napi::JsObject> {
         let query = parse_query(&query_json)?;
 
@@ -1059,13 +376,14 @@ impl NapiRuntime {
             };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         let future = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.query(query, session, tier)
+            core.query_with_propagation(query, session, tier, propagation)
         };
 
         // Create a deferred/promise pair
@@ -1080,11 +398,9 @@ impl NapiRuntime {
                     let json_rows: Vec<serde_json::Value> = rows
                         .into_iter()
                         .map(|(id, values)| {
-                            let js_values: Vec<NapiValue> =
-                                values.into_iter().map(Into::into).collect();
                             serde_json::json!({
                                 "id": id.uuid().to_string(),
-                                "values": js_values
+                                "values": values
                             })
                         })
                         .collect();
@@ -1111,6 +427,7 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: napi::JsFunction,
         session_json: Option<String>,
         settled_tier: Option<String>,
+        options_json: Option<String>,
     ) -> napi::Result<f64> {
         let query = parse_query(&query_json)?;
 
@@ -1124,6 +441,7 @@ impl NapiRuntime {
             };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+        let propagation = parse_propagation(options_json)?;
 
         // Create a ThreadsafeFunction for the JS callback.
         // The closure converts our serde_json::Value into a JsUnknown to pass to JS.
@@ -1138,7 +456,7 @@ impl NapiRuntime {
                                descriptor: &jazz_tools::query_manager::types::RowDescriptor|
              -> serde_json::Value {
                 let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().map(NapiValue::from).collect::<Vec<_>>())
+                    .map(|vals| vals.into_iter().collect::<Vec<_>>())
                     .unwrap_or_default();
                 serde_json::json!({
                     "id": row.id.uuid().to_string(),
@@ -1187,7 +505,13 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let handle = core
-            .subscribe_with_settled_tier(query, callback, session, tier)
+            .subscribe_with_settled_tier_and_propagation(
+                query,
+                callback,
+                session,
+                tier,
+                propagation,
+            )
             .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
 
         Ok(handle.0 as f64)
@@ -1217,9 +541,9 @@ impl NapiRuntime {
     ) -> napi::Result<napi::JsObject> {
         let persistence_tier = parse_tier(&tier)?;
 
-        let js_values: Vec<NapiValue> = serde_json::from_value(values)
+        let js_values: Vec<Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let groove_values = convert_values(js_values)?;
+        let groove_values = convert_values(js_values);
 
         let (object_id, receiver) = {
             let mut core = self
@@ -1254,9 +578,9 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, NapiValue> = serde_json::from_value(values)
+        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let updates = convert_updates(partial_values)?;
+        let updates = convert_updates(partial_values);
 
         let receiver = {
             let mut core = self
@@ -1470,8 +794,7 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let schema = core.current_schema();
-        let js_schema = groove_schema_to_js(schema);
-        env.to_js_value(&js_schema)
+        env.to_js_value(schema)
     }
 
     #[napi(js_name = "getSchemaHash")]
@@ -1529,123 +852,55 @@ pub fn current_timestamp() -> i64 {
 
 #[napi(js_name = "parseSchema", ts_return_type = "any")]
 pub fn parse_schema_fn(env: Env, json: String) -> napi::Result<napi::JsUnknown> {
-    let js_schema: JsSchema = serde_json::from_str(&json)
+    let schema: Schema = serde_json::from_str(&json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-    let _groove_schema = js_schema_to_groove(js_schema.clone());
-    env.to_js_value(&js_schema)
+    env.to_js_value(&schema)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableName, TableSchema};
-    use std::collections::HashMap;
+    use jazz_tools::query_manager::types::{
+        ColumnType, Schema, SchemaBuilder, TableName, TableSchema,
+    };
 
     #[test]
-    fn js_schema_to_groove_parses_enum_column_type() {
-        let js_schema = JsSchema {
-            tables: HashMap::from([(
-                "todos".to_string(),
-                JsTableSchema {
-                    columns: vec![JsColumnDescriptor {
-                        name: "status".to_string(),
-                        column_type: JsColumnType {
-                            type_name: "Enum".to_string(),
-                            element: None,
-                            variants: Some(vec!["done".to_string(), "todo".to_string()]),
-                            columns: None,
-                            schema: None,
-                        },
-                        nullable: false,
-                        references: None,
-                    }],
-                    policies: None,
-                },
-            )]),
-        };
-
-        let schema = js_schema_to_groove(js_schema);
-        let status = schema
-            .get(&TableName::new("todos"))
-            .unwrap()
-            .descriptor
-            .column("status")
-            .unwrap();
-        assert_eq!(
-            status.column_type,
-            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()])
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Only Json columns can include `schema` metadata")]
-    fn js_schema_to_groove_rejects_schema_on_non_json_column_type() {
-        let js_schema = JsSchema {
-            tables: HashMap::from([(
-                "todos".to_string(),
-                JsTableSchema {
-                    columns: vec![JsColumnDescriptor {
-                        name: "title".to_string(),
-                        column_type: JsColumnType {
-                            type_name: "Text".to_string(),
-                            element: None,
-                            variants: None,
-                            columns: None,
-                            schema: Some(serde_json::json!({ "type": "string" })),
-                        },
-                        nullable: false,
-                        references: None,
-                    }],
-                    policies: None,
-                },
-            )]),
-        };
-
-        let _ = js_schema_to_groove(js_schema);
-    }
-
-    #[test]
-    fn groove_schema_to_js_emits_enum_column_type() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("todos").column(
-                "status",
-                ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
-            ))
-            .build();
-
-        let js_schema = groove_schema_to_js(&schema);
-        let status = &js_schema.tables["todos"].columns[0];
-        assert_eq!(status.column_type.type_name, "Enum");
-        assert_eq!(
-            status.column_type.variants,
-            Some(vec!["done".to_string(), "todo".to_string()])
-        );
-        assert!(status.column_type.element.is_none());
-        assert!(status.column_type.columns.is_none());
-    }
-
-    #[test]
-    fn js_schema_roundtrip_preserves_fk_references() {
+    fn schema_json_roundtrip_preserves_enum_and_fk() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("files").column("name", ColumnType::Text))
             .table(
                 TableSchema::builder("todos")
-                    .column("title", ColumnType::Text)
+                    .column(
+                        "status",
+                        ColumnType::Enum {
+                            variants: vec!["done".to_string(), "todo".to_string()],
+                        },
+                    )
                     .fk_column("image", "files"),
             )
             .build();
 
-        let js_schema = groove_schema_to_js(&schema);
-        let image = &js_schema.tables["todos"].columns[1];
-        assert_eq!(image.references.as_deref(), Some("files"));
+        let encoded = serde_json::to_string(&schema).expect("serialize schema");
+        let decoded: Schema = serde_json::from_str(&encoded).expect("deserialize schema");
 
-        let decoded = js_schema_to_groove(js_schema);
-        let image_col = decoded
+        let status = decoded
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
+            .column("status")
+            .unwrap();
+        assert_eq!(
+            status.column_type,
+            ColumnType::Enum {
+                variants: vec!["done".to_string(), "todo".to_string()]
+            }
+        );
+
+        let image = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .columns
             .column("image")
             .unwrap();
-        assert_eq!(image_col.references, Some(TableName::new("files")));
+        assert_eq!(image.references, Some(TableName::new("files")));
     }
 }

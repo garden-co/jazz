@@ -25,7 +25,6 @@ use crate::middleware::auth::{
     validate_jwt_identity,
 };
 use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::schema_manager::CatalogueSchemaResponse;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -379,7 +378,7 @@ async fn schema_handler(
                 requested_hash = %schema_hash.short(),
                 "schema request: returning requested hash"
             );
-            let body = CatalogueSchemaResponse::from(&schema);
+            let body = schema.clone();
             Json(body).into_response()
         }
         Ok(None) => (
