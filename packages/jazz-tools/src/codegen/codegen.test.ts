@@ -1054,7 +1054,7 @@ describe("generateAppExport", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export const app = {");
+    expect(output).toContain("export const app: GeneratedApp = {");
     expect(output).toContain("todos: new TodoQueryBuilder(),");
     expect(output).toContain("users: new UserQueryBuilder(),");
     expect(output).toContain("wasmSchema,");
@@ -1068,7 +1068,7 @@ describe("generateAppExport", () => {
 
     // Verify wasmSchema is defined before app and included in app
     const wasmSchemaIndex = output.indexOf("export const wasmSchema");
-    const appIndex = output.indexOf("export const app = {");
+    const appIndex = output.indexOf("export const app: GeneratedApp = {");
     expect(wasmSchemaIndex).toBeLessThan(appIndex);
     expect(output).toContain("wasmSchema,");
   });

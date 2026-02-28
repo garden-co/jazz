@@ -40,7 +40,7 @@ export function TableDataGrid() {
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
 
-  const schemaColumns = schema.tables[table]?.columns ?? [];
+  const schemaColumns = schema[table]?.columns ?? [];
 
   const columnDefs = useMemo<ColumnDef<DynamicTableRow>[]>(
     () => [

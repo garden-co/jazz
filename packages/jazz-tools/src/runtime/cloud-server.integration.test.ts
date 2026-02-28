@@ -469,27 +469,33 @@ function asRecord(value: unknown, context: string): Record<string, unknown> {
 }
 
 function normalizeWasmLiteral(value: unknown): unknown {
-  if (value === null) return "Null";
-  if (typeof value === "boolean") return { Boolean: value };
+  if (value === null) return { type: "Null" };
+  if (typeof value === "boolean") return { type: "Boolean", value };
   if (typeof value === "number") {
     if (!Number.isInteger(value) || !Number.isFinite(value)) {
       throw new Error("relation literal numbers must be finite integers");
     }
-    if (value >= -2147483648 && value <= 2147483647) return { Integer: value };
-    return { BigInt: value };
+    if (value >= -2147483648 && value <= 2147483647) return { type: "Integer", value };
+    return { type: "BigInt", value };
   }
   if (typeof value === "string") {
     const uuidLike =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-    return uuidLike ? { Uuid: value } : { Text: value };
+    return uuidLike ? { type: "Uuid", value } : { type: "Text", value };
   }
   if (Array.isArray(value)) {
-    return { Array: value.map((entry) => normalizeWasmLiteral(entry)) };
+    return { type: "Array", value: value.map((entry) => normalizeWasmLiteral(entry)) };
   }
 
   const object = asRecord(value, "literal");
-  // Already in externally-tagged Value enum form.
-  if (Object.keys(object).length === 1) return object;
+  // Already in internally-tagged Value enum form.
+  if (typeof object.type === "string") return object;
+  // Accept legacy externally-tagged test literals and normalize them.
+  if (Object.keys(object).length === 1) {
+    const [legacyType, legacyValue] = Object.entries(object)[0]!;
+    if (legacyType === "Null") return { type: "Null" };
+    return { type: legacyType, value: legacyValue };
+  }
   throw new Error("relation literal object must use typed Value enum representation");
 }
 
@@ -678,8 +684,8 @@ function toSerdeRelExpr(input: unknown): unknown {
 function toSerdePolicyValue(input: unknown): unknown {
   const record = asRecord(input, "policy value");
   const type = record.type;
-  if (type === "Literal") return { Literal: normalizeWasmLiteral(record.value) };
-  if (type === "SessionRef") return { SessionRef: record.path };
+  if (type === "Literal") return { type: "Literal", value: normalizeWasmLiteral(record.value) };
+  if (type === "SessionRef") return { type: "SessionRef", path: record.path };
   return record;
 }
 
@@ -689,87 +695,79 @@ function normalizePolicyExprForWasm(input: unknown): unknown {
   if (typeof type !== "string") return expr;
   if (type === "Cmp") {
     return {
-      Cmp: {
-        column: expr.column,
-        op: expr.op,
-        value: toSerdePolicyValue(expr.value),
-      },
+      type: "Cmp",
+      column: expr.column,
+      op: expr.op,
+      value: toSerdePolicyValue(expr.value),
     };
   }
-  if (type === "IsNull") return { IsNull: { column: expr.column } };
-  if (type === "IsNotNull") return { IsNotNull: { column: expr.column } };
+  if (type === "IsNull") return { type: "IsNull", column: expr.column };
+  if (type === "IsNotNull") return { type: "IsNotNull", column: expr.column };
   if (type === "Contains") {
     return {
-      Contains: {
-        column: expr.column,
-        value: toSerdePolicyValue(expr.value),
-      },
+      type: "Contains",
+      column: expr.column,
+      value: toSerdePolicyValue(expr.value),
     };
   }
   if (type === "In") {
     return {
-      In: {
-        column: expr.column,
-        session_path: expr.session_path,
-      },
+      type: "In",
+      column: expr.column,
+      session_path: expr.session_path,
     };
   }
   if (type === "InList") {
     const values = Array.isArray(expr.values) ? expr.values : [];
     return {
-      InList: {
-        column: expr.column,
-        values: values.map((value) => toSerdePolicyValue(value)),
-      },
+      type: "InList",
+      column: expr.column,
+      values: values.map((value) => toSerdePolicyValue(value)),
     };
   }
   if (type === "Exists") {
     return {
-      Exists: {
-        table: expr.table,
-        condition: normalizePolicyExprForWasm(expr.condition),
-      },
+      type: "Exists",
+      table: expr.table,
+      condition: normalizePolicyExprForWasm(expr.condition),
     };
   }
   if (type === "ExistsRel") {
     return {
-      ExistsRel: {
-        rel: toSerdeRelExpr(expr.rel),
-      },
+      type: "ExistsRel",
+      rel: toSerdeRelExpr(expr.rel),
     };
   }
   if (type === "Inherits") {
     return {
-      Inherits: {
-        operation: expr.operation,
-        via_column: expr.via_column,
-        max_depth: expr.max_depth,
-      },
+      type: "Inherits",
+      operation: expr.operation,
+      via_column: expr.via_column,
+      max_depth: expr.max_depth,
     };
   }
   if (type === "InheritsReferencing") {
     return {
-      InheritsReferencing: {
-        operation: expr.operation,
-        source_table: expr.source_table,
-        via_column: expr.via_column,
-        max_depth: expr.max_depth,
-      },
+      type: "InheritsReferencing",
+      operation: expr.operation,
+      source_table: expr.source_table,
+      via_column: expr.via_column,
+      max_depth: expr.max_depth,
     };
   }
   if (type === "And") {
     const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
-    return { And: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
+    return { type: "And", exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
   }
   if (type === "Or") {
     const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
-    return { Or: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
+    return { type: "Or", exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
   }
   if (type === "Not") {
-    return { Not: normalizePolicyExprForWasm(expr.expr) };
+    return { type: "Not", expr: normalizePolicyExprForWasm(expr.expr) };
   }
-  if (type === "True") return "True";
-  if (type === "False") return "False";
+  if (type === "True") return { type: "True" };
+  if (type === "False") return { type: "False" };
   throw new Error(`Unsupported policy expr type in schema normalization: ${type}`);
 }
 
