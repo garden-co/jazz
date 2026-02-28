@@ -135,7 +135,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         type: "Inherits",
         operation: expr.operation,
         via_column: expr.via_column,
-        max_depth: expr.max_depth,
+        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
       };
     case "InheritsReferencing":
       return {
@@ -143,7 +143,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         operation: expr.operation,
         source_table: expr.source_table,
         via_column: expr.via_column,
-        max_depth: expr.max_depth,
+        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
       };
     case "And":
       return { type: "And", exprs: expr.exprs.map(clonePolicyExpr) };
@@ -158,40 +158,28 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   }
 }
 
+function cloneOperationPolicy(
+  policy: DslTablePolicies[keyof DslTablePolicies],
+): TablePolicies["select"] {
+  const out: TablePolicies["select"] = {};
+  if (!policy) {
+    return out;
+  }
+  if (policy.using) {
+    out.using = clonePolicyExpr(policy.using);
+  }
+  if (policy.with_check) {
+    out.with_check = clonePolicyExpr(policy.with_check);
+  }
+  return out;
+}
+
 function clonePolicies(policies: DslTablePolicies): TablePolicies {
   return {
-    select: policies.select
-      ? {
-          using: policies.select.using ? clonePolicyExpr(policies.select.using) : undefined,
-          with_check: policies.select.with_check
-            ? clonePolicyExpr(policies.select.with_check)
-            : undefined,
-        }
-      : undefined,
-    insert: policies.insert
-      ? {
-          using: policies.insert.using ? clonePolicyExpr(policies.insert.using) : undefined,
-          with_check: policies.insert.with_check
-            ? clonePolicyExpr(policies.insert.with_check)
-            : undefined,
-        }
-      : undefined,
-    update: policies.update
-      ? {
-          using: policies.update.using ? clonePolicyExpr(policies.update.using) : undefined,
-          with_check: policies.update.with_check
-            ? clonePolicyExpr(policies.update.with_check)
-            : undefined,
-        }
-      : undefined,
-    delete: policies.delete
-      ? {
-          using: policies.delete.using ? clonePolicyExpr(policies.delete.using) : undefined,
-          with_check: policies.delete.with_check
-            ? clonePolicyExpr(policies.delete.with_check)
-            : undefined,
-        }
-      : undefined,
+    select: cloneOperationPolicy(policies.select),
+    insert: cloneOperationPolicy(policies.insert),
+    update: cloneOperationPolicy(policies.update),
+    delete: cloneOperationPolicy(policies.delete),
   };
 }
 
@@ -222,5 +210,5 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     };
   }
 
-  return { tables };
+  return tables;
 }

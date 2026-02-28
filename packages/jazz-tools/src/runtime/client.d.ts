@@ -124,6 +124,7 @@ export declare class JazzClient {
   private serverClientId;
   private subscriptions;
   private context;
+  private resolvedSession;
   private constructor();
   /**
    * Connect to Jazz with the given context.

@@ -5,69 +5,62 @@ export type RelColumnRef = {
 export type RelRowIdRef = "Current" | "Outer" | "Frontier";
 export type RelValueRef =
   | {
-      type: "Literal";
-      value: unknown;
+      Literal: unknown;
     }
   | {
-      type: "SessionRef";
-      path: string[];
+      SessionRef: string[];
     }
   | {
-      type: "OuterColumn";
-      column: RelColumnRef;
+      OuterColumn: RelColumnRef;
     }
   | {
-      type: "FrontierColumn";
-      column: RelColumnRef;
+      FrontierColumn: RelColumnRef;
     }
   | {
-      type: "RowId";
-      source: RelRowIdRef;
+      RowId: RelRowIdRef;
     };
 export type RelPredicateCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
 export type RelPredicateExpr =
   | {
-      type: "Cmp";
-      left: RelColumnRef;
-      op: RelPredicateCmpOp;
-      right: RelValueRef;
+      Cmp: {
+        left: RelColumnRef;
+        op: RelPredicateCmpOp;
+        right: RelValueRef;
+      };
     }
   | {
-      type: "IsNull";
-      column: RelColumnRef;
+      IsNull: {
+        column: RelColumnRef;
+      };
     }
   | {
-      type: "IsNotNull";
-      column: RelColumnRef;
+      IsNotNull: {
+        column: RelColumnRef;
+      };
     }
   | {
-      type: "In";
-      left: RelColumnRef;
-      values: RelValueRef[];
+      In: {
+        left: RelColumnRef;
+        values: RelValueRef[];
+      };
     }
   | {
-      type: "Contains";
-      left: RelColumnRef;
-      value: RelValueRef;
+      Contains: {
+        left: RelColumnRef;
+        right: RelValueRef;
+      };
     }
   | {
-      type: "And";
-      exprs: RelPredicateExpr[];
+      And: RelPredicateExpr[];
     }
   | {
-      type: "Or";
-      exprs: RelPredicateExpr[];
+      Or: RelPredicateExpr[];
     }
   | {
-      type: "Not";
-      expr: RelPredicateExpr;
+      Not: RelPredicateExpr;
     }
-  | {
-      type: "True";
-    }
-  | {
-      type: "False";
-    };
+  | "True"
+  | "False";
 export type RelJoinKind = "Inner" | "Left";
 export type RelJoinCondition = {
   left: RelColumnRef;
@@ -75,21 +68,17 @@ export type RelJoinCondition = {
 };
 export type RelKeyRef =
   | {
-      type: "Column";
-      column: RelColumnRef;
+      Column: RelColumnRef;
     }
   | {
-      type: "RowId";
-      source: RelRowIdRef;
+      RowId: RelRowIdRef;
     };
 export type RelProjectExpr =
   | {
-      type: "Column";
-      column: RelColumnRef;
+      Column: RelColumnRef;
     }
   | {
-      type: "RowId";
-      source: RelRowIdRef;
+      RowId: RelRowIdRef;
     };
 export type RelProjectColumn = {
   alias: string;
@@ -102,86 +91,89 @@ export type RelOrderByExpr = {
 };
 export type RelExpr =
   | {
-      type: "TableScan";
-      table: string;
+      TableScan: {
+        table: string;
+      };
     }
   | {
-      type: "Filter";
-      input: RelExpr;
-      predicate: RelPredicateExpr;
+      Filter: {
+        input: RelExpr;
+        predicate: RelPredicateExpr;
+      };
     }
   | {
-      type: "Join";
-      left: RelExpr;
-      right: RelExpr;
-      on: RelJoinCondition[];
-      joinKind: RelJoinKind;
+      Join: {
+        left: RelExpr;
+        right: RelExpr;
+        on: RelJoinCondition[];
+        join_kind: RelJoinKind;
+      };
     }
   | {
-      type: "Project";
-      input: RelExpr;
-      columns: RelProjectColumn[];
+      Project: {
+        input: RelExpr;
+        columns: RelProjectColumn[];
+      };
     }
   | {
-      type: "Gather";
-      seed: RelExpr;
-      step: RelExpr;
-      frontierKey: RelKeyRef;
-      maxDepth: number;
-      dedupeKey: RelKeyRef[];
+      Gather: {
+        seed: RelExpr;
+        step: RelExpr;
+        frontier_key: RelKeyRef;
+        max_depth: number;
+        dedupe_key: RelKeyRef[];
+      };
     }
   | {
-      type: "Distinct";
-      input: RelExpr;
-      key: RelKeyRef[];
+      Distinct: {
+        input: RelExpr;
+        key: RelKeyRef[];
+      };
     }
   | {
-      type: "OrderBy";
-      input: RelExpr;
-      terms: RelOrderByExpr[];
+      OrderBy: {
+        input: RelExpr;
+        terms: RelOrderByExpr[];
+      };
     }
   | {
-      type: "Offset";
-      input: RelExpr;
-      offset: number;
+      Offset: {
+        input: RelExpr;
+        offset: number;
+      };
     }
   | {
-      type: "Limit";
-      input: RelExpr;
-      limit: number;
+      Limit: {
+        input: RelExpr;
+        limit: number;
+      };
     };
 export type PolicyOperationV2 = "Select" | "Insert" | "Update" | "Delete";
 export type PolicyExprV2 =
   | {
-      type: "Predicate";
-      predicate: RelPredicateExpr;
+      Predicate: RelPredicateExpr;
     }
   | {
-      type: "ExistsRel";
-      rel: RelExpr;
+      ExistsRel: {
+        rel: RelExpr;
+      };
     }
   | {
-      type: "Inherits";
-      operation: PolicyOperationV2;
-      viaColumn: string;
-      maxDepth?: number;
+      Inherits: {
+        operation: PolicyOperationV2;
+        via_column: string;
+        max_depth?: number;
+      };
     }
   | {
-      type: "And";
-      exprs: PolicyExprV2[];
+      And: PolicyExprV2[];
     }
   | {
-      type: "Or";
-      exprs: PolicyExprV2[];
+      Or: PolicyExprV2[];
     }
   | {
-      type: "Not";
-      expr: PolicyExprV2;
+      Not: PolicyExprV2;
     }
-  | {
-      type: "True";
-    }
-  | {
-      type: "False";
-    };
+  | "True"
+  | "False";
 //# sourceMappingURL=ir.d.ts.map
