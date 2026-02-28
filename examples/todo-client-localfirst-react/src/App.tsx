@@ -1,6 +1,12 @@
 import * as React from "react";
-import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/react";
+import {
+  createJazzClient,
+  JazzProvider,
+  getActiveSyntheticAuth,
+  attachDevTools,
+} from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
+import { app } from "../schema/app.js";
 
 type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 
@@ -27,21 +33,61 @@ function defaultConfig(
 }
 // #endregion context-setup-react
 
-const jazzClient = createJazzClient(defaultConfig());
-
-if (location.origin.includes("localhost")) {
-  jazzClient.then((client) =>
-    Object.defineProperty(window, "jazzClient", {
-      value: client,
-      writable: true,
-    }),
-  );
-}
+type AppProps = {
+  config?: Partial<JazzProviderClientConfig>;
+  fallback?: React.ReactNode;
+};
 
 // #region context-setup-react
-export function App() {
+export function App({ config, fallback }: AppProps = {}) {
+  const resolvedConfig = defaultConfig(config);
+  const configKey = JSON.stringify(resolvedConfig);
+  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
+    null,
+  );
+  const [error, setError] = React.useState<unknown>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    const pending = createJazzClient(resolvedConfig);
+
+    void pending.then(
+      (resolved) => {
+        if (!active) {
+          void resolved.shutdown();
+          return;
+        }
+        setClient(resolved);
+        attachDevTools(resolved, app.wasmSchema);
+        if (location.origin.includes("localhost")) {
+          Object.defineProperty(window, "jazzClient", {
+            value: resolved,
+            writable: true,
+          });
+        }
+      },
+      (reason) => {
+        if (!active) return;
+        setError(reason);
+      },
+    );
+
+    return () => {
+      active = false;
+      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
+    };
+  }, [configKey]);
+
+  if (error) {
+    throw error;
+  }
+
+  if (!client) {
+    return <>{fallback ?? <p>Loading...</p>}</>;
+  }
+
   return (
-    <JazzProvider client={jazzClient}>
+    <JazzProvider client={client}>
       <h1>Todos</h1>
       <TodoList />
     </JazzProvider>

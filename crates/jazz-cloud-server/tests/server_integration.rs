@@ -6,7 +6,7 @@ use base64::Engine;
 use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
-use jazz_tools::schema_manager::{CatalogueSchemaResponse, encode_schema};
+use jazz_tools::schema_manager::encode_schema;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -535,7 +535,6 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
     assert_eq!(schema_response.status(), StatusCode::OK);
 
     let schema_json: Value = schema_response.json().await.expect("schema json");
-    let expected_schema_json =
-        serde_json::to_value(CatalogueSchemaResponse::from(&schema)).expect("expected schema json");
+    let expected_schema_json = serde_json::to_value(schema.clone()).expect("expected schema json");
     assert_eq!(schema_json, expected_schema_json);
 }

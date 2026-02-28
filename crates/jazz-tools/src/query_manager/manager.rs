@@ -995,7 +995,7 @@ impl QueryManager {
             return;
         };
 
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let has_prior_history = !update.previous_commit_ids.is_empty();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates

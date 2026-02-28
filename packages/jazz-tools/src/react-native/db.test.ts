@@ -16,10 +16,8 @@ class TestDb extends Db {
 
 function makeSchema(tableName: string): WasmSchema {
   return {
-    tables: {
-      [tableName]: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
+    [tableName]: {
+      columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
     },
   };
 }

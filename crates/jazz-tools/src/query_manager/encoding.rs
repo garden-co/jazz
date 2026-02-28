@@ -178,18 +178,22 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
         ColumnType::Text => matches!(value, Value::Text(_)),
         ColumnType::Bytea => matches!(value, Value::Bytea(_)),
-        ColumnType::Json(_) => matches!(value, Value::Text(_)),
-        ColumnType::Enum(variants) => match value {
+        ColumnType::Json { schema: _ } => matches!(value, Value::Text(_)),
+        ColumnType::Enum { variants } => match value {
             Value::Text(s) => variants.contains(s),
             _ => false,
         },
-        ColumnType::Array(element_type) => match value {
+        ColumnType::Array {
+            element: element_type,
+        } => match value {
             Value::Array(elements) => elements.iter().all(|element| {
                 !element.is_null() && value_matches_column_type(element, element_type)
             }),
             _ => false,
         },
-        ColumnType::Row(row_descriptor) => match value {
+        ColumnType::Row {
+            columns: row_descriptor,
+        } => match value {
             Value::Row(values) if values.len() == row_descriptor.columns.len() => values
                 .iter()
                 .zip(row_descriptor.columns.iter())
@@ -223,13 +227,23 @@ fn validate_value_size(
 ) -> Result<(), EncodingError> {
     match (value, column_type) {
         (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
-        (Value::Array(values), ColumnType::Array(element_type)) => {
+        (
+            Value::Array(values),
+            ColumnType::Array {
+                element: element_type,
+            },
+        ) => {
             for element in values {
                 validate_value_size(element, element_type, column)?;
             }
             Ok(())
         }
-        (Value::Row(values), ColumnType::Row(row_descriptor)) => {
+        (
+            Value::Row(values),
+            ColumnType::Row {
+                columns: row_descriptor,
+            },
+        ) => {
             for (inner_value, inner_column) in values.iter().zip(row_descriptor.columns.iter()) {
                 validate_value_size(
                     inner_value,
@@ -293,7 +307,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
         Value::Array(elements) => buf.extend(encode_array(elements, &col.column_type)),
         Value::Row(values) => {
             // Encode row using its descriptor from the column type
-            if let ColumnType::Row(desc) = &col.column_type {
+            if let ColumnType::Row { columns: desc } = &col.column_type {
                 let row_bytes = encode_row(desc, values).unwrap_or_default();
                 buf.extend(row_bytes);
             }
@@ -412,13 +426,15 @@ fn decode_non_null_value(
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
         ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
-        ColumnType::Text | ColumnType::Json(_) => decode_text_value(data, None),
-        ColumnType::Enum(variants) => decode_text_value(data, Some(variants)),
-        ColumnType::Array(element_type) => {
+        ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
+        ColumnType::Enum { variants } => decode_text_value(data, Some(variants)),
+        ColumnType::Array {
+            element: element_type,
+        } => {
             let elements = decode_array(data, element_type)?;
             Ok(Value::Array(elements))
         }
-        ColumnType::Row(row_desc) => {
+        ColumnType::Row { columns: row_desc } => {
             let values = decode_row(row_desc, data)?;
             Ok(Value::Row(values))
         }
@@ -700,10 +716,10 @@ pub fn compare_column(
             operation: "ordering".to_string(),
         }),
         ColumnType::Text
-        | ColumnType::Json(_)
-        | ColumnType::Enum(_)
-        | ColumnType::Array(_)
-        | ColumnType::Row(_) => {
+        | ColumnType::Json { schema: _ }
+        | ColumnType::Enum { variants: _ }
+        | ColumnType::Array { element: _ }
+        | ColumnType::Row { columns: _ } => {
             // Lexicographic comparison of bytes
             Ok(bytes1.cmp(bytes2))
         }
@@ -759,10 +775,10 @@ pub fn compare_column_to_value(
         }),
         ColumnType::Uuid
         | ColumnType::Text
-        | ColumnType::Json(_)
-        | ColumnType::Enum(_)
-        | ColumnType::Array(_)
-        | ColumnType::Row(_) => Ok(bytes.cmp(value)),
+        | ColumnType::Json { schema: _ }
+        | ColumnType::Enum { variants: _ }
+        | ColumnType::Array { element: _ }
+        | ColumnType::Row { columns: _ } => Ok(bytes.cmp(value)),
     }
 }
 
@@ -813,8 +829,12 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
 /// Encode a Value to binary bytes with type information (needed for Row values).
 pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
     match (value, col_type) {
-        (Value::Row(values), ColumnType::Row(desc)) => encode_row(desc, values).unwrap_or_default(),
-        (Value::Array(elements), ColumnType::Array(_)) => encode_array(elements, col_type),
+        (Value::Row(values), ColumnType::Row { columns: desc }) => {
+            encode_row(desc, values).unwrap_or_default()
+        }
+        (Value::Array(elements), ColumnType::Array { element: _ }) => {
+            encode_array(elements, col_type)
+        }
         // For non-Row/Array types, fall back to simple encoding
         _ => encode_value(value),
     }
@@ -878,7 +898,7 @@ pub fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
 
     // Get the element type from the array type
     let element_type = match array_type {
-        ColumnType::Array(elem_type) => elem_type.as_ref(),
+        ColumnType::Array { element: elem_type } => elem_type.as_ref(),
         _ => return result, // Not an array type
     };
 
@@ -1409,7 +1429,9 @@ mod tests {
     #[test]
     fn array_encode_decode_empty() {
         let elements: Vec<Value> = vec![];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Integer));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Integer).unwrap();
         assert_eq!(decoded, elements);
@@ -1418,7 +1440,9 @@ mod tests {
     #[test]
     fn array_encode_decode_integers() {
         let elements = vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Integer));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Integer).unwrap();
         assert_eq!(decoded, elements);
@@ -1427,7 +1451,9 @@ mod tests {
     #[test]
     fn array_encode_decode_single_integer() {
         let elements = vec![Value::Integer(42)];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Integer));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Integer).unwrap();
         assert_eq!(decoded, elements);
@@ -1440,7 +1466,9 @@ mod tests {
             Value::Text("world".into()),
             Value::Text("!".into()),
         ];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Text));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Text),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Text).unwrap();
         assert_eq!(decoded, elements);
@@ -1449,7 +1477,9 @@ mod tests {
     #[test]
     fn array_encode_decode_single_text() {
         let elements = vec![Value::Text("hello".into())];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Text));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Text),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Text).unwrap();
         assert_eq!(decoded, elements);
@@ -1462,7 +1492,9 @@ mod tests {
             Value::Boolean(false),
             Value::Boolean(true),
         ];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Boolean));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Boolean),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Boolean).unwrap();
         assert_eq!(decoded, elements);
@@ -1474,7 +1506,9 @@ mod tests {
             Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(1))),
             Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(2))),
         ];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Uuid));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Uuid),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Uuid).unwrap();
         assert_eq!(decoded, elements);
@@ -1484,7 +1518,12 @@ mod tests {
     fn array_in_row_roundtrip() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ]);
 
         let values = vec![
@@ -1504,7 +1543,12 @@ mod tests {
     fn array_of_integers_in_row() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("name", ColumnType::Text),
-            ColumnDescriptor::new("scores", ColumnType::Array(Box::new(ColumnType::Integer))),
+            ColumnDescriptor::new(
+                "scores",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+            ),
         ]);
 
         let values = vec![
@@ -1525,7 +1569,12 @@ mod tests {
     fn empty_array_in_row() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ]);
 
         let values = vec![Value::Integer(1), Value::Array(vec![])];
@@ -1538,8 +1587,12 @@ mod tests {
     #[test]
     fn nested_array() {
         // Array of arrays of integers
-        let inner_type = ColumnType::Array(Box::new(ColumnType::Integer));
-        let array_type = ColumnType::Array(Box::new(inner_type.clone()));
+        let inner_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
+        let array_type = ColumnType::Array {
+            element: Box::new(inner_type.clone()),
+        };
         let elements = vec![
             Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
             Value::Array(vec![
@@ -1561,8 +1614,12 @@ mod tests {
             ColumnDescriptor::new("id", ColumnType::Integer),
             ColumnDescriptor::new("name", ColumnType::Text),
         ]);
-        let row_type = ColumnType::Row(Box::new(row_desc.clone()));
-        let array_type = ColumnType::Array(Box::new(row_type.clone()));
+        let row_type = ColumnType::Row {
+            columns: Box::new(row_desc.clone()),
+        };
+        let array_type = ColumnType::Array {
+            element: Box::new(row_type.clone()),
+        };
 
         let elements = vec![
             Value::Row(vec![Value::Integer(1), Value::Text("Alice".into())]),
@@ -2032,7 +2089,9 @@ mod tests {
     fn encode_row_rejects_invalid_enum_variant() {
         let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
             "status",
-            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+            ColumnType::Enum {
+                variants: vec!["done".to_string(), "todo".to_string()],
+            },
         )]);
 
         let err = encode_row(&descriptor, &[Value::Text("invalid".to_string())]).unwrap_err();
@@ -2043,7 +2102,9 @@ mod tests {
     fn decode_row_rejects_invalid_enum_variant() {
         let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
             "status",
-            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+            ColumnType::Enum {
+                variants: vec!["done".to_string(), "todo".to_string()],
+            },
         )]);
 
         let mut encoded = encode_row(&descriptor, &[Value::Text("todo".to_string())]).unwrap();

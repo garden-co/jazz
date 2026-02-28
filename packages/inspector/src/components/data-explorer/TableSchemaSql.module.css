@@ -1,0 +1,32 @@
+.container {
+  height: 100%;
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 12px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+}
+
+.title {
+  margin: 0;
+  text-transform: capitalize;
+  font-size: 18px;
+  color: #e4e9f3;
+}
+
+.codeBlock {
+  margin: 0;
+  border: 1px solid #2f3a4b;
+  border-radius: 8px;
+  background: #101723;
+  color: #d3deef;
+  padding: 12px;
+  overflow: auto;
+}

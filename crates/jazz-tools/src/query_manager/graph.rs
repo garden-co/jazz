@@ -411,7 +411,7 @@ impl QueryGraph {
         }
 
         let table_schema = schema.get(&plan.table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let select_policy = table_schema.policies.select.using.clone();
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
@@ -707,7 +707,7 @@ impl QueryGraph {
         schema_context: &SchemaContext,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
-        let inner_descriptor = schema.get(&spec.table)?.descriptor.clone();
+        let inner_descriptor = schema.get(&spec.table)?.columns.clone();
 
         // Find outer correlation column index
         // The outer_column may be qualified (table.column) or unqualified
@@ -760,7 +760,7 @@ impl QueryGraph {
         let mut combined_columns = inner_descriptor.columns.clone();
         for join_spec in &spec.joins {
             if let Some(joined_schema) = schema.get(&join_spec.table) {
-                combined_columns.extend(joined_schema.descriptor.columns.clone());
+                combined_columns.extend(joined_schema.columns.columns.clone());
             }
         }
 
@@ -769,7 +769,11 @@ impl QueryGraph {
             if let Some(nested_element_desc) = Self::build_nested_array_descriptor(nested, schema) {
                 combined_columns.push(ColumnDescriptor::new(
                     &nested.column_name,
-                    ColumnType::Array(Box::new(ColumnType::Row(Box::new(nested_element_desc)))),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Row {
+                            columns: Box::new(nested_element_desc),
+                        }),
+                    },
                 ));
             }
         }
@@ -829,10 +833,10 @@ impl QueryGraph {
         let inner_schema = schema.get(&spec.table)?;
 
         // Start with base table columns + joined table columns
-        let mut columns = inner_schema.descriptor.columns.clone();
+        let mut columns = inner_schema.columns.columns.clone();
         for join_spec in &spec.joins {
             if let Some(joined_schema) = schema.get(&join_spec.table) {
-                columns.extend(joined_schema.descriptor.columns.clone());
+                columns.extend(joined_schema.columns.columns.clone());
             }
         }
 
@@ -841,7 +845,11 @@ impl QueryGraph {
             if let Some(nested_element_desc) = Self::build_nested_array_descriptor(nested, schema) {
                 columns.push(ColumnDescriptor::new(
                     &nested.column_name,
-                    ColumnType::Array(Box::new(ColumnType::Row(Box::new(nested_element_desc)))),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Row {
+                            columns: Box::new(nested_element_desc),
+                        }),
+                    },
                 ));
             }
         }
@@ -868,7 +876,7 @@ impl QueryGraph {
         schema_context: &SchemaContext,
     ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
         let step_table_schema = schema.get(&spec.table)?;
-        let step_table_descriptor = step_table_schema.descriptor.clone();
+        let step_table_descriptor = step_table_schema.columns.clone();
 
         let outer_col_name = spec
             .outer_column
@@ -916,7 +924,7 @@ impl QueryGraph {
         // Build descriptor for step output.
         let mut step_table_descriptors = vec![step_table_descriptor.clone()];
         for join_spec in &spec.joins {
-            let joined_descriptor = schema.get(&join_spec.table)?.descriptor.clone();
+            let joined_descriptor = schema.get(&join_spec.table)?.columns.clone();
             step_table_descriptors.push(joined_descriptor);
         }
         let combined_step_descriptor = RowDescriptor::combine(&step_table_descriptors);
@@ -941,7 +949,7 @@ impl QueryGraph {
 
         let hop = if let Some(hop_spec) = &spec.hop {
             let target_schema = schema.get(&hop_spec.table)?;
-            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.descriptor) {
+            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.columns) {
                 return None;
             }
 
@@ -989,7 +997,7 @@ impl QueryGraph {
         schema_context: &SchemaContext,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
-        let base_descriptor = base_table_schema.descriptor.clone();
+        let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
 
         let join_branches: Vec<&str> = if branches.is_empty() {
@@ -1101,7 +1109,7 @@ impl QueryGraph {
             let (left_col, right_col) = join_spec.on.as_ref()?;
 
             let right_table_schema = schema.get(&join_spec.table)?;
-            let right_descriptor = right_table_schema.descriptor.clone();
+            let right_descriptor = right_table_schema.columns.clone();
 
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
@@ -2153,7 +2161,7 @@ fn descriptor_for_table_with_joins(
     let base = schema
         .get(&table)
         .ok_or(QueryCompileError::UnknownTable(table))?
-        .descriptor
+        .columns
         .clone();
     if joins.is_empty() {
         return Ok(base);
@@ -2164,7 +2172,7 @@ fn descriptor_for_table_with_joins(
         let joined = schema
             .get(&join.table)
             .ok_or(QueryCompileError::UnknownTable(join.table))?
-            .descriptor
+            .columns
             .clone();
         descriptors.push(joined);
     }
@@ -3121,7 +3129,12 @@ mod tests {
             TableName::new("users"),
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("name", ColumnType::Text),
-                ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+                ColumnDescriptor::new(
+                    "tags",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
             ])
             .into(),
         );
