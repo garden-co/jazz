@@ -1,5 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export interface Project {
   id: string;
@@ -91,81 +98,79 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [
-        {
-          name: "name",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+  projects: {
+    columns: [
+      {
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-      ],
-    },
-    todos: {
-      columns: [
-        {
-          name: "title",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+        nullable: false,
+      },
+    ],
+  },
+  todos: {
+    columns: [
+      {
+        name: "title",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "done",
-          column_type: {
-            type: "Boolean",
-          },
-          nullable: false,
+        nullable: false,
+      },
+      {
+        name: "done",
+        column_type: {
+          type: "Boolean",
         },
-        {
-          name: "description",
-          column_type: {
-            type: "Text",
-          },
-          nullable: true,
+        nullable: false,
+      },
+      {
+        name: "description",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "parent",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: true,
-          references: "todos",
+        nullable: true,
+      },
+      {
+        name: "parent",
+        column_type: {
+          type: "Uuid",
         },
-        {
-          name: "project",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: true,
-          references: "projects",
+        nullable: true,
+        references: "todos",
+      },
+      {
+        name: "project",
+        column_type: {
+          type: "Uuid",
         },
-      ],
-      policies: {
-        select: {
-          using: {
-            type: "True",
-          },
+        nullable: true,
+        references: "projects",
+      },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "True",
         },
-        insert: {
-          with_check: {
-            type: "True",
-          },
+      },
+      insert: {
+        with_check: {
+          type: "True",
         },
-        update: {
-          using: {
-            type: "True",
-          },
-          with_check: {
-            type: "True",
-          },
+      },
+      update: {
+        using: {
+          type: "True",
         },
-        delete: {
-          using: {
-            type: "True",
-          },
+        with_check: {
+          type: "True",
+        },
+      },
+      delete: {
+        using: {
+          type: "True",
         },
       },
     },
@@ -530,7 +535,13 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
   }
 }
 
-export const app = {
+export interface GeneratedApp {
+  projects: ProjectQueryBuilder;
+  todos: TodoQueryBuilder;
+  wasmSchema: WasmSchema;
+}
+
+export const app: GeneratedApp = {
   projects: new ProjectQueryBuilder(),
   todos: new TodoQueryBuilder(),
   wasmSchema,

@@ -137,14 +137,14 @@ fn diff_table(
     ambiguities: &mut Vec<Ambiguity>,
 ) {
     let old_cols: std::collections::HashMap<_, _> = old
-        .descriptor
+        .columns
         .columns
         .iter()
         .map(|c| (c.name.as_str(), c))
         .collect();
 
     let new_cols: std::collections::HashMap<_, _> = new
-        .descriptor
+        .columns
         .columns
         .iter()
         .map(|c| (c.name.as_str(), c))
@@ -258,7 +258,7 @@ fn default_for_type(ct: &ColumnType) -> Value {
         ColumnType::Double => Value::Double(0.0),
         ColumnType::Boolean => Value::Boolean(false),
         ColumnType::Text => Value::Text(String::new()),
-        ColumnType::Enum(variants) => variants
+        ColumnType::Enum { variants } => variants
             .first()
             .cloned()
             .map(Value::Text)
@@ -266,8 +266,9 @@ fn default_for_type(ct: &ColumnType) -> Value {
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
         ColumnType::Bytea => Value::Bytea(vec![]),
-        ColumnType::Array(_) => Value::Array(vec![]),
-        ColumnType::Row(_) => Value::Null,
+        ColumnType::Json { schema: _ } => Value::Null,
+        ColumnType::Array { element: _ } => Value::Array(vec![]),
+        ColumnType::Row { columns: _ } => Value::Null,
     }
 }
 

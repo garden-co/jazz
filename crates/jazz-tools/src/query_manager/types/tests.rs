@@ -11,7 +11,13 @@ fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
     assert_eq!(ColumnType::Text.fixed_size(), None);
     assert_eq!(ColumnType::Bytea.fixed_size(), None);
-    assert_eq!(ColumnType::Enum(vec!["a".to_string()]).fixed_size(), None);
+    assert_eq!(
+        ColumnType::Enum {
+            variants: vec!["a".to_string()]
+        }
+        .fixed_size(),
+        None
+    );
 }
 
 #[test]
@@ -41,6 +47,22 @@ fn row_descriptor_column_lookup() {
 
     assert_eq!(descriptor.fixed_column_count(), 2); // id (uuid) + age (integer)
     assert_eq!(descriptor.variable_column_count(), 1); // name (text)
+}
+
+#[test]
+fn column_type_row_serializes_columns_as_array() {
+    let column_type = ColumnType::Row {
+        columns: Box::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Uuid),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])),
+    };
+
+    let json = serde_json::to_value(&column_type).expect("serialize row column type");
+    assert_eq!(json["type"], "Row");
+    assert!(json["columns"].is_array());
+    assert_eq!(json["columns"][0]["name"], "id");
+    assert_eq!(json["columns"][1]["name"], "name");
 }
 
 #[test]
@@ -431,22 +453,26 @@ fn schema_hash_enum_variant_order_independent() {
     let schema1 = SchemaBuilder::new()
         .table(TableSchema::builder("todos").column(
             "status",
-            ColumnType::Enum(vec![
-                "done".to_string(),
-                "in_progress".to_string(),
-                "todo".to_string(),
-            ]),
+            ColumnType::Enum {
+                variants: vec![
+                    "done".to_string(),
+                    "in_progress".to_string(),
+                    "todo".to_string(),
+                ],
+            },
         ))
         .build();
 
     let schema2 = SchemaBuilder::new()
         .table(TableSchema::builder("todos").column(
             "status",
-            ColumnType::Enum(vec![
-                "todo".to_string(),
-                "done".to_string(),
-                "in_progress".to_string(),
-            ]),
+            ColumnType::Enum {
+                variants: vec![
+                    "todo".to_string(),
+                    "done".to_string(),
+                    "in_progress".to_string(),
+                ],
+            },
         ))
         .build();
 
@@ -532,22 +558,22 @@ fn table_schema_builder() {
         .build_named();
 
     assert_eq!(name.as_str(), "users");
-    assert_eq!(schema.descriptor.columns.len(), 4);
+    assert_eq!(schema.columns.columns.len(), 4);
 
-    let id_col = schema.descriptor.column("id").unwrap();
+    let id_col = schema.columns.column("id").unwrap();
     assert_eq!(id_col.column_type, ColumnType::Uuid);
     assert!(!id_col.nullable);
 
-    let email_col = schema.descriptor.column("email").unwrap();
+    let email_col = schema.columns.column("email").unwrap();
     assert_eq!(email_col.column_type, ColumnType::Text);
     assert!(email_col.nullable);
 
-    let org_col = schema.descriptor.column("org_id").unwrap();
+    let org_col = schema.columns.column("org_id").unwrap();
     assert_eq!(org_col.column_type, ColumnType::Uuid);
     assert!(!org_col.nullable);
     assert_eq!(org_col.references, Some(TableName::new("orgs")));
 
-    let manager_col = schema.descriptor.column("manager_id").unwrap();
+    let manager_col = schema.columns.column("manager_id").unwrap();
     assert!(manager_col.nullable);
     assert_eq!(manager_col.references, Some(TableName::new("users")));
 }

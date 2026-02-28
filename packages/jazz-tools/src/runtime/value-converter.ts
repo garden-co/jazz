@@ -6,6 +6,7 @@
  */
 
 import type { WasmSchema, ColumnType, Value as WasmValue } from "../drivers/types.js";
+import { toJsonText } from "./json-text.js";
 
 function toTimestampMs(value: unknown): number {
   const numeric = value instanceof Date ? value.getTime() : Number(value);
@@ -54,6 +55,8 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       }
       throw new Error("Expected Uint8Array or byte array for Bytea column type");
     }
+    case "Json":
+      return { type: "Text", value: toJsonText(value) };
     case "Enum": {
       const enumValue = String(value);
       if (!columnType.variants.includes(enumValue)) {
@@ -103,7 +106,7 @@ export function toValueArray(
   schema: WasmSchema,
   tableName: string,
 ): WasmValue[] {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }
@@ -130,7 +133,7 @@ export function toUpdateRecord(
   schema: WasmSchema,
   tableName: string,
 ): Record<string, WasmValue> {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }

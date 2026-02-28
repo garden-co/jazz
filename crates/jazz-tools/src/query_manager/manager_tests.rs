@@ -82,6 +82,19 @@ fn get_branch(qm: &QueryManager) -> String {
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 
+fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
+    let mut out = Schema::new();
+    out.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "payload",
+            ColumnType::Json { schema },
+        )])
+        .into(),
+    );
+    out
+}
+
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
 /// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
 fn execute_query(
@@ -94,6 +107,111 @@ fn execute_query(
     let results = qm.get_subscription_results(sub_id);
     qm.unsubscribe_with_sync(sub_id);
     Ok(results)
+}
+
+#[test]
+fn insert_json_preserves_original_text() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let raw = "{\n  \"name\": \"Ada\",\n  \"active\": true\n}";
+    qm.insert(&mut storage, "documents", &[Value::Text(raw.to_string())])
+        .expect("insert valid json");
+
+    let query = qm.query("documents").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query inserted row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, vec![Value::Text(raw.to_string())]);
+}
+
+#[test]
+fn insert_rejects_invalid_json_text() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let err = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":true".to_string())],
+        )
+        .expect_err("invalid JSON must be rejected");
+
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("invalid JSON for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn insert_rejects_json_schema_violation() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(Some(json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })));
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let err = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":123}".to_string())],
+        )
+        .expect_err("schema-invalid JSON must be rejected");
+
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("JSON schema validation failed for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn update_rejects_json_schema_violation() {
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(Some(json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })));
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("{\"name\":\"ok\"}".to_string())],
+        )
+        .expect("insert valid row first");
+
+    let err = qm
+        .update(
+            &mut storage,
+            inserted.row_id,
+            &[Value::Text("{\"name\":42}".to_string())],
+        )
+        .expect_err("invalid update payload must be rejected");
+    assert!(
+        matches!(&err, QueryError::EncodingError(msg) if msg.contains("JSON schema validation failed for column `payload`")),
+        "unexpected error: {err:?}"
+    );
+
+    let query = qm.query("documents").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query existing row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("{\"name\":\"ok\"}".to_string())]
+    );
 }
 
 #[test]
@@ -373,7 +491,7 @@ fn recursive_hop_query_subscriptions_receive_expansion_updates() {
         .added
         .iter()
         .filter_map(|row| {
-            match decode_row(&team_descriptor.descriptor, &row.data)
+            match decode_row(&team_descriptor.columns, &row.data)
                 .ok()?
                 .first()
             {
@@ -1220,7 +1338,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     let live_descriptor = live_schema
         .get(&TableName::new("users"))
         .expect("live schema table should exist")
-        .descriptor
+        .columns
         .clone();
     qm.add_live_schema(live_schema);
 
@@ -2522,7 +2640,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .schema()
         .get(&TableName::new("users"))
         .unwrap()
-        .descriptor
+        .columns
         .clone();
 
     // Commit A: lower timestamp, content "TipA"
@@ -3825,8 +3943,13 @@ fn file_storage_schema() -> Schema {
     schema.insert(
         TableName::new("files"),
         RowDescriptor::new(vec![
-            ColumnDescriptor::new("parts", ColumnType::Array(Box::new(ColumnType::Uuid)))
-                .references("file_parts"),
+            ColumnDescriptor::new(
+                "parts",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+            .references("file_parts"),
         ])
         .into(),
     );
@@ -3854,10 +3977,19 @@ fn files_with_parts_descriptor() -> RowDescriptor {
     let part_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]);
     RowDescriptor::new(vec![
-        ColumnDescriptor::new("parts", ColumnType::Array(Box::new(ColumnType::Uuid))),
+        ColumnDescriptor::new(
+            "parts",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
+        ),
         ColumnDescriptor::new(
             "part_rows",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(part_descriptor)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(part_descriptor),
+                }),
+            },
         ),
     ])
 }
@@ -4284,7 +4416,11 @@ fn users_with_posts_descriptor() -> RowDescriptor {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ])
 }
@@ -5021,7 +5157,11 @@ fn array_subquery_with_select_columns() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -5172,7 +5312,11 @@ fn array_subquery_with_join() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "post_comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(joined_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(joined_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -5333,7 +5477,11 @@ fn array_subquery_nested() {
         ColumnDescriptor::new("author_id", ColumnType::Integer),
         ColumnDescriptor::new(
             "comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(comments_row_desc),
+                }),
+            },
         ),
     ]);
     // users row with posts array: [id, name, posts[]]
@@ -5342,7 +5490,11 @@ fn array_subquery_nested() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -5538,11 +5690,19 @@ fn array_subquery_multiple_columns() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
         ColumnDescriptor::new(
             "comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(comments_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -6975,7 +7135,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // (simulating upstream sending fresh data)
     let table_schema = schema.get(&TableName::new("users")).unwrap();
     let row_data = encode_row(
-        &table_schema.descriptor,
+        &table_schema.columns,
         &[Value::Text("Alice".into()), Value::Integer(80)],
     )
     .unwrap();
@@ -7409,7 +7569,7 @@ fn e2e_permissions_prevent_sync() {
     schema.insert(
         TableName::new("documents"),
         TableSchema {
-            descriptor: RowDescriptor::new(vec![
+            columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),
@@ -7497,7 +7657,7 @@ fn e2e_permissions_prevent_new_row_sync() {
     schema.insert(
         TableName::new("documents"),
         TableSchema {
-            descriptor: RowDescriptor::new(vec![
+            columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),

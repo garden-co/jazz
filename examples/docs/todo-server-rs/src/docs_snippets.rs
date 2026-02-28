@@ -75,6 +75,27 @@ pub fn inherits_select_policy() -> TablePolicies {
 }
 // #endregion permissions-inherits-rust
 
+// #region permissions-combinators-rust
+pub fn combinator_policy() -> TablePolicies {
+    TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::and(vec![
+            PolicyExpr::True,
+            PolicyExpr::inherits(Operation::Select, "project"),
+        ]),
+    ]))
+}
+// #endregion permissions-combinators-rust
+
+// #region permissions-recursive-inherits-rust
+pub fn recursive_inherits_policy() -> TablePolicies {
+    TablePolicies::new().with_select(PolicyExpr::or(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::inherits_with_depth(Operation::Select, "parent", 10),
+    ]))
+}
+// #endregion permissions-recursive-inherits-rust
+
 // #region reading-oneshot-rust
 pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();

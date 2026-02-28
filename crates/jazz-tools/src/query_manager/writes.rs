@@ -43,7 +43,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let insert_policy = table_schema.policies.insert.with_check.clone();
 
         if values.len() != descriptor.columns.len() {
@@ -60,6 +60,7 @@ impl QueryManager {
             values,
             &self.current_branch(),
         )?;
+        self.validate_json_for_values(&descriptor, values)?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -156,7 +157,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let insert_policy = table_schema.policies.insert.with_check.clone();
 
         if values.len() != descriptor.columns.len() {
@@ -167,6 +168,7 @@ impl QueryManager {
         }
 
         self.validate_foreign_keys_for_values(storage, &table_name, &descriptor, values, branch)?;
+        self.validate_json_for_values(&descriptor, values)?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -268,9 +270,12 @@ impl QueryManager {
                         missing_id: *target_id,
                     });
                 }
-                (ColumnType::Array(element_type), Value::Array(elements))
-                    if matches!(element_type.as_ref(), ColumnType::Uuid) =>
-                {
+                (
+                    ColumnType::Array {
+                        element: element_type,
+                    },
+                    Value::Array(elements),
+                ) if matches!(element_type.as_ref(), ColumnType::Uuid) => {
                     for element in elements {
                         let Value::Uuid(target_id) = element else {
                             continue;
@@ -297,6 +302,83 @@ impl QueryManager {
         Ok(())
     }
 
+    fn validate_json_for_values(
+        &self,
+        descriptor: &RowDescriptor,
+        values: &[Value],
+    ) -> Result<(), QueryError> {
+        for (column, value) in descriptor.columns.iter().zip(values.iter()) {
+            Self::validate_json_value_for_type(
+                &column.column_type,
+                value,
+                column.name.as_str().to_string(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_json_value_for_type(
+        column_type: &ColumnType,
+        value: &Value,
+        column_path: String,
+    ) -> Result<(), QueryError> {
+        match (column_type, value) {
+            (_, Value::Null) => Ok(()),
+            (ColumnType::Json { schema }, Value::Text(raw)) => {
+                let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
+                    QueryError::EncodingError(format!(
+                        "invalid JSON for column `{column_path}`: {err}"
+                    ))
+                })?;
+
+                if let Some(schema) = schema {
+                    let validator = jsonschema::validator_for(schema).map_err(|err| {
+                        QueryError::EncodingError(format!(
+                            "invalid JSON schema for column `{column_path}`: {err}"
+                        ))
+                    })?;
+
+                    if let Err(err) = validator.validate(&parsed) {
+                        return Err(QueryError::EncodingError(format!(
+                            "JSON schema validation failed for column `{column_path}`: {err}"
+                        )));
+                    }
+                }
+
+                Ok(())
+            }
+            (
+                ColumnType::Array {
+                    element: element_type,
+                },
+                Value::Array(elements),
+            ) => {
+                for (idx, element) in elements.iter().enumerate() {
+                    Self::validate_json_value_for_type(
+                        element_type,
+                        element,
+                        format!("{column_path}[{idx}]"),
+                    )?;
+                }
+                Ok(())
+            }
+            (ColumnType::Row { columns: desc }, Value::Row(row_values)) => {
+                for (idx, row_col) in desc.columns.iter().enumerate() {
+                    let Some(row_value) = row_values.get(idx) else {
+                        break;
+                    };
+                    Self::validate_json_value_for_type(
+                        &row_col.column_type,
+                        row_value,
+                        format!("{column_path}.{}", row_col.name.as_str()),
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(super) fn validate_foreign_keys_for_content(
         &self,
         storage: &dyn Storage,
@@ -307,6 +389,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         let values = decode_row(descriptor, content)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        self.validate_json_for_values(descriptor, &values)?;
         self.validate_foreign_keys_for_values(storage, table_name, descriptor, &values, branch)
     }
 
@@ -532,7 +615,7 @@ impl QueryManager {
         let Some(source_schema) = self.schema.get(&source_table_name) else {
             return false;
         };
-        let source_descriptor = source_schema.descriptor.clone();
+        let source_descriptor = source_schema.columns.clone();
 
         let Some(col_idx) = source_descriptor.column_index(via_column) else {
             return false;
@@ -566,7 +649,7 @@ impl QueryManager {
                     }
                 }
             }
-            crate::query_manager::types::ColumnType::Array(element)
+            crate::query_manager::types::ColumnType::Array { element }
                 if **element == crate::query_manager::types::ColumnType::Uuid =>
             {
                 let candidate_ids =
@@ -657,7 +740,7 @@ impl QueryManager {
                     storage,
                     policy,
                     &content,
-                    &table_schema.descriptor,
+                    &table_schema.columns,
                     session,
                     table_name.as_str(),
                     branch,
@@ -715,6 +798,12 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
+        // Ensure object is loaded from storage (cold-start: may only exist on disk)
+        let branch = self.current_branch();
+        self.sync_manager
+            .object_manager
+            .get_or_load(id, storage, &[branch]);
+
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -736,7 +825,7 @@ impl QueryManager {
                 .get(&table_name)
                 .ok_or(QueryError::TableNotFound(table_name))?;
             (
-                table_schema.descriptor.clone(),
+                table_schema.columns.clone(),
                 table_schema.policies.update.using.clone(),
                 table_schema.policies.update.with_check.clone(),
             )
@@ -756,6 +845,7 @@ impl QueryManager {
             values,
             &self.current_branch(),
         )?;
+        self.validate_json_for_values(&descriptor, values)?;
 
         // Encode new data (used by WITH CHECK and commit write).
         let new_data = encode_row(&descriptor, values)
@@ -880,6 +970,12 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
+        // Ensure object is loaded from storage (cold-start: may only exist on disk)
+        let branch = self.current_branch();
+        self.sync_manager
+            .object_manager
+            .get_or_load(id, storage, &[branch]);
+
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -911,7 +1007,7 @@ impl QueryManager {
                 .get(&table_name)
                 .ok_or(QueryError::TableNotFound(table_name))?;
             (
-                table_schema.descriptor.clone(),
+                table_schema.columns.clone(),
                 table_schema.policies.effective_delete_using().cloned(),
             )
         };
@@ -1022,7 +1118,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         // Get parent commit on this branch
         let tips = self
@@ -1107,7 +1203,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -1123,6 +1219,7 @@ impl QueryManager {
             values,
             &self.current_branch(),
         )?;
+        self.validate_json_for_values(&descriptor, values)?;
 
         // Encode new row data
         let new_data = encode_row(&descriptor, values)
@@ -1203,7 +1300,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         // Get parent commit
         let tips = self
@@ -1308,7 +1405,7 @@ impl QueryManager {
         let (data, _) = self.load_row_from_object(id)?;
 
         let table_schema = self.schema.get(&table_name)?;
-        let values = decode_row(&table_schema.descriptor, &data).ok()?;
+        let values = decode_row(&table_schema.columns, &data).ok()?;
         Some((table, values))
     }
 

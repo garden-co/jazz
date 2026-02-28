@@ -11,6 +11,8 @@
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { Session } from "./context.js";
 import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
@@ -450,7 +452,7 @@ export class Db {
     }
 
     // Use stringified schema as cache key
-    const key = JSON.stringify(schema);
+    const key = serializeRuntimeSchema(schema);
 
     if (!this.clients.has(key)) {
       // Create in-memory runtime (works for both direct and worker mode)
@@ -814,6 +816,59 @@ export class Db {
     }
   }
 
+  private currentWorkerNamespace(): string {
+    return this.workerDbName ?? this.config.dbName ?? this.config.appId;
+  }
+
+  private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
+    const currentWorker = this.worker;
+
+    if (this.workerBridge && currentWorker) {
+      try {
+        await this.workerBridge.shutdown(currentWorker);
+      } catch {
+        // Best effort: if the bridge shutdown times out, we still terminate below.
+      }
+    }
+    this.workerBridge = null;
+    this.bridgeReady = null;
+
+    for (const client of this.clients.values()) {
+      await client.shutdown();
+    }
+    this.clients.clear();
+    this.leaderPeerIds.clear();
+    this.activeRemoteLeaderTabId = null;
+
+    if (currentWorker) {
+      currentWorker.terminate();
+    }
+    this.worker = null;
+  }
+
+  private async removeOpfsNamespaceFile(namespace: string): Promise<void> {
+    const rootDirectory = await navigator.storage.getDirectory();
+    const fileName = `${namespace}.opfsbtree`;
+    try {
+      await rootDirectory.removeEntry(fileName, { recursive: false });
+    } catch (error) {
+      const name = (error as { name?: string } | undefined)?.name;
+      if (name === "NotFoundError") {
+        return;
+      }
+      if (name === "NoModificationAllowedError" || name === "InvalidStateError") {
+        throw new Error(
+          `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
+        );
+      }
+      throw new Error(
+        `Failed to delete browser storage for "${namespace}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private static resolveWorkerDbNameForSnapshot(
     primaryDbName: string,
     snapshot: LeaderSnapshot,
@@ -1007,6 +1062,66 @@ export class Db {
   }
 
   /**
+   * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
+   *
+   * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
+   * localStorage-based auth or synthetic-user state.
+   *
+   * Behavior:
+   * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
+   * - Leader tab only (throws on follower tabs and asks to close other tabs)
+   * - Serializes with worker reconfigure operations
+   * - Tears down worker + clients, deletes OPFS file, respawns worker
+   * - If file deletion fails, still respawns worker and then rethrows the deletion error
+   */
+  async deleteClientStorage(): Promise<void> {
+    if (!isBrowser()) {
+      console.error(
+        "deleteClientStorage() is only available on browser worker-backed Db instances.",
+      );
+      return;
+    }
+
+    const operation = this.workerReconfigure.then(async () => {
+      if (this.tabRole !== "leader") {
+        console.error(
+          "deleteClientStorage() can only run from the leader tab. Close other tabs and retry.",
+        );
+        return;
+      }
+
+      const namespace = this.currentWorkerNamespace();
+
+      // Wait for any in-flight bridge init before we tear down worker state.
+      if (this.bridgeReady) {
+        await this.bridgeReady;
+      }
+
+      await this.shutdownWorkerAndClientsForStorageReset();
+
+      let deleteError: unknown = null;
+      try {
+        await this.removeOpfsNamespaceFile(namespace);
+      } catch (error) {
+        deleteError = error;
+      }
+
+      this.worker = await Db.spawnWorker();
+
+      if (deleteError) {
+        throw deleteError;
+      }
+    });
+
+    this.workerReconfigure = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    await operation;
+  }
+
+  /**
    * Execute a query and return all matching rows as typed objects.
    *
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
@@ -1067,6 +1182,7 @@ export class Db {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     settledTier?: PersistenceTier,
+    session?: Session,
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
@@ -1083,12 +1199,13 @@ export class Db {
       return transformRows<T>([row], query._schema, outputTable, outputIncludes)[0];
     };
 
-    const subId = client.subscribe(
+    const subId = client.subscribeInternal(
       wasmQuery,
       (delta) => {
         const typedDelta = manager.handleDelta(delta, transform);
         callback(typedDelta);
       },
+      session,
       settledTier,
     );
 

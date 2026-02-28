@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY examples/todo-server-rs ./examples/todo-server-rs
+COPY examples ./examples
 
 RUN cargo build --release -p jazz-cloud-server
 

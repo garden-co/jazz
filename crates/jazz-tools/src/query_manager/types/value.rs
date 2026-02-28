@@ -11,6 +11,7 @@ use super::*;
 /// `Eq`. We use bitwise comparison (`f64::to_bits`) so that NaN == NaN and
 /// -0.0 != 0.0, which is the correct semantics for storage identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
@@ -68,7 +69,9 @@ impl Value {
                 elements
                     .iter()
                     .find_map(|v| v.column_type())
-                    .map(|elem_type| ColumnType::Array(Box::new(elem_type)))
+                    .map(|elem_type| ColumnType::Array {
+                        element: Box::new(elem_type),
+                    })
             }
             // Row type requires external schema, can't be inferred
             Value::Row(_) => None,

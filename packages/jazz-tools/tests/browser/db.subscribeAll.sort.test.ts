@@ -11,14 +11,12 @@ interface Todo {
 }
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "rank", column_type: { type: "Integer" }, nullable: true },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "rank", column_type: { type: "Integer" }, nullable: true },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
