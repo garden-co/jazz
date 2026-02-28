@@ -408,6 +408,17 @@ echo ECS_CLUSTER=${cluster.name} >> /etc/ecs/ecs.config
 echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
 echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
 
+if ! command -v aws >/dev/null 2>&1; then
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y awscli
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y awscli
+  else
+    echo "aws CLI is required in user-data but no supported package manager was found"
+    exit 1
+  fi
+fi
+
 echo "Ensuring persistent data volume is attached"
 VOLUME_ID=${dataVolume.id}
 REGION=${region}
@@ -415,20 +426,35 @@ REGION=${region}
 TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/instance-id")
 
-for i in {1..60}; do
-  STATE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query 'Volumes[0].State' --output text)
-  if [ "$STATE" = "available" ] || [ "$STATE" = "in-use" ]; then
+get_attached_instance() {
+  aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query 'Volumes[0].Attachments[?State!=\`detached\`]|[0].InstanceId' --output text 2>/dev/null || true
+}
+
+for i in {1..120}; do
+  ATTACHED_INSTANCE=$(get_attached_instance)
+  if [ "$ATTACHED_INSTANCE" = "$INSTANCE_ID" ]; then
+    echo "Data volume already attached to this instance"
     break
   fi
+
+  if [ "$ATTACHED_INSTANCE" = "None" ] || [ -z "$ATTACHED_INSTANCE" ]; then
+    echo "Attaching data volume $VOLUME_ID to $INSTANCE_ID"
+    aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/xvdf || true
+  else
+    echo "Data volume $VOLUME_ID attached to $ATTACHED_INSTANCE, forcing detach"
+    aws ec2 detach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$ATTACHED_INSTANCE" --force || true
+  fi
+
   sleep 5
 done
 
-ATTACHED_INSTANCE=$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$VOLUME_ID" --query 'Volumes[0].Attachments[0].InstanceId' --output text || true)
-if [ "$ATTACHED_INSTANCE" = "None" ] || [ -z "$ATTACHED_INSTANCE" ]; then
-  aws ec2 attach-volume --region "$REGION" --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/xvdf || true
+ATTACHED_INSTANCE=$(get_attached_instance)
+if [ "$ATTACHED_INSTANCE" != "$INSTANCE_ID" ]; then
+  echo "Failed to attach data volume $VOLUME_ID to $INSTANCE_ID"
+  exit 1
 fi
 
-for i in {1..60}; do
+for i in {1..120}; do
   if [ -e /dev/xvdf ] || [ -e /dev/nvme1n1 ]; then
     break
   fi

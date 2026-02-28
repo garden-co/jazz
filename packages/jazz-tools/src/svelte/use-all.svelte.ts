@@ -48,7 +48,7 @@ export class QuerySubscription<T extends { id: string }> {
             this.current = delta.all;
             this.loading = false;
           },
-          tier,
+          tier ? { settledTier: tier } : undefined,
         );
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));

@@ -1779,7 +1779,12 @@ fn send_query_subscription_includes_session() {
     let query = QueryBuilder::new("users").branch("main").build();
     let session = Session::new("alice");
 
-    sm.send_query_subscription_to_servers(QueryId(1), query.clone(), Some(session.clone()));
+    sm.send_query_subscription_to_servers(
+        QueryId(1),
+        query.clone(),
+        Some(session.clone()),
+        QueryPropagation::Full,
+    );
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
@@ -1792,11 +1797,13 @@ fn send_query_subscription_includes_session() {
                     query_id,
                     query: sent_query,
                     session: sent_session,
+                    propagation,
                 },
         } => {
             assert_eq!(*id, server_id);
             assert_eq!(*query_id, QueryId(1));
             assert_eq!(sent_query.table, query.table);
+            assert_eq!(*propagation, QueryPropagation::Full);
             let sent_session = sent_session
                 .as_ref()
                 .expect("QuerySubscription payload should include session");

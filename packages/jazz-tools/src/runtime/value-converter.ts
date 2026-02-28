@@ -106,7 +106,7 @@ export function toValueArray(
   schema: WasmSchema,
   tableName: string,
 ): WasmValue[] {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }
@@ -133,7 +133,7 @@ export function toUpdateRecord(
   schema: WasmSchema,
   tableName: string,
 ): Record<string, WasmValue> {
-  const table = schema.tables[tableName];
+  const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }

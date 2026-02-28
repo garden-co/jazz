@@ -7,6 +7,7 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
   generateClientId,
@@ -47,12 +48,14 @@ export interface Runtime {
     query_json: string,
     session_json?: string | null,
     settled_tier?: string | null,
+    options_json?: string | null,
   ): Promise<any>;
   subscribe(
     query_json: string,
     on_update: Function,
     session_json?: string | null,
     settled_tier?: string | null,
+    options_json?: string | null,
   ): number;
   unsubscribe(handle: number): void;
   insertWithAck(table: string, values: any, tier: string): Promise<string>;
@@ -78,6 +81,11 @@ export interface Runtime {
  * - `core`: Persisted at core server
  */
 export type PersistenceTier = "worker" | "edge" | "core";
+export type QueryPropagation = "full" | "local-only";
+export interface QueryExecutionOptions {
+  settledTier?: PersistenceTier;
+  propagation?: QueryPropagation;
+}
 
 /**
  * Query row result.
@@ -109,6 +117,27 @@ export interface QueryInput {
 
 function resolveQueryJson(query: string | QueryInput): string {
   return typeof query === "string" ? query : query._build();
+}
+
+function normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+  if (!options) {
+    return { propagation: "full" };
+  }
+
+  return {
+    settledTier: options.settledTier,
+    propagation: options.propagation ?? "full",
+  };
+}
+
+function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
+  if ((options.propagation ?? "full") === "full") {
+    return undefined;
+  }
+
+  return JSON.stringify({
+    propagation: options.propagation,
+  });
 }
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -283,15 +312,19 @@ export class SessionClient {
   /**
    * Query as this session's user.
    */
-  async query(query: string | QueryInput): Promise<Row[]> {
-    return this.client.queryInternal(resolveQueryJson(query), this.session);
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    return this.client.queryInternal(resolveQueryJson(query), this.session, options);
   }
 
   /**
    * Subscribe to a query as this session's user.
    */
-  subscribe(query: string | QueryInput, callback: SubscriptionCallback): number {
-    return this.client.subscribeInternal(query, callback, this.session);
+  subscribe(
+    query: string | QueryInput,
+    callback: SubscriptionCallback,
+    options?: QueryExecutionOptions,
+  ): number {
+    return this.client.subscribeInternal(query, callback, this.session, options);
   }
 }
 
@@ -337,7 +370,7 @@ export class JazzClient {
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
@@ -370,7 +403,7 @@ export class JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
@@ -481,12 +514,8 @@ export class JazzClient {
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns Array of matching rows
    */
-  async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(
-      resolveQueryJson(query),
-      this.resolvedSession ?? undefined,
-      settledTier,
-    );
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    return this.queryInternal(resolveQueryJson(query), this.resolvedSession ?? undefined, options);
   }
 
   /**
@@ -496,10 +525,17 @@ export class JazzClient {
   async queryInternal(
     queryJson: string,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): Promise<Row[]> {
+    const normalizedOptions = normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
-    const results = await this.runtime.query(queryJson, sessionJson, settledTier);
+    const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
+    const results = await this.runtime.query(
+      queryJson,
+      sessionJson,
+      normalizedOptions.settledTier,
+      optionsJson,
+    );
     return results as Row[];
   }
 
@@ -551,9 +587,9 @@ export class JazzClient {
   subscribe(
     query: string | QueryInput,
     callback: SubscriptionCallback,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number {
-    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, settledTier);
+    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, options);
   }
 
   /**
@@ -564,10 +600,12 @@ export class JazzClient {
     query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number {
+    const normalizedOptions = normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
+    const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const subId = this.runtime.subscribe(
       queryJson,
       (deltaJsonOrObject: RowDelta | string) => {
@@ -577,7 +615,8 @@ export class JazzClient {
         callback(delta);
       },
       sessionJson,
-      settledTier,
+      normalizedOptions.settledTier,
+      optionsJson,
     );
     this.subscriptions.set(subId, callback);
     return subId;
@@ -597,7 +636,7 @@ export class JazzClient {
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    return this.runtime.getSchema();
+    return this.runtime.getSchema() as WasmSchema;
   }
 
   /**

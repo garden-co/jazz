@@ -28,7 +28,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 describe("JazzRnRuntimeAdapter", () => {
   it("defers batched tick execution to avoid re-entrancy", async () => {
     const binding = createBinding();
-    new JazzRnRuntimeAdapter(binding, { tables: {} });
+    new JazzRnRuntimeAdapter(binding, {});
 
     const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
     const callbackObject = onBatchedTickNeeded.mock.calls[0][0];
@@ -42,7 +42,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("serializes mutation payloads and parses query responses", async () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const id = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
     expect(id).toBe("row-1");
@@ -65,7 +65,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("bridges sync and subscription callbacks with handle conversion", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const syncHandler = vi.fn();
     adapter.onSyncMessageToSend(syncHandler);
@@ -97,7 +97,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     adapter.onSyncMessageToSend(() => {
       throw new Error("sync boom");
@@ -117,7 +117,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("passes canonical subscription tuple updates through unchanged", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const onUpdate = vi.fn();
     adapter.subscribe("{}", onUpdate, null, null);
@@ -153,7 +153,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     await expect(adapter.insertWithAck("todos", [], "worker")).resolves.toBe("row-1");
     expect(binding.flush).toHaveBeenCalledTimes(1);
@@ -180,7 +180,7 @@ describe("JazzRnRuntimeAdapter", () => {
         throw objectNotFound;
       }),
     });
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     expect(() => adapter.update("row-1", { done: true })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
@@ -188,7 +188,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("no-ops sync hooks after close", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     adapter.close();
     adapter.addServer();

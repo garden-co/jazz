@@ -270,7 +270,7 @@ impl SubgraphBuilder {
     pub fn build(self, schema: &Schema) -> Option<SubgraphTemplate> {
         let table_name = crate::query_manager::types::TableName::new(&self.table);
         let table_schema = schema.get(&table_name)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         // Build base query
         let mut query_builder = QueryBuilder::new(&self.table);
@@ -448,7 +448,7 @@ mod tests {
         let base_query = QueryBuilder::new("users")
             .branches(&[v1_branch.as_str()])
             .build();
-        let output_descriptor = v2.get(&TableName::new("users")).unwrap().descriptor.clone();
+        let output_descriptor = v2.get(&TableName::new("users")).unwrap().columns.clone();
         let template = SubgraphTemplate::new(
             base_query,
             "email_address".to_string(),

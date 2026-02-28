@@ -288,6 +288,7 @@ impl SyncManager {
                 query_id,
                 query,
                 session,
+                propagation,
             } => {
                 // Track origin for QuerySettled relay
                 self.query_origin
@@ -300,6 +301,7 @@ impl SyncManager {
                         query_id: *query_id,
                         query: query.as_ref().clone(),
                         session: session.clone(),
+                        propagation: *propagation,
                     });
             }
             // Handle query unsubscription

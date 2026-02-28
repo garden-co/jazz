@@ -1,5 +1,6 @@
 import { NapiRuntime } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { JazzClient, type RequestLike, type SessionClient } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
@@ -35,8 +36,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isTableSchema(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.columns);
+}
+
 function isWasmSchema(value: unknown): value is WasmSchema {
-  return isRecord(value) && "tables" in value;
+  return (
+    isRecord(value) &&
+    !("_schema" in value) &&
+    !("wasmSchema" in value) &&
+    Object.values(value).every((table) => isTableSchema(table))
+  );
 }
 
 function resolveSchema(input: BackendSchemaInput): WasmSchema {
@@ -85,7 +95,7 @@ export class JazzContext {
   }
 
   private createClient(schema: WasmSchema): JazzClient {
-    const schemaJson = JSON.stringify(schema);
+    const schemaJson = serializeRuntimeSchema(schema);
     this.initializedSchemaJson = schemaJson;
 
     this.runtime = new NapiRuntime(
@@ -121,7 +131,7 @@ export class JazzContext {
    */
   client(source?: BackendSchemaInput): JazzClient {
     const schema = this.resolveSchema(source);
-    const schemaJson = JSON.stringify(schema);
+    const schemaJson = serializeRuntimeSchema(schema);
 
     if (!this.clientInstance) {
       return this.createClient(schema);

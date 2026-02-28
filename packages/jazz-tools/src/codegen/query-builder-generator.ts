@@ -112,7 +112,7 @@ export function generateWhereInputTypesWithMapper(
 ): string[] {
   const lines: string[] = [];
 
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName) + "WhereInput";
     lines.push(`export interface ${interfaceName} {`);
 
@@ -375,7 +375,7 @@ export function generateQueryBuilderClasses(
 ): string[] {
   const lines: string[] = [];
 
-  for (const tableName of Object.keys(schema.tables)) {
+  for (const tableName of Object.keys(schema)) {
     lines.push(...generateQueryBuilderClass(tableName, relations));
   }
 
@@ -388,8 +388,17 @@ export function generateQueryBuilderClasses(
 export function generateAppExport(schema: WasmSchema): string[] {
   const lines: string[] = [];
 
-  lines.push(`export const app = {`);
-  for (const tableName of Object.keys(schema.tables)) {
+  lines.push(`export interface GeneratedApp {`);
+  for (const tableName of Object.keys(schema)) {
+    const interfaceName = tableNameToInterface(tableName);
+    lines.push(`  ${tableName}: ${interfaceName}QueryBuilder;`);
+  }
+  lines.push(`  wasmSchema: WasmSchema;`);
+  lines.push(`}`);
+  lines.push(``);
+
+  lines.push(`export const app: GeneratedApp = {`);
+  for (const tableName of Object.keys(schema)) {
     const interfaceName = tableNameToInterface(tableName);
     lines.push(`  ${tableName}: new ${interfaceName}QueryBuilder(),`);
   }

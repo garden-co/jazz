@@ -43,7 +43,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let insert_policy = table_schema.policies.insert.with_check.clone();
 
         if values.len() != descriptor.columns.len() {
@@ -157,7 +157,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let insert_policy = table_schema.policies.insert.with_check.clone();
 
         if values.len() != descriptor.columns.len() {
@@ -270,9 +270,12 @@ impl QueryManager {
                         missing_id: *target_id,
                     });
                 }
-                (ColumnType::Array(element_type), Value::Array(elements))
-                    if matches!(element_type.as_ref(), ColumnType::Uuid) =>
-                {
+                (
+                    ColumnType::Array {
+                        element: element_type,
+                    },
+                    Value::Array(elements),
+                ) if matches!(element_type.as_ref(), ColumnType::Uuid) => {
                     for element in elements {
                         let Value::Uuid(target_id) = element else {
                             continue;
@@ -321,7 +324,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         match (column_type, value) {
             (_, Value::Null) => Ok(()),
-            (ColumnType::Json(schema), Value::Text(raw)) => {
+            (ColumnType::Json { schema }, Value::Text(raw)) => {
                 let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
                     QueryError::EncodingError(format!(
                         "invalid JSON for column `{column_path}`: {err}"
@@ -344,7 +347,12 @@ impl QueryManager {
 
                 Ok(())
             }
-            (ColumnType::Array(element_type), Value::Array(elements)) => {
+            (
+                ColumnType::Array {
+                    element: element_type,
+                },
+                Value::Array(elements),
+            ) => {
                 for (idx, element) in elements.iter().enumerate() {
                     Self::validate_json_value_for_type(
                         element_type,
@@ -354,7 +362,7 @@ impl QueryManager {
                 }
                 Ok(())
             }
-            (ColumnType::Row(desc), Value::Row(row_values)) => {
+            (ColumnType::Row { columns: desc }, Value::Row(row_values)) => {
                 for (idx, row_col) in desc.columns.iter().enumerate() {
                     let Some(row_value) = row_values.get(idx) else {
                         break;
@@ -607,7 +615,7 @@ impl QueryManager {
         let Some(source_schema) = self.schema.get(&source_table_name) else {
             return false;
         };
-        let source_descriptor = source_schema.descriptor.clone();
+        let source_descriptor = source_schema.columns.clone();
 
         let Some(col_idx) = source_descriptor.column_index(via_column) else {
             return false;
@@ -641,7 +649,7 @@ impl QueryManager {
                     }
                 }
             }
-            crate::query_manager::types::ColumnType::Array(element)
+            crate::query_manager::types::ColumnType::Array { element }
                 if **element == crate::query_manager::types::ColumnType::Uuid =>
             {
                 let candidate_ids =
@@ -732,7 +740,7 @@ impl QueryManager {
                     storage,
                     policy,
                     &content,
-                    &table_schema.descriptor,
+                    &table_schema.columns,
                     session,
                     table_name.as_str(),
                     branch,
@@ -817,7 +825,7 @@ impl QueryManager {
                 .get(&table_name)
                 .ok_or(QueryError::TableNotFound(table_name))?;
             (
-                table_schema.descriptor.clone(),
+                table_schema.columns.clone(),
                 table_schema.policies.update.using.clone(),
                 table_schema.policies.update.with_check.clone(),
             )
@@ -999,7 +1007,7 @@ impl QueryManager {
                 .get(&table_name)
                 .ok_or(QueryError::TableNotFound(table_name))?;
             (
-                table_schema.descriptor.clone(),
+                table_schema.columns.clone(),
                 table_schema.policies.effective_delete_using().cloned(),
             )
         };
@@ -1110,7 +1118,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         // Get parent commit on this branch
         let tips = self
@@ -1195,7 +1203,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -1292,7 +1300,7 @@ impl QueryManager {
             .schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         // Get parent commit
         let tips = self
@@ -1397,7 +1405,7 @@ impl QueryManager {
         let (data, _) = self.load_row_from_object(id)?;
 
         let table_schema = self.schema.get(&table_name)?;
-        let values = decode_row(&table_schema.descriptor, &data).ok()?;
+        let values = decode_row(&table_schema.columns, &data).ok()?;
         Some((table, values))
     }
 

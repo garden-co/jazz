@@ -5,14 +5,7 @@ on:
     branches:
       - main
     paths:
-      - packages/jazz-tools/package.json
-      - crates/jazz-wasm/package.json
-      - crates/jazz-napi/package.json
-      - crates/jazz-rn/package.json
-      - packages/jazz-tools/CHANGELOG.md
-      - crates/jazz-wasm/CHANGELOG.md
-      - crates/jazz-napi/CHANGELOG.md
-      - crates/jazz-rn/CHANGELOG.md
+      - .changeset/pre.json
   workflow_call:
     inputs:
       mode:
@@ -36,9 +29,57 @@ on:
         type: string
 
 jobs:
+  release-push-gate:
+    name: Gate release push trigger
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      - id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${EVENT_NAME}" != "push" ]; then
+            echo "should_run=true" >> "${GITHUB_OUTPUT}"
+            echo "reason=non-push invocation (${EVENT_NAME})" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${REF}" != "refs/heads/main" ]; then
+            echo "should_run=false" >> "${GITHUB_OUTPUT}"
+            echo "reason=push is not on main (${REF})" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          PRS_JSON=$(gh api "repos/${REPOSITORY}/commits/${SHA}/pulls" 2>/dev/null || echo "[]")
+          PR_NUMBER=$(PRS_JSON="${PRS_JSON}" node -e 'const prs=JSON.parse(process.env.PRS_JSON || "[]");const pr=prs.find((p)=>p&&p.merged_at&&p.head&&typeof p.head.ref==="string"&&p.head.ref.startsWith("changeset-release/"));if(pr){process.stdout.write(String(pr.number));}')
+
+          if [ -n "${PR_NUMBER}" ]; then
+            echo "should_run=true" >> "${GITHUB_OUTPUT}"
+            echo "reason=merged changeset release PR #${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should_run=false" >> "${GITHUB_OUTPUT}"
+            echo "reason=main push is not from a merged changeset-release/* PR" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Show gate decision
+        run: |
+          echo "should_run=${{ steps.gate.outputs.should_run }}"
+          echo "reason=${{ steps.gate.outputs.reason }}"
+
   build-linux:
     name: Build Linux (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +123,8 @@ jobs:
   build-macos:
     name: Build macOS (${{ matrix.arch }})
     runs-on: macos-14
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +160,8 @@ jobs:
   build-windows:
     name: Build Windows (x64)
     runs-on: windows-latest
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
 
     steps:
       - uses: actions/checkout@v6
@@ -143,6 +188,8 @@ jobs:
   build-napi:
     name: Build jazz-napi (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -187,6 +234,8 @@ jobs:
   build-rn-native:
     name: Build jazz-rn native payload
     runs-on: macos-14
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
 
     steps:
       - uses: actions/checkout@v6
@@ -226,7 +275,8 @@ jobs:
   publish-npm:
     name: Publish npm alpha
     runs-on: ubuntu-latest
-    needs: [build-linux, build-macos, build-windows, build-napi, build-rn-native]
+    needs: [release-push-gate, build-linux, build-macos, build-windows, build-napi, build-rn-native]
+    if: needs.release-push-gate.outputs.should_run == 'true'
     permissions:
       contents: read
       id-token: write

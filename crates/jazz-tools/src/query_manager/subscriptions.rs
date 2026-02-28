@@ -5,6 +5,7 @@ use std::{
 
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
+use crate::sync_manager::QueryPropagation;
 use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 
 #[cfg(test)]
@@ -23,6 +24,10 @@ use super::types::{ComposedBranchName, Schema, SchemaHash};
 use crate::object::ObjectId;
 
 impl QueryManager {
+    fn should_send_local_subscription_upstream(&self, propagation: QueryPropagation) -> bool {
+        propagation == QueryPropagation::Full || !self.sync_manager.has_persistence_tier()
+    }
+
     /// Create a query builder for a table.
     pub fn query(&self, table: &str) -> QueryBuilder {
         QueryBuilder::new(table)
@@ -49,6 +54,21 @@ impl QueryManager {
         query: Query,
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_session_and_propagation(
+            query,
+            session,
+            settled_tier,
+            QueryPropagation::Full,
+        )
+    }
+
+    fn subscribe_with_session_and_propagation(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?settled_tier).entered();
@@ -93,6 +113,7 @@ impl QueryManager {
                 settled_tier,
                 achieved_tiers: HashSet::new(),
                 current_ordered_ids: Vec::new(),
+                propagation,
             },
         );
 
@@ -148,6 +169,7 @@ impl QueryManager {
                 settled_tier: None,
                 achieved_tiers: HashSet::new(),
                 current_ordered_ids: Vec::new(),
+                propagation: QueryPropagation::Full,
             },
         );
 
@@ -171,16 +193,44 @@ impl QueryManager {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_sync_and_propagation(
+            query,
+            session,
+            settled_tier,
+            QueryPropagation::Full,
+        )
+    }
+
+    /// Subscribe to query results and configure upstream propagation.
+    pub fn subscribe_with_sync_and_propagation(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        propagation: QueryPropagation,
+    ) -> Result<QuerySubscriptionId, QueryError> {
         // Create local subscription
-        let sub_id = self.subscribe_with_session(query.clone(), session.clone(), settled_tier)?;
+        let sub_id = self.subscribe_with_session_and_propagation(
+            query.clone(),
+            session.clone(),
+            settled_tier,
+            propagation,
+        )?;
 
         let sync_query = self.sync_query_payload_for_upstream(&query);
 
-        // Send QuerySubscription to all servers
-        // Use the subscription ID as the query ID for simplicity
-        let query_id = QueryId(sub_id.0);
-        self.sync_manager
-            .send_query_subscription_to_servers(query_id, sync_query, session);
+        // Send QuerySubscription to connected servers/tiers.
+        // local-only still needs to reach the directly connected storage tier
+        // (e.g. worker OPFS), and will be prevented from forwarding upstream.
+        if self.should_send_local_subscription_upstream(propagation) {
+            let query_id = QueryId(sub_id.0);
+            self.sync_manager.send_query_subscription_to_servers(
+                query_id,
+                sync_query,
+                session,
+                propagation,
+            );
+        }
 
         Ok(sub_id)
     }
@@ -200,12 +250,18 @@ impl QueryManager {
     /// 1. Removes the local subscription
     /// 2. Sends a QueryUnsubscription to all connected servers
     pub fn unsubscribe_with_sync(&mut self, id: QuerySubscriptionId) {
+        let propagation = self
+            .subscriptions
+            .get(&id)
+            .map(|sub| sub.propagation)
+            .unwrap_or(QueryPropagation::Full);
         self.subscriptions.remove(&id);
 
-        // Send QueryUnsubscription to all servers
-        let query_id = QueryId(id.0);
-        self.sync_manager
-            .send_query_unsubscription_to_servers(query_id);
+        if self.should_send_local_subscription_upstream(propagation) {
+            let query_id = QueryId(id.0);
+            self.sync_manager
+                .send_query_unsubscription_to_servers(query_id);
+        }
     }
 
     /// Build the sync payload query for upstream forwarding.
@@ -223,7 +279,7 @@ impl QueryManager {
     /// Replay all currently active local and downstream query subscriptions
     /// to a newly added upstream server.
     fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
-        let local_subs: Vec<(QueryId, Query, Option<Session>)> = self
+        let local_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
             .subscriptions
             .iter()
             .map(|(sub_id, sub)| {
@@ -231,24 +287,45 @@ impl QueryManager {
                     QueryId(sub_id.0),
                     self.sync_query_payload_for_upstream(&sub.query),
                     sub.session.clone(),
+                    sub.propagation,
                 )
             })
             .collect();
 
-        for (query_id, query, session) in local_subs {
-            self.sync_manager
-                .send_query_subscription_to_server(server_id, query_id, query, session);
+        for (query_id, query, session, propagation) in local_subs {
+            if self.should_send_local_subscription_upstream(propagation) {
+                self.sync_manager.send_query_subscription_to_server(
+                    server_id,
+                    query_id,
+                    query,
+                    session,
+                    propagation,
+                );
+            }
         }
 
-        let downstream_subs: Vec<(QueryId, Query, Option<Session>)> = self
+        let downstream_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
             .server_subscriptions
             .iter()
-            .map(|((_, query_id), sub)| (*query_id, sub.query.clone(), sub.session.clone()))
+            .filter(|(_, sub)| sub.propagation == QueryPropagation::Full)
+            .map(|((_, query_id), sub)| {
+                (
+                    *query_id,
+                    sub.query.clone(),
+                    sub.session.clone(),
+                    sub.propagation,
+                )
+            })
             .collect();
 
-        for (query_id, query, session) in downstream_subs {
-            self.sync_manager
-                .send_query_subscription_to_server(server_id, query_id, query, session);
+        for (query_id, query, session, propagation) in downstream_subs {
+            self.sync_manager.send_query_subscription_to_server(
+                server_id,
+                query_id,
+                query,
+                session,
+                propagation,
+            );
         }
     }
 

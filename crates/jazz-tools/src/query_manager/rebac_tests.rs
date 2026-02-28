@@ -2030,8 +2030,13 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     );
 
     let image_column = if array_edge {
-        ColumnDescriptor::new("images", ColumnType::Array(Box::new(ColumnType::Uuid)))
-            .references("files")
+        ColumnDescriptor::new(
+            "images",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
+        )
+        .references("files")
     } else {
         ColumnDescriptor::new("image", ColumnType::Uuid)
             .nullable()

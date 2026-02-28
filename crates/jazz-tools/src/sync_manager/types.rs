@@ -80,6 +80,15 @@ impl std::fmt::Display for ClientId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueryId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum QueryPropagation {
+    #[default]
+    #[serde(rename = "full")]
+    Full,
+    #[serde(rename = "local-only")]
+    LocalOnly,
+}
+
 /// Unique identifier for a pending permission check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
@@ -226,6 +235,8 @@ pub enum SyncPayload {
         query_id: QueryId,
         query: Box<Query>,
         session: Option<Session>,
+        #[serde(default)]
+        propagation: QueryPropagation,
     },
 
     /// Unsubscribe from a query (client to server).
@@ -323,6 +334,7 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    pub propagation: QueryPropagation,
 }
 
 /// A pending query unsubscription that needs cleanup.

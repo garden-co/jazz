@@ -102,7 +102,11 @@ impl ArraySubqueryNode {
         // Array column type: Array<Row> where Row has the subgraph's output descriptor.
         // Each row from the subgraph is encoded using row encoding with that descriptor.
         let row_descriptor = subgraph_template.output_descriptor().clone();
-        let element_type = ColumnType::Array(Box::new(ColumnType::Row(Box::new(row_descriptor))));
+        let element_type = ColumnType::Array {
+            element: Box::new(ColumnType::Row {
+                columns: Box::new(row_descriptor),
+            }),
+        };
 
         output_columns.push(ColumnDescriptor {
             name: array_column_name.clone().into(),
@@ -471,7 +475,7 @@ mod tests {
             schema
                 .get(&TableName::new("users"))
                 .unwrap()
-                .descriptor
+                .columns
                 .clone(),
             true,
         );
@@ -506,7 +510,7 @@ mod tests {
             schema
                 .get(&TableName::new("users"))
                 .unwrap()
-                .descriptor
+                .columns
                 .clone(),
             true,
         );
@@ -526,7 +530,7 @@ mod tests {
 
         // Create a tuple with user id=42
         let user_values = vec![Value::Integer(42), Value::Text("Alice".into())];
-        let user_row_desc = &schema.get(&TableName::new("users")).unwrap().descriptor;
+        let user_row_desc = &schema.get(&TableName::new("users")).unwrap().columns;
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
@@ -547,7 +551,7 @@ mod tests {
             schema
                 .get(&TableName::new("users"))
                 .unwrap()
-                .descriptor
+                .columns
                 .clone(),
             true,
         );
@@ -567,7 +571,7 @@ mod tests {
 
         let row_id = ObjectId::new();
         let user_values = vec![Value::Integer(42), Value::Text("Alice".into())];
-        let user_row_desc = &schema.get(&TableName::new("users")).unwrap().descriptor;
+        let user_row_desc = &schema.get(&TableName::new("users")).unwrap().columns;
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: row_id,

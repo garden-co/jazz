@@ -54,7 +54,7 @@ impl SchemaHash {
             hasher.update(&[0]); // delimiter
 
             // Hash row descriptor (columns sorted by name)
-            hash_row_descriptor(&mut hasher, &table_schema.descriptor);
+            hash_row_descriptor(&mut hasher, &table_schema.columns);
             hash_table_policies(&mut hasher, &table_schema.policies);
         }
 
@@ -440,7 +440,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Text => {
             hasher.update(&[4]);
         }
-        ColumnType::Enum(variants) => {
+        ColumnType::Enum { variants } => {
             hasher.update(&[9]);
             // Enum variant ordering is normalized for hashing.
             let mut normalized = variants.clone();
@@ -461,7 +461,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Bytea => {
             hasher.update(&[10]);
         }
-        ColumnType::Json(schema) => {
+        ColumnType::Json { schema } => {
             hasher.update(&[11]);
             match schema {
                 Some(schema) => {
@@ -478,11 +478,11 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
                 }
             }
         }
-        ColumnType::Array(elem) => {
+        ColumnType::Array { element: elem } => {
             hasher.update(&[7]);
             hash_column_type(hasher, elem);
         }
-        ColumnType::Row(desc) => {
+        ColumnType::Row { columns: desc } => {
             hasher.update(&[8]);
             hash_row_descriptor(hasher, desc);
         }

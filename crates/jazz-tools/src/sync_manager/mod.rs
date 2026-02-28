@@ -125,6 +125,12 @@ impl SyncManager {
         self
     }
 
+    /// True when this runtime instance represents a persistence tier node
+    /// (worker/edge/core) rather than a top-level client.
+    pub fn has_persistence_tier(&self) -> bool {
+        self.my_tier.is_some()
+    }
+
     // ========================================================================
     // Connection Management
     // ========================================================================
@@ -344,6 +350,7 @@ impl SyncManager {
         query_id: QueryId,
         query: Query,
         session: Option<Session>,
+        propagation: QueryPropagation,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         for server_id in server_ids {
@@ -352,6 +359,7 @@ impl SyncManager {
                 query_id,
                 query.clone(),
                 session.clone(),
+                propagation,
             );
         }
     }
@@ -365,6 +373,7 @@ impl SyncManager {
         query_id: QueryId,
         query: Query,
         session: Option<Session>,
+        propagation: QueryPropagation,
     ) {
         if !self.servers.contains_key(&server_id) {
             return;
@@ -376,6 +385,7 @@ impl SyncManager {
                 query_id,
                 query: Box::new(query),
                 session,
+                propagation,
             },
         });
     }

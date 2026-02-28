@@ -24,13 +24,11 @@ const BACKEND_SECRET = "jazz-ts-backend-secret";
 const JWT_KID = "jazz-ts-kid";
 const JWT_SECRET = "jazz-ts-jwt-secret";
 const TEST_SCHEMA: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
@@ -332,7 +330,7 @@ async function waitForRows(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await client.query(queryJson, settledTier);
+      const rows = await client.query(queryJson, settledTier ? { settledTier } : undefined);
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
@@ -413,54 +411,52 @@ class JwksServer {
 
 function makeSocialBaseSchema(): WasmSchema {
   return {
-    tables: {
-      profiles: {
-        columns: [
-          { name: "displayName", column_type: { type: "Text" }, nullable: false },
-          { name: "principalId", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
-      people: {
-        columns: [
-          {
-            name: "profileId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "profiles",
-          },
-          {
-            name: "principalId",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-        ],
-      },
-      friendships: {
-        columns: [
-          {
-            name: "personAId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "people",
-          },
-          {
-            name: "personBId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "people",
-          },
-          {
-            name: "personAPrincipal",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-          {
-            name: "personBPrincipal",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-        ],
-      },
+    profiles: {
+      columns: [
+        { name: "displayName", column_type: { type: "Text" }, nullable: false },
+        { name: "principalId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+    people: {
+      columns: [
+        {
+          name: "profileId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "profiles",
+        },
+        {
+          name: "principalId",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+      ],
+    },
+    friendships: {
+      columns: [
+        {
+          name: "personAId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+        {
+          name: "personBId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+        {
+          name: "personAPrincipal",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+        {
+          name: "personBPrincipal",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+      ],
     },
   };
 }
@@ -473,27 +469,33 @@ function asRecord(value: unknown, context: string): Record<string, unknown> {
 }
 
 function normalizeWasmLiteral(value: unknown): unknown {
-  if (value === null) return "Null";
-  if (typeof value === "boolean") return { Boolean: value };
+  if (value === null) return { type: "Null" };
+  if (typeof value === "boolean") return { type: "Boolean", value };
   if (typeof value === "number") {
     if (!Number.isInteger(value) || !Number.isFinite(value)) {
       throw new Error("relation literal numbers must be finite integers");
     }
-    if (value >= -2147483648 && value <= 2147483647) return { Integer: value };
-    return { BigInt: value };
+    if (value >= -2147483648 && value <= 2147483647) return { type: "Integer", value };
+    return { type: "BigInt", value };
   }
   if (typeof value === "string") {
     const uuidLike =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-    return uuidLike ? { Uuid: value } : { Text: value };
+    return uuidLike ? { type: "Uuid", value } : { type: "Text", value };
   }
   if (Array.isArray(value)) {
-    return { Array: value.map((entry) => normalizeWasmLiteral(entry)) };
+    return { type: "Array", value: value.map((entry) => normalizeWasmLiteral(entry)) };
   }
 
   const object = asRecord(value, "literal");
-  // Already in externally-tagged Value enum form.
-  if (Object.keys(object).length === 1) return object;
+  // Already in internally-tagged Value enum form.
+  if (typeof object.type === "string") return object;
+  // Accept legacy externally-tagged test literals and normalize them.
+  if (Object.keys(object).length === 1) {
+    const [legacyType, legacyValue] = Object.entries(object)[0]!;
+    if (legacyType === "Null") return { type: "Null" };
+    return { type: legacyType, value: legacyValue };
+  }
   throw new Error("relation literal object must use typed Value enum representation");
 }
 
@@ -580,6 +582,9 @@ function toSerdeProjectExpr(input: unknown): unknown {
 function toSerdeRelExpr(input: unknown): unknown {
   const record = asRecord(input, "relation expr");
   const type = record.type;
+  if (typeof type !== "string") {
+    return record;
+  }
   if (type === "TableScan") return { TableScan: { table: record.table } };
   if (type === "Filter") {
     return {
@@ -676,43 +681,109 @@ function toSerdeRelExpr(input: unknown): unknown {
   throw new Error(`Unsupported relation type in ExistsRel conversion: ${String(type)}`);
 }
 
+function toSerdePolicyValue(input: unknown): unknown {
+  const record = asRecord(input, "policy value");
+  const type = record.type;
+  if (type === "Literal") return { type: "Literal", value: normalizeWasmLiteral(record.value) };
+  if (type === "SessionRef") return { type: "SessionRef", path: record.path };
+  return record;
+}
+
 function normalizePolicyExprForWasm(input: unknown): unknown {
   const expr = asRecord(input, "policy expr");
   const type = expr.type;
-  if (type === "And" || type === "Or") {
-    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+  if (typeof type !== "string") return expr;
+  if (type === "Cmp") {
     return {
-      ...expr,
-      exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)),
+      type: "Cmp",
+      column: expr.column,
+      op: expr.op,
+      value: toSerdePolicyValue(expr.value),
     };
   }
-  if (type === "Not") {
+  if (type === "IsNull") return { type: "IsNull", column: expr.column };
+  if (type === "IsNotNull") return { type: "IsNotNull", column: expr.column };
+  if (type === "Contains") {
     return {
-      ...expr,
-      expr: normalizePolicyExprForWasm(expr.expr),
+      type: "Contains",
+      column: expr.column,
+      value: toSerdePolicyValue(expr.value),
+    };
+  }
+  if (type === "In") {
+    return {
+      type: "In",
+      column: expr.column,
+      session_path: expr.session_path,
+    };
+  }
+  if (type === "InList") {
+    const values = Array.isArray(expr.values) ? expr.values : [];
+    return {
+      type: "InList",
+      column: expr.column,
+      values: values.map((value) => toSerdePolicyValue(value)),
     };
   }
   if (type === "Exists") {
     return {
-      ...expr,
+      type: "Exists",
+      table: expr.table,
       condition: normalizePolicyExprForWasm(expr.condition),
     };
   }
   if (type === "ExistsRel") {
     return {
-      ...expr,
+      type: "ExistsRel",
       rel: toSerdeRelExpr(expr.rel),
     };
   }
-  return expr;
+  if (type === "Inherits") {
+    return {
+      type: "Inherits",
+      operation: expr.operation,
+      via_column: expr.via_column,
+      max_depth: expr.max_depth,
+    };
+  }
+  if (type === "InheritsReferencing") {
+    return {
+      type: "InheritsReferencing",
+      operation: expr.operation,
+      source_table: expr.source_table,
+      via_column: expr.via_column,
+      max_depth: expr.max_depth,
+    };
+  }
+  if (type === "And") {
+    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+    return { type: "And", exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
+  }
+  if (type === "Or") {
+    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+    return { type: "Or", exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
+  }
+  if (type === "Not") {
+    return { type: "Not", expr: normalizePolicyExprForWasm(expr.expr) };
+  }
+  if (type === "True") return { type: "True" };
+  if (type === "False") return { type: "False" };
+  throw new Error(`Unsupported policy expr type in schema normalization: ${type}`);
 }
 
 function normalizePermissionsForWasm<T>(permissions: T): T {
   const out: Record<string, unknown> = {};
   for (const [tableName, tablePolicies] of Object.entries(permissions as Record<string, unknown>)) {
     const policiesRecord = asRecord(tablePolicies, `policies for ${tableName}`);
-    const normalizedTable: Record<string, unknown> = {};
-    for (const [operation, opPolicy] of Object.entries(policiesRecord)) {
+    const normalizedTable: Record<string, unknown> = {
+      select: {},
+      insert: {},
+      update: {},
+      delete: {},
+    };
+    const operations = ["select", "insert", "update", "delete"] as const;
+    for (const operation of operations) {
+      const opPolicy = policiesRecord[operation];
       if (!opPolicy) continue;
       const opPolicyRecord = asRecord(opPolicy, `${tableName}.${operation}`);
       const normalizedOperation: Record<string, unknown> = {};
@@ -802,8 +873,8 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
     }),
   );
 
-  const tables: WasmSchema["tables"] = {};
-  for (const [tableName, tableSchema] of Object.entries(schema.tables)) {
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
     const tablePolicies = permissions[tableName];
     tables[tableName] = tablePolicies
       ? ({
@@ -812,7 +883,7 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
         } as (typeof tables)[string])
       : tableSchema;
   }
-  return { tables };
+  return tables;
 }
 
 function buildAllRowsQuery(schema: WasmSchema, table: string): string {
@@ -1277,13 +1348,11 @@ class OwnedItemQueryBuilder {
 
 function buildOwnedItemsSchema(): WasmSchema {
   const schema: WasmSchema = {
-    tables: {
-      owned_items: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
+    owned_items: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
     },
   };
 
@@ -1298,8 +1367,8 @@ function buildOwnedItemsSchema(): WasmSchema {
     }),
   );
 
-  const tables: WasmSchema["tables"] = {};
-  for (const [tableName, tableSchema] of Object.entries(schema.tables)) {
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
     const tablePolicies = permissions[tableName];
     tables[tableName] = tablePolicies
       ? ({
@@ -1308,7 +1377,7 @@ function buildOwnedItemsSchema(): WasmSchema {
         } as (typeof tables)[string])
       : tableSchema;
   }
-  return { tables };
+  return tables;
 }
 
 describe("Policy bypass: subscription without session skips PolicyFilterNode", () => {
@@ -1368,7 +1437,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       );
 
       // Establish sync by fetching data without session first.
-      await aliceClient.queryInternal(queryAllItems, undefined, "edge");
+      await aliceClient.queryInternal(queryAllItems, undefined, { settledTier: "edge" });
 
       // query() should only return alice's row.
       const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 1);
@@ -1449,7 +1518,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       bobClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("bob", JWT_SECRET), schema),
       );
-      const rows = await bobClient.queryInternal(queryAllItems, undefined, "edge");
+      const rows = await bobClient.queryInternal(queryAllItems, undefined, { settledTier: "edge" });
 
       // Server should fall back to Bob's connection-level session.
       // The hashed principal ID won't match Alice's ownerId, so zero rows.
