@@ -8,6 +8,8 @@ use crate::object::ObjectId;
 
 use crate::storage::Storage;
 
+use crate::schema_manager::SchemaContext;
+
 use super::graph::{GraphNode, QueryGraph};
 use super::graph_nodes::NodeId;
 use super::graph_nodes::exists_output::ExistsOutputNode;
@@ -208,7 +210,14 @@ impl PolicyGraph {
         branch: &str,
     ) -> Option<Self> {
         let branches = vec![branch.to_string()];
-        let mut graph = QueryGraph::compile_relation_ir(rel, schema, &branches, None)?;
+        let schema_context = SchemaContext::with_defaults(schema.clone(), "main");
+        let mut graph = QueryGraph::compile_relation_ir_with_schema_context(
+            rel,
+            schema,
+            &branches,
+            None,
+            &schema_context,
+        )?;
         let output_descriptor = match graph
             .nodes
             .get(graph.output_node.0 as usize)

@@ -17,6 +17,11 @@ export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transpor
 export { createDb, Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
+export {
+  fetchSchemaHashes,
+  fetchStoredWasmSchema,
+  type FetchStoredWasmSchemaOptions,
+} from "./schema-fetch.js";
 export { resolveLocalAuthDefaults } from "./local-auth.js";
 export {
   fetchSchemaHashes,

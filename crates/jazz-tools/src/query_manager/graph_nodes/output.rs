@@ -2,10 +2,10 @@ use ahash::AHashSet;
 
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::types::{
-    Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
+    Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 
-use super::RowNode;
+use super::{RowNode, tuple_delta::compute_tuple_delta};
 
 /// Output mode for query results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,55 +98,9 @@ impl OutputNode {
         &self.ordered_tuples
     }
 
-    fn compute_tuple_delta(&self, old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
-        let mut delta = TupleDelta::new();
-        let old_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
-            old_tuples.iter().map(|t| t.ids()).collect();
-        let new_ids: std::collections::HashSet<Vec<crate::object::ObjectId>> =
-            new_tuples.iter().map(|t| t.ids()).collect();
-
-        for old in old_tuples {
-            if !new_ids.contains(&old.ids()) {
-                delta.removed.push(old.clone());
-            }
-        }
-
-        for new in new_tuples {
-            if !old_ids.contains(&new.ids()) {
-                delta.added.push(new.clone());
-            }
-        }
-
-        let old_pos: std::collections::HashMap<Vec<crate::object::ObjectId>, usize> = old_tuples
-            .iter()
-            .enumerate()
-            .map(|(idx, t)| (t.ids(), idx))
-            .collect();
-        for (new_idx, new_tuple) in new_tuples.iter().enumerate() {
-            let ids = new_tuple.ids();
-            if let Some(old_idx) = old_pos.get(&ids)
-                && old_idx != &new_idx
-            {
-                delta.moved.push(tuple_as_id_only(new_tuple));
-            }
-        }
-
-        for old in old_tuples {
-            if let Some(new) = new_tuples
-                .iter()
-                .find(|candidate| candidate.ids() == old.ids())
-                && has_tuple_content_changed(old, new)
-            {
-                delta.updated.push((old.clone(), new.clone()));
-            }
-        }
-
-        delta
-    }
-
     /// Rebuild ordered output from a full ordered upstream input.
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
-        let delta = self.compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
+        let delta = compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
 
         self.ordered_tuples = ordered_tuples.to_vec();
         self.current_tuples = self.ordered_tuples.iter().cloned().collect();
@@ -191,24 +145,6 @@ impl OutputNode {
                 .collect(),
         }
     }
-}
-
-fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
-    old.iter()
-        .zip(new.iter())
-        .any(|(o, n)| match (o.content(), n.content()) {
-            (Some(oc), Some(nc)) => oc != nc,
-            _ => false,
-        })
-}
-
-fn tuple_as_id_only(tuple: &Tuple) -> Tuple {
-    Tuple::new(
-        tuple
-            .iter()
-            .map(|elem| TupleElement::Id(elem.id()))
-            .collect(),
-    )
 }
 
 /// Decoded delta with Values instead of binary.
@@ -444,5 +380,79 @@ mod tests {
         let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
+    }
+
+    #[test]
+    fn ordered_input_insert_does_not_mark_existing_as_moved() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let base: Vec<_> = ids
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&base);
+
+        let inserted = make_tuple(ids[3], 99, "Inserted");
+        let delta = node.process_with_ordered_input(&[
+            inserted.clone(),
+            base[0].clone(),
+            base[1].clone(),
+            base[2].clone(),
+        ]);
+
+        assert_eq!(delta.added.len(), 1);
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_remove_does_not_mark_following_as_moved() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        let delta = node.process_with_ordered_input(&[
+            tuples[0].clone(),
+            tuples[2].clone(),
+            tuples[3].clone(),
+        ]);
+
+        assert_eq!(delta.removed.len(), 1);
+        assert_eq!(delta.removed[0].first_id(), tuples[1].first_id());
+        assert!(delta.added.is_empty());
+        assert!(delta.moved.is_empty());
+    }
+
+    #[test]
+    fn ordered_input_rotation_marks_only_reordered_tuple_as_moved() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let ids: Vec<_> = (0..3).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        let delta = node.process_with_ordered_input(&[
+            tuples[1].clone(),
+            tuples[2].clone(),
+            tuples[0].clone(),
+        ]);
+
+        assert!(delta.added.is_empty());
+        assert!(delta.removed.is_empty());
+        assert_eq!(delta.moved.len(), 1);
+        assert_eq!(delta.moved[0].first_id(), tuples[0].first_id());
     }
 }
