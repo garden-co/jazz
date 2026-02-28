@@ -441,7 +441,7 @@ impl QueryManager {
             && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 new_content,
                 &branch,
             )
@@ -499,8 +499,7 @@ impl QueryManager {
         };
 
         // Evaluate simple parts of the policy
-        let result =
-            evaluate_simple_parts(&policy, content, &table_schema.descriptor, &check.session);
+        let result = evaluate_simple_parts(&policy, content, &table_schema.columns, &check.session);
 
         if !result.passed {
             // Simple parts failed - reject immediately
@@ -575,7 +574,7 @@ impl QueryManager {
         let graphs = self.create_policy_graphs_for_complex_clauses(
             &graph_clauses,
             content,
-            &table_schema.descriptor,
+            &table_schema.columns,
             &table_name,
             &check.session,
         );
@@ -617,7 +616,7 @@ impl QueryManager {
             && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 new_content,
                 branch,
             )
@@ -655,7 +654,7 @@ impl QueryManager {
             };
 
             let result =
-                evaluate_simple_parts(using, old_content, &table_schema.descriptor, &check.session);
+                evaluate_simple_parts(using, old_content, &table_schema.columns, &check.session);
 
             if !result.passed {
                 // USING check failed - session cannot see the old row
@@ -687,7 +686,7 @@ impl QueryManager {
             let result = evaluate_simple_parts(
                 with_check,
                 new_content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &check.session,
             );
 
@@ -773,7 +772,7 @@ impl QueryManager {
             let clause_graphs = self.create_policy_graphs_for_complex_clauses(
                 std::slice::from_ref(clause),
                 content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &table_name,
                 &check.session,
             );

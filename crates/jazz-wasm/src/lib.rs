@@ -24,7 +24,7 @@
 //! };
 //!
 //! // Create runtime
-//! const schema = { tables: { todos: { columns: [...] } } };
+//! const schema = { todos: { columns: [...] } };
 //! const runtime = new WasmRuntime(driver, JSON.stringify(schema), 'my-app', 'dev', 'main');
 //!
 //! // Insert a row
@@ -71,9 +71,9 @@ pub fn init() {
 /// Returns the schema as a JsValue for inspection.
 #[wasm_bindgen(js_name = parseSchema)]
 pub fn parse_schema(json: &str) -> Result<JsValue, JsError> {
-    let wasm_schema: types::WasmSchema =
+    let schema: types::Schema =
         serde_json::from_str(json).map_err(|e| JsError::new(&format!("Parse error: {}", e)))?;
-    Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
+    Ok(serde_wasm_bindgen::to_value(&schema)?)
 }
 
 /// Generate a new UUID v7 (time-ordered).

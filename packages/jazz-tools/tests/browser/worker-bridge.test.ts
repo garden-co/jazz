@@ -30,22 +30,20 @@ interface DebugSchemaState {
 // ---------------------------------------------------------------------------
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: true,
-        },
-      ],
-    },
-    projects: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: true,
+      },
+    ],
+  },
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
   },
 };
 
@@ -121,25 +119,21 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 
 // Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
 const catalogueSchemaV1: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
 const catalogueSchemaV2: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-        { name: "description", column_type: { type: "Text" }, nullable: true },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
+      { name: "description", column_type: { type: "Text" }, nullable: true },
+    ],
   },
 };
 

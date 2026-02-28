@@ -84,54 +84,52 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [
-        {
-          name: "name",
-          column_type: {
+  projects: {
+    columns: [
+      {
+        name: "name",
+        column_type: {
+          type: "Text",
+        },
+        nullable: false,
+      },
+    ],
+  },
+  todos: {
+    columns: [
+      {
+        name: "title",
+        column_type: {
+          type: "Text",
+        },
+        nullable: false,
+      },
+      {
+        name: "done",
+        column_type: {
+          type: "Boolean",
+        },
+        nullable: false,
+      },
+      {
+        name: "tags",
+        column_type: {
+          type: "Array",
+          element: {
             type: "Text",
           },
-          nullable: false,
         },
-      ],
-    },
-    todos: {
-      columns: [
-        {
-          name: "title",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+        nullable: false,
+      },
+      {
+        name: "project",
+        column_type: {
+          type: "Uuid",
         },
-        {
-          name: "done",
-          column_type: {
-            type: "Boolean",
-          },
-          nullable: false,
-        },
-        {
-          name: "tags",
-          column_type: {
-            type: "Array",
-            element: {
-              type: "Text",
-            },
-          },
-          nullable: false,
-        },
-        {
-          name: "project",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: false,
-          references: "projects",
-        },
-      ],
-    },
+        nullable: false,
+        references: "projects",
+      },
+    ],
   },
 };
 

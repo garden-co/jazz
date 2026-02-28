@@ -11,6 +11,7 @@
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { Session } from "./context.js";
 import {
   JazzClient,
@@ -462,7 +463,7 @@ export class Db {
     }
 
     // Use stringified schema as cache key
-    const key = JSON.stringify(schema);
+    const key = serializeRuntimeSchema(schema);
 
     if (!this.clients.has(key)) {
       // Create in-memory runtime (works for both direct and worker mode)

@@ -10,9 +10,10 @@ use super::encoding::{
 use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
+use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -23,7 +24,8 @@ pub enum CmpOp {
 }
 
 /// A value in a policy expression - either a literal or a session reference.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "PolicyValueSerde", into = "PolicyValueSerde")]
 pub enum PolicyValue {
     /// A literal value.
     Literal(Value),
@@ -52,7 +54,7 @@ pub fn normalize_recursive_max_depth(requested: Option<usize>) -> Option<usize> 
 }
 
 /// Database operation type for policy evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Operation {
     Select,
     Insert,
@@ -75,7 +77,8 @@ impl std::fmt::Display for Operation {
 ///
 /// Policies are boolean expressions evaluated against rows and session context.
 /// They can reference row columns, session variables, and related rows via INHERITS.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "PolicyExprSerde", into = "PolicyExprSerde")]
 pub enum PolicyExpr {
     /// Compare a column value against a policy value.
     Cmp {
@@ -162,6 +165,196 @@ pub enum PolicyExpr {
 
     /// Always false - denies all rows.
     False,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum PolicyValueSerde {
+    Literal { value: Value },
+    SessionRef { path: Vec<String> },
+}
+
+impl From<PolicyValueSerde> for PolicyValue {
+    fn from(value: PolicyValueSerde) -> Self {
+        match value {
+            PolicyValueSerde::Literal { value } => PolicyValue::Literal(value),
+            PolicyValueSerde::SessionRef { path } => PolicyValue::SessionRef(path),
+        }
+    }
+}
+
+impl From<PolicyValue> for PolicyValueSerde {
+    fn from(value: PolicyValue) -> Self {
+        match value {
+            PolicyValue::Literal(value) => PolicyValueSerde::Literal { value },
+            PolicyValue::SessionRef(path) => PolicyValueSerde::SessionRef { path },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum PolicyExprSerde {
+    Cmp {
+        column: String,
+        op: CmpOp,
+        value: PolicyValue,
+    },
+    IsNull {
+        column: String,
+    },
+    IsNotNull {
+        column: String,
+    },
+    Contains {
+        column: String,
+        value: PolicyValue,
+    },
+    In {
+        column: String,
+        session_path: Vec<String>,
+    },
+    InList {
+        column: String,
+        values: Vec<PolicyValue>,
+    },
+    Exists {
+        table: String,
+        condition: Box<PolicyExprSerde>,
+    },
+    ExistsRel {
+        rel: RelExpr,
+    },
+    Inherits {
+        operation: Operation,
+        via_column: String,
+        max_depth: Option<usize>,
+    },
+    InheritsReferencing {
+        operation: Operation,
+        source_table: String,
+        via_column: String,
+        max_depth: Option<usize>,
+    },
+    And {
+        exprs: Vec<PolicyExprSerde>,
+    },
+    Or {
+        exprs: Vec<PolicyExprSerde>,
+    },
+    Not {
+        expr: Box<PolicyExprSerde>,
+    },
+    True {},
+    False {},
+}
+
+impl From<PolicyExprSerde> for PolicyExpr {
+    fn from(value: PolicyExprSerde) -> Self {
+        match value {
+            PolicyExprSerde::Cmp { column, op, value } => PolicyExpr::Cmp { column, op, value },
+            PolicyExprSerde::IsNull { column } => PolicyExpr::IsNull { column },
+            PolicyExprSerde::IsNotNull { column } => PolicyExpr::IsNotNull { column },
+            PolicyExprSerde::Contains { column, value } => PolicyExpr::Contains { column, value },
+            PolicyExprSerde::In {
+                column,
+                session_path,
+            } => PolicyExpr::In {
+                column,
+                session_path,
+            },
+            PolicyExprSerde::InList { column, values } => PolicyExpr::InList { column, values },
+            PolicyExprSerde::Exists { table, condition } => PolicyExpr::Exists {
+                table,
+                condition: Box::new((*condition).into()),
+            },
+            PolicyExprSerde::ExistsRel { rel } => PolicyExpr::ExistsRel { rel },
+            PolicyExprSerde::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            } => PolicyExpr::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            },
+            PolicyExprSerde::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            },
+            PolicyExprSerde::And { exprs } => {
+                PolicyExpr::And(exprs.into_iter().map(PolicyExpr::from).collect())
+            }
+            PolicyExprSerde::Or { exprs } => {
+                PolicyExpr::Or(exprs.into_iter().map(PolicyExpr::from).collect())
+            }
+            PolicyExprSerde::Not { expr } => PolicyExpr::Not(Box::new((*expr).into())),
+            PolicyExprSerde::True {} => PolicyExpr::True,
+            PolicyExprSerde::False {} => PolicyExpr::False,
+        }
+    }
+}
+
+impl From<PolicyExpr> for PolicyExprSerde {
+    fn from(value: PolicyExpr) -> Self {
+        match value {
+            PolicyExpr::Cmp { column, op, value } => PolicyExprSerde::Cmp { column, op, value },
+            PolicyExpr::IsNull { column } => PolicyExprSerde::IsNull { column },
+            PolicyExpr::IsNotNull { column } => PolicyExprSerde::IsNotNull { column },
+            PolicyExpr::Contains { column, value } => PolicyExprSerde::Contains { column, value },
+            PolicyExpr::In {
+                column,
+                session_path,
+            } => PolicyExprSerde::In {
+                column,
+                session_path,
+            },
+            PolicyExpr::InList { column, values } => PolicyExprSerde::InList { column, values },
+            PolicyExpr::Exists { table, condition } => PolicyExprSerde::Exists {
+                table,
+                condition: Box::new((*condition).into()),
+            },
+            PolicyExpr::ExistsRel { rel } => PolicyExprSerde::ExistsRel { rel },
+            PolicyExpr::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            } => PolicyExprSerde::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            },
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => PolicyExprSerde::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            },
+            PolicyExpr::And(exprs) => PolicyExprSerde::And {
+                exprs: exprs.into_iter().map(PolicyExprSerde::from).collect(),
+            },
+            PolicyExpr::Or(exprs) => PolicyExprSerde::Or {
+                exprs: exprs.into_iter().map(PolicyExprSerde::from).collect(),
+            },
+            PolicyExpr::Not(expr) => PolicyExprSerde::Not {
+                expr: Box::new((*expr).into()),
+            },
+            PolicyExpr::True => PolicyExprSerde::True {},
+            PolicyExpr::False => PolicyExprSerde::False {},
+        }
+    }
 }
 
 impl PolicyExpr {
@@ -494,7 +687,7 @@ where
     evaluate_recursive(
         parent_policy,
         &parent_content,
-        &parent_schema.descriptor,
+        &parent_schema.columns,
         ctx,
         depth + 1,
     )
@@ -1760,7 +1953,12 @@ mod tests {
     fn test_simple_parts_contains_text_and_array() {
         let desc = RowDescriptor::new(vec![
             ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ]);
         let content = encode_row(
             &desc,

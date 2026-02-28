@@ -57,9 +57,12 @@ use jazz_tools::sync_manager::{
 };
 
 use crate::query::parse_query;
+use crate::types::SubscriptionRow;
 #[cfg(target_arch = "wasm32")]
-use crate::types::{WasmAdded, WasmRemoved, WasmRowChange, WasmRowDelta, WasmUpdated};
-use crate::types::{WasmRow, WasmSchema, WasmValue};
+use crate::types::{
+    SubscriptionRowAdded, SubscriptionRowChange, SubscriptionRowDelta, SubscriptionRowRemoved,
+    SubscriptionRowUpdated,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -282,12 +285,10 @@ impl WasmRuntime {
         info!("creating in-memory runtime");
 
         // Parse schema
-        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
-        let schema: Schema = wasm_schema
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
+        let schema: Schema = wasm_schema;
 
         // Parse optional tier
         let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
@@ -403,12 +404,8 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
-        let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<_, _>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values;
 
         let mut core = self.core.borrow_mut();
         let result = core
@@ -459,8 +456,8 @@ impl WasmRuntime {
             let wasm_results: Vec<_> = results
                 .into_iter()
                 .map(|(id, values)| {
-                    let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
-                    WasmRow {
+                    let wasm_values: Vec<Value> = values;
+                    SubscriptionRow {
                         id: id.uuid().to_string(),
                         values: wasm_values,
                     }
@@ -484,16 +481,8 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
-
-        let updates: Vec<(String, Value)> = partial_values
-            .into_iter()
-            .map(|(k, v)| {
-                let groove_value: Value = v.try_into()?;
-                Ok((k, groove_value))
-            })
-            .collect::<Result<_, String>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
@@ -535,12 +524,8 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<_, _>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values;
 
         let (object_id, receiver) = {
             let mut core = self.core.borrow_mut();
@@ -571,15 +556,8 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
-        let updates: Vec<(String, Value)> = partial_values
-            .into_iter()
-            .map(|(k, v)| {
-                let groove_value: Value = v.try_into()?;
-                Ok((k, groove_value))
-            })
-            .collect::<Result<_, String>>()
-            .map_err(|e: String| JsError::new(&e))?;
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let receiver = {
             let mut core = self.core.borrow_mut();
@@ -658,31 +636,31 @@ impl WasmRuntime {
         let propagation = parse_propagation(options_json)?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> WasmRow {
+            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
                 let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().map(WasmValue::from).collect::<Vec<_>>())
+                    .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
                     .unwrap_or_default();
-                WasmRow {
+                SubscriptionRow {
                     id: row.id.uuid().to_string(),
                     values,
                 }
             };
 
             let descriptor = &delta.descriptor;
-            let wasm_delta = WasmRowDelta(
+            let wasm_delta = SubscriptionRowDelta(
                 delta
                     .ordered_delta
                     .removed
                     .iter()
                     .map(|change| {
-                        WasmRowChange::Removed(WasmRemoved {
+                        SubscriptionRowChange::Removed(SubscriptionRowRemoved {
                             kind: 1,
                             id: change.id.uuid().to_string(),
                             index: change.index,
                         })
                     })
                     .chain(delta.ordered_delta.updated.iter().map(|change| {
-                        WasmRowChange::Updated(WasmUpdated {
+                        SubscriptionRowChange::Updated(SubscriptionRowUpdated {
                             kind: 2,
                             id: change.id.uuid().to_string(),
                             index: change.new_index,
@@ -690,7 +668,7 @@ impl WasmRuntime {
                         })
                     }))
                     .chain(delta.ordered_delta.added.iter().map(|change| {
-                        WasmRowChange::Added(WasmAdded {
+                        SubscriptionRowChange::Added(SubscriptionRowAdded {
                             kind: 0,
                             id: change.id.uuid().to_string(),
                             index: change.index,
@@ -824,7 +802,7 @@ impl WasmRuntime {
     pub fn get_schema(&self) -> Result<JsValue, JsError> {
         let core = self.core.borrow();
         let schema = core.current_schema();
-        let wasm_schema = WasmSchema::from(schema);
+        let wasm_schema = schema.clone();
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
     }
 
@@ -896,11 +874,9 @@ impl WasmRuntime {
     /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
     #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
     pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
-        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema: Schema = wasm_schema
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
+        let schema: Schema = wasm_schema;
 
         let mut core = self.core.borrow_mut();
         core.add_live_schema_and_persist_catalogue(schema)
@@ -963,12 +939,10 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         // Parse schema
-        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
-        let schema: Schema = wasm_schema
-            .try_into()
-            .map_err(|e: String| JsError::new(&e))?;
+        let schema: Schema = wasm_schema;
 
         // Parse optional tier
         let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
