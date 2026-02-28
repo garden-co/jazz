@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 2.0.0-alpha.8
+
+### Patch Changes
+
+- 401db01: fix cold load of object history
+- d1f17a9: fix: ensure query subgraphs share branch and schema context of parent graph
+- 4775a79: Add a high-level server-side `createJazzContext` API in `jazz-tools/backend` with lazy runtime setup from generated app DSL objects, plus request/session-scoped helpers (`forRequest`, `forSession`) and lifecycle helpers (`flush`, `shutdown`).
+  - jazz-wasm@2.0.0-alpha.8
+
 ## 2.0.0-alpha.7
 
 ### Patch Changes
