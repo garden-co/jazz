@@ -24,7 +24,13 @@ export {
   type QueryOptions,
   type TableProxy,
 } from "./db.js";
+export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
+export {
+  fetchSchemaHashes,
+  fetchStoredWasmSchema,
+  type FetchStoredWasmSchemaOptions,
+} from "./schema-fetch.js";
 export { resolveLocalAuthDefaults } from "./local-auth.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";

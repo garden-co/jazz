@@ -88,7 +88,7 @@ fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
         TableName::new("documents"),
         RowDescriptor::new(vec![ColumnDescriptor::new(
             "payload",
-            ColumnType::Json(schema),
+            ColumnType::Json { schema },
         )])
         .into(),
     );
@@ -491,7 +491,7 @@ fn recursive_hop_query_subscriptions_receive_expansion_updates() {
         .added
         .iter()
         .filter_map(|row| {
-            match decode_row(&team_descriptor.descriptor, &row.data)
+            match decode_row(&team_descriptor.columns, &row.data)
                 .ok()?
                 .first()
             {
@@ -1338,7 +1338,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     let live_descriptor = live_schema
         .get(&TableName::new("users"))
         .expect("live schema table should exist")
-        .descriptor
+        .columns
         .clone();
     qm.add_live_schema(live_schema);
 
@@ -2640,7 +2640,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .schema()
         .get(&TableName::new("users"))
         .unwrap()
-        .descriptor
+        .columns
         .clone();
 
     // Commit A: lower timestamp, content "TipA"
@@ -3943,8 +3943,13 @@ fn file_storage_schema() -> Schema {
     schema.insert(
         TableName::new("files"),
         RowDescriptor::new(vec![
-            ColumnDescriptor::new("parts", ColumnType::Array(Box::new(ColumnType::Uuid)))
-                .references("file_parts"),
+            ColumnDescriptor::new(
+                "parts",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+            .references("file_parts"),
         ])
         .into(),
     );
@@ -3972,10 +3977,19 @@ fn files_with_parts_descriptor() -> RowDescriptor {
     let part_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]);
     RowDescriptor::new(vec![
-        ColumnDescriptor::new("parts", ColumnType::Array(Box::new(ColumnType::Uuid))),
+        ColumnDescriptor::new(
+            "parts",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid),
+            },
+        ),
         ColumnDescriptor::new(
             "part_rows",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(part_descriptor)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(part_descriptor),
+                }),
+            },
         ),
     ])
 }
@@ -4402,7 +4416,11 @@ fn users_with_posts_descriptor() -> RowDescriptor {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ])
 }
@@ -5139,7 +5157,11 @@ fn array_subquery_with_select_columns() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -5290,7 +5312,11 @@ fn array_subquery_with_join() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "post_comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(joined_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(joined_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -5451,7 +5477,11 @@ fn array_subquery_nested() {
         ColumnDescriptor::new("author_id", ColumnType::Integer),
         ColumnDescriptor::new(
             "comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(comments_row_desc),
+                }),
+            },
         ),
     ]);
     // users row with posts array: [id, name, posts[]]
@@ -5460,7 +5490,11 @@ fn array_subquery_nested() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -5656,11 +5690,19 @@ fn array_subquery_multiple_columns() {
         ColumnDescriptor::new("name", ColumnType::Text),
         ColumnDescriptor::new(
             "posts",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(posts_row_desc),
+                }),
+            },
         ),
         ColumnDescriptor::new(
             "comments",
-            ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(comments_row_desc),
+                }),
+            },
         ),
     ]);
 
@@ -7303,7 +7345,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // (simulating upstream sending fresh data)
     let table_schema = schema.get(&TableName::new("users")).unwrap();
     let row_data = encode_row(
-        &table_schema.descriptor,
+        &table_schema.columns,
         &[Value::Text("Alice".into()), Value::Integer(80)],
     )
     .unwrap();
@@ -7737,7 +7779,7 @@ fn e2e_permissions_prevent_sync() {
     schema.insert(
         TableName::new("documents"),
         TableSchema {
-            descriptor: RowDescriptor::new(vec![
+            columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),
@@ -7825,7 +7867,7 @@ fn e2e_permissions_prevent_new_row_sync() {
     schema.insert(
         TableName::new("documents"),
         TableSchema {
-            descriptor: RowDescriptor::new(vec![
+            columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
             ]),

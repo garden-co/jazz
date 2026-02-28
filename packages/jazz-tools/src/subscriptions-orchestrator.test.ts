@@ -45,7 +45,7 @@ function makeQuery(payload?: Record<string, unknown>): QueryBuilder<Todo> {
 
   return {
     _table: "todos",
-    _schema: { tables: {} },
+    _schema: {},
     _rowType: {} as Todo,
     _build() {
       return JSON.stringify(builtPayload);

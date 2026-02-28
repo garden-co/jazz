@@ -101,111 +101,109 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [
-        {
-          name: "name",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+  projects: {
+    columns: [
+      {
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-      ],
-    },
-    todos: {
-      columns: [
-        {
-          name: "title",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+        nullable: false,
+      },
+    ],
+  },
+  todos: {
+    columns: [
+      {
+        name: "title",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "done",
-          column_type: {
-            type: "Boolean",
-          },
-          nullable: false,
+        nullable: false,
+      },
+      {
+        name: "done",
+        column_type: {
+          type: "Boolean",
         },
-        {
-          name: "description",
-          column_type: {
-            type: "Text",
-          },
-          nullable: true,
+        nullable: false,
+      },
+      {
+        name: "description",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "owner_id",
-          column_type: {
-            type: "Text",
-          },
-          nullable: false,
+        nullable: true,
+      },
+      {
+        name: "owner_id",
+        column_type: {
+          type: "Text",
         },
-        {
-          name: "parent",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: true,
-          references: "todos",
+        nullable: false,
+      },
+      {
+        name: "parent",
+        column_type: {
+          type: "Uuid",
         },
-        {
-          name: "project",
-          column_type: {
-            type: "Uuid",
-          },
-          nullable: true,
-          references: "projects",
+        nullable: true,
+        references: "todos",
+      },
+      {
+        name: "project",
+        column_type: {
+          type: "Uuid",
         },
-      ],
-      policies: {
-        select: {
-          using: {
-            type: "True",
-          },
+        nullable: true,
+        references: "projects",
+      },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "True",
         },
-        insert: {
-          with_check: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
           },
         },
-        update: {
-          using: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
-          },
-          with_check: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
           },
         },
-        delete: {
-          using: {
-            type: "Cmp",
-            column: "owner_id",
-            op: "Eq",
-            value: {
-              type: "SessionRef",
-              path: ["user_id"],
-            },
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
           },
         },
       },
@@ -571,7 +569,13 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
   }
 }
 
-export const app = {
+export interface GeneratedApp {
+  projects: ProjectQueryBuilder;
+  todos: TodoQueryBuilder;
+  wasmSchema: WasmSchema;
+}
+
+export const app: GeneratedApp = {
   projects: new ProjectQueryBuilder(),
   todos: new TodoQueryBuilder(),
   wasmSchema,

@@ -427,7 +427,7 @@ impl SchemaManager {
     ) -> Option<&crate::query_manager::types::RowDescriptor> {
         let schema = self.context.get_schema(schema_hash)?;
         let table_schema = schema.get(&crate::query_manager::types::TableName::new(table))?;
-        Some(&table_schema.descriptor)
+        Some(&table_schema.columns)
     }
 
     // =========================================================================

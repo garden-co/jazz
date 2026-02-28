@@ -16,6 +16,7 @@ import {
   isCataloguePayload,
   isExpectedFetchAbortError,
 } from "../runtime/sync-transport.js";
+import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -94,6 +95,7 @@ async function startup(): Promise<void> {
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
+    const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;
@@ -116,7 +118,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Open persistent OPFS-backed runtime with Worker tier
     runtime = await wasmModule.WasmRuntime.openPersistent(
-      msg.schemaJson,
+      schemaJson,
       msg.appId,
       msg.env,
       msg.userBranch,
@@ -565,7 +567,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
       try {
-        runtime.__debugSeedLiveSchema(msg.schemaJson);
+        runtime.__debugSeedLiveSchema(normalizeRuntimeSchemaJson(msg.schemaJson));
         post({ type: "debug-seed-live-schema-ok" });
       } catch (error: any) {
         post({

@@ -1,4 +1,9 @@
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export {
+  createJazzClient,
+  createExtensionJazzClient,
+  type JazzClient,
+} from "./create-jazz-client.js";
+export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
 export { JazzProvider, useDb, useSession, type JazzProviderProps } from "./provider.js";
 export { useAll, useAllSuspense } from "./use-all.js";
 export {

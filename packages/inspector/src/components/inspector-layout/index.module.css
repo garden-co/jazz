@@ -1,0 +1,66 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #10151d;
+  color: #dbe1ea;
+}
+
+.topBar {
+  height: 52px;
+  border-bottom: 1px solid #273344;
+  background: #161d28;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tabBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tabLink {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 6px;
+  color: #9ca8b9;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tabLink:hover {
+  background: #202937;
+  color: #d4dae3;
+}
+
+.tabLinkActive {
+  background: #233246;
+  color: #e5e9f0;
+}
+
+.resetButton {
+  border: 1px solid #36465d;
+  background: #202937;
+  color: #d6dde7;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.resetButton:hover {
+  background: #273245;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+}

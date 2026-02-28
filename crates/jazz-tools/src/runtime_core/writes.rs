@@ -130,7 +130,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .ok_or_else(|| RuntimeError::WriteError("Table not found".to_string()))?;
 
         for (col_name, new_value) in values {
-            if let Some(idx) = table_schema.descriptor.column_index(&col_name) {
+            if let Some(idx) = table_schema.columns.column_index(&col_name) {
                 current_values[idx] = new_value;
             } else {
                 return Err(RuntimeError::WriteError(format!(
