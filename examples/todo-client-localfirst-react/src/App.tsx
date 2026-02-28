@@ -59,6 +59,12 @@ export function App({ config, fallback }: AppProps = {}) {
         }
         setClient(resolved);
         attachDevTools(resolved, app.wasmSchema);
+        if (location.origin.includes("localhost")) {
+          Object.defineProperty(window, "jazzClient", {
+            value: resolved,
+            writable: true,
+          });
+        }
       },
       (reason) => {
         if (!active) return;
