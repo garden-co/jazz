@@ -9,9 +9,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    response::{IntoResponse, Json},
-    routing::{get, post},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    },
+    response::{Html, IntoResponse, Json},
+    routing::{get, patch, post},
 };
 use base64::Engine;
 use bytes::Bytes;
@@ -46,6 +49,522 @@ const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
+const MANAGEMENT_USERNAME: &str = "admin";
+const MANAGEMENT_BASIC_AUTH_REALM: &str = "jazz-cloud-server-management";
+const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jazz Cloud Server Management</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        background: #f6f8fa;
+        color: #18202a;
+      }
+      main {
+        max-width: 1000px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin-top: 0;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+      }
+      form {
+        display: grid;
+        gap: 0.75rem;
+      }
+      .row {
+        display: grid;
+        gap: 0.75rem;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+      label {
+        display: grid;
+        gap: 0.25rem;
+        font-size: 0.9rem;
+      }
+      input[type="text"] {
+        border: 1px solid #c6ccd2;
+        border-radius: 6px;
+        padding: 0.5rem;
+        font-size: 0.95rem;
+      }
+      .checkboxes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+      .checkboxes label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      button {
+        border: 1px solid #1f6feb;
+        background: #1f6feb;
+        color: #fff;
+        border-radius: 6px;
+        padding: 0.5rem 0.8rem;
+        cursor: pointer;
+      }
+      button.secondary {
+        border-color: #8c959f;
+        background: #fff;
+        color: #18202a;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th, td {
+        text-align: left;
+        font-size: 0.9rem;
+        border-bottom: 1px solid #e5e9ed;
+        padding: 0.5rem 0.35rem;
+        vertical-align: top;
+      }
+      th {
+        font-weight: 600;
+      }
+      code, pre {
+        background: #f6f8fa;
+        border-radius: 6px;
+      }
+      code {
+        padding: 0.1rem 0.25rem;
+      }
+      pre {
+        border: 1px solid #d0d7de;
+        padding: 0.75rem;
+        overflow: auto;
+      }
+      #status {
+        min-height: 1.25rem;
+        font-size: 0.9rem;
+      }
+      .error {
+        color: #b42318;
+      }
+      .muted {
+        color: #57606a;
+        font-size: 0.82rem;
+      }
+      .auth-editor {
+        display: grid;
+        gap: 0.45rem;
+        margin-top: 0.45rem;
+      }
+      .auth-editor input[type="text"] {
+        font-size: 0.85rem;
+        padding: 0.35rem;
+      }
+      .auth-editor .checkboxes {
+        gap: 0.5rem;
+      }
+      .auth-editor .checkboxes label {
+        font-size: 0.82rem;
+      }
+      .secret-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.45rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Jazz Cloud Server Management</h1>
+      <p>Authenticated as basic user <code>admin</code>. Use this page for app provisioning, auth-mode edits, and admin secret management.</p>
+
+      <section class="card">
+        <h2>Create App</h2>
+        <form id="create-form">
+          <div class="row">
+            <label>
+              App name
+              <input type="text" id="app-name" required />
+            </label>
+            <label>
+              JWKS endpoint (optional)
+              <input type="text" id="jwks-endpoint" placeholder="https://idp.example.com/.well-known/jwks.json" />
+            </label>
+          </div>
+          <div class="row">
+            <label>
+              Backend secret (optional)
+              <input type="text" id="backend-secret" placeholder="auto-generated if empty" />
+            </label>
+            <label>
+              Admin secret (optional)
+              <input type="text" id="admin-secret" placeholder="auto-generated if empty" />
+            </label>
+          </div>
+          <div class="checkboxes">
+            <label><input type="checkbox" id="allow-anonymous" checked /> Allow anonymous local auth</label>
+            <label><input type="checkbox" id="allow-demo" checked /> Allow demo local auth</label>
+          </div>
+          <div>
+            <button type="submit">Create app</button>
+          </div>
+        </form>
+        <p id="status"></p>
+        <pre id="create-result" hidden></pre>
+      </section>
+
+      <section class="card">
+        <h2>Apps</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>Status</th>
+              <th>Auth config</th>
+              <th>Admin secret</th>
+              <th>Worker</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="apps-body"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const appsBodyEl = document.getElementById("apps-body");
+      const resultEl = document.getElementById("create-result");
+      const revealedAdminSecrets = new Map();
+
+      async function api(path, options = {}) {
+        const config = { ...options };
+        config.headers = { ...(options.headers || {}) };
+        if (config.body && !config.headers["Content-Type"]) {
+          config.headers["Content-Type"] = "application/json";
+        }
+        const response = await fetch(path, config);
+        const text = await response.text();
+        let payload = null;
+        if (text.length > 0) {
+          try {
+            payload = JSON.parse(text);
+          } catch (_) {
+            payload = text;
+          }
+        }
+        if (!response.ok) {
+          const message =
+            (payload && payload.error && payload.error.message) ||
+            (payload && payload.message) ||
+            (typeof payload === "string" ? payload : "") ||
+            `Request failed (${response.status})`;
+          throw new Error(message);
+        }
+        return payload;
+      }
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message || "";
+        statusEl.className = isError ? "error" : "";
+      }
+
+      function setCreateResult(value) {
+        if (!value) {
+          resultEl.hidden = true;
+          resultEl.textContent = "";
+          return;
+        }
+        resultEl.hidden = false;
+        resultEl.textContent = JSON.stringify(value, null, 2);
+      }
+
+      function maskSecret(secret) {
+        return "*".repeat(Math.max(8, Math.min(secret.length, 24)));
+      }
+
+      async function loadApps() {
+        const apps = await api("/manage/api/apps");
+        appsBodyEl.textContent = "";
+        if (!Array.isArray(apps) || apps.length === 0) {
+          const emptyRow = document.createElement("tr");
+          const emptyCell = document.createElement("td");
+          emptyCell.colSpan = 6;
+          emptyCell.textContent = "No apps created yet.";
+          emptyRow.appendChild(emptyCell);
+          appsBodyEl.appendChild(emptyRow);
+          return;
+        }
+
+        for (const app of apps) {
+          const tr = document.createElement("tr");
+
+          const appCell = document.createElement("td");
+          const name = document.createElement("div");
+          name.textContent = app.app_name || "(unnamed)";
+          const id = document.createElement("code");
+          id.textContent = app.app_id;
+          appCell.appendChild(name);
+          appCell.appendChild(id);
+
+          const statusCell = document.createElement("td");
+          statusCell.textContent = app.status;
+
+          const authCell = document.createElement("td");
+          const authSummary = document.createElement("div");
+          authSummary.className = "muted";
+          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}`;
+          authCell.appendChild(authSummary);
+
+          const authEditor = document.createElement("div");
+          authEditor.className = "auth-editor";
+
+          const flags = document.createElement("div");
+          flags.className = "checkboxes";
+
+          const anonymousLabel = document.createElement("label");
+          const anonymousCheckbox = document.createElement("input");
+          anonymousCheckbox.type = "checkbox";
+          anonymousCheckbox.checked = Boolean(app.allow_anonymous);
+          anonymousLabel.appendChild(anonymousCheckbox);
+          anonymousLabel.appendChild(document.createTextNode("Allow anonymous"));
+
+          const demoLabel = document.createElement("label");
+          const demoCheckbox = document.createElement("input");
+          demoCheckbox.type = "checkbox";
+          demoCheckbox.checked = Boolean(app.allow_demo);
+          demoLabel.appendChild(demoCheckbox);
+          demoLabel.appendChild(document.createTextNode("Allow demo"));
+
+          flags.appendChild(anonymousLabel);
+          flags.appendChild(demoLabel);
+
+          const jwksInput = document.createElement("input");
+          jwksInput.type = "text";
+          jwksInput.placeholder = "JWKS endpoint (blank disables JWT auth)";
+          jwksInput.value = app.jwks_endpoint || "";
+
+          const saveAuthButton = document.createElement("button");
+          saveAuthButton.type = "button";
+          saveAuthButton.className = "secondary";
+          saveAuthButton.textContent = "Save auth";
+          saveAuthButton.addEventListener("click", async () => {
+            saveAuthButton.disabled = true;
+            try {
+              await api(`/manage/api/apps/${encodeURIComponent(app.app_id)}/auth`, {
+                method: "PATCH",
+                body: JSON.stringify({
+                  allow_anonymous: anonymousCheckbox.checked,
+                  allow_demo: demoCheckbox.checked,
+                  jwks_endpoint: jwksInput.value.trim(),
+                }),
+              });
+              setStatus(`Saved auth config for ${app.app_id}`);
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              saveAuthButton.disabled = false;
+            }
+          });
+
+          authEditor.appendChild(flags);
+          authEditor.appendChild(jwksInput);
+          authEditor.appendChild(saveAuthButton);
+          authCell.appendChild(authEditor);
+
+          const secretCell = document.createElement("td");
+          const secretDisplay = document.createElement("code");
+          const knownSecretState = revealedAdminSecrets.get(app.app_id);
+          if (knownSecretState && knownSecretState.value) {
+            secretDisplay.textContent = knownSecretState.visible
+              ? knownSecretState.value
+              : maskSecret(knownSecretState.value);
+          } else {
+            secretDisplay.textContent = "(hidden)";
+          }
+          secretCell.appendChild(secretDisplay);
+
+          const secretControls = document.createElement("div");
+          secretControls.className = "secret-controls";
+
+          const revealButton = document.createElement("button");
+          revealButton.type = "button";
+          revealButton.className = "secondary";
+          revealButton.textContent =
+            knownSecretState && knownSecretState.visible ? "Hide" : "Reveal";
+          revealButton.addEventListener("click", async () => {
+            const currentState = revealedAdminSecrets.get(app.app_id);
+            if (currentState && currentState.value) {
+              currentState.visible = !currentState.visible;
+              revealedAdminSecrets.set(app.app_id, currentState);
+              await loadApps();
+              return;
+            }
+
+            revealButton.disabled = true;
+            try {
+              const revealed = await api(
+                `/manage/api/apps/${encodeURIComponent(app.app_id)}/admin-secret`
+              );
+              if (revealed && revealed.admin_secret) {
+                revealedAdminSecrets.set(app.app_id, {
+                  value: revealed.admin_secret,
+                  visible: true,
+                });
+                setStatus(`Revealed admin secret for ${app.app_id}`);
+                setCreateResult(revealed);
+              } else {
+                setStatus(
+                  `No stored admin secret for ${app.app_id}. Rotate to generate a new one.`,
+                  true
+                );
+              }
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              revealButton.disabled = false;
+            }
+          });
+
+          const rotateButton = document.createElement("button");
+          rotateButton.type = "button";
+          rotateButton.className = "secondary";
+          rotateButton.textContent = "Rotate";
+          rotateButton.addEventListener("click", async () => {
+            rotateButton.disabled = true;
+            try {
+              const rotated = await api(
+                `/manage/api/apps/${encodeURIComponent(app.app_id)}/admin-secret/rotate`,
+                { method: "POST" }
+              );
+              if (rotated && rotated.admin_secret) {
+                revealedAdminSecrets.set(app.app_id, {
+                  value: rotated.admin_secret,
+                  visible: true,
+                });
+                setCreateResult(rotated);
+              }
+              setStatus(`Rotated admin secret for ${app.app_id}`);
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              rotateButton.disabled = false;
+            }
+          });
+
+          secretControls.appendChild(revealButton);
+          secretControls.appendChild(rotateButton);
+          secretCell.appendChild(secretControls);
+
+          const workerCell = document.createElement("td");
+          workerCell.textContent = String(app.worker);
+
+          const actionCell = document.createElement("td");
+          const toggleButton = document.createElement("button");
+          const nextStatus = app.status === "active" ? "disabled" : "active";
+          toggleButton.textContent = app.status === "active" ? "Disable" : "Enable";
+          toggleButton.className = "secondary";
+          toggleButton.addEventListener("click", async () => {
+            toggleButton.disabled = true;
+            try {
+              await api(`/manage/api/apps/${encodeURIComponent(app.app_id)}/status`, {
+                method: "POST",
+                body: JSON.stringify({ status: nextStatus }),
+              });
+              setStatus(`Updated ${app.app_id} -> ${nextStatus}`);
+              await loadApps();
+            } catch (error) {
+              setStatus(error.message || String(error), true);
+            } finally {
+              toggleButton.disabled = false;
+            }
+          });
+          actionCell.appendChild(toggleButton);
+
+          tr.appendChild(appCell);
+          tr.appendChild(statusCell);
+          tr.appendChild(authCell);
+          tr.appendChild(secretCell);
+          tr.appendChild(workerCell);
+          tr.appendChild(actionCell);
+          appsBodyEl.appendChild(tr);
+        }
+      }
+
+      document.getElementById("create-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setStatus("");
+        setCreateResult(null);
+
+        const payload = {
+          app_name: document.getElementById("app-name").value.trim(),
+          jwks_endpoint: document.getElementById("jwks-endpoint").value.trim(),
+          allow_anonymous: document.getElementById("allow-anonymous").checked,
+          allow_demo: document.getElementById("allow-demo").checked,
+        };
+
+        const backendSecret = document.getElementById("backend-secret").value.trim();
+        const adminSecret = document.getElementById("admin-secret").value.trim();
+        if (backendSecret.length > 0) {
+          payload.backend_secret = backendSecret;
+        }
+        if (adminSecret.length > 0) {
+          payload.admin_secret = adminSecret;
+        }
+
+        if (!payload.app_name) {
+          setStatus("App name is required.", true);
+          return;
+        }
+
+        try {
+          const created = await api("/manage/api/apps", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          if (created && created.app_id && created.admin_secret) {
+            revealedAdminSecrets.set(created.app_id, {
+              value: created.admin_secret,
+              visible: true,
+            });
+          }
+          setCreateResult(created);
+          setStatus("App created.");
+          event.target.reset();
+          document.getElementById("allow-anonymous").checked = true;
+          document.getElementById("allow-demo").checked = true;
+          await loadApps();
+        } catch (error) {
+          setStatus(error.message || String(error), true);
+        }
+      });
+
+      loadApps().catch((error) => {
+        setStatus(error.message || String(error), true);
+      });
+    </script>
+  </body>
+</html>
+"##;
 type ClientSyncUpdate = (ClientId, u64, SyncPayload);
 type ClientSendSeqMap = Arc<Mutex<HashMap<ClientId, u64>>>;
 
@@ -493,6 +1012,7 @@ struct MetaAppRow {
     status: AppStatus,
     created_at: u64,
     updated_at: u64,
+    admin_secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -523,7 +1043,8 @@ impl MetaStore {
                     .column("admin_secret_hash", ColumnType::Text)
                     .column("status", ColumnType::Text)
                     .column("created_at", ColumnType::Timestamp)
-                    .column("updated_at", ColumnType::Timestamp),
+                    .column("updated_at", ColumnType::Timestamp)
+                    .column("admin_secret", ColumnType::Text),
             )
             .table(
                 TableSchema::builder("external_identities")
@@ -618,6 +1139,7 @@ impl MetaStore {
         backend_secret_hash: String,
         admin_secret_hash: String,
         status: AppStatus,
+        admin_secret: Option<String>,
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
         let values = vec![
@@ -631,6 +1153,10 @@ impl MetaStore {
             Value::Text(status.as_str().to_string()),
             Value::Timestamp(now),
             Value::Timestamp(now),
+            match &admin_secret {
+                Some(value) => Value::Text(value.clone()),
+                None => Value::Null,
+            },
         ];
 
         let object_id = self
@@ -654,6 +1180,7 @@ impl MetaStore {
             status,
             created_at: now,
             updated_at: now,
+            admin_secret,
         })
     }
 
@@ -682,6 +1209,13 @@ impl MetaStore {
                 Value::Text(row.status.as_str().to_string()),
             ),
             ("updated_at".to_string(), Value::Timestamp(row.updated_at)),
+            (
+                "admin_secret".to_string(),
+                match &row.admin_secret {
+                    Some(value) => Value::Text(value.clone()),
+                    None => Value::Null,
+                },
+            ),
         ];
 
         self.runtime
@@ -869,6 +1403,20 @@ impl MetaStore {
             }
         };
 
+        let admin_secret = if values.len() > 8 + idx_shift {
+            match &values[8 + idx_shift] {
+                Value::Text(value) => Some(value.clone()),
+                Value::Null => None,
+                other => {
+                    return Err(format!(
+                        "meta row field admin_secret expected text|null, got {other:?}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(MetaAppRow {
             object_id,
             app_id: AppId::from_object_id(app_obj_id),
@@ -881,6 +1429,7 @@ impl MetaStore {
             status,
             created_at,
             updated_at,
+            admin_secret,
         })
     }
 
@@ -1256,6 +1805,18 @@ struct UpdateAppRequest {
     rotate_admin_secret: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManageSetStatusRequest {
+    status: AppStatus,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManageUpdateAuthRequest {
+    jwks_endpoint: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 struct AppSummaryResponse {
     app_id: String,
@@ -1300,6 +1861,12 @@ struct LinkExternalResponse {
     issuer: String,
     subject: String,
     created: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ManageAdminSecretResponse {
+    app_id: String,
+    admin_secret: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1380,6 +1947,10 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
     warn!(
         "TODO(security): JWT auth currently validates signatures only; add claim validation before production."
     );
+    info!(
+        username = MANAGEMENT_USERNAME,
+        "management UI enabled at /manage (HTTP basic auth, password = JAZZ_INTERNAL_API_SECRET)"
+    );
 
     let app = create_router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -1436,6 +2007,27 @@ fn create_router(state: Arc<ServerState>) -> Router {
             get(get_app_handler).patch(update_app_handler),
         )
         .route("/health", get(health_handler))
+        .route("/manage", get(manage_page_handler))
+        .route(
+            "/manage/api/apps",
+            get(manage_list_apps_handler).post(manage_create_app_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/status",
+            post(manage_set_status_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/auth",
+            patch(manage_update_auth_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/admin-secret",
+            get(manage_get_admin_secret_handler),
+        )
+        .route(
+            "/manage/api/apps/:app_id/admin-secret/rotate",
+            post(manage_rotate_admin_secret_handler),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -1991,6 +2583,69 @@ fn validate_internal_secret(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ManageAuthError {
+    Unauthorized,
+}
+
+impl ManageAuthError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Unauthorized => management_basic_auth_challenge(),
+        }
+    }
+}
+
+fn build_internal_secret_headers(secret: &str) -> Result<HeaderMap, &'static str> {
+    let secret_value = HeaderValue::from_str(secret)
+        .map_err(|_| "configured internal API secret is invalid for HTTP header transport")?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Jazz-Internal-Secret", secret_value);
+    Ok(headers)
+}
+
+fn management_basic_auth_challenge() -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            WWW_AUTHENTICATE,
+            format!("Basic realm=\"{MANAGEMENT_BASIC_AUTH_REALM}\""),
+        )],
+        "Unauthorized",
+    )
+        .into_response()
+}
+
+fn authorize_management_request(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Result<(), ManageAuthError> {
+    let encoded = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.strip_prefix("Basic "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(ManageAuthError::Unauthorized)?;
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ManageAuthError::Unauthorized)?;
+    let decoded = std::str::from_utf8(&decoded).map_err(|_| ManageAuthError::Unauthorized)?;
+    let (username, password) = decoded
+        .split_once(':')
+        .ok_or(ManageAuthError::Unauthorized)?;
+
+    let username_valid = constant_time_eq(username, MANAGEMENT_USERNAME);
+    let password_valid = constant_time_eq(password, &state.internal_api_secret);
+    if username_valid && password_valid {
+        Ok(())
+    } else {
+        Err(ManageAuthError::Unauthorized)
+    }
+}
+
 fn generate_secret() -> String {
     format!("{}{}", Uuid::now_v7().simple(), Uuid::new_v4().simple())
 }
@@ -2027,6 +2682,226 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
         status: cfg.status,
         worker,
     }
+}
+
+async fn manage_page_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    Html(MANAGEMENT_PAGE_HTML).into_response()
+}
+
+async fn manage_list_apps_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    list_apps_handler(State(state), internal_headers)
+        .await
+        .into_response()
+}
+
+async fn manage_create_app_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAppRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    create_app_handler(State(state), internal_headers, Json(request))
+        .await
+        .into_response()
+}
+
+async fn manage_set_status_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<ManageSetStatusRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    update_app_handler(
+        State(state),
+        AxumPath(path),
+        internal_headers,
+        Json(UpdateAppRequest {
+            app_name: None,
+            jwks_endpoint: None,
+            allow_anonymous: None,
+            allow_demo: None,
+            status: Some(request.status),
+            rotate_backend_secret: None,
+            rotate_admin_secret: None,
+        }),
+    )
+    .await
+    .into_response()
+}
+
+async fn manage_update_auth_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<ManageUpdateAuthRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    update_app_handler(
+        State(state),
+        AxumPath(path),
+        internal_headers,
+        Json(UpdateAppRequest {
+            app_name: None,
+            jwks_endpoint: request.jwks_endpoint,
+            allow_anonymous: request.allow_anonymous,
+            allow_demo: request.allow_demo,
+            status: None,
+            rotate_backend_secret: None,
+            rotate_admin_secret: None,
+        }),
+    )
+    .await
+    .into_response()
+}
+
+async fn manage_get_admin_secret_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let row = match state.meta_store.get_by_app_id(app_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(err)),
+            )
+                .into_response();
+        }
+    };
+
+    Json(ManageAdminSecretResponse {
+        app_id: app_id.to_string(),
+        admin_secret: row.admin_secret,
+    })
+    .into_response()
+}
+
+async fn manage_rotate_admin_secret_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = authorize_management_request(&headers, &state) {
+        return err.into_response();
+    }
+
+    let internal_headers = match build_internal_secret_headers(&state.internal_api_secret) {
+        Ok(headers) => headers,
+        Err(msg) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(msg)),
+            )
+                .into_response();
+        }
+    };
+
+    update_app_handler(
+        State(state),
+        AxumPath(path),
+        internal_headers,
+        Json(UpdateAppRequest {
+            app_name: None,
+            jwks_endpoint: None,
+            allow_anonymous: None,
+            allow_demo: None,
+            status: None,
+            rotate_backend_secret: None,
+            rotate_admin_secret: Some(true),
+        }),
+    )
+    .await
+    .into_response()
 }
 
 async fn events_handler(
@@ -2399,6 +3274,7 @@ async fn create_app_handler(
             backend_secret_hash,
             admin_secret_hash,
             AppStatus::Active,
+            Some(admin_secret.clone()),
         )
         .await
     {
@@ -2608,6 +3484,7 @@ async fn update_app_handler(
     if request.rotate_admin_secret.unwrap_or(false) {
         let secret = generate_secret();
         row.admin_secret_hash = state.meta_store.hash_secret(&secret);
+        row.admin_secret = Some(secret.clone());
         new_admin_secret = Some(secret);
     }
     row.updated_at = now_timestamp_us().max(row.created_at);
