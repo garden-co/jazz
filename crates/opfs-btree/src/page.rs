@@ -131,11 +131,6 @@ pub(crate) fn encode_page(page: &Page, page_size: usize) -> Result<Vec<u8>, BTre
     Ok(raw)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn decode_page(raw: &[u8], expected_page_size: usize) -> Result<Page, BTreeError> {
-    decode_page_with_checksum(raw, expected_page_size, true)
-}
-
 pub(crate) fn decode_page_unchecked(
     raw: &[u8],
     expected_page_size: usize,
@@ -1465,7 +1460,7 @@ mod tests {
         };
 
         let encoded = encode_page(&page, 4096).expect("encode leaf page");
-        let decoded = decode_page(&encoded, 4096).expect("decode leaf page");
+        let decoded = decode_page_with_checksum(&encoded, 4096, true).expect("decode leaf page");
         assert_eq!(decoded, page);
     }
 
@@ -1479,7 +1474,7 @@ mod tests {
         let mut encoded = encode_page(&page, 4096).expect("encode overflow page");
         encoded[100] ^= 0xFF;
 
-        let err = decode_page(&encoded, 4096).expect_err("must fail checksum");
+        let err = decode_page_with_checksum(&encoded, 4096, true).expect_err("must fail checksum");
         assert!(matches!(err, BTreeError::Corrupt(_)));
     }
 
@@ -1490,7 +1485,7 @@ mod tests {
         let (decoded_chunk, next) = raw_overflow_chunk(&raw, 4096).expect("raw overflow");
         assert_eq!(decoded_chunk, chunk.as_slice());
         assert_eq!(next, Some(42));
-        let decoded_page = decode_page(&raw, 4096).expect("decode");
+        let decoded_page = decode_page_with_checksum(&raw, 4096, true).expect("decode");
         assert_eq!(
             decoded_page,
             Page::Overflow {
@@ -1533,7 +1528,7 @@ mod tests {
             }
         );
 
-        let decoded = decode_page(&raw, 4096).expect("decode");
+        let decoded = decode_page_with_checksum(&raw, 4096, true).expect("decode");
         assert_eq!(
             decoded,
             Page::Leaf {
