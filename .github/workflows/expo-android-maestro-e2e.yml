@@ -26,8 +26,17 @@ permissions:
   contents: read
 
 jobs:
+  build-rn:
+    name: Build jazz-rn (Android and iOS) artifacts
+    uses: ./.github/workflows/rn-build-reusable.yml
+    with:
+      concurrency: e2e-rn-test
+      disableAndroid: false
+      disableIOS: true
+
   expo-android-e2e:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: build-rn
     timeout-minutes: 60
     env:
       JAZZ_E2E_APP_ID: 6316f08d-d5d1-41df-82b8-8c16aa26db84
@@ -41,20 +50,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Node.js
-        uses: useblacksmith/setup-node@v5
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+  
+      - name: Download React Native Android artifact
+        uses: actions/download-artifact@v5
         with:
-          # Keep Node pinned for RN/Expo stability in this workflow.
-          node-version: "22"
+          name: jazz-rn-android
+          path: crates/jazz-rn
 
-      - name: Enable Corepack and pin pnpm
+      - name: List React Native Android artifacts
         run: |
-          set -euo pipefail
-          mkdir -p "${COREPACK_HOME}"
-          corepack enable
-          corepack prepare pnpm@10.14.0 --activate
-          node --version
-          pnpm --version
+          ls -R crates/jazz-rn/android/src/main/jniLibs
+        shell: bash
 
       - uses: actions/setup-java@v5
         with:
@@ -64,24 +72,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+          targets: wasm32-unknown-unknown
 
-      - uses: android-actions/setup-android@v3
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Verify Rust toolchain binaries
+      - name: Pnpm Build
+        run: pnpm turbo build
+      
+      - name: Todo Client Local First Expo App Pre Build
+        working-directory: ./examples/todo-client-localfirst-expo
         run: |
-          set -euo pipefail
-          rustc --version
-          cargo --version
-          sccache --version
+          pnpm expo prebuild --clean
 
       - name: Validate required CI secrets
         env:
@@ -91,54 +90,12 @@ jobs:
           VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
         run: scripts/expo-android-maestro-e2e.sh validate-secrets
 
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-
-      - name: Verify wasm-pack via pnpm
-        run: scripts/expo-android-maestro-e2e.sh ensure-wasm-pack-binary
-
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
-      - name: Install cross-compile linker prerequisites
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
-          path: /home/runner/.cache/sccache
-
-      - name: Build all workspace packages
-        run: |
-          set -euo pipefail
-          sccache --show-stats || true
-
-          # `build:all` includes jazz-rn iOS native artifacts.
-          # This workflow runs on Linux, so we run the Linux-equivalent set:
-          # 1) explicit jazz-rn Android native payload build
-          # 2) workspace build (same as CI)
-          pnpm --filter jazz-rn build:rn:android
-          pnpm build
-
-          sccache --show-stats || true
-
       - name: Install Vercel Sandbox CLI
         run: |
           set -euo pipefail
           npm install -g sandbox
           sandbox --version
 
-      - name: Generate Expo Android project (prebuild)
-        run: |
-          set -euo pipefail
-          pnpm --filter todo-client-localfirst-expo verify:expo:android
-          test -f examples/todo-client-localfirst-expo/android/gradlew
 
       - name: Start Vercel Sandbox and run jazz-tools server
         env:

@@ -27,7 +27,23 @@ validate_secrets() {
 }
 
 ensure_wasm_pack_binary() {
-  pnpm wasm-pack --version
+  local wasm_pack_pkg_json
+  local wasm_pack_bin
+
+  # Resolve wasm-pack from the jazz-wasm package context so we always use the
+  # workspace node_modules version (never a globally installed binary).
+  wasm_pack_pkg_json="$(
+    pnpm --filter jazz-wasm exec node -e "process.stdout.write(require.resolve('wasm-pack/package.json'))"
+  )"
+  wasm_pack_bin="$(dirname "${wasm_pack_pkg_json}")/binary/wasm-pack"
+
+  if [ ! -f "${wasm_pack_bin}" ]; then
+    echo "::error::wasm-pack binary not found at ${wasm_pack_bin}"
+    exit 1
+  fi
+
+  chmod +x "${wasm_pack_bin}"
+  pnpm --filter jazz-wasm exec wasm-pack --version
 }
 
 start_sandbox_server() {
