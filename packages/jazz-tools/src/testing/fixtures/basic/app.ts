@@ -1,5 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export interface Todo {
   id: string;
@@ -36,27 +43,6 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
-      },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "done",
-          op: "Eq",
-          value: {
-            type: "Literal",
-            value: {
-              type: "Boolean",
-              value: true,
-            },
-          },
-        },
-      },
-    },
   },
 };
 
@@ -116,7 +102,7 @@ export class TodoQueryBuilder<I extends Record<string, never> = {}> implements Q
 
   gather(options: {
     start: TodoWhereInput;
-    step: (ctx: { current: any }) => unknown;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
   }): TodoQueryBuilder<I> {
     if (options.start === undefined) {
@@ -147,7 +133,7 @@ export class TodoQueryBuilder<I extends Record<string, never> = {}> implements Q
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -208,8 +194,8 @@ export class TodoQueryBuilder<I extends Record<string, never> = {}> implements Q
     });
   }
 
-  private _clone(): TodoQueryBuilder<I> {
-    const clone = new TodoQueryBuilder<I>();
+  private _clone<CloneI extends Record<string, never> = I>(): TodoQueryBuilder<CloneI> {
+    const clone = new TodoQueryBuilder<CloneI>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
     clone._orderBys = [...this._orderBys];
@@ -227,7 +213,12 @@ export class TodoQueryBuilder<I extends Record<string, never> = {}> implements Q
   }
 }
 
-export const app = {
+export interface GeneratedApp {
+  todos: TodoQueryBuilder;
+  wasmSchema: WasmSchema;
+}
+
+export const app: GeneratedApp = {
   todos: new TodoQueryBuilder(),
   wasmSchema,
 };
