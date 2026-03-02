@@ -806,24 +806,52 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("export type TodoWithIncludes<I extends TodoInclude = {}>");
     expect(output).toContain("export type UserWithIncludes<I extends UserInclude = {}>");
-    expect(output).toContain('owner?: I["owner"] extends true');
+    expect(output).toContain('owner?: NonNullable<I["owner"]> extends infer RelationInclude');
+    expect(output).toContain("? RelationInclude extends true");
     expect(output).toContain("? User");
     expect(output).toContain(
-      ': I["owner"] extends UserQueryBuilder<infer QueryInclude extends UserInclude>',
+      ": RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude>",
     );
     expect(output).toContain("? UserWithIncludes<QueryInclude>");
-    expect(output).toContain(': I["owner"] extends UserInclude');
-    expect(output).toContain('? UserWithIncludes<I["owner"]>');
-    expect(output).toContain('todosViaOwner?: I["todosViaOwner"] extends true');
+    expect(output).toContain(": RelationInclude extends UserInclude");
+    expect(output).toContain("? UserWithIncludes<RelationInclude>");
+    expect(output).toContain(
+      'todosViaOwner?: NonNullable<I["todosViaOwner"]> extends infer RelationInclude',
+    );
     expect(output).toContain("? Todo[]");
     expect(output).toContain(
-      ': I["todosViaOwner"] extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>',
+      ": RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>",
     );
     expect(output).toContain("? TodoWithIncludes<QueryInclude>[]");
-    expect(output).toContain(': I["todosViaOwner"] extends TodoInclude');
-    expect(output).toContain('? TodoWithIncludes<I["todosViaOwner"]>[]');
+    expect(output).toContain(": RelationInclude extends TodoInclude");
+    expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
     expect(output).not.toContain("WithIncludesFor<");
     expect(output).not.toContain("WithIncludesArray<");
+  });
+
+  it("avoids collapsing nested array includes to never when selectors are optional", () => {
+    table("teams", { legacy_id: col.string() });
+    table("resources", { kind: col.enum("branding") });
+    table("resource_access_edges", {
+      resource: col.ref("resources"),
+      team: col.ref("teams"),
+      grant_role: col.enum("viewer", "editor", "manager"),
+    });
+    table("brandings", {
+      resource: col.ref("resources"),
+      name: col.string(),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      'resource_access_edgesViaResource?: NonNullable<I["resource_access_edgesViaResource"]> extends infer RelationInclude',
+    );
+    expect(output).toContain("? ResourceAccessEdgeWithIncludes<RelationInclude>[]");
+    expect(output).not.toContain(
+      'resource_access_edgesViaResource?: I["resource_access_edgesViaResource"] extends true',
+    );
   });
 
   it("generates Include types for self-referential tables", () => {
