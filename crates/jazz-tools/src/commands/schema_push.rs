@@ -56,7 +56,7 @@ impl SyncServerClient {
         payload: SyncPayload,
         client_id: ClientId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let payload_bytes = payload.to_postcard_bytes()?;
+        let payload_bytes = payload.to_bitcode_bytes()?;
         let sync_url = format!(
             "{}{}{}?client_id={}",
             self.base_url, self.route_prefix, "/sync", client_id

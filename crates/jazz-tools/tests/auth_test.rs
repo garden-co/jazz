@@ -100,7 +100,7 @@ fn sync_url(base_url: impl AsRef<str>, client_id: &str) -> String {
 
 fn sync_body(payload: serde_json::Value) -> Vec<u8> {
     let payload: SyncPayload = serde_json::from_value(payload).unwrap();
-    payload.to_postcard_bytes().unwrap()
+    payload.to_bitcode_bytes().unwrap()
 }
 
 // ============================================================================

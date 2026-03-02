@@ -137,7 +137,7 @@ impl ServerConnection {
         };
 
         let payload_bytes = payload
-            .to_postcard_bytes()
+            .to_bitcode_bytes()
             .map_err(|e| JazzError::Sync(format!("Failed to encode sync payload: {e}")))?;
 
         self.client

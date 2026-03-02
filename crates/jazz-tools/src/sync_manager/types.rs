@@ -318,14 +318,14 @@ mod query_subscription_session_serde {
 }
 
 impl SyncPayload {
-    /// Encode this payload using postcard.
-    pub fn to_postcard_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
-        postcard::to_allocvec(self)
+    /// Encode this payload using bitcode.
+    pub fn to_bitcode_bytes(&self) -> Result<Vec<u8>, bitcode::Error> {
+        bitcode::serialize(self)
     }
 
-    /// Decode a payload from postcard bytes.
-    pub fn from_postcard_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
-        postcard::from_bytes(bytes)
+    /// Decode a payload from bitcode bytes.
+    pub fn from_bitcode_bytes(bytes: &[u8]) -> Result<Self, bitcode::Error> {
+        bitcode::deserialize(bytes)
     }
 
     /// Check if this payload carries a catalogue object (schema or lens).
