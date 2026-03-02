@@ -265,8 +265,6 @@ impl<F: SyncFile> OpfsBTree<F> {
         let root_page_raw = self.pages.get(&root_page_id).ok_or_else(|| {
             BTreeError::Corrupt(format!("root page {} missing after delete", root_page_id))
         })?;
-        // Safe: tree pages are checksum-validated when read from disk, and this
-        // buffer is already resident in the in-memory page cache.
         let root_page = decode_page(root_page_raw, self.options.page_size)?;
 
         if let Page::Leaf { entries, .. } = &root_page
@@ -450,7 +448,6 @@ impl<F: SyncFile> OpfsBTree<F> {
                 let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
                     BTreeError::Corrupt(format!("page {} missing during insert", page_id))
                 })?;
-                // Safe: page bytes came from the validated cache entry for this page_id.
                 let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Leaf { mut entries, next } = page else {
                     return Err(BTreeError::Corrupt(format!(
@@ -517,7 +514,6 @@ impl<F: SyncFile> OpfsBTree<F> {
                 let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
                     BTreeError::Corrupt(format!("page {} missing during insert", page_id))
                 })?;
-                // Safe: page bytes came from the validated cache entry for this page_id.
                 let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Internal {
                     mut keys,
@@ -629,7 +625,6 @@ impl<F: SyncFile> OpfsBTree<F> {
                 let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
                     BTreeError::Corrupt(format!("page {} missing during delete", page_id))
                 })?;
-                // Safe: page bytes came from the validated cache entry for this page_id.
                 let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Internal { keys, children } = page else {
                     return Err(BTreeError::Corrupt(format!(
