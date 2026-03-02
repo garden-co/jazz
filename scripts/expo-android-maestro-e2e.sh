@@ -27,19 +27,7 @@ validate_secrets() {
 }
 
 ensure_wasm_pack_binary() {
-  local wasm_pack_pkg_json
-  local wasm_pack_bin
-
-  wasm_pack_pkg_json="$(node -e "process.stdout.write(require.resolve('wasm-pack/package.json', { paths: ['crates/jazz-wasm'] }))")"
-  wasm_pack_bin="$(dirname "${wasm_pack_pkg_json}")/binary/wasm-pack"
-
-  if [ ! -f "${wasm_pack_bin}" ]; then
-    echo "::error::wasm-pack binary not found at ${wasm_pack_bin}"
-    exit 1
-  fi
-
-  chmod +x "${wasm_pack_bin}"
-  "${wasm_pack_bin}" --version
+  pnpm wasm-pack --version
 }
 
 start_sandbox_server() {
