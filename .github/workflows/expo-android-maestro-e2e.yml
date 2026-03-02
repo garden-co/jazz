@@ -76,7 +76,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Pnpm Build
-        run: pnpm turbo build
+        run: pnpm build
       
       - name: Todo Client Local First Expo App Pre Build
         working-directory: ./examples/todo-client-localfirst-expo
