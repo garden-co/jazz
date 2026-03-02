@@ -49,9 +49,6 @@ jobs:
         with:
           tool: sccache
 
-      - name: Verify wasm-pack via pnpm (workspace version)
-        run: scripts/expo-android-maestro-e2e.sh ensure-wasm-pack-binary
-
       - name: Mount sccache sticky disk
         uses: useblacksmith/stickydisk@v1
         with:

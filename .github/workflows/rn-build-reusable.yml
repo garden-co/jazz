@@ -1,4 +1,4 @@
-name: Build cojson-core-rn (React Native)
+name: Build jazz-rn (React Native)
 
 'on':
   pull_request:
@@ -41,6 +41,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: |
             aarch64-linux-android
             armv7-linux-androideabi
@@ -82,6 +83,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: |
             aarch64-apple-ios
             aarch64-apple-ios-sim
@@ -99,4 +101,3 @@ jobs:
             ${{ env.PACKAGE_PATH }}/JazzRnFramework.xcframework
             ${{ env.PACKAGE_PATH }}/ios
             ${{ env.PACKAGE_PATH }}/cpp/generated
-
