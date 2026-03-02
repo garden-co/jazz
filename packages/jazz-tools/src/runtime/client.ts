@@ -782,7 +782,8 @@ export class JazzClient {
       createSyncOutboxRouter({
         logPrefix: "[client] ",
         retryServerPayloads: true,
-        onServerPayload: (payload) => this.sendSyncMessage(payload),
+        onServerPayload: (payloadJson, isCatalogue) =>
+          this.sendSyncMessage(payloadJson, isCatalogue),
         onServerPayloadError: (error) => {
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {
@@ -797,18 +798,24 @@ export class JazzClient {
     this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(payload: unknown): Promise<void> {
+  private async sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
     const serverUrl = this.streamController.getServerUrl();
     if (!serverUrl) return;
 
-    await sendSyncPayload(serverUrl, payload, {
-      jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
-      adminSecret: this.context.adminSecret,
-      clientId: this.serverClientId,
-      pathPrefix: this.streamController.getPathPrefix(),
-    });
+    await sendSyncPayload(
+      serverUrl,
+      payloadJson,
+      isCatalogue,
+      {
+        jwtToken: this.context.jwtToken,
+        localAuthMode: this.context.localAuthMode,
+        localAuthToken: this.context.localAuthToken,
+        adminSecret: this.context.adminSecret,
+        clientId: this.serverClientId,
+        pathPrefix: this.streamController.getPathPrefix(),
+      },
+      "[client] ",
+    );
   }
 }
 

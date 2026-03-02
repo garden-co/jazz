@@ -74,8 +74,8 @@ describe("JazzRnRuntimeAdapter", () => {
 
     // Trigger callback captured by adapter wiring.
     const callbackObject = onSyncMessageToSend.mock.calls[0][0];
-    callbackObject.onSyncMessage('{"destination":{},"payload":{}}');
-    expect(syncHandler).toHaveBeenCalledWith('{"destination":{},"payload":{}}');
+    callbackObject.onSyncMessage("server", "server-1", "{}", false);
+    expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
     const onUpdate = vi.fn();
     const handle = adapter.subscribe("{}", onUpdate, null, null);
@@ -104,7 +104,7 @@ describe("JazzRnRuntimeAdapter", () => {
     });
     const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
     const syncCallback = onSyncMessageToSend.mock.calls[0][0];
-    expect(() => syncCallback.onSyncMessage("{}")).not.toThrow();
+    expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");

@@ -1,5 +1,6 @@
 import type { WasmSchema } from "../drivers/types.js";
 import type { Runtime } from "../runtime/client.js";
+import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
 export interface JazzRnRuntimeBinding {
   addClient(): string;
@@ -22,7 +23,12 @@ export interface JazzRnRuntimeBinding {
   onSyncMessageToSend(
     callback:
       | {
-          onSyncMessage(messageJson: string): void;
+          onSyncMessage(
+            destinationKind: OutboxDestinationKind,
+            destinationId: string,
+            payloadJson: string,
+            isCatalogue: boolean,
+          ): void;
         }
       | undefined,
   ): void;
@@ -209,9 +215,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   onSyncMessageToSend(callback: Function): void {
     this.binding.onSyncMessageToSend({
-      onSyncMessage: (messageJson: string) => {
+      onSyncMessage: (
+        destinationKind: OutboxDestinationKind,
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => {
         try {
-          callback(messageJson);
+          callback(destinationKind, destinationId, payloadJson, isCatalogue);
         } catch (error) {
           swallowCallbackError("sync message", error);
         }
