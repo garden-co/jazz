@@ -16,6 +16,7 @@ on:
       - pnpm-workspace.yaml
       - turbo.json
       - .github/workflows/expo-android-maestro-e2e.yml
+      - scripts/expo-android-maestro-e2e.sh
 
 concurrency:
   group: expo-android-maestro-e2e-${{ github.event_name == 'push' && github.sha || github.ref }}
@@ -63,7 +64,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 
       - uses: android-actions/setup-android@v3
 
@@ -73,30 +74,44 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
+          tool: wasm-pack
+
+      - uses: taiki-e/install-action@v2
+        with:
           tool: sccache
 
-      - name: Validate Maestro Cloud secrets
+      - name: Verify Rust toolchain binaries
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          wasm-pack --version
+          sccache --version
+
+      - name: Validate required CI secrets
         env:
           MAESTRO_KEY: ${{ secrets.MAESTRO_KEY }}
           MAESTRO_PROJECT_ID: ${{ secrets.MAESTRO_PROJECT_ID }}
-        run: |
-          set -euo pipefail
-          if [ -z "${MAESTRO_KEY}" ]; then
-            echo "::error::Missing MAESTRO_KEY repository secret."
-            exit 1
-          fi
-          if [ -z "${MAESTRO_PROJECT_ID}" ]; then
-            echo "::error::Missing MAESTRO_PROJECT_ID repository secret."
-            exit 1
-          fi
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+        run: scripts/expo-android-maestro-e2e.sh validate-secrets
 
       - name: Install dependencies
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile
 
+      - name: Ensure npm wasm-pack binary is executable
+        run: scripts/expo-android-maestro-e2e.sh ensure-wasm-pack-binary
+
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
+
+      - name: Install cross-compile linker prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Mount sccache sticky disk
         uses: useblacksmith/stickydisk@v1
@@ -118,35 +133,11 @@ jobs:
 
           sccache --show-stats || true
 
-      - name: Build jazz-tools CLI
+      - name: Install Vercel Sandbox CLI
         run: |
           set -euo pipefail
-          sccache --show-stats || true
-          cargo build -p jazz-tools --bin jazz-tools --features cli
-          sccache --show-stats || true
-
-      - name: Install cloudflared
-        run: |
-          set -euo pipefail
-
-          ARCH="$(uname -m)"
-          case "${ARCH}" in
-            x86_64) CLOUDFLARED_ASSET="cloudflared-linux-amd64" ;;
-            aarch64|arm64) CLOUDFLARED_ASSET="cloudflared-linux-arm64" ;;
-            *)
-              echo "::error::Unsupported architecture for cloudflared: ${ARCH}"
-              exit 1
-              ;;
-          esac
-
-          mkdir -p "${HOME}/.local/bin"
-          curl -fsSL \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/${CLOUDFLARED_ASSET}" \
-            -o "${HOME}/.local/bin/cloudflared"
-          chmod +x "${HOME}/.local/bin/cloudflared"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-
-          "${HOME}/.local/bin/cloudflared" --version
+          npm install -g sandbox
+          sandbox --version
 
       - name: Generate Expo Android project (prebuild)
         run: |
@@ -154,138 +145,19 @@ jobs:
           pnpm --filter todo-client-localfirst-expo verify:expo:android
           test -f examples/todo-client-localfirst-expo/android/gradlew
 
-      - name: Start jazz-tools server
-        run: |
-          set -euo pipefail
-          rm -f server.log
-
-          nohup target/debug/jazz-tools server "${JAZZ_E2E_APP_ID}" \
-            --admin-secret "${JAZZ_E2E_ADMIN_SECRET}" \
-            --port "${JAZZ_E2E_SERVER_PORT}" \
-            > server.log 2>&1 &
-
-          SERVER_PID=$!
-          echo "SERVER_PID=${SERVER_PID}" >> "${GITHUB_ENV}"
-
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error \
-              "http://127.0.0.1:${JAZZ_E2E_SERVER_PORT}/health" > /dev/null; then
-              echo "Jazz server is healthy."
-              exit 0
-            fi
-
-            if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-              echo "::error::jazz-tools server exited before becoming healthy."
-              tail -n 200 server.log || true
-              exit 1
-            fi
-
-            sleep 1
-          done
-
-          echo "::error::Timed out waiting for jazz-tools /health endpoint."
-          tail -n 200 server.log || true
-          exit 1
-
-      - name: Start cloudflared and wait for public URL
-        run: |
-          set -euo pipefail
-          rm -f cloudflared.log
-
-          nohup cloudflared tunnel --url "http://127.0.0.1:${JAZZ_E2E_SERVER_PORT}" --no-autoupdate \
-            > cloudflared.log 2>&1 &
-
-          CLOUDFLARED_PID=$!
-          echo "CLOUDFLARED_PID=${CLOUDFLARED_PID}" >> "${GITHUB_ENV}"
-
-          SERVER_PUBLIC_URL=""
-          for attempt in $(seq 1 90); do
-            SERVER_PUBLIC_URL="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -n 1 || true)"
-            if [ -n "${SERVER_PUBLIC_URL}" ]; then
-              break
-            fi
-
-            if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
-              echo "::error::cloudflared exited before publishing a public URL."
-              tail -n 200 cloudflared.log || true
-              exit 1
-            fi
-
-            sleep 1
-          done
-
-          if [ -z "${SERVER_PUBLIC_URL}" ]; then
-            echo "::error::Timed out waiting for cloudflared URL in cloudflared.log."
-            tail -n 200 cloudflared.log || true
-            exit 1
-          fi
-
-          TUNNEL_HOST="${SERVER_PUBLIC_URL#https://}"
-          TUNNEL_READY=0
-          for attempt in $(seq 1 180); do
-            if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
-              echo "::error::cloudflared exited before tunnel became reachable."
-              tail -n 200 cloudflared.log || true
-              exit 1
-            fi
-
-            # Quick tunnels can take time to propagate in DNS; skip health checks
-            # until the hostname resolves from this runner.
-            if getent hosts "${TUNNEL_HOST}" >/dev/null 2>&1; then
-              if curl --fail --silent --show-error --max-time 5 "${SERVER_PUBLIC_URL}/health" > /dev/null; then
-                TUNNEL_READY=1
-                break
-              fi
-            fi
-
-            sleep 1
-          done
-
-          echo "SERVER_PUBLIC_URL=${SERVER_PUBLIC_URL}" >> "${GITHUB_ENV}"
-          if [ "${TUNNEL_READY}" -eq 1 ]; then
-            echo "Resolved tunnel URL and verified /health: ${SERVER_PUBLIC_URL}"
-            exit 0
-          fi
-
-          echo "::warning::Tunnel URL resolved but could not verify /health from this runner within timeout (likely DNS propagation). Continuing with discovered URL for Maestro Cloud."
-          tail -n 100 cloudflared.log || true
+      - name: Start Vercel Sandbox and run jazz-tools server
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: scripts/expo-android-maestro-e2e.sh start-sandbox-server
 
       - name: Build Expo Android release APK
         env:
           EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
           EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
           EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
-        run: |
-          set -euo pipefail
-          APP_DIR="examples/todo-client-localfirst-expo"
-          ANDROID_DIR="${APP_DIR}/android"
-
-          if [ -z "${EXPO_PUBLIC_JAZZ_SERVER_URL:-}" ]; then
-            echo "::error::EXPO_PUBLIC_JAZZ_SERVER_URL is empty before APK build."
-            exit 1
-          fi
-          if ! printf '%s' "${EXPO_PUBLIC_JAZZ_SERVER_URL}" | grep -Eq '^https://[a-z0-9-]+\.trycloudflare\.com$'; then
-            echo "::error::EXPO_PUBLIC_JAZZ_SERVER_URL has unexpected format: ${EXPO_PUBLIC_JAZZ_SERVER_URL}"
-            exit 1
-          fi
-
-          # The Android project is generated by Expo prebuild and is not tracked.
-          # If another prior step cleaned it, regenerate right before Gradle.
-          if [ ! -f "${ANDROID_DIR}/gradlew" ]; then
-            echo "::warning::Missing ${ANDROID_DIR}/gradlew before assembleRelease; regenerating Android project."
-            pnpm --filter todo-client-localfirst-expo verify:expo:android
-          fi
-
-          if [ ! -f "${ANDROID_DIR}/gradlew" ]; then
-            echo "::error::Android project was not generated at ${ANDROID_DIR}."
-            exit 1
-          fi
-
-          chmod +x "${ANDROID_DIR}/gradlew"
-          (
-            cd "${ANDROID_DIR}"
-            ./gradlew :app:assembleRelease --no-daemon
-          )
+        run: scripts/expo-android-maestro-e2e.sh build-expo-apk
 
       - name: Ensure APK exists
         run: |
@@ -301,43 +173,32 @@ jobs:
           app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
           workspace: .maestro
 
-      - name: Verify server communication evidence
-        run: |
-          set -euo pipefail
-
-          SYNC_COUNT="$(grep -c 'sync request' server.log || true)"
-          EVENTS_COUNT="$(grep -c 'events stream connecting' server.log || true)"
-
-          echo "sync request count: ${SYNC_COUNT}"
-          echo "events stream connecting count: ${EVENTS_COUNT}"
-
-          if [ "${SYNC_COUNT}" -eq 0 ]; then
-            echo "::error::No 'sync request' lines found in server.log."
-            exit 1
-          fi
-
-          if [ "${EVENTS_COUNT}" -eq 0 ]; then
-            echo "::error::No 'events stream connecting' lines found in server.log."
-            exit 1
-          fi
-
-      - name: Stop background services
+      - name: Fetch sandbox server log
         if: always()
-        run: |
-          set -euo pipefail
-          if [ -n "${CLOUDFLARED_PID:-}" ] && kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
-            kill "${CLOUDFLARED_PID}" || true
-          fi
-          if [ -n "${SERVER_PID:-}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-            kill "${SERVER_PID}" || true
-          fi
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: scripts/expo-android-maestro-e2e.sh fetch-sandbox-server-log
 
-      - name: Upload server and tunnel logs
+      - name: Verify server communication evidence
+        if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
+        run: scripts/expo-android-maestro-e2e.sh verify-server-evidence
+
+      - name: Stop Vercel Sandbox
+        if: always()
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: scripts/expo-android-maestro-e2e.sh stop-sandbox
+
+      - name: Upload server and sandbox logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: expo-android-maestro-e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             server.log
-            cloudflared.log
+            vercel-sandbox.log
           if-no-files-found: warn
