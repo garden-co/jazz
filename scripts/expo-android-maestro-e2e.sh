@@ -19,6 +19,13 @@ build_scope_args() {
   fi
 }
 
+extract_sandbox_id() {
+  local create_output="$1"
+
+  # New CLI versions emit IDs as sbx_*, older ones used sb_*.
+  printf '%s\n' "${create_output}" | grep -Eo 'sbx_[[:alnum:]]+|sb_[[:alnum:]]+' | head -n 1 || true
+}
+
 validate_secrets() {
   require_env MAESTRO_KEY
   require_env MAESTRO_PROJECT_ID
@@ -62,13 +69,10 @@ start_sandbox_server() {
   local sandbox_rust_target
   local sandbox_binary
   local sandbox_host
+  local sandbox_url_from_create=""
   local server_public_url=""
   local sandbox_ready=0
-  local candidate
-  local existing
-  local seen
   local -a url_candidates=()
-  local -a deduped_url_candidates=()
 
   SANDBOX_ARGS=(
     --token "${VERCEL_SANDBOXES_TOKEN}"
@@ -85,7 +89,7 @@ start_sandbox_server() {
   sandbox_create_output="$(sandbox create "${SANDBOX_ARGS[@]}")"
   printf '%s\n' "${sandbox_create_output}" | tee "${ROOT_DIR}/vercel-sandbox.log"
 
-  sandbox_id="$(printf '%s\n' "${sandbox_create_output}" | grep -Eo 'sb_[a-zA-Z0-9]+' | head -n 1 || true)"
+  sandbox_id="$(extract_sandbox_id "${sandbox_create_output}")"
   if [ -z "${sandbox_id}" ]; then
     echo "::error::Could not parse sandbox ID from sandbox create output."
     exit 1
@@ -141,36 +145,25 @@ start_sandbox_server() {
     "${sandbox_id}" \
     sh -lc "chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '${JAZZ_E2E_APP_ID}' --admin-secret '${JAZZ_E2E_ADMIN_SECRET}' --port '${JAZZ_E2E_SERVER_PORT}' >/tmp/server.log 2>&1 &"
 
-  while IFS= read -r candidate; do
-    if [ -n "${candidate}" ]; then
-      url_candidates+=("${candidate%/}")
-    fi
-  done < <(printf '%s\n' "${sandbox_create_output}" | grep -Eo 'https://[^ )]+' || true)
+  sandbox_url_from_create="$(printf '%s\n' "${sandbox_create_output}" | grep -Eo 'https://[^ )]+' | head -n 1 || true)"
+  if [ -n "${sandbox_url_from_create}" ]; then
+    url_candidates+=("${sandbox_url_from_create%/}")
+  fi
 
+  # Fallback host guesses for older CLI output formats.
   sandbox_host="${sandbox_id//_/-}"
-  url_candidates+=("https://${sandbox_host}.vercel.app")
   url_candidates+=("https://${sandbox_host}.vercel.run")
+  url_candidates+=("https://${sandbox_host}.vercel.app")
 
-  for candidate in "${url_candidates[@]}"; do
-    seen=0
-    for existing in "${deduped_url_candidates[@]}"; do
-      if [ "${existing}" = "${candidate}" ]; then
-        seen=1
-        break
-      fi
-    done
-    if [ "${seen}" -eq 0 ]; then
-      deduped_url_candidates+=("${candidate}")
-    fi
-  done
+  mapfile -t url_candidates < <(printf '%s\n' "${url_candidates[@]}" | sed '/^$/d' | awk '!seen[$0]++')
 
-  if [ "${#deduped_url_candidates[@]}" -eq 0 ]; then
+  if [ "${#url_candidates[@]}" -eq 0 ]; then
     echo "::error::Could not derive sandbox URL candidates from sandbox create output."
     exit 1
   fi
 
   for _attempt in $(seq 1 120); do
-    for candidate in "${deduped_url_candidates[@]}"; do
+    for candidate in "${url_candidates[@]}"; do
       if curl --fail --silent --show-error --max-time 5 "${candidate}/health" > /dev/null; then
         server_public_url="${candidate}"
         sandbox_ready=1
@@ -182,7 +175,7 @@ start_sandbox_server() {
 
   if [ "${sandbox_ready}" -ne 1 ]; then
     echo "::error::Timed out waiting for sandbox URL health check."
-    echo "Tried candidates: ${deduped_url_candidates[*]}"
+    echo "Tried candidates: ${url_candidates[*]}"
     sandbox exec \
       --token "${VERCEL_SANDBOXES_TOKEN}" \
       --project "${VERCEL_SANDBOXES_PROJECT_ID}" \
