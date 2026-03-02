@@ -17,6 +17,6 @@ export function setHashJamId(jamId: string): void {
 
 export function onHashChange(callback: (jamId: string | null) => void): () => void {
   const handler = () => callback(parseJamId());
-  window.addEventListener('hashchange', handler);
-  return () => window.removeEventListener('hashchange', handler);
+  window.addEventListener("hashchange", handler);
+  return () => window.removeEventListener("hashchange", handler);
 }

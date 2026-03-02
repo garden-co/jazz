@@ -11,53 +11,26 @@ export const SEED_INSTRUMENTS = [
   { name: "Guitar 2", file: "/amaj7.mp3", display_order: 6 },
 ] as const;
 
-/**
- * Ensure instruments are seeded.
- * Checks both local OPFS and server-synced data before inserting.
- */
+export const SEEDED_STORAGE_KEY = "wequencer-seeded";
+
+/** Returns the seeds whose names are absent from the given set. */
+export function missingSeeds(existingNames: Set<string>) {
+  return SEED_INSTRUMENTS.filter((s) => !existingNames.has(s.name));
+}
+
 export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
-  // Check local first (fast path)
-  const local = await db.all(app.instruments, "worker");
-  if (local.length > 0) return;
+  // Return visits on the same device: skip the network round-trip entirely.
+  // This makes the app fully offline-capable after the first successful seed.
+  if (localStorage.getItem(SEEDED_STORAGE_KEY)) return;
 
-  // Wait briefly for server-synced instruments to arrive
-  const hasServerData = await new Promise<boolean>((resolve) => {
-    let settled = false;
-    let unsubFn: (() => void) | null = null;
+  // First visit on this device: wait for edge confirmation before deciding what
+  // to insert. Without deterministic IDs in the Jazz API we cannot make
+  // concurrent inserts from two fresh clients idempotent at the DB layer, so
+  // settledTier: 'edge' remains the dedup guard here.
+  const existing = await db.all(app.instruments, { settledTier: "edge" });
+  const existingNames = new Set(existing.map((i) => i.name));
 
-    function cleanup() {
-      if (unsubFn) {
-        unsubFn();
-        unsubFn = null;
-      }
-    }
-
-    unsubFn = db.subscribeAll(app.instruments, (delta) => {
-      if (!settled && delta.all.length > 0) {
-        settled = true;
-        // Defer cleanup to avoid calling unsub before it's assigned
-        queueMicrotask(cleanup);
-        resolve(true);
-      }
-    });
-
-    // If the callback already resolved synchronously, clean up
-    if (settled) {
-      cleanup();
-    } else {
-      setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          resolve(false);
-        }
-      }, 2000);
-    }
-  });
-
-  if (hasServerData) return;
-
-  for (const seed of SEED_INSTRUMENTS) {
+  for (const seed of missingSeeds(existingNames)) {
     const res = await fetch(seed.file);
     const buffer = await res.arrayBuffer();
     db.insert(app.instruments, {
@@ -66,6 +39,8 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
       display_order: seed.display_order,
     });
   }
+
+  localStorage.setItem(SEEDED_STORAGE_KEY, "1");
 }
 
 /** Floor the current time to the nearest minute. */
@@ -81,7 +56,7 @@ export function currentMinuteDate(): Date {
 export async function getCurrentJam(db: Db): Promise<string> {
   const now = currentMinuteDate();
 
-  const existing = await db.all(app.jams.where({ created_at: now }).limit(1), "worker");
+  const existing = await db.all(app.jams.where({ created_at: now }).limit(1));
   if (existing.length > 0) {
     return existing[0].id;
   }

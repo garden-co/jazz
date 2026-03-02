@@ -1,6 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
-export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export interface Instrument {
   id: string;
@@ -62,22 +68,46 @@ export interface InstrumentWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
   sound?: Uint8Array | { eq?: Uint8Array; ne?: Uint8Array };
-  display_order?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  display_order?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
 }
 
 export interface JamWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
-  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
-  transport_start?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  created_at?:
+    | Date
+    | number
+    | {
+        eq?: Date | number;
+        gt?: Date | number;
+        gte?: Date | number;
+        lt?: Date | number;
+        lte?: Date | number;
+      };
+  transport_start?:
+    | Date
+    | number
+    | {
+        eq?: Date | number;
+        gt?: Date | number;
+        gte?: Date | number;
+        lt?: Date | number;
+        lte?: Date | number;
+      };
   bpm?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  beat_count?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  beat_count?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
 }
 
 export interface BeatWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   jam?: string | { eq?: string; ne?: string };
   instrument?: string | { eq?: string; ne?: string };
-  beat_index?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  beat_index?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   placed_by?: string | { eq?: string; ne?: string; contains?: string };
 }
 
@@ -149,7 +179,9 @@ export type JamWithIncludes<I extends JamInclude = {}> = Jam & {
   participantsViaJam?: NonNullable<I["participantsViaJam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Participant[]
-      : RelationInclude extends ParticipantQueryBuilder<infer QueryInclude extends ParticipantInclude>
+      : RelationInclude extends ParticipantQueryBuilder<
+            infer QueryInclude extends ParticipantInclude
+          >
         ? ParticipantWithIncludes<QueryInclude>[]
         : RelationInclude extends ParticipantInclude
           ? ParticipantWithIncludes<RelationInclude>[]
@@ -191,126 +223,128 @@ export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Partici
 };
 
 export const wasmSchema: WasmSchema = {
-  "instruments": {
-    "columns": [
+  instruments: {
+    columns: [
       {
-        "name": "name",
-        "column_type": {
-          "type": "Text"
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "sound",
-        "column_type": {
-          "type": "Bytea"
+        name: "sound",
+        column_type: {
+          type: "Bytea",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "display_order",
-        "column_type": {
-          "type": "Integer"
+        name: "display_order",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
-      }
-    ]
+        nullable: false,
+      },
+    ],
   },
-  "jams": {
-    "columns": [
+  jams: {
+    columns: [
       {
-        "name": "created_at",
-        "column_type": {
-          "type": "Timestamp"
+        name: "created_at",
+        column_type: {
+          type: "Timestamp",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "transport_start",
-        "column_type": {
-          "type": "Timestamp"
+        name: "transport_start",
+        column_type: {
+          type: "Timestamp",
         },
-        "nullable": true
+        nullable: true,
       },
       {
-        "name": "bpm",
-        "column_type": {
-          "type": "Integer"
+        name: "bpm",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "beat_count",
-        "column_type": {
-          "type": "Integer"
+        name: "beat_count",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
-      }
-    ]
+        nullable: false,
+      },
+    ],
   },
-  "beats": {
-    "columns": [
+  beats: {
+    columns: [
       {
-        "name": "jam",
-        "column_type": {
-          "type": "Uuid"
+        name: "jam",
+        column_type: {
+          type: "Uuid",
         },
-        "nullable": false,
-        "references": "jams"
+        nullable: false,
+        references: "jams",
       },
       {
-        "name": "instrument",
-        "column_type": {
-          "type": "Uuid"
+        name: "instrument",
+        column_type: {
+          type: "Uuid",
         },
-        "nullable": false,
-        "references": "instruments"
+        nullable: false,
+        references: "instruments",
       },
       {
-        "name": "beat_index",
-        "column_type": {
-          "type": "Integer"
+        name: "beat_index",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "placed_by",
-        "column_type": {
-          "type": "Text"
+        name: "placed_by",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
-      }
-    ]
+        nullable: false,
+      },
+    ],
   },
-  "participants": {
-    "columns": [
+  participants: {
+    columns: [
       {
-        "name": "jam",
-        "column_type": {
-          "type": "Uuid"
+        name: "jam",
+        column_type: {
+          type: "Uuid",
         },
-        "nullable": false,
-        "references": "jams"
+        nullable: false,
+        references: "jams",
       },
       {
-        "name": "user_id",
-        "column_type": {
-          "type": "Text"
+        name: "user_id",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "display_name",
-        "column_type": {
-          "type": "Text"
+        name: "display_name",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
-      }
-    ]
-  }
+        nullable: false,
+      },
+    ],
+  },
 };
 
-export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements QueryBuilder<InstrumentWithIncludes<I>> {
+export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements QueryBuilder<
+  InstrumentWithIncludes<I>
+> {
   readonly _table = "instruments";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: InstrumentWithIncludes<I>;
@@ -401,13 +435,15 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -431,7 +467,9 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -485,7 +523,9 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
   }
 }
 
-export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<JamWithIncludes<I>> {
+export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
+  JamWithIncludes<I>
+> {
   readonly _table = "jams";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: JamWithIncludes<I>;
@@ -576,13 +616,15 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -606,7 +648,9 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -660,7 +704,9 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
   }
 }
 
-export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilder<BeatWithIncludes<I>> {
+export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilder<
+  BeatWithIncludes<I>
+> {
   readonly _table = "beats";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: BeatWithIncludes<I>;
@@ -751,13 +797,15 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -781,7 +829,9 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -835,7 +885,9 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
   }
 }
 
-export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implements QueryBuilder<ParticipantWithIncludes<I>> {
+export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implements QueryBuilder<
+  ParticipantWithIncludes<I>
+> {
   readonly _table = "participants";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ParticipantWithIncludes<I>;
@@ -877,7 +929,10 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
     return clone;
   }
 
-  orderBy(column: keyof Participant, direction: "asc" | "desc" = "asc"): ParticipantQueryBuilder<I> {
+  orderBy(
+    column: keyof Participant,
+    direction: "asc" | "desc" = "asc",
+  ): ParticipantQueryBuilder<I> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -926,13 +981,15 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -956,7 +1013,9 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
