@@ -234,6 +234,7 @@ pub enum SyncPayload {
     QuerySubscription {
         query_id: QueryId,
         query: Box<Query>,
+        #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
         #[serde(default)]
         propagation: QueryPropagation,
@@ -260,6 +261,60 @@ pub enum SyncPayload {
 
     /// Error response.
     Error(SyncError),
+}
+
+mod query_subscription_session_serde {
+    use super::Session;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct SessionWire {
+        user_id: String,
+        claims_json: String,
+    }
+
+    pub fn serialize<S>(value: &Option<Session>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+
+        let wire: Option<SessionWire> = value
+            .as_ref()
+            .map(|session| {
+                let claims_json =
+                    serde_json::to_string(&session.claims).map_err(serde::ser::Error::custom)?;
+                Ok(SessionWire {
+                    user_id: session.user_id.clone(),
+                    claims_json,
+                })
+            })
+            .transpose()?;
+
+        wire.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Session>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<Session>::deserialize(deserializer);
+        }
+
+        let wire = Option::<SessionWire>::deserialize(deserializer)?;
+        wire.map(|session_wire| {
+            let claims = serde_json::from_str(&session_wire.claims_json)
+                .map_err(serde::de::Error::custom)?;
+            Ok(Session {
+                user_id: session_wire.user_id,
+                claims,
+            })
+        })
+        .transpose()
+    }
 }
 
 impl SyncPayload {
