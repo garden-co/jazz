@@ -447,6 +447,34 @@ export function getCollectedMigration(): Lens | null {
   return { table: migration.table, operations };
 }
 
+export function getCollectedMigrations(): Lens[] {
+  const migrations = [...collectedMigrations];
+  collectedMigrations = [];
+  return migrations.map((migration) => {
+    const operations: LensOp[] = migration.operations.map(({ column, op }) => {
+      switch (op._type) {
+        case "add":
+          return {
+            type: "introduce" as const,
+            column,
+            sqlType: op.sqlType,
+            value: op.default,
+          };
+        case "drop":
+          return {
+            type: "drop" as const,
+            column,
+            sqlType: op.sqlType,
+            value: op.backwardsDefault,
+          };
+        case "rename":
+          return { type: "rename" as const, column, value: op.oldName };
+      }
+    });
+    return { table: migration.table, operations };
+  });
+}
+
 export function resetCollectedState(): void {
   collectedTables = [];
   collectedMigrations = [];
