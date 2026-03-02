@@ -871,14 +871,11 @@ fn parse_header<'a>(
     }
 
     let kind = decode_kind(raw[4])?;
-    let next_page_id = nonzero(u64::from_le_bytes(
-        raw[8..16].try_into().expect("next page id header slice"),
-    ));
-    let item_count = u32::from_le_bytes(raw[16..20].try_into().expect("item count header slice"));
+    let next_page_id = nonzero(read_le_u64(raw, 8));
+    let item_count = read_le_u32(raw, 16);
 
     if verify_checksum {
-        let expected_checksum =
-            u32::from_le_bytes(raw[20..24].try_into().expect("checksum header slice"));
+        let expected_checksum = read_le_u32(raw, 20);
         let actual_checksum = page_checksum(raw);
         if expected_checksum != actual_checksum {
             return Err(BTreeError::Corrupt(format!(
@@ -1346,6 +1343,30 @@ fn page_checksum(raw: &[u8]) -> u32 {
     hasher.update(&raw[..20]);
     hasher.update(&raw[24..]);
     hasher.finalize()
+}
+
+#[inline]
+fn read_le_u32(raw: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        raw[offset],
+        raw[offset + 1],
+        raw[offset + 2],
+        raw[offset + 3],
+    ])
+}
+
+#[inline]
+fn read_le_u64(raw: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        raw[offset],
+        raw[offset + 1],
+        raw[offset + 2],
+        raw[offset + 3],
+        raw[offset + 4],
+        raw[offset + 5],
+        raw[offset + 6],
+        raw[offset + 7],
+    ])
 }
 
 fn nonzero(value: u64) -> Option<u64> {
