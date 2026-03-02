@@ -4,7 +4,10 @@ import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
   DEVTOOLS_EVENTS,
+  DevtoolsBridgeCommand,
+  DevtoolsEventEnvelope,
   DevtoolsRequestEnvelope,
+  DevtoolsRequestPayloadByCommand,
   DevtoolsResponseEnvelope,
   isRecord,
 } from "./protocol.js";
@@ -26,6 +29,11 @@ export interface DevToolsAttachment {
 
 const runtimeBridgeStateByDb = new WeakMap<Db, RuntimeBridgeState>();
 const registeredRuntimeBridgeDbs = new WeakSet<Db>();
+const devtoolsCommandSet = new Set<string>(Object.values(DEVTOOLS_COMMANDS));
+
+function isDevtoolsBridgeCommand(command: unknown): command is DevtoolsBridgeCommand {
+  return typeof command === "string" && devtoolsCommandSet.has(command);
+}
 
 function notifyConnectionListeners(state: RuntimeBridgeState): void {
   for (const listener of state.listeners) {
@@ -80,7 +88,7 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
       if (rawMessage.channel !== DEVTOOLS_BRIDGE_CHANNEL) return;
 
       if (rawMessage.kind === "event") {
-        const eventEnvelope = rawMessage as Partial<{ event: string }>;
+        const eventEnvelope = rawMessage as Partial<DevtoolsEventEnvelope>;
         if (eventEnvelope.event === DEVTOOLS_EVENTS.CONNECTED) {
           setRuntimeBridgeConnected(db, true);
         }
@@ -91,18 +99,21 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
         return;
       }
 
-      const envelope = rawMessage as Partial<DevtoolsRequestEnvelope>;
+      const envelope = rawMessage as DevtoolsRequestEnvelope;
       if (
         envelope.kind !== "request" ||
         typeof envelope.requestId !== "string" ||
-        typeof envelope.command !== "string"
+        !isDevtoolsBridgeCommand(envelope.command)
       ) {
         return;
       }
       const requestId = envelope.requestId;
 
       const respond = (
-        response: Omit<DevtoolsResponseEnvelope, "channel" | "kind" | "requestId">,
+        response: Omit<
+          DevtoolsResponseEnvelope<DevtoolsBridgeCommand>,
+          "channel" | "kind" | "requestId"
+        >,
       ) => {
         window.postMessage(
           {
@@ -131,7 +142,8 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE) {
-          const payload = isRecord(envelope.payload) ? envelope.payload : {};
+          const payload =
+            envelope.payload as DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE];
           const bridgeSubscriptionId = payload.subscriptionId;
           if (typeof bridgeSubscriptionId !== "string") {
             throw new Error("Invalid payload for client.unsubscribe.");
@@ -145,48 +157,26 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
           return;
         }
 
-        if (
-          envelope.command !== DEVTOOLS_COMMANDS.CLIENT_QUERY &&
-          envelope.command !== DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE
-        ) {
-          respond({
-            ok: false,
-            error: { message: `Unsupported devtools command: ${envelope.command}` },
-          });
+        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_QUERY) {
+          const queryPayload = envelope.payload;
+          const rows = await db.all(
+            translateQueryToBuilder(queryPayload.query),
+            queryPayload.options,
+          );
+          respond({ ok: true, payload: rows });
           return;
         }
 
-        const queryPayload = isRecord(envelope.payload) ? envelope.payload : {};
-        const query = queryPayload.query;
-        const settledTier = queryPayload.settledTier as PersistenceTier | undefined;
-        const options = isRecord(queryPayload.options)
-          ? (queryPayload.options as QueryExecutionOptions)
-          : settledTier
-            ? { settledTier }
-            : undefined;
-
-        if (!isRecord(query)) {
-          throw new Error(
-            envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE
-              ? "Invalid payload for client.subscribe."
-              : "Invalid payload for client.query.",
-          );
-        }
-
         if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE) {
-          const bridgeSubscriptionId = queryPayload.subscriptionId;
-          if (typeof bridgeSubscriptionId !== "string") {
-            throw new Error("Invalid payload for client.subscribe.");
-          }
-
-          const unsubPriorSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
+          const { subscriptionId, query, options } = envelope.payload;
+          const unsubPriorSubscription = state?.activeSubscriptions.get(subscriptionId);
           if (unsubPriorSubscription) {
             unsubPriorSubscription();
-            state?.activeSubscriptions.delete(bridgeSubscriptionId);
+            state?.activeSubscriptions.delete(subscriptionId);
           }
 
           const unsub = db.subscribeAll(
-            translateQueryToBuilder(query as any),
+            translateQueryToBuilder(query),
             (delta) => {
               window.postMessage(
                 {
@@ -194,7 +184,7 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
                   kind: "event",
                   event: DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA,
                   payload: {
-                    subscriptionId: bridgeSubscriptionId,
+                    subscriptionId: subscriptionId,
                     delta,
                   },
                 },
@@ -204,13 +194,19 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
             options,
           );
 
-          state?.activeSubscriptions.set(bridgeSubscriptionId, unsub);
+          state?.activeSubscriptions.set(subscriptionId, unsub);
           respond({ ok: true, payload: { subscribed: true } });
           return;
         }
 
-        const rows = await db.all(translateQueryToBuilder(query as any), options);
-        respond({ ok: true, payload: rows });
+        // @ts-expect-error - it should be impossible to get here
+        console.error(`Unsupported devtools command: ${envelope.command}`);
+        respond({
+          ok: false,
+          // @ts-expect-error - it should be impossible to get here
+          error: { message: `Unsupported devtools command: ${envelope.command}` },
+        });
+        return;
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : "Unknown devtools bridge error";
@@ -237,11 +233,9 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
   };
 }
 
-function translateQueryToBuilder(query: {
-  _schema: WasmSchema;
-  _table: string;
-  _build: string;
-}): QueryBuilder<{ id: string }> {
+function translateQueryToBuilder(
+  query: Omit<QueryBuilder<unknown>, "_build"> & { _build: string },
+): QueryBuilder<{ id: string }> {
   return {
     _schema: query._schema,
     _table: query._table,

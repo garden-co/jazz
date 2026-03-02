@@ -14,8 +14,11 @@ import {
   DEVTOOLS_EVENTS,
   DEVTOOLS_PORT_NAME,
   DevToolsBootstrap,
+  DevtoolsBridgeCommand,
   DevtoolsEventEnvelope,
-  DevtoolsRequestEnvelope,
+  DevtoolsEventPayloadByEvent,
+  DevtoolsRequestPayloadByCommand,
+  DevtoolsResponsePayloadByCommand,
   DevtoolsResponseEnvelope,
   isRecord,
   isSerializableDbConfig,
@@ -42,8 +45,6 @@ let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
 const pendingRequests = new Map<string, PendingRequest>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
-const pendingSubscriptionBridgeIds = new Map<number, string>();
-let nextSubscriptionHandle = 1;
 
 function randomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -221,7 +222,12 @@ async function ensureDevtoolsPort(): Promise<any> {
       eventEnvelope.kind === "event" &&
       eventEnvelope.event === DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA
     ) {
-      const payload = isRecord(eventEnvelope.payload) ? eventEnvelope.payload : {};
+      const payload = eventEnvelope.payload as
+        | DevtoolsEventPayloadByEvent[typeof DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA]
+        | undefined;
+      if (!payload) {
+        return;
+      }
       const bridgeSubscriptionId = payload.subscriptionId;
       if (typeof bridgeSubscriptionId !== "string") {
         return;
@@ -272,8 +278,6 @@ async function ensureDevtoolsPort(): Promise<any> {
     }
     pendingRequests.clear();
     pendingSubscriptionCallbacks.clear();
-    pendingSubscriptionBridgeIds.clear();
-    nextSubscriptionHandle = 1;
     devtoolsPort = null;
     announcedBootstrap = null;
     announcePromise = null;
@@ -287,14 +291,15 @@ async function ensureDevtoolsPort(): Promise<any> {
   return devtoolsPort;
 }
 
-async function sendDevtoolsRequest<TPayload>(
-  command: string,
-  payload: unknown,
+async function sendDevtoolsRequest<TCommand extends DevtoolsBridgeCommand>(
+  command: TCommand,
+  payload: DevtoolsRequestPayloadByCommand[TCommand],
   timeoutMs = REQUEST_TIMEOUT_MS,
-): Promise<TPayload> {
+): Promise<DevtoolsResponsePayloadByCommand[TCommand]> {
   const port = await ensureDevtoolsPort();
   const requestId = randomId();
-  const envelope: DevtoolsRequestEnvelope = {
+
+  const envelope = {
     channel: DEVTOOLS_BRIDGE_CHANNEL,
     kind: "request",
     requestId,
@@ -302,14 +307,14 @@ async function sendDevtoolsRequest<TPayload>(
     payload,
   };
 
-  return new Promise<TPayload>((resolve, reject) => {
+  return new Promise<DevtoolsResponsePayloadByCommand[TCommand]>((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
       pendingRequests.delete(requestId);
       reject(new Error(`DevTools bridge request timed out (${command}).`));
     }, timeoutMs);
 
     pendingRequests.set(requestId, {
-      resolve: (value: unknown) => resolve(value as TPayload),
+      resolve: (value: unknown) => resolve(value as DevtoolsResponsePayloadByCommand[TCommand]),
       reject,
       timeoutId,
     });
@@ -328,11 +333,11 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
   announcePromise = (async () => {
     while (true) {
       try {
-        const result = await sendDevtoolsRequest<{
-          ready?: boolean;
-          wasmSchema?: WasmSchema;
-          dbConfig?: DbConfig;
-        }>(DEVTOOLS_COMMANDS.ANNOUNCE, {}, ANNOUNCE_REQUEST_TIMEOUT_MS);
+        const result = await sendDevtoolsRequest(
+          DEVTOOLS_COMMANDS.ANNOUNCE,
+          {},
+          ANNOUNCE_REQUEST_TIMEOUT_MS,
+        );
 
         if (
           !isRecord(result) ||
@@ -401,21 +406,19 @@ class DevToolsDb extends Db {
     return ensureDevtoolsAnnounced();
   }
 
-  getConnectedSchema(): WasmSchema | null {
-    return announcedBootstrap?.wasmSchema ?? null;
-  }
-
-  getConnectedConfig(): DbConfig | null {
-    return announcedBootstrap?.dbConfig ?? null;
-  }
-
-  protected getClient(schema: WasmSchema): JazzClient {
+  protected getClient(): JazzClient {
     throw new Error("DevToolsDb does not support getClient.");
   }
 
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const payload = { query, options, settledTier: options?.settledTier };
-    return sendDevtoolsRequest<T[]>(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload);
+    const payload = {
+      query: {
+        ...query,
+        _build: query._build(),
+      },
+      options,
+    };
+    return sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload) as Promise<T[]>;
   }
 
   subscribeAll<T extends { id: string }>(
@@ -437,7 +440,6 @@ class DevToolsDb extends Db {
             _build: query._build(),
           },
           options,
-          settledTier: options?.settledTier,
           subscriptionId: bridgeSubscriptionId,
         }),
       )
