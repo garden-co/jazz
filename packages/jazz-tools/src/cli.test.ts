@@ -109,6 +109,63 @@ export default {
 `;
 }
 
+function schemaWithMessagesAndCanvases(): string {
+  return `
+import { table, col } from ${JSON.stringify(dslPath)};
+
+table("messages", {
+  content: col.string(),
+  isPublic: col.boolean(),
+});
+
+table("canvases", {
+  name: col.string(),
+  isPublic: col.boolean(),
+});
+`;
+}
+
+function migrationDropIsPublicFromBothTables(): string {
+  return `
+import { migrate, col } from ${JSON.stringify(dslPath)};
+
+migrate("messages", {
+  isPublic: col.drop().boolean({ backwardsDefault: false }),
+});
+
+migrate("canvases", {
+  isPublic: col.drop().boolean({ backwardsDefault: false }),
+});
+`;
+}
+
+describe("cli build migration SQL generation", () => {
+  it("generates DROP COLUMN for every table when migrate() is called on multiple tables", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), schemaWithMessagesAndCanvases());
+    await writeFile(
+      join(schemaDir, "migration_v1_v2_aaaaaaaaaaaa_bbbbbbbbbbbb.ts"),
+      migrationDropIsPublicFromBothTables(),
+    );
+
+    await build({ schemaDir, jazzBin });
+
+    const fwdSql = await readFile(
+      join(schemaDir, "migration_v1_v2_fwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"),
+      "utf8",
+    );
+    const bwdSql = await readFile(
+      join(schemaDir, "migration_v1_v2_bwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"),
+      "utf8",
+    );
+
+    expect(fwdSql).toContain("ALTER TABLE messages DROP COLUMN isPublic;");
+    expect(fwdSql).toContain("ALTER TABLE canvases DROP COLUMN isPublic;");
+    expect(bwdSql).toContain("ALTER TABLE messages ADD COLUMN isPublic BOOLEAN DEFAULT FALSE;");
+    expect(bwdSql).toContain("ALTER TABLE canvases ADD COLUMN isPublic BOOLEAN DEFAULT FALSE;");
+  });
+});
+
 describe("cli build permissions generation", () => {
   it("loads permissions.ts, merges policies, and creates permissions.test.ts stub", async () => {
     const { schemaDir, jazzBin } = await createWorkspace();
