@@ -5,9 +5,9 @@ use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
-    ValueCellRef, decode_page_unchecked, encode_page, freelist_ids_per_page, page_fits,
-    raw_freelist_page, raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value,
-    raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
+    raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan,
+    raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -267,7 +267,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         })?;
         // Safe: tree pages are checksum-validated when read from disk, and this
         // buffer is already resident in the in-memory page cache.
-        let root_page = decode_page_unchecked(root_page_raw, self.options.page_size)?;
+        let root_page = decode_page(root_page_raw, self.options.page_size)?;
 
         if let Page::Leaf { entries, .. } = &root_page
             && entries.is_empty()
@@ -451,7 +451,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     BTreeError::Corrupt(format!("page {} missing during insert", page_id))
                 })?;
                 // Safe: page bytes came from the validated cache entry for this page_id.
-                let page = decode_page_unchecked(&page_raw, self.options.page_size)?;
+                let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Leaf { mut entries, next } = page else {
                     return Err(BTreeError::Corrupt(format!(
                         "expected leaf page {}, found non-leaf during split fallback",
@@ -518,7 +518,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     BTreeError::Corrupt(format!("page {} missing during insert", page_id))
                 })?;
                 // Safe: page bytes came from the validated cache entry for this page_id.
-                let page = decode_page_unchecked(&page_raw, self.options.page_size)?;
+                let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Internal {
                     mut keys,
                     mut children,
@@ -630,7 +630,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     BTreeError::Corrupt(format!("page {} missing during delete", page_id))
                 })?;
                 // Safe: page bytes came from the validated cache entry for this page_id.
-                let page = decode_page_unchecked(&page_raw, self.options.page_size)?;
+                let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Internal { keys, children } = page else {
                     return Err(BTreeError::Corrupt(format!(
                         "expected internal page {}, found non-internal during delete",
