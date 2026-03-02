@@ -52,13 +52,13 @@ export interface TodoWhereInput {
 }
 
 export interface ProjectInclude {
-  todosViaProject?: boolean | TodoInclude | TodoQueryBuilder;
+  todosViaProject?: true | TodoInclude | TodoQueryBuilder;
 }
 
 export interface TodoInclude {
-  parent?: boolean | TodoInclude | TodoQueryBuilder;
-  todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;
-  project?: boolean | ProjectInclude | ProjectQueryBuilder;
+  parent?: true | TodoInclude | TodoQueryBuilder;
+  todosViaParent?: true | TodoInclude | TodoQueryBuilder;
+  project?: true | ProjectInclude | ProjectQueryBuilder;
 }
 
 export interface ProjectRelations {
@@ -255,7 +255,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
   }
 
   include<NewI extends ProjectInclude>(relations: NewI): ProjectQueryBuilder<I & NewI> {
-    const clone = this._clone() as unknown as ProjectQueryBuilder<I & NewI>;
+    const clone = this._clone<I & NewI>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
@@ -286,7 +286,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
 
   gather(options: {
     start: ProjectWhereInput;
-    step: (ctx: { current: any }) => unknown;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
   }): ProjectQueryBuilder<I> {
     if (options.start === undefined) {
@@ -317,7 +317,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -378,8 +378,8 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     });
   }
 
-  private _clone(): ProjectQueryBuilder<I> {
-    const clone = new ProjectQueryBuilder<I>();
+  private _clone<CloneI extends ProjectInclude = I>(): ProjectQueryBuilder<CloneI> {
+    const clone = new ProjectQueryBuilder<CloneI>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
     clone._orderBys = [...this._orderBys];
@@ -436,7 +436,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
   }
 
   include<NewI extends TodoInclude>(relations: NewI): TodoQueryBuilder<I & NewI> {
-    const clone = this._clone() as unknown as TodoQueryBuilder<I & NewI>;
+    const clone = this._clone<I & NewI>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
@@ -467,7 +467,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
 
   gather(options: {
     start: TodoWhereInput;
-    step: (ctx: { current: any }) => unknown;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
   }): TodoQueryBuilder<I> {
     if (options.start === undefined) {
@@ -498,7 +498,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse((stepOutput as { _build: () => string })._build()) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -559,8 +559,8 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     });
   }
 
-  private _clone(): TodoQueryBuilder<I> {
-    const clone = new TodoQueryBuilder<I>();
+  private _clone<CloneI extends TodoInclude = I>(): TodoQueryBuilder<CloneI> {
+    const clone = new TodoQueryBuilder<CloneI>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
     clone._orderBys = [...this._orderBys];

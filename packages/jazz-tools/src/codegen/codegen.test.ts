@@ -771,8 +771,8 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoInclude {");
-    // Include types now include QueryBuilder union
-    expect(output).toContain("owner?: boolean | UserInclude | UserQueryBuilder;");
+    // Include types now include QueryBuilder union and only allow `true` for flags
+    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder;");
   });
 
   it("generates Relations types", () => {
@@ -836,9 +836,9 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoInclude {");
-    // Include types now include QueryBuilder union
-    expect(output).toContain("parent?: boolean | TodoInclude | TodoQueryBuilder;");
-    expect(output).toContain("todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;");
+    // Include types now include QueryBuilder union and only allow `true` for flags
+    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder;");
   });
 
   it("does not generate relation types for tables without relations", () => {
@@ -983,6 +983,8 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
+    expect(output).toContain("const clone = this._clone<I & NewI>();");
+    expect(output).not.toContain("as unknown as TodoQueryBuilder<I & NewI>");
   });
 
   it("generates hopTo method for tables with relations", () => {
@@ -1016,7 +1018,7 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("owner?: boolean | UserInclude | UserQueryBuilder;");
+    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder;");
   });
 
   it("QueryBuilder._build() returns valid JSON structure", () => {
@@ -1044,8 +1046,10 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("private _clone(): TodoQueryBuilder<I> {");
-    expect(output).toContain("const clone = new TodoQueryBuilder<I>();");
+    expect(output).toContain(
+      "private _clone<CloneI extends Record<string, never> = I>(): TodoQueryBuilder<CloneI> {",
+    );
+    expect(output).toContain("const clone = new TodoQueryBuilder<CloneI>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
     expect(output).toContain("clone._hops = [...this._hops];");
     expect(output).toContain("clone._gatherVal = this._gatherVal");
@@ -1058,6 +1062,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("gather(options: {");
+    expect(output).toContain("step: (ctx: { current: string }) => QueryBuilder<unknown>;");
     expect(output).toContain("const stepOutput = options.step({ current: currentToken });");
     expect(output).toContain("if (stepHops.length !== 1) {");
     expect(output).toContain("const withStart = this.where(options.start);");
@@ -1111,7 +1116,7 @@ describe("QueryBuilder self-referential relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("parent?: boolean | TodoInclude | TodoQueryBuilder;");
-    expect(output).toContain("todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder;");
   });
 });

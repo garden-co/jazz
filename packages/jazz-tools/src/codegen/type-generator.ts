@@ -145,8 +145,8 @@ export function tableNameToInterface(name: string): string {
  *
  * Example output:
  *   export interface TodoInclude {
- *     parent?: boolean | TodoInclude | TodoQueryBuilder;
- *     owner?: boolean | UserInclude | UserQueryBuilder;
+ *     parent?: true | TodoInclude | TodoQueryBuilder;
+ *     owner?: true | UserInclude | UserQueryBuilder;
  *   }
  */
 function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
@@ -162,7 +162,7 @@ function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
       const targetInclude = targetInterface + "Include";
       const targetQueryBuilder = targetInterface + "QueryBuilder";
       // Add QueryBuilder to union for type-safe filtered includes
-      lines.push(`  ${rel.name}?: boolean | ${targetInclude} | ${targetQueryBuilder};`);
+      lines.push(`  ${rel.name}?: true | ${targetInclude} | ${targetQueryBuilder};`);
     }
     lines.push(`}`);
     lines.push(``);
