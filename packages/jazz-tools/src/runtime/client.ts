@@ -22,6 +22,7 @@ import {
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveJwtSession } from "./client-session.js";
+import { translateQuery } from "./query-adapter.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -113,10 +114,32 @@ export type LinkExternalIdentityResult = LinkExternalResponse;
  */
 export interface QueryInput {
   _build(): string;
+  /** Optional schema metadata available on generated QueryBuilder objects. */
+  _schema?: WasmSchema;
 }
 
 function resolveQueryJson(query: string | QueryInput): string {
-  return typeof query === "string" ? query : query._build();
+  if (typeof query === "string") {
+    return query;
+  }
+
+  const builtQuery = query._build();
+  const schema = query._schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return builtQuery;
+  }
+
+  // Query payloads already in runtime form include relation_ir and should pass through unchanged.
+  try {
+    const parsed = JSON.parse(builtQuery) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && "relation_ir" in parsed) {
+      return builtQuery;
+    }
+  } catch {
+    return builtQuery;
+  }
+
+  return translateQuery(builtQuery, schema);
 }
 
 function normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
@@ -313,7 +336,7 @@ export class SessionClient {
    * Query as this session's user.
    */
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.client.queryInternal(resolveQueryJson(query), this.session, options);
+    return this.client.queryInternal(query, this.session, options);
   }
 
   /**
@@ -515,7 +538,7 @@ export class JazzClient {
    * @returns Array of matching rows
    */
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.queryInternal(resolveQueryJson(query), this.resolvedSession ?? undefined, options);
+    return this.queryInternal(query, this.resolvedSession ?? undefined, options);
   }
 
   /**
@@ -523,11 +546,12 @@ export class JazzClient {
    * @internal
    */
   async queryInternal(
-    queryJson: string,
+    query: string | QueryInput,
     session?: Session,
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = normalizeQueryExecutionOptions(options);
+    const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
