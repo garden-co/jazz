@@ -72,37 +72,45 @@ export interface TodoRelations {
 }
 
 export type ProjectWithIncludes<I extends ProjectInclude = {}> = Project & {
-  todosViaProject?: I["todosViaProject"] extends true
-    ? Todo[]
-    : I["todosViaProject"] extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
-      ? TodoWithIncludes<QueryInclude>[]
-      : I["todosViaProject"] extends TodoInclude
-        ? TodoWithIncludes<I["todosViaProject"]>[]
-        : never;
+  todosViaProject?: NonNullable<I["todosViaProject"]> extends infer RelationInclude
+    ? RelationInclude extends true
+      ? Todo[]
+      : RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
+        ? TodoWithIncludes<QueryInclude>[]
+        : RelationInclude extends TodoInclude
+          ? TodoWithIncludes<RelationInclude>[]
+          : never
+    : never;
 };
 
 export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
-  parent?: I["parent"] extends true
-    ? Todo
-    : I["parent"] extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
-      ? TodoWithIncludes<QueryInclude>
-      : I["parent"] extends TodoInclude
-        ? TodoWithIncludes<I["parent"]>
-        : never;
-  todosViaParent?: I["todosViaParent"] extends true
-    ? Todo[]
-    : I["todosViaParent"] extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
-      ? TodoWithIncludes<QueryInclude>[]
-      : I["todosViaParent"] extends TodoInclude
-        ? TodoWithIncludes<I["todosViaParent"]>[]
-        : never;
-  project?: I["project"] extends true
-    ? Project
-    : I["project"] extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
-      ? ProjectWithIncludes<QueryInclude>
-      : I["project"] extends ProjectInclude
-        ? ProjectWithIncludes<I["project"]>
-        : never;
+  parent?: NonNullable<I["parent"]> extends infer RelationInclude
+    ? RelationInclude extends true
+      ? Todo
+      : RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
+        ? TodoWithIncludes<QueryInclude>
+        : RelationInclude extends TodoInclude
+          ? TodoWithIncludes<RelationInclude>
+          : never
+    : never;
+  todosViaParent?: NonNullable<I["todosViaParent"]> extends infer RelationInclude
+    ? RelationInclude extends true
+      ? Todo[]
+      : RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
+        ? TodoWithIncludes<QueryInclude>[]
+        : RelationInclude extends TodoInclude
+          ? TodoWithIncludes<RelationInclude>[]
+          : never
+    : never;
+  project?: NonNullable<I["project"]> extends infer RelationInclude
+    ? RelationInclude extends true
+      ? Project
+      : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
+        ? ProjectWithIncludes<QueryInclude>
+        : RelationInclude extends ProjectInclude
+          ? ProjectWithIncludes<RelationInclude>
+          : never
+    : never;
 };
 
 export const wasmSchema: WasmSchema = {
