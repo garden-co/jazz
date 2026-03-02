@@ -9,6 +9,7 @@
     "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs"
   },
   "devDependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "wasm-pack": "^0.14.0"
   }
 }

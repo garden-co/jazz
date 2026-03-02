@@ -30,6 +30,9 @@
     "turbo": "^2.0.0",
     "typescript": "catalog:default"
   },
+  "onlyBuiltDependencies": [
+    "wasm-pack"
+  ],
   "packageManager": "pnpm@10.14.0",
   "pnpm": {
     "overrides": {
