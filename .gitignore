@@ -28,6 +28,9 @@ __screenshots__
 playwright-report/
 test-results/
 
+# Generated
+examples/wequencer/walkthrough/*.html
+
 # Local data
 data/
 

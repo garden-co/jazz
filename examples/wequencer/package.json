@@ -8,7 +8,9 @@
     "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "walkthrough": "npx @marp-team/marp-cli --html walkthrough/jazz-wequencer.md --preview",
+    "walkthrough:shots": "playwright test --config playwright.screenshots.config.ts"
   },
   "dependencies": {
     "jazz-tools": "workspace:*",

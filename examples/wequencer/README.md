@@ -1,42 +1,49 @@
 # Wequencer
 
-Collaborative real-time music sequencer. Multiple users create rhythmic patterns together on a 16-beat grid. Jazz2 handles state synchronisation via a relational model, and Tone.js handles audio playback.
+Collaborative real-time music sequencer. Multiple users place beats on a shared 16-step grid and play in sync. Jazz handles state sync; Tone.js handles audio.
+
+## Getting started
+
+```bash
+pnpm install
+pnpm dev        # starts the Jazz server, pushes the schema, and opens Vite
+```
+
+To understand how the app uses Jazz, run the walkthrough:
+
+```bash
+npm run walkthrough
+```
 
 ## Commands
 
 ```bash
-pnpm install                    # Install dependencies
-pnpm dev                        # Start jazz server + push schema + Vite dev server
-pnpm build                      # Schema codegen + production build
-pnpm test:e2e                   # Playwright E2E tests (spawns its own jazz server)
+npm run walkthrough        # Marp slideshow — Jazz patterns used in this app
+npm run walkthrough:shots  # Re-capture screenshots for the slideshow
+npm run test:e2e           # Playwright e2e tests
+npm run test               # Vitest unit tests
+npm run build              # Schema codegen + production build
 ```
-
-## HTTPS in development
-
-The dev server uses a self-signed TLS certificate (`@vitejs/plugin-basic-ssl`). This is required because the Web Crypto API (`crypto.subtle`, used by jazz for SHA-256 hashing) is only available in [secure contexts](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API#availability). Without HTTPS, the app will fail with "No SHA-256 implementation available in this runtime" on any device that accesses it over the network.
-
-Vite proxies jazz server requests (`/sync`, `/events`, `/health`, `/auth`) so that everything goes through a single HTTPS origin, avoiding mixed content issues.
-
-When accessing from another device (e.g. a phone on the same network), you will need to accept the self-signed certificate warning in the browser.
-
-## Schema
-
-The relational schema is defined in `schema/current.ts` using jazz2's `table()` and `col.*` DSL. Running `pnpm build` generates the typed client (`schema/app.ts`) and SQL files.
-
-Tables:
-
-- **instruments** — name, sound (BYTEA), display_order
-- **jams** — created_at, transport_start (nullable, for playback sync)
-- **beats** — jam (ref), instrument (ref), beat_index, placed_by
-- **participants** — jam (ref), user_id, display_name
 
 ## How it works
 
-`AudioProvider.svelte` orchestrates playback:
+**State sync** is entirely handled by Jazz. Every beat, instrument change, BPM update, and participant rename is a synchronous local write (`db.insert`, `db.update`, `db.deleteFrom`). Jazz replicates the change to all connected peers in the background. The UI is driven by `QuerySubscription` reactive queries — no polling, no manual state management.
 
-1. A `ClockSync` WebSocket connection estimates the offset between local and server time.
-2. On play, a future server-epoch start time is computed and written to the jam's `transport_start`.
-3. All peers read `transport_start`, convert to local time, and schedule Tone.js transport.
-4. A drift correction loop adjusts BPM within +/-2% to keep peers aligned.
+**Synchronized playback** is also scheduled through Jazz. All peers need to start their Tone.js transport at exactly the same moment. When a user hits play, a future timestamp (in server epoch time) is written to `jam.transport_start` via Jazz. All peers receive the update, convert it to their local clock using a measured offset, and schedule Tone.js to start at that instant. The offset is tracked by `ClockSync`, which connects to the Jazz WebSocket and computes a smoothed estimate of the difference between local `performance.now()` and server epoch time.
 
-Audio samples (MP3) live in `public/`. On first run, `ensureInstrumentsSeeded()` fetches them and stores the data in the instruments table so all peers can load them via jazz sync.
+**Drift correction** runs every 500ms during playback. If the measured beat position drifts more than 10ms from the expected position for two consecutive checks, BPM is nudged up or down by up to 2% to pull the clocks back into alignment.
+
+**Audio samples** are stored as `BYTEA` blobs in the instruments table. When an instrument is seeded or added, the MP3 is fetched and written to the database. All peers receive the binary data through Jazz sync and decode it locally — no separate asset server required.
+
+## Schema
+
+Defined in `schema/current.ts` using the Jazz `table()` / `col.*` DSL. Running `pnpm build` generates the typed client (`schema/app.ts`) and SQL files.
+
+- **instruments** — name, sound (BYTEA), display_order
+- **jams** — created_at, transport_start (nullable), bpm, beat_count
+- **beats** — jam (ref), instrument (ref), beat_index, placed_by
+- **participants** — jam (ref), user_id, display_name
+
+## HTTPS in development
+
+The dev server uses a self-signed TLS certificate (`@vitejs/plugin-basic-ssl`), required because `crypto.subtle` (used by Jazz) is only available in secure contexts. Vite proxies Jazz server requests (`/sync`, `/events`, `/health`, `/auth`) through the same HTTPS origin to avoid mixed content issues. When accessing from another device on the same network, accept the self-signed certificate warning in the browser.
