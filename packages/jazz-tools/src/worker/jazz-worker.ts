@@ -21,7 +21,7 @@ import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
 declare const self: {
-  postMessage(msg: unknown): void;
+  postMessage(msg: unknown, transfer?: Transferable[]): void;
   onmessage: ((event: MessageEvent) => void) | null;
   close(): void;
   location?: { origin?: string };
@@ -106,7 +106,15 @@ function enqueueSyncMessageForMain(payload: Uint8Array): void {
 }
 
 function post(msg: WorkerToMainMessage): void {
-  self.postMessage(msg);
+  const transfer =
+    msg.type === "sync" || msg.type === "peer-sync"
+      ? collectPayloadTransferables(msg.payload)
+      : undefined;
+  self.postMessage(msg, transfer);
+}
+
+function collectPayloadTransferables(payloads: Uint8Array[]): Transferable[] {
+  return payloads.map((payload) => payload.buffer);
 }
 
 // ============================================================================

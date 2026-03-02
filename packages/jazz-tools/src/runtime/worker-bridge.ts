@@ -284,12 +284,14 @@ export class WorkerBridge {
   sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
     if (this.isDisposedLike()) return;
     if (payload.length === 0) return;
-    this.worker.postMessage({
-      type: "peer-sync",
+    const message = {
+      type: "peer-sync" as const,
       peerId,
       term,
       payload,
-    });
+    };
+    const transfer = collectPayloadTransferables(payload);
+    this.worker.postMessage(message, transfer);
   }
 
   closePeer(peerId: string): void {
@@ -323,10 +325,12 @@ export class WorkerBridge {
     const payloads = this.state.pendingSyncPayloadsForWorker;
     this.state.pendingSyncPayloadsForWorker = [];
 
-    this.worker.postMessage({
-      type: "sync",
+    const message = {
+      type: "sync" as const,
       payload: payloads,
-    });
+    };
+    const transfer = collectPayloadTransferables(payloads);
+    this.worker.postMessage(message, transfer);
   }
 
   private isDisposedLike(): boolean {
@@ -371,6 +375,10 @@ export class WorkerBridge {
     this.state.syncBatchFlushQueued = false;
     this.runtime.onSyncMessageToSend(() => undefined);
   }
+}
+
+function collectPayloadTransferables(payloads: Uint8Array[]): Transferable[] {
+  return payloads.map((payload) => payload.buffer);
 }
 
 /**
