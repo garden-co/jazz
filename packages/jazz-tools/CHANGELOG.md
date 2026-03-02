@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.20.12
+
+### Patch Changes
+
+- 9a43096: Fixed Better Auth email OTP sign-in to handle email addresses case-insensitively.
+  - cojson@0.20.12
+  - cojson-storage-indexeddb@0.20.12
+  - cojson-transport-ws@0.20.12
+
 ## 0.20.11
 
 ### Patch Changes
