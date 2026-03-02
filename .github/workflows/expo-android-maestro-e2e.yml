@@ -74,10 +74,6 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
-
-      - uses: taiki-e/install-action@v2
-        with:
           tool: sccache
 
       - name: Verify Rust toolchain binaries
@@ -85,7 +81,6 @@ jobs:
           set -euo pipefail
           rustc --version
           cargo --version
-          wasm-pack --version
           sccache --version
 
       - name: Validate required CI secrets
