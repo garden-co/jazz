@@ -16,7 +16,6 @@ on:
       - pnpm-workspace.yaml
       - turbo.json
       - .github/workflows/expo-android-maestro-e2e.yml
-      - scripts/expo-android-maestro-e2e.sh
 
 concurrency:
   group: expo-android-maestro-e2e-${{ github.event_name == 'push' && github.sha || github.ref }}
@@ -27,7 +26,7 @@ permissions:
 
 jobs:
   build-rn:
-    name: Build jazz-rn (Android and iOS) artifacts
+    name: Build jazz-rn (Android) artifacts
     uses: ./.github/workflows/rn-build-reusable.yml
     with:
       concurrency: e2e-rn-test
@@ -49,17 +48,12 @@ jobs:
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
-  
+
       - name: Download React Native Android artifact
         uses: actions/download-artifact@v5
         with:
           name: jazz-rn-android
           path: crates/jazz-rn
-
-      - name: List React Native Android artifacts
-        run: |
-          ls -R crates/jazz-rn/android/src/main/jniLibs
-        shell: bash
 
       - uses: actions/setup-java@v5
         with:
@@ -72,46 +66,77 @@ jobs:
           targets: wasm32-unknown-unknown, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
           components: clippy, rustfmt
 
-      - name: Pnpm Build
+      - name: pnpm build
         run: pnpm build
-      
-      - name: Todo Client Local First Expo App Pre Build
-        working-directory: ./examples/todo-client-localfirst-expo
-        run: |
-          pnpm expo prebuild --clean
 
-      - name: Validate required CI secrets
-        env:
-          MAESTRO_KEY: ${{ secrets.MAESTRO_KEY }}
-          MAESTRO_PROJECT_ID: ${{ secrets.MAESTRO_PROJECT_ID }}
-          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
-          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-        run: scripts/expo-android-maestro-e2e.sh validate-secrets
+      - name: Expo prebuild
+        working-directory: examples/todo-client-localfirst-expo
+        run: pnpm expo prebuild --clean
 
       - name: Install Vercel Sandbox CLI
-        run: |
-          set -euo pipefail
-          npm install -g sandbox
-          sandbox --version
+        run: npm install -g sandbox
 
-      - name: Start Vercel Sandbox and run jazz-tools server
+      - name: Create sandbox and start jazz-tools server
         env:
           VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
           VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
           VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-        run: scripts/expo-android-maestro-e2e.sh start-sandbox-server
+        run: |
+          set -euo pipefail
 
-      - name: Build Expo Android release APK
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          COMMON=(--token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}")
+
+          CREATE_OUT="$(sandbox create "${COMMON[@]}" --runtime node22 --timeout 60m --publish-port "$JAZZ_E2E_SERVER_PORT")"
+          echo "$CREATE_OUT" | tee vercel-sandbox.log
+
+          SANDBOX_ID="$(echo "$CREATE_OUT" | grep -Eo 'sbx_[[:alnum:]]+|sb_[[:alnum:]]+' | head -n1)"
+          if [ -z "$SANDBOX_ID" ]; then echo "::error::Could not parse sandbox ID"; exit 1; fi
+          echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
+
+          ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -lc 'uname -m' | tr -d '\r' | tail -n1)"
+          case "$ARCH" in
+            x86_64|amd64)  TARGET=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            *) echo "::error::Unsupported sandbox arch: $ARCH"; exit 1 ;;
+          esac
+
+          cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "$TARGET"
+          sandbox copy "${COMMON[@]}" "target/$TARGET/release/jazz-tools" "$SANDBOX_ID:/tmp/jazz-tools"
+
+          # sleep keeps the shell alive so sandbox exec's HTTP connection closes cleanly
+          # (without it, nohup+& causes the sandbox side to hang up and the CLI throws TypeError: terminated)
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" \
+            sh -lc "chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' >/tmp/server.log 2>&1 & sleep 5"
+
+          URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^ )]+' | head -n1 || true)"
+          HOST="${SANDBOX_ID//_/-}"
+          CANDIDATES=("${URL:-}" "https://$HOST.vercel.run" "https://$HOST.vercel.app")
+
+          for _ in $(seq 1 120); do
+            for c in "${CANDIDATES[@]}"; do
+              [ -z "$c" ] && continue
+              if curl --fail --silent --max-time 5 "${c%/}/health" >/dev/null 2>&1; then
+                echo "SERVER_PUBLIC_URL=${c%/}" >> "$GITHUB_ENV"
+                echo "Health OK: $c"
+                exit 0
+              fi
+            done
+            sleep 1
+          done
+
+          echo "::error::Timed out waiting for sandbox health"
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -lc "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
+          exit 1
+
+      - name: Build release APK
+        working-directory: examples/todo-client-localfirst-expo/android
         env:
           EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
           EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
           EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
-        run: scripts/expo-android-maestro-e2e.sh build-expo-apk
-
-      - name: Ensure APK exists
-        run: |
-          set -euo pipefail
-          test -f examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
 
       - name: Run Maestro Cloud flows
         id: maestro
@@ -122,27 +147,37 @@ jobs:
           app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
           workspace: .maestro
 
-      - name: Fetch sandbox server log
-        if: always()
-        env:
-          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
-          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-        run: scripts/expo-android-maestro-e2e.sh fetch-sandbox-server-log
-
-      - name: Verify server communication evidence
+      - name: Verify server evidence
         if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
-        run: scripts/expo-android-maestro-e2e.sh verify-server-evidence
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
+            "$SANDBOX_ID:/tmp/server.log" server.log || true
 
-      - name: Stop Vercel Sandbox
+          SYNC="$(grep -c 'sync request' server.log || true)"
+          EVENTS="$(grep -c 'events stream connecting' server.log || true)"
+          echo "sync requests: $SYNC | event connections: $EVENTS"
+          test "$SYNC" -gt 0 && test "$EVENTS" -gt 0
+
+      - name: Stop sandbox
         if: always()
         env:
           VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
           VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
           VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-        run: scripts/expo-android-maestro-e2e.sh stop-sandbox
+        run: |
+          if [ -z "${SANDBOX_ID:-}" ]; then exit 0; fi
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          sandbox stop --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" "$SANDBOX_ID" || true
 
-      - name: Upload server and sandbox logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
