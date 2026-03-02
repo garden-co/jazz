@@ -7,11 +7,13 @@ test.describe('instrument management', () => {
 		await expect(startButton).toBeVisible({ timeout: 10_000 });
 		await startButton.click();
 		await expect(page.locator('.instrument-manager')).toBeVisible({ timeout: 10_000 });
+		// Wait for all 7 instruments to finish seeding (each fetches an MP3 from the dev server)
+		await expect(page.locator('.instrument-list li')).toHaveCount(7, { timeout: 60_000 });
 	});
 
 	test('shows the instrument list', async ({ page }) => {
 		const instruments = page.locator('.instrument-list li');
-		await expect(instruments).toHaveCount(7, { timeout: 10_000 });
+		await expect(instruments).toHaveCount(7);
 	});
 
 	test('+ Add button toggles the form', async ({ page }) => {

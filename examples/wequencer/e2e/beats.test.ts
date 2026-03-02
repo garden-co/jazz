@@ -7,11 +7,13 @@ test.describe('beat grid interaction', () => {
 		await expect(startButton).toBeVisible({ timeout: 10_000 });
 		await startButton.click();
 		await expect(page.locator('.sequencer .grid')).toBeVisible({ timeout: 10_000 });
+		// Wait for all 7 instruments to finish seeding (each fetches an MP3 from the dev server)
+		await expect(page.locator('.instrument-name')).toHaveCount(7, { timeout: 60_000 });
 	});
 
 	test('renders all default instruments', async ({ page }) => {
 		const names = page.locator('.instrument-name');
-		await expect(names).toHaveCount(7, { timeout: 10_000 });
+		await expect(names).toHaveCount(7);
 
 		const expectedNames = ['Kick', 'Snare', 'Hi-hat', 'Piano 1', 'Piano 2', 'Guitar 1', 'Guitar 2'];
 		for (let i = 0; i < expectedNames.length; i++) {
