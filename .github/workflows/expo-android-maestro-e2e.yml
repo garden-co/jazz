@@ -88,7 +88,7 @@ jobs:
           api-key: ${{ secrets.MAESTRO_KEY }}
           project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
           app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
-          workspace: .maestro
+          workspace: .maestro/flows
 
       - name: Verify server evidence
         if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
