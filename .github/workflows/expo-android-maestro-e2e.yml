@@ -74,9 +74,29 @@ jobs:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
+      
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before build)
+        run: sccache --show-stats || true
 
       - name: Pnpm Build
         run: pnpm build
+      
+      - name: Show sccache stats (after pnpm build)
+        run: sccache --show-stats || true
       
       - name: Todo Client Local First Expo App Pre Build
         working-directory: ./examples/todo-client-localfirst-expo

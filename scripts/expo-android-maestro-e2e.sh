@@ -122,9 +122,7 @@ start_sandbox_server() {
   echo "Detected sandbox architecture: ${sandbox_arch} (${sandbox_rust_target})"
 
   # Build only the target needed by the actual sandbox architecture.
-  sccache --show-stats || true
   cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "${sandbox_rust_target}"
-  sccache --show-stats || true
 
   if [ ! -f "${sandbox_binary}" ]; then
     echo "::error::Expected jazz-tools binary not found at ${sandbox_binary}."
