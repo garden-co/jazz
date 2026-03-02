@@ -806,6 +806,24 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("export type TodoWithIncludes<I extends TodoInclude = {}>");
     expect(output).toContain("export type UserWithIncludes<I extends UserInclude = {}>");
+    expect(output).toContain('owner?: I["owner"] extends true');
+    expect(output).toContain("? User");
+    expect(output).toContain(
+      ': I["owner"] extends UserQueryBuilder<infer QueryInclude extends UserInclude>',
+    );
+    expect(output).toContain("? UserWithIncludes<QueryInclude>");
+    expect(output).toContain(': I["owner"] extends UserInclude');
+    expect(output).toContain('? UserWithIncludes<I["owner"]>');
+    expect(output).toContain('todosViaOwner?: I["todosViaOwner"] extends true');
+    expect(output).toContain("? Todo[]");
+    expect(output).toContain(
+      ': I["todosViaOwner"] extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>',
+    );
+    expect(output).toContain("? TodoWithIncludes<QueryInclude>[]");
+    expect(output).toContain(': I["todosViaOwner"] extends TodoInclude');
+    expect(output).toContain('? TodoWithIncludes<I["todosViaOwner"]>[]');
+    expect(output).not.toContain("WithIncludesFor<");
+    expect(output).not.toContain("WithIncludesArray<");
   });
 
   it("generates Include types for self-referential tables", () => {

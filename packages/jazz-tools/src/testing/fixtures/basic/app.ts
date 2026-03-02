@@ -1,5 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export interface Todo {
   id: string;
@@ -36,27 +43,6 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
-      },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "done",
-          op: "Eq",
-          value: {
-            type: "Literal",
-            value: {
-              type: "Boolean",
-              value: true,
-            },
-          },
-        },
-      },
-    },
   },
 };
 
@@ -227,7 +213,12 @@ export class TodoQueryBuilder<I extends Record<string, never> = {}> implements Q
   }
 }
 
-export const app = {
+export interface GeneratedApp {
+  todos: TodoQueryBuilder;
+  wasmSchema: WasmSchema;
+}
+
+export const app: GeneratedApp = {
   todos: new TodoQueryBuilder(),
   wasmSchema,
 };

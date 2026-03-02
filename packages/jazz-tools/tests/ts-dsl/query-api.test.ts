@@ -86,12 +86,10 @@ describe("TS Query API", () => {
     );
 
     expect(results.length).toBe(1);
-    const todo = results[0] as Record<string, unknown>;
+    const todo = results[0];
     expect(todo.title).toBe("Write tests");
-
-    const project = todo.project as { name: string };
-    expect(project).toBeDefined();
-    expect(project.name).toBe("Announcements");
+    expect(todo.project).toBeDefined();
+    expect(todo.project?.name).toBe("Announcements");
   });
 
   describe("query by array column", () => {
