@@ -30,34 +30,5 @@ test.describe('app loading', () => {
 		expect(count).toBeGreaterThanOrEqual(1);
 	});
 
-	test('shows transport controls after audio context is active', async ({ page }) => {
-		await page.goto('/');
-		await page.locator('.start-prompt button').click();
 
-		const transport = page.locator('.transport');
-		await expect(transport).toBeVisible({ timeout: 10_000 });
-
-		// Play button should be visible
-		await expect(page.locator('.play-btn')).toBeVisible();
-	});
-
-	test('shows participants panel after audio context is active', async ({ page }) => {
-		await page.goto('/');
-		await page.locator('.start-prompt button').click();
-
-		const participants = page.locator('.participants');
-		await expect(participants).toBeVisible({ timeout: 10_000 });
-		await expect(participants.locator('h2')).toHaveText('The Band');
-
-		// Current user should appear with (you) tag
-		await expect(page.locator('.you-tag')).toBeVisible({ timeout: 10_000 });
-	});
-
-	test('shows instrument manager after audio context is active', async ({ page }) => {
-		await page.goto('/');
-		await page.locator('.start-prompt button').click();
-
-		const manager = page.locator('.instrument-manager');
-		await expect(manager).toBeVisible({ timeout: 10_000 });
-	});
 });

@@ -5,7 +5,7 @@ import basicSsl from "@vitejs/plugin-basic-ssl";
 const JAZZ_SERVER_PORT = process.env.VITE_JAZZ_SERVER_PORT ?? "4200";
 
 export default defineConfig({
-  plugins: [svelte(), basicSsl()],
+  plugins: [svelte(), ...(process.env.VITE_E2E ? [] : [basicSsl()])],
   build: { target: "es2020" },
   worker: { format: "es" },
   optimizeDeps: {

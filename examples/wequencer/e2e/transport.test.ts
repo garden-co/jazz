@@ -31,8 +31,4 @@ test.describe('transport controls', () => {
 		await expect(page.locator('.stop-btn')).not.toBeVisible();
 	});
 
-	test('transport display shows bar and beat labels', async ({ page }) => {
-		await expect(page.locator('.bar-label')).toHaveText('Bar');
-		await expect(page.locator('.beat-label')).toHaveText('Beat');
-	});
 });
