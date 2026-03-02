@@ -131,8 +131,24 @@ pub(crate) fn encode_page(page: &Page, page_size: usize) -> Result<Vec<u8>, BTre
     Ok(raw)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn decode_page(raw: &[u8], expected_page_size: usize) -> Result<Page, BTreeError> {
-    let header = parse_header(raw, expected_page_size, true)?;
+    decode_page_with_checksum(raw, expected_page_size, true)
+}
+
+pub(crate) fn decode_page_unchecked(
+    raw: &[u8],
+    expected_page_size: usize,
+) -> Result<Page, BTreeError> {
+    decode_page_with_checksum(raw, expected_page_size, false)
+}
+
+fn decode_page_with_checksum(
+    raw: &[u8],
+    expected_page_size: usize,
+    verify_checksum: bool,
+) -> Result<Page, BTreeError> {
+    let header = parse_header(raw, expected_page_size, verify_checksum)?;
     let payload = header.payload;
 
     match header.kind {
