@@ -1,3 +1,10 @@
+CREATE TABLE beats (
+    jam UUID REFERENCES jams NOT NULL,
+    instrument UUID REFERENCES instruments NOT NULL,
+    beat_index INTEGER NOT NULL,
+    placed_by TEXT NOT NULL
+);
+
 CREATE TABLE instruments (
     name TEXT NOT NULL,
     sound BYTEA NOT NULL,
@@ -9,13 +16,6 @@ CREATE TABLE jams (
     transport_start TIMESTAMP,
     bpm INTEGER NOT NULL,
     beat_count INTEGER NOT NULL
-);
-
-CREATE TABLE beats (
-    jam UUID REFERENCES jams NOT NULL,
-    instrument UUID REFERENCES instruments NOT NULL,
-    beat_index INTEGER NOT NULL,
-    placed_by TEXT NOT NULL
 );
 
 CREATE TABLE participants (

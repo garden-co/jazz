@@ -1,1 +1,0 @@
-ALTER TABLE jams DROP COLUMN bpm;
