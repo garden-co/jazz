@@ -90,13 +90,13 @@ function createRuntimeMock(): {
     emitSyncPayload: (
       destinationKind: OutboxDestinationKind,
       destinationId: string,
-      payload: unknown,
+      payloadJson: string,
       isCatalogue = false,
     ) => {
       if (!onSyncToSend) {
         throw new Error("onSyncMessageToSend callback not registered");
       }
-      onSyncToSend(destinationKind, destinationId, JSON.stringify(payload), isCatalogue);
+      onSyncToSend(destinationKind, destinationId, payloadJson, isCatalogue);
     },
     receivedFromWorker,
     addServerCalls,
