@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BINARIES = {
@@ -42,6 +42,41 @@ function ensureExecutable(binaryPath, name) {
   }
 }
 
+function parseSchemaDir(args) {
+  let schemaDir = "./schema";
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--schema-dir" && args[i + 1]) {
+      schemaDir = args[++i];
+      continue;
+    }
+
+    const prefix = "--schema-dir=";
+    if (arg.startsWith(prefix)) {
+      schemaDir = arg.slice(prefix.length);
+    }
+  }
+
+  return schemaDir;
+}
+
+function exitWithSpawnResult(result, name) {
+  if (result.error) {
+    fail(`Failed to execute ${name}: ${result.error.message}`);
+  }
+
+  if (typeof result.status === "number") {
+    process.exit(result.status);
+  }
+
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+  }
+
+  process.exit(1);
+}
+
 const key = `${process.platform}-${process.arch}`;
 const binaryName = BINARIES[key];
 const here = dirname(fileURLToPath(import.meta.url));
@@ -73,21 +108,31 @@ if (!binaryPath) {
 
 ensureExecutable(binaryPath, binaryName ?? localBinaryName);
 
-const result = spawnSync(binaryPath, process.argv.slice(2), {
-  stdio: "inherit",
-  env: process.env,
-});
+const args = process.argv.slice(2);
+const command = args[0];
 
-if (result.error) {
-  fail(`Failed to execute ${binaryName ?? binaryPath}: ${result.error.message}`);
+if (command === "build") {
+  const schemaDirArg = parseSchemaDir(args.slice(1));
+  const schemaDir = resolve(process.cwd(), schemaDirArg);
+  const currentSqlPath = join(schemaDir, "current.sql");
+  const currentTsPath = join(schemaDir, "current.ts");
+  const tsCliPath = join(here, "..", "dist", "cli.js");
+
+  if (!existsSync(currentSqlPath) && existsSync(currentTsPath) && existsSync(tsCliPath)) {
+    console.log(
+      `Detected ${schemaDirArg}/current.ts without current.sql. Running TypeScript schema build bootstrap.`,
+    );
+    const tsBuildResult = spawnSync(
+      process.execPath,
+      [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],
+      {
+        stdio: "inherit",
+        env: process.env,
+      },
+    );
+    exitWithSpawnResult(tsBuildResult, "TypeScript schema build");
+  }
 }
 
-if (typeof result.status === "number") {
-  process.exit(result.status);
-}
-
-if (result.signal) {
-  process.kill(process.pid, result.signal);
-}
-
-process.exit(1);
+const result = spawnSync(binaryPath, args, { stdio: "inherit", env: process.env });
+exitWithSpawnResult(result, binaryName ?? binaryPath);
