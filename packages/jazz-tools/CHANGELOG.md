@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 2.0.0-alpha.10
+
+### Patch Changes
+
+- b058893: fix `jazz-tools build` bootstrap behavior by routing through the TypeScript schema CLI when `schema/current.ts` exists and `schema/current.sql` is missing
+- ddf7756: Tighten generated query helper and include types for stronger inference and stricter contracts.
+
+  This preserves include-aware returned row types by keeping `QueryBuilder<...WithIncludes<I>>` / `_rowType` aligned with selected includes, narrows generated `*Include` relation flags to `true` (instead of `boolean`), tightens `gather(...)` step callback typing, avoids optional-include selector collapse to `never` in nested array includes, and removes unnecessary `unknown` casts in generated include helpers.
+  - jazz-wasm@2.0.0-alpha.10
+
 ## 2.0.0-alpha.9
 
 ### Patch Changes
