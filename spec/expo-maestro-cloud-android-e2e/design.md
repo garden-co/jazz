@@ -12,7 +12,7 @@ The suite validates the real app behavior end-to-end:
 4. remove one or more todos
 5. prove the app communicated with a live `jazz-tools server` for the full run
 
-Key constraint: Maestro Cloud devices run outside GitHub Actions networking, so the CI-started server must be reachable from the public internet during the run (ephemeral tunnel).
+Key constraint: Maestro Cloud devices run outside GitHub Actions networking, so the CI-started server must be reachable from the public internet during the run.
 
 ## Architecture / Components
 
@@ -34,46 +34,44 @@ PR path filters should include:
 - `examples/todo-client-localfirst-expo/**`
 - lock/build plumbing (`Cargo.toml`, `Cargo.lock`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `turbo.json`)
 - the workflow file itself
+- the workflow helper script (`scripts/expo-android-maestro-e2e.sh`)
 
 This matches your requirement to ignore unrelated example changes while still running when the Expo example itself changes.
 
-### 2) Build and start `jazz-tools server` in CI
+### 2) Build `jazz-tools` for sandbox runtime and start it in Vercel Sandbox
 
-Use your exact runtime shape in CI:
+Because Vercel Sandboxes expose ports for processes running inside the sandbox, the server process must run in the sandbox (not on the GitHub runner). Detect sandbox architecture at runtime (`uname -m`), build the matching Linux binary target, and copy that binary into the sandbox.
 
-```bash
-cargo build -p jazz-tools --bin jazz-tools --features cli
-target/debug/jazz-tools server 6316f08d-d5d1-41df-82b8-8c16aa26db84 \
-  --admin-secret d0a2f110-36a8-45b9-8632-ecbc09128e2a \
-  --port 1625
-```
+Required repository secrets for sandbox bootstrap:
 
-Run it in the background and capture logs to `server.log`.
+- `VERCEL_SANDBOXES_TOKEN`
+- `VERCEL_SANDBOXES_PROJECT_ID`
+- `VERCEL_TEAM_ID` (optional, only for team-scoped projects)
 
-Health gate before running tests:
+Representative sequence:
 
 ```bash
-curl --fail --retry 20 --retry-delay 1 http://127.0.0.1:1625/health
+SANDBOX_CREATE_OUTPUT="$(sandbox create --project "$VERCEL_SANDBOXES_PROJECT_ID" --runtime node22 --timeout 60m --publish-port 1625)"
+SANDBOX_ID="$(printf '%s\n' "$SANDBOX_CREATE_OUTPUT" | grep -Eo 'sb_[a-zA-Z0-9]+' | head -n1)"
+SANDBOX_ARCH="$(sandbox exec "$SANDBOX_ID" sh -lc 'uname -m' | tail -n1)"
+# map x86_64|amd64 -> x86_64-unknown-linux-gnu
+# map aarch64|arm64 -> aarch64-unknown-linux-gnu
+cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "$MATCHING_TARGET"
+sandbox copy "$MATCHING_BINARY" "${SANDBOX_ID}:/tmp/jazz-tools"
+sandbox exec "$SANDBOX_ID" sh -lc "chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server 6316f08d-d5d1-41df-82b8-8c16aa26db84 --admin-secret d0a2f110-36a8-45b9-8632-ecbc09128e2a --port 1625 >/tmp/server.log 2>&1 &"
 ```
 
-### 3) Expose the server to Maestro Cloud devices
+### 3) Resolve sandbox public URL and gate on `/health`
 
-Because cloud devices cannot resolve local CI hostnames like `server-ns`, publish an ephemeral HTTPS URL via tunnel (for example `cloudflared` quick tunnel), then inject that URL as `EXPO_PUBLIC_JAZZ_SERVER_URL` at build time.
+Extract or resolve the sandbox public URL, export it as `SERVER_PUBLIC_URL`, and inject it into APK build as `EXPO_PUBLIC_JAZZ_SERVER_URL`.
 
-Example:
+Health gate before running Maestro:
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:1625 --no-autoupdate > cloudflared.log 2>&1 &
-SERVER_PUBLIC_URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare.com' cloudflared.log | head -n1)"
+curl --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health"
 ```
 
-`cloudflared` quick tunnels are free for test/dev usage and do not require creating a Cloudflare account. They are explicitly best-effort and not production-SLA, which is acceptable for CI E2E.
-
-Compatibility note:
-
-- Quick Tunnel docs call out an SSE limitation.
-- This Expo test path uses Jazz binary chunked `/events` (not SSE), so this limitation is not expected to block the run.
-- If tunnel flakiness is observed in CI, fallback is a named Cloudflare Tunnel (account-backed) for higher stability.
+Persist sandbox bootstrap output to `vercel-sandbox.log` for post-failure diagnostics.
 
 ### 4) Build an Android artifact suitable for Maestro Cloud
 
@@ -148,13 +146,13 @@ This feature introduces operational data models for CI orchestration rather than
 
 ### `E2ERunConfig`
 
-| Field              | Type                 | Source                       |
-| ------------------ | -------------------- | ---------------------------- |
-| `appId`            | `string (uuid)`      | hardcoded E2E constant       |
-| `adminSecret`      | `string (uuid)`      | hardcoded E2E constant       |
-| `serverPort`       | `number`             | workflow env (`1625`)        |
-| `serverPublicUrl`  | `string (https url)` | parsed from tunnel logs      |
-| `maestroProjectId` | `string`             | `secrets.MAESTRO_PROJECT_ID` |
+| Field              | Type                 | Source                                     |
+| ------------------ | -------------------- | ------------------------------------------ |
+| `appId`            | `string (uuid)`      | hardcoded E2E constant                     |
+| `adminSecret`      | `string (uuid)`      | hardcoded E2E constant                     |
+| `serverPort`       | `number`             | workflow env (`1625`)                      |
+| `serverPublicUrl`  | `string (https url)` | parsed/resolved from sandbox create output |
+| `maestroProjectId` | `string`             | `secrets.MAESTRO_PROJECT_ID`               |
 
 ### `TodoScenario`
 
@@ -221,7 +219,7 @@ appId: dev.jazz.todo.localfirstexpo
 1. server health reachable before upload
 2. Maestro run must succeed
 3. server evidence assertions must pass (`sync request` and `events stream connecting` present)
-4. always upload `server.log` and `cloudflared.log` as artifacts for debugging
+4. always upload `server.log` and `vercel-sandbox.log` as artifacts for debugging
 
 ### Representative integration verification snippet
 
@@ -237,5 +235,5 @@ test "${EVENT_COUNT}" -gt 0
 
 ### Security policy
 
-1. Confirm this CI-only policy is acceptable: ephemeral tunnel URL is public but unguessable, and server uses app id/admin secret dedicated to E2E scope only.  
+1. Confirm this CI-only policy is acceptable: sandbox URL is public but scoped to test runtime, and server uses app id/admin secret dedicated to E2E scope only.  
    Impact: this is the main security boundary for exposing the CI test server to cloud devices.
