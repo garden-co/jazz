@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
           pnpm install --frozen-lockfile
 
-      - name: Ensure npm wasm-pack binary is executable
+      - name: Verify wasm-pack via pnpm
         run: scripts/expo-android-maestro-e2e.sh ensure-wasm-pack-binary
 
       - name: Install Rust prerequisites
