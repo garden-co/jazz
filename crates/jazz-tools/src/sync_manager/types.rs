@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -20,7 +21,21 @@ pub struct PolicyError {
 // ============================================================================
 
 /// Persistence tier — declaration order defines Ord (Worker < EdgeServer < CoreServer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    Ord,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum PersistenceTier {
     Worker,
     EdgeServer,
@@ -28,7 +43,19 @@ pub enum PersistenceTier {
 }
 
 /// Unique identifier for a server connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ServerId(pub Uuid);
 
 impl ServerId {
@@ -50,7 +77,19 @@ impl std::fmt::Display for ServerId {
 }
 
 /// Unique identifier for a client connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct ClientId(pub Uuid);
 
 impl ClientId {
@@ -77,10 +116,34 @@ impl std::fmt::Display for ClientId {
 }
 
 /// Unique identifier for a query subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct QueryId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum QueryPropagation {
     #[default]
     #[serde(rename = "full")]
@@ -178,7 +241,9 @@ impl ClientState {
 // ============================================================================
 
 /// Strongly typed errors for sync operations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SyncError {
     /// Operation denied due to insufficient permission.
     PermissionDenied {
@@ -205,14 +270,18 @@ pub enum SyncError {
 // ============================================================================
 
 /// Object metadata sent once per destination.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ObjectMetadata {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
 }
 
 /// Payload for sync messages between peers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub enum SyncPayload {
     /// Object or branch update with commits.
     ObjectUpdated {
@@ -226,6 +295,7 @@ pub enum SyncPayload {
     ObjectTruncated {
         object_id: ObjectId,
         branch_name: BranchName,
+        #[rkyv(with = rkyv::with::AsVec)]
         tails: HashSet<CommitId>,
     },
 
@@ -233,6 +303,7 @@ pub enum SyncPayload {
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
         query_id: QueryId,
+        #[rkyv(with = query_subscription_query_rkyv::QueryAsJson)]
         query: Box<Query>,
         #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
@@ -247,6 +318,7 @@ pub enum SyncPayload {
     PersistenceAck {
         object_id: ObjectId,
         branch_name: BranchName,
+        #[rkyv(with = rkyv::with::AsVec)]
         confirmed_commits: HashSet<CommitId>,
         tier: PersistenceTier,
     },
@@ -317,15 +389,94 @@ mod query_subscription_session_serde {
     }
 }
 
-impl SyncPayload {
-    /// Encode this payload using bitcode.
-    pub fn to_bitcode_bytes(&self) -> Result<Vec<u8>, bitcode::Error> {
-        bitcode::serialize(self)
+mod query_subscription_query_rkyv {
+    use std::{error::Error, fmt};
+
+    use rkyv::{
+        Archive, Archived, Deserialize, Place, Resolver, Serialize,
+        rancor::{Fallible, ResultExt as _, Source},
+        with::{ArchiveWith, DeserializeWith, SerializeWith},
+    };
+
+    use super::Query;
+
+    pub struct QueryAsJson;
+
+    #[derive(Debug)]
+    struct QuerySerializeError;
+
+    impl fmt::Display for QuerySerializeError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "failed to serialize query as JSON")
+        }
     }
 
-    /// Decode a payload from bitcode bytes.
-    pub fn from_bitcode_bytes(bytes: &[u8]) -> Result<Self, bitcode::Error> {
-        bitcode::deserialize(bytes)
+    impl Error for QuerySerializeError {}
+
+    #[derive(Debug)]
+    struct QueryDeserializeError;
+
+    impl fmt::Display for QueryDeserializeError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "failed to deserialize query from JSON")
+        }
+    }
+
+    impl Error for QueryDeserializeError {}
+
+    impl ArchiveWith<Box<Query>> for QueryAsJson {
+        type Archived = Archived<String>;
+        type Resolver = Resolver<String>;
+
+        fn resolve_with(field: &Box<Query>, resolver: Self::Resolver, out: Place<Self::Archived>) {
+            let json = serde_json::to_string(field.as_ref())
+                .expect("query JSON serialization succeeded during rkyv::Serialize");
+            json.resolve(resolver, out);
+        }
+    }
+
+    impl<S> SerializeWith<Box<Query>, S> for QueryAsJson
+    where
+        S: Fallible + ?Sized,
+        S::Error: Source,
+        String: Serialize<S>,
+    {
+        fn serialize_with(
+            field: &Box<Query>,
+            serializer: &mut S,
+        ) -> Result<Self::Resolver, <S as Fallible>::Error> {
+            let json = serde_json::to_string(field.as_ref()).into_trace(QuerySerializeError)?;
+            json.serialize(serializer)
+        }
+    }
+
+    impl<D> DeserializeWith<Archived<String>, Box<Query>, D> for QueryAsJson
+    where
+        D: Fallible + ?Sized,
+        D::Error: Source,
+        Archived<String>: Deserialize<String, D>,
+    {
+        fn deserialize_with(
+            field: &Archived<String>,
+            deserializer: &mut D,
+        ) -> Result<Box<Query>, <D as Fallible>::Error> {
+            let json = field.deserialize(deserializer)?;
+            let query = serde_json::from_str(&json).into_trace(QueryDeserializeError)?;
+            Ok(Box::new(query))
+        }
+    }
+}
+
+impl SyncPayload {
+    /// Encode this payload using rkyv.
+    pub fn to_rkyv_bytes(&self) -> Result<Vec<u8>, rkyv::rancor::Error> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)?;
+        Ok(bytes.into_vec())
+    }
+
+    /// Decode a payload from rkyv bytes.
+    pub fn from_rkyv_bytes(bytes: &[u8]) -> Result<Self, rkyv::rancor::Error> {
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(bytes)
     }
 
     /// Check if this payload carries a catalogue object (schema or lens).

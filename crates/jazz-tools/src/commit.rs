@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use blake3::Hasher;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -8,7 +9,20 @@ use crate::object::ObjectId;
 use crate::sync_manager::PersistenceTier;
 
 /// BLAKE3 hash identifying a commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[rkyv(derive(PartialEq, Eq, Hash))]
 pub struct CommitId(pub [u8; 32]);
 
 /// Persistence acknowledgment state (runtime only, not serialized).
@@ -30,7 +44,9 @@ pub enum StoredState {
 }
 
 /// A commit in an object's history.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct Commit {
     /// Parent commit IDs. Inline storage for 0-2 parents (root, regular, merge).
     pub parents: SmallVec<[CommitId; 2]>,
@@ -41,9 +57,11 @@ pub struct Commit {
     pub metadata: Option<BTreeMap<String, String>>,
     /// Storage state (runtime only, not serialized).
     #[serde(skip, default)]
+    #[rkyv(with = rkyv::with::Skip)]
     pub stored_state: StoredState,
     /// Persistence acknowledgment state (runtime only, not serialized).
     #[serde(skip, default)]
+    #[rkyv(with = rkyv::with::Skip)]
     pub ack_state: CommitAckState,
 }
 

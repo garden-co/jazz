@@ -4,6 +4,7 @@
 //! - `user_id`: Required unique identifier for the user
 //! - `claims`: Optional JSON object with additional claims (roles, teams, etc.)
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -11,11 +12,14 @@ use serde_json::Value as JsonValue;
 ///
 /// Contains the authenticated user's identity and claims. Used by policy
 /// expressions to check row access permissions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct Session {
     /// Required user identifier.
     pub user_id: String,
     /// Additional claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
+    #[rkyv(with = crate::rkyv_utils::JsonValueAsString)]
     pub claims: JsonValue,
 }
 

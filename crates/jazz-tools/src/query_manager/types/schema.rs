@@ -1,21 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
 use internment::Intern;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::*;
 
 /// Interned name identifying a table in the schema.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TableName(pub Intern<String>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct TableName(#[rkyv(with = crate::rkyv_utils::InternAsOwned)] pub Intern<String>);
 
 impl Serialize for TableName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        self.as_str().serialize(serializer)
+        <str as Serialize>::serialize(self.as_str(), serializer)
     }
 }
 
@@ -24,7 +25,7 @@ impl<'de> Deserialize<'de> for TableName {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
+        let s = <String as Deserialize>::deserialize(deserializer)?;
         Ok(TableName::new(s))
     }
 }
@@ -147,15 +148,15 @@ impl ColumnType {
 
 /// Interned column name type.
 /// Pointer-sized (8 bytes), Copy, fast equality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ColumnName(pub Intern<String>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct ColumnName(#[rkyv(with = crate::rkyv_utils::InternAsOwned)] pub Intern<String>);
 
 impl Serialize for ColumnName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        self.as_str().serialize(serializer)
+        <str as Serialize>::serialize(self.as_str(), serializer)
     }
 }
 
@@ -164,7 +165,7 @@ impl<'de> Deserialize<'de> for ColumnName {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
+        let s = <String as Deserialize>::deserialize(deserializer)?;
         Ok(ColumnName::new(s))
     }
 }

@@ -3,6 +3,7 @@ pub mod metadata;
 pub mod object;
 pub mod object_manager;
 pub mod query_manager;
+pub(crate) mod rkyv_utils;
 pub mod runtime_core;
 pub mod schema_manager;
 pub mod storage;

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use internment::Intern;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smolset::SmolSet;
 use uuid::Uuid;
@@ -9,15 +10,15 @@ use crate::commit::{Commit, CommitId};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectId(pub Intern<Uuid>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct ObjectId(#[rkyv(with = crate::rkyv_utils::InternAsOwned)] pub Intern<Uuid>);
 
 impl Serialize for ObjectId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        self.uuid().serialize(serializer)
+        <Uuid as Serialize>::serialize(self.uuid(), serializer)
     }
 }
 
@@ -26,14 +27,14 @@ impl<'de> Deserialize<'de> for ObjectId {
     where
         D: Deserializer<'de>,
     {
-        let uuid = Uuid::deserialize(deserializer)?;
+        let uuid = <Uuid as Deserialize>::deserialize(deserializer)?;
         Ok(ObjectId::from_uuid(uuid))
     }
 }
 
 /// How deeply a branch has been loaded from storage.
 /// Note: With sync storage, this is mainly used to track whether branch data exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum BranchLoadedState {
     #[default]
     NotLoaded,
@@ -84,15 +85,15 @@ impl Ord for ObjectId {
 
 /// Interned name identifying a branch within an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BranchName(pub Intern<String>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct BranchName(#[rkyv(with = crate::rkyv_utils::InternAsOwned)] pub Intern<String>);
 
 impl Serialize for BranchName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        self.as_str().serialize(serializer)
+        <str as Serialize>::serialize(self.as_str(), serializer)
     }
 }
 
@@ -101,7 +102,7 @@ impl<'de> Deserialize<'de> for BranchName {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
+        let s = <String as Deserialize>::deserialize(deserializer)?;
         Ok(BranchName::new(s))
     }
 }

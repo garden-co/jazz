@@ -2994,7 +2994,7 @@ async fn events_handler(
                     match result {
                         Ok((target_client_id, seq, payload)) => {
                             if target_client_id == client_id {
-                                let Ok(payload_bytes) = payload.to_bitcode_bytes() else {
+                                let Ok(payload_bytes) = payload.to_rkyv_bytes() else {
                                     warn!(app_id = %app_id, connection_id, "failed to encode sync payload for stream frame");
                                     continue;
                                 };
@@ -3086,13 +3086,13 @@ async fn sync_handler(
         }
     };
 
-    let payload = match SyncPayload::from_bitcode_bytes(&body) {
+    let payload = match SyncPayload::from_rkyv_bytes(&body) {
         Ok(payload) => payload,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::bad_request(format!(
-                    "invalid bitcode payload: {error}"
+                    "invalid rkyv payload: {error}"
                 ))),
             )
                 .into_response();

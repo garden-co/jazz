@@ -561,8 +561,8 @@ fn handle_server_event(
             Ok(())
         }
         ServerEvent::SyncUpdate { seq, payload } => {
-            let payload = SyncPayload::from_bitcode_bytes(&payload)
-                .map_err(|e| JazzError::Sync(format!("Invalid sync payload bitcode: {e}")))?;
+            let payload = SyncPayload::from_rkyv_bytes(&payload)
+                .map_err(|e| JazzError::Sync(format!("Invalid sync payload rkyv: {e}")))?;
             let entry = InboxEntry {
                 source: Source::Server(server_id),
                 payload,
