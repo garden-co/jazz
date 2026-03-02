@@ -73,6 +73,41 @@ jobs:
         working-directory: examples/todo-client-localfirst-expo
         run: pnpm expo prebuild --clean
 
+      - name: Build release APK
+        working-directory: examples/todo-client-localfirst-expo/android
+        env:
+          EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
+          EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
+          EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Run Maestro Cloud flows
+        id: maestro
+        uses: mobile-dev-inc/action-maestro-cloud@v2
+        with:
+          api-key: ${{ secrets.MAESTRO_KEY }}
+          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
+          app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
+          workspace: .maestro
+
+      - name: Verify server evidence
+        if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
+            "$SANDBOX_ID:/tmp/server.log" server.log || true
+
+          SYNC="$(grep -c 'sync request' server.log || true)"
+          EVENTS="$(grep -c 'events stream connecting' server.log || true)"
+          echo "sync requests: $SYNC | event connections: $EVENTS"
+          test "$SYNC" -gt 0 && test "$EVENTS" -gt 0
+
       - name: Install Vercel Sandbox CLI
         run: npm install -g sandbox
 
@@ -129,41 +164,6 @@ jobs:
           echo "::error::Timed out waiting for sandbox health"
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -lc "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
           exit 1
-
-      - name: Build release APK
-        working-directory: examples/todo-client-localfirst-expo/android
-        env:
-          EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
-          EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
-          EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
-        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
-
-      - name: Run Maestro Cloud flows
-        id: maestro
-        uses: mobile-dev-inc/action-maestro-cloud@v2
-        with:
-          api-key: ${{ secrets.MAESTRO_KEY }}
-          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
-          app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
-          workspace: .maestro
-
-      - name: Verify server evidence
-        if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
-        env:
-          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
-          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          SCOPE=()
-          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
-          sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
-            "$SANDBOX_ID:/tmp/server.log" server.log || true
-
-          SYNC="$(grep -c 'sync request' server.log || true)"
-          EVENTS="$(grep -c 'events stream connecting' server.log || true)"
-          echo "sync requests: $SYNC | event connections: $EVENTS"
-          test "$SYNC" -gt 0 && test "$EVENTS" -gt 0
 
       - name: Stop sandbox
         if: always()
