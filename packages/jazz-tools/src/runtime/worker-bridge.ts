@@ -102,7 +102,12 @@ export class WorkerBridge {
 
     // Wire main → worker: outgoing sync messages from runtime
     this.runtime.onSyncMessageToSend(
-      (destinationKind: OutboxDestinationKind, _destinationId: string, payloadJson: string) => {
+      (
+        destinationKind: OutboxDestinationKind,
+        _destinationId: string,
+        payloadJson: string,
+        _isCatalogue: boolean,
+      ) => {
         if (this.isDisposedLike()) return;
 
         // Only forward server-bound messages (worker IS the server)

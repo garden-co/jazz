@@ -168,7 +168,7 @@ function createRuntimeHarness() {
       if (!outboundHandler) {
         throw new Error("Runtime sync handler is not installed");
       }
-      outboundHandler("server", "server-1", JSON.stringify(payload));
+      outboundHandler("server", "server-1", JSON.stringify(payload), false);
     },
   };
 }

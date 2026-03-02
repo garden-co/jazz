@@ -27,6 +27,7 @@ export interface JazzRnRuntimeBinding {
             destinationKind: OutboxDestinationKind,
             destinationId: string,
             payloadJson: string,
+            isCatalogue: boolean,
           ): void;
         }
       | undefined,
@@ -218,9 +219,10 @@ export class JazzRnRuntimeAdapter implements Runtime {
         destinationKind: OutboxDestinationKind,
         destinationId: string,
         payloadJson: string,
+        isCatalogue: boolean,
       ) => {
         try {
-          callback(destinationKind, destinationId, payloadJson);
+          callback(destinationKind, destinationId, payloadJson, isCatalogue);
         } catch (error) {
           swallowCallbackError("sync message", error);
         }

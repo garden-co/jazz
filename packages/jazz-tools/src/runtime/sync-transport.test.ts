@@ -67,8 +67,8 @@ describe("sync-transport", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload("http://localhost:3000", { Ping: {} }, {});
-    await sendSyncPayload("http://localhost:3000", { Pong: {} }, {});
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {});
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Pong: {} }), false, {});
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
@@ -87,11 +87,10 @@ describe("sync-transport", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const providedClientId = "11111111-2222-4333-8444-555555555555";
-    await sendSyncPayload(
-      "http://localhost:3000",
-      { Ping: {} },
-      { clientId: providedClientId, jwtToken: "token" },
-    );
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {
+      clientId: providedClientId,
+      jwtToken: "token",
+    });
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.client_id).toBe(providedClientId);
@@ -103,29 +102,28 @@ describe("sync-transport", () => {
       .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: 503 Service Unavailable",
-    );
+    await expect(
+      sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {}),
+    ).rejects.toThrow("Sync POST failed: 503 Service Unavailable");
   });
 
   it("throws when fetch rejects", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: network down",
-    );
+    await expect(
+      sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {}),
+    ).rejects.toThrow("Sync POST failed: network down");
   });
 
   it("posts to path-prefixed sync route when provided", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload(
-      "http://localhost:3000/",
-      { Ping: {} },
-      { jwtToken: "token", pathPrefix: "apps/app-123/" },
-    );
+    await sendSyncPayload("http://localhost:3000/", JSON.stringify({ Ping: {} }), false, {
+      jwtToken: "token",
+      pathPrefix: "apps/app-123/",
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
@@ -137,7 +135,7 @@ describe("sync-transport", () => {
 
     await sendSyncPayload(
       "http://localhost:3000",
-      {
+      JSON.stringify({
         ObjectUpdated: {
           metadata: {
             metadata: {
@@ -145,7 +143,8 @@ describe("sync-transport", () => {
             },
           },
         },
-      },
+      }),
+      true,
       { jwtToken: "jwt-token" },
     );
 
@@ -158,7 +157,7 @@ describe("sync-transport", () => {
 
     await sendSyncPayload(
       "http://localhost:3000",
-      {
+      JSON.stringify({
         ObjectUpdated: {
           metadata: {
             metadata: {
@@ -166,7 +165,8 @@ describe("sync-transport", () => {
             },
           },
         },
-      },
+      }),
+      true,
       { adminSecret: "admin-secret", jwtToken: "jwt-token" },
     );
 
@@ -414,10 +414,12 @@ describe("sync-transport", () => {
       onClientPayload,
     });
 
-    router("server", "upstream-1", JSON.stringify({ Ping: {} }));
-    router("client", "client-1", JSON.stringify({ Pong: {} }));
+    router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
+    router("client", "client-1", JSON.stringify({ Pong: {} }), false);
 
-    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledWith({ Ping: {} }));
+    await vi.waitFor(() =>
+      expect(onServerPayload).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), false),
+    );
     expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
   });
 
@@ -430,7 +432,7 @@ describe("sync-transport", () => {
       onServerPayloadError,
     });
 
-    router("server", "upstream-1", JSON.stringify({ Ping: {} }));
+    router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
   });

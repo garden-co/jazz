@@ -3,6 +3,7 @@ import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
 import { OutboxDestinationKind } from "./sync-transport.js";
+import fa from "zod/v4/locales/fa.cjs";
 
 class MockWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -41,7 +42,8 @@ class MockWorker {
 type SendSyncPayloadCallback = (
   destinationKind: OutboxDestinationKind,
   destinationId: string,
-  payload: unknown,
+  payloadJson: string,
+  isCatalogue: boolean,
 ) => void;
 
 function createRuntimeMock(): {
@@ -89,11 +91,12 @@ function createRuntimeMock(): {
       destinationKind: OutboxDestinationKind,
       destinationId: string,
       payload: unknown,
+      isCatalogue = false,
     ) => {
       if (!onSyncToSend) {
         throw new Error("onSyncMessageToSend callback not registered");
       }
-      onSyncToSend(destinationKind, destinationId, JSON.stringify(payload));
+      onSyncToSend(destinationKind, destinationId, JSON.stringify(payload), isCatalogue);
     },
     receivedFromWorker,
     addServerCalls,
@@ -123,9 +126,9 @@ describe("WorkerBridge", () => {
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
 
-    runtimeMock.emitSyncPayload("server", "server-1", { id: 1 });
-    runtimeMock.emitSyncPayload("server", "server-2", { id: 2 });
-    runtimeMock.emitSyncPayload("client", "client-1", { ignored: true });
+    runtimeMock.emitSyncPayload("server", "server-1", JSON.stringify({ id: 1 }), false);
+    runtimeMock.emitSyncPayload("server", "server-2", JSON.stringify({ id: 2 }), false);
+    runtimeMock.emitSyncPayload("client", "client-1", JSON.stringify({ ignored: true }), false);
 
     // Outgoing payloads are buffered until init completes.
     let syncMessages = worker.posted.filter(
@@ -199,7 +202,7 @@ describe("WorkerBridge", () => {
     worker.emitFromWorker({ type: "shutdown-ok" });
     await shutdownPromise;
 
-    runtimeMock.emitSyncPayload("server", "server-1", { dropped: true });
+    runtimeMock.emitSyncPayload("server", "server-1", JSON.stringify({ dropped: true }), false);
     await Promise.resolve();
 
     const syncMessagesAfterShutdown = worker.posted.filter(
@@ -254,7 +257,7 @@ describe("WorkerBridge", () => {
     bridge.setServerPayloadForwarder((payload) => {
       redirected.push(payload);
     });
-    runtimeMock.emitSyncPayload("server", "server-1", { routed: "peer" });
+    runtimeMock.emitSyncPayload("server", "server-1", JSON.stringify({ routed: "peer" }), false);
     await Promise.resolve();
 
     const workerSyncMessages = worker.posted.filter(

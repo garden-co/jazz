@@ -13,7 +13,6 @@ import {
   generateClientId,
   buildEventsUrl,
   applyUserAuthHeaders,
-  isCataloguePayload,
   isExpectedFetchAbortError,
   OutboxDestinationKind,
 } from "../runtime/sync-transport.js";
@@ -186,7 +185,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Set up outbox routing
     runtime.onSyncMessageToSend(
-      (destinationKind: OutboxDestinationKind, destinationId: string, payloadJson: string) => {
+      (
+        destinationKind: OutboxDestinationKind,
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => {
         if (destinationKind === "client") {
           const destinationClientId = destinationId;
           if (destinationClientId === mainClientId) {
@@ -208,16 +212,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
             payload: [payloadJson],
           });
         } else if (destinationKind === "server") {
-          let parsedPayload: unknown;
-          try {
-            parsedPayload = JSON.parse(payloadJson);
-          } catch (error) {
-            console.error("[worker] Sync payload parse error:", error);
-            return;
-          }
-
           if (bootstrapCatalogueForwarding) {
-            if (isCataloguePayload(parsedPayload)) {
+            if (isCatalogue) {
               enqueueSyncMessageForMain(payloadJson);
             }
             return;
@@ -225,7 +221,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
           // Server-bound → HTTP POST to upstream
           if (activeServerUrl) {
-            void sendToServer(activeServerUrl, parsedPayload).catch((error) => {
+            void sendToServer(activeServerUrl, payloadJson, isCatalogue).catch((error) => {
               if (!isExpectedFetchAbortError(error)) {
                 console.error("[worker] Sync POST error:", error);
               }
@@ -285,10 +281,15 @@ async function handleInit(msg: InitMessage): Promise<void> {
 // ============================================================================
 
 /** POST a sync payload to the upstream server. */
-async function sendToServer(serverUrl: string, payload: any): Promise<void> {
+async function sendToServer(
+  serverUrl: string,
+  payloadJson: string,
+  isCatalogue: boolean,
+): Promise<void> {
   await sendSyncPayload(
     serverUrl,
-    payload,
+    payloadJson,
+    isCatalogue,
     {
       jwtToken,
       localAuthMode,
