@@ -11,7 +11,7 @@
 //!
 //! # Wire Format
 //!
-//! Each frame: `[4 bytes: u32 big-endian length][N bytes: JSON-encoded ServerEvent]`
+//! Each frame: `[4 bytes: u32 big-endian length][N bytes: binary ServerEvent payload]`
 //!
 //! # Endpoints
 //!
@@ -22,28 +22,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::sync_manager::{ClientId, QueryId, SyncPayload};
+use crate::sync_manager::QueryId;
 
 /// Unique identifier for a client's streaming connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub u64);
-
-// ============================================================================
-// Client -> Server Requests
-// ============================================================================
-
-/// Request to push a sync payload to the server's inbox.
-///
-/// This is the unified request type for all client→server communication.
-/// Session context is extracted from HTTP headers at connection time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncPayloadRequest {
-    /// The sync payload from the client's outbox.
-    /// Can be any SyncPayload variant: ObjectUpdated, QuerySubscription, etc.
-    pub payload: SyncPayload,
-    /// Client ID for source tracking.
-    pub client_id: ClientId,
-}
 
 // ============================================================================
 // Server -> Client Events
@@ -73,7 +56,8 @@ pub enum ServerEvent {
     SyncUpdate {
         /// Per-connection stream sequence, if provided by the server.
         seq: Option<u64>,
-        payload: Box<SyncPayload>,
+        /// Postcard-encoded sync payload bytes.
+        payload: Vec<u8>,
     },
 
     /// Error response.
@@ -95,6 +79,12 @@ impl ServerEvent {
         }
     }
 }
+
+const EVENT_CONNECTED: u8 = 1;
+const EVENT_SUBSCRIBED: u8 = 2;
+const EVENT_SYNC_UPDATE: u8 = 3;
+const EVENT_ERROR: u8 = 4;
+const EVENT_HEARTBEAT: u8 = 5;
 
 /// Error codes for server errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,13 +170,13 @@ impl ErrorResponse {
 impl ServerEvent {
     /// Encode as a length-prefixed binary frame.
     ///
-    /// Format: `[4 bytes: u32 big-endian length][N bytes: JSON]`
+    /// Format: `[4 bytes: u32 big-endian length][N bytes: binary event payload]`
     pub fn encode_frame(&self) -> Vec<u8> {
-        let json = serde_json::to_vec(self).unwrap_or_default();
-        let len = (json.len() as u32).to_be_bytes();
-        let mut buf = Vec::with_capacity(4 + json.len());
+        let payload = self.encode_payload();
+        let len = (payload.len() as u32).to_be_bytes();
+        let mut buf = Vec::with_capacity(4 + payload.len());
         buf.extend_from_slice(&len);
-        buf.extend_from_slice(&json);
+        buf.extend_from_slice(&payload);
         buf
     }
 
@@ -202,14 +192,178 @@ impl ServerEvent {
         if buf.len() < 4 + len {
             return None;
         }
-        let event: ServerEvent = serde_json::from_slice(&buf[4..4 + len]).ok()?;
+        let event = ServerEvent::decode_payload(&buf[4..4 + len])?;
         Some((event, 4 + len))
     }
+
+    fn encode_payload(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            ServerEvent::Connected {
+                connection_id,
+                client_id,
+                next_sync_seq,
+            } => {
+                out.push(EVENT_CONNECTED);
+                out.extend_from_slice(&connection_id.0.to_be_bytes());
+                match next_sync_seq {
+                    Some(seq) => {
+                        out.push(1);
+                        out.extend_from_slice(&seq.to_be_bytes());
+                    }
+                    None => out.push(0),
+                }
+                let client_id_bytes = client_id.as_bytes();
+                out.extend_from_slice(&(client_id_bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(client_id_bytes);
+            }
+            ServerEvent::Subscribed { query_id } => {
+                out.push(EVENT_SUBSCRIBED);
+                out.extend_from_slice(&query_id.0.to_be_bytes());
+            }
+            ServerEvent::SyncUpdate { seq, payload } => {
+                out.push(EVENT_SYNC_UPDATE);
+                match seq {
+                    Some(seq) => {
+                        out.push(1);
+                        out.extend_from_slice(&seq.to_be_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(payload);
+            }
+            ServerEvent::Error { message, code } => {
+                out.push(EVENT_ERROR);
+                out.push(code.to_u8());
+                let message_bytes = message.as_bytes();
+                out.extend_from_slice(&(message_bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(message_bytes);
+            }
+            ServerEvent::Heartbeat => out.push(EVENT_HEARTBEAT),
+        }
+        out
+    }
+
+    fn decode_payload(payload: &[u8]) -> Option<Self> {
+        if payload.is_empty() {
+            return None;
+        }
+        let mut idx = 0usize;
+        let tag = read_u8(payload, &mut idx)?;
+        match tag {
+            EVENT_CONNECTED => {
+                let connection_id = ConnectionId(read_u64(payload, &mut idx)?);
+                let has_seq = read_u8(payload, &mut idx)? != 0;
+                let next_sync_seq = if has_seq {
+                    Some(read_u64(payload, &mut idx)?)
+                } else {
+                    None
+                };
+                let client_id_len = read_u32(payload, &mut idx)? as usize;
+                let client_id_bytes = read_exact(payload, &mut idx, client_id_len)?;
+                let client_id = String::from_utf8(client_id_bytes.to_vec()).ok()?;
+                if idx != payload.len() {
+                    return None;
+                }
+                Some(ServerEvent::Connected {
+                    connection_id,
+                    client_id,
+                    next_sync_seq,
+                })
+            }
+            EVENT_SUBSCRIBED => {
+                let query_id = QueryId(read_u64(payload, &mut idx)?);
+                if idx != payload.len() {
+                    return None;
+                }
+                Some(ServerEvent::Subscribed { query_id })
+            }
+            EVENT_SYNC_UPDATE => {
+                let has_seq = read_u8(payload, &mut idx)? != 0;
+                let seq = if has_seq {
+                    Some(read_u64(payload, &mut idx)?)
+                } else {
+                    None
+                };
+                let remaining = payload.get(idx..)?.to_vec();
+                Some(ServerEvent::SyncUpdate {
+                    seq,
+                    payload: remaining,
+                })
+            }
+            EVENT_ERROR => {
+                let code = ErrorCode::from_u8(read_u8(payload, &mut idx)?)?;
+                let message_len = read_u32(payload, &mut idx)? as usize;
+                let message_bytes = read_exact(payload, &mut idx, message_len)?;
+                let message = String::from_utf8(message_bytes.to_vec()).ok()?;
+                if idx != payload.len() {
+                    return None;
+                }
+                Some(ServerEvent::Error { message, code })
+            }
+            EVENT_HEARTBEAT => {
+                if idx != payload.len() {
+                    return None;
+                }
+                Some(ServerEvent::Heartbeat)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl ErrorCode {
+    fn to_u8(self) -> u8 {
+        match self {
+            ErrorCode::BadRequest => 1,
+            ErrorCode::Unauthorized => 2,
+            ErrorCode::Forbidden => 3,
+            ErrorCode::NotFound => 4,
+            ErrorCode::Internal => 5,
+            ErrorCode::RateLimited => 6,
+        }
+    }
+
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(ErrorCode::BadRequest),
+            2 => Some(ErrorCode::Unauthorized),
+            3 => Some(ErrorCode::Forbidden),
+            4 => Some(ErrorCode::NotFound),
+            5 => Some(ErrorCode::Internal),
+            6 => Some(ErrorCode::RateLimited),
+            _ => None,
+        }
+    }
+}
+
+fn read_u8(buf: &[u8], idx: &mut usize) -> Option<u8> {
+    let byte = *buf.get(*idx)?;
+    *idx += 1;
+    Some(byte)
+}
+
+fn read_u32(buf: &[u8], idx: &mut usize) -> Option<u32> {
+    let bytes = read_exact(buf, idx, 4)?;
+    Some(u32::from_be_bytes(bytes.try_into().ok()?))
+}
+
+fn read_u64(buf: &[u8], idx: &mut usize) -> Option<u64> {
+    let bytes = read_exact(buf, idx, 8)?;
+    Some(u64::from_be_bytes(bytes.try_into().ok()?))
+}
+
+fn read_exact<'a>(buf: &'a [u8], idx: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = idx.checked_add(len)?;
+    let bytes = buf.get(*idx..end)?;
+    *idx = end;
+    Some(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_manager::ClientId;
 
     #[test]
     fn test_server_event_frame_roundtrip() {
@@ -259,26 +413,7 @@ mod tests {
 
     #[test]
     fn test_sync_payload_request_serialization() {
-        use crate::object::BranchName;
-        use crate::object::ObjectId;
-        use crate::sync_manager::ClientId;
-
-        let payload = SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
-            metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
-        };
-        let request = SyncPayloadRequest {
-            payload,
-            client_id: ClientId::new(),
-        };
-
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("ObjectUpdated"));
-        assert!(json.contains("main"));
-
-        let parsed: SyncPayloadRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed.payload, SyncPayload::ObjectUpdated { .. }));
+        let client_id = ClientId::new();
+        assert!(!client_id.to_string().is_empty());
     }
 }

@@ -1,6 +1,5 @@
 //! HTTP/SSE transport for server communication.
 
-use crate::jazz_transport::SyncPayloadRequest;
 use crate::query_manager::session::Session;
 use crate::sync_manager::{ClientId, SyncPayload};
 use base64::Engine;
@@ -72,7 +71,10 @@ impl ServerConnection {
     /// - `Authorization: Bearer <token>` header
     fn build_headers(&self, session: Option<&Session>) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
 
         // Priority 1: Backend impersonation
         if let (Some(session), Some(secret)) = (session, &self.auth.backend_secret) {
@@ -125,7 +127,7 @@ impl ServerConnection {
 
     /// Push a sync payload to the server.
     pub async fn push_sync(&self, payload: SyncPayload, client_id: ClientId) -> Result<()> {
-        let url = self.endpoint_url("/sync");
+        let url = format!("{}?client_id={}", self.endpoint_url("/sync"), client_id);
 
         // Check if this is a catalogue object - use admin headers
         let headers = if is_catalogue_payload(&payload) {
@@ -134,12 +136,14 @@ impl ServerConnection {
             self.build_headers(None)
         };
 
-        let request = SyncPayloadRequest { payload, client_id };
+        let payload_bytes = payload
+            .to_postcard_bytes()
+            .map_err(|e| JazzError::Sync(format!("Failed to encode sync payload: {e}")))?;
 
         self.client
             .post(&url)
             .headers(headers)
-            .json(&request)
+            .body(payload_bytes)
             .send()
             .await?
             .error_for_status()

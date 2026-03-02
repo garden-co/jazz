@@ -1108,7 +1108,7 @@ describe("cloud-server integration (Jazz TS)", () => {
 
       await sendSyncPayload(
         server.baseUrl,
-        JSON.stringify(makeSyncPayload()),
+        new TextEncoder().encode(JSON.stringify(makeSyncPayload())),
         false,
         { jwtToken: signJwt("valid-user", JWT_SECRET), pathPrefix },
         "[valid] ",
@@ -1117,7 +1117,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       await expect(
         sendSyncPayload(
           server.baseUrl,
-          JSON.stringify(makeSyncPayload()),
+          new TextEncoder().encode(JSON.stringify(makeSyncPayload())),
           false,
           { jwtToken: signJwt("invalid-user", "wrong-secret"), pathPrefix },
           "[invalid] ",

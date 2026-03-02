@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use jazz_tools::jazz_transport::SyncPayloadRequest;
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{
@@ -57,13 +56,16 @@ impl SyncServerClient {
         payload: SyncPayload,
         client_id: ClientId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let request = SyncPayloadRequest { payload, client_id };
-        let sync_url = format!("{}{}{}", self.base_url, self.route_prefix, "/sync");
+        let payload_bytes = payload.to_postcard_bytes()?;
+        let sync_url = format!(
+            "{}{}{}?client_id={}",
+            self.base_url, self.route_prefix, "/sync", client_id
+        );
         self.http_client
             .post(sync_url)
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, "application/octet-stream")
             .header("X-Jazz-Admin-Secret", &self.admin_secret)
-            .json(&request)
+            .body(payload_bytes)
             .send()
             .await?
             .error_for_status()?;

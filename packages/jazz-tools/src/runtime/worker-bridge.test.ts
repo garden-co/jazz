@@ -3,7 +3,6 @@ import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
 import { OutboxDestinationKind } from "./sync-transport.js";
-import fa from "zod/v4/locales/fa.cjs";
 
 class MockWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -42,19 +41,19 @@ class MockWorker {
 type SendSyncPayloadCallback = (
   destinationKind: OutboxDestinationKind,
   destinationId: string,
-  payloadJson: string,
+  payload: Uint8Array,
   isCatalogue: boolean,
 ) => void;
 
 function createRuntimeMock(): {
   runtime: Runtime;
   emitSyncPayload: SendSyncPayloadCallback;
-  receivedFromWorker: string[];
+  receivedFromWorker: Uint8Array[];
   addServerCalls: { count: number };
   removeServerCalls: { count: number };
 } {
   let onSyncToSend: SendSyncPayloadCallback | null = null;
-  const receivedFromWorker: string[] = [];
+  const receivedFromWorker: Uint8Array[] = [];
   const addServerCalls = { count: 0 };
   const removeServerCalls = { count: 0 };
 
@@ -68,8 +67,8 @@ function createRuntimeMock(): {
     insertWithAck: async () => "id",
     updateWithAck: async () => undefined,
     deleteWithAck: async () => undefined,
-    onSyncMessageReceived: (messageJson: string) => {
-      receivedFromWorker.push(messageJson);
+    onSyncMessageReceived: (payload: Uint8Array) => {
+      receivedFromWorker.push(payload);
     },
     onSyncMessageToSend: (callback: SendSyncPayloadCallback) => {
       onSyncToSend = callback;
@@ -90,13 +89,13 @@ function createRuntimeMock(): {
     emitSyncPayload: (
       destinationKind: OutboxDestinationKind,
       destinationId: string,
-      payloadJson: string,
+      payload: Uint8Array,
       isCatalogue = false,
     ) => {
       if (!onSyncToSend) {
         throw new Error("onSyncMessageToSend callback not registered");
       }
-      onSyncToSend(destinationKind, destinationId, payloadJson, isCatalogue);
+      onSyncToSend(destinationKind, destinationId, payload, isCatalogue);
     },
     receivedFromWorker,
     addServerCalls,
@@ -105,6 +104,8 @@ function createRuntimeMock(): {
 }
 
 describe("WorkerBridge", () => {
+  const enc = (value: string): Uint8Array => new TextEncoder().encode(value);
+
   it("attaches runtime server and forwards worker sync payloads to runtime", () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
@@ -115,10 +116,10 @@ describe("WorkerBridge", () => {
 
     worker.emitFromWorker({
       type: "sync",
-      payload: ["payload-a", "payload-b"],
+      payload: [enc("payload-a"), enc("payload-b")],
     });
 
-    expect(runtimeMock.receivedFromWorker).toEqual(["payload-a", "payload-b"]);
+    expect(runtimeMock.receivedFromWorker).toEqual([enc("payload-a"), enc("payload-b")]);
   });
 
   it("batches server-bound runtime payloads into one worker sync message", async () => {
@@ -126,13 +127,18 @@ describe("WorkerBridge", () => {
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
 
-    runtimeMock.emitSyncPayload("server", "server-1", JSON.stringify({ id: 1 }), false);
-    runtimeMock.emitSyncPayload("server", "server-2", JSON.stringify({ id: 2 }), false);
-    runtimeMock.emitSyncPayload("client", "client-1", JSON.stringify({ ignored: true }), false);
+    runtimeMock.emitSyncPayload("server", "server-1", enc(JSON.stringify({ id: 1 })), false);
+    runtimeMock.emitSyncPayload("server", "server-2", enc(JSON.stringify({ id: 2 })), false);
+    runtimeMock.emitSyncPayload(
+      "client",
+      "client-1",
+      enc(JSON.stringify({ ignored: true })),
+      false,
+    );
 
     // Outgoing payloads are buffered until init completes.
     let syncMessages = worker.posted.filter(
-      (entry): entry is { type: "sync"; payload: string[] } =>
+      (entry): entry is { type: "sync"; payload: Uint8Array[] } =>
         typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
     );
     expect(syncMessages).toHaveLength(0);
@@ -149,14 +155,14 @@ describe("WorkerBridge", () => {
     await Promise.resolve();
 
     syncMessages = worker.posted.filter(
-      (entry): entry is { type: "sync"; payload: string[] } =>
+      (entry): entry is { type: "sync"; payload: Uint8Array[] } =>
         typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
     );
 
     expect(syncMessages).toHaveLength(1);
     expect(syncMessages[0]).toEqual({
       type: "sync",
-      payload: [JSON.stringify({ id: 1 }), JSON.stringify({ id: 2 })],
+      payload: [enc(JSON.stringify({ id: 1 })), enc(JSON.stringify({ id: 2 }))],
     });
   });
 
@@ -202,11 +208,16 @@ describe("WorkerBridge", () => {
     worker.emitFromWorker({ type: "shutdown-ok" });
     await shutdownPromise;
 
-    runtimeMock.emitSyncPayload("server", "server-1", JSON.stringify({ dropped: true }), false);
+    runtimeMock.emitSyncPayload(
+      "server",
+      "server-1",
+      enc(JSON.stringify({ dropped: true })),
+      false,
+    );
     await Promise.resolve();
 
     const syncMessagesAfterShutdown = worker.posted.filter(
-      (entry): entry is { type: "sync"; payload: string[] } =>
+      (entry): entry is { type: "sync"; payload: Uint8Array[] } =>
         typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
     );
     expect(syncMessagesAfterShutdown).toHaveLength(0);
@@ -223,12 +234,17 @@ describe("WorkerBridge", () => {
     });
 
     bridge.openPeer("peer-a");
-    bridge.sendPeerSync("peer-a", 9, ["payload-1", "payload-2"]);
+    bridge.sendPeerSync("peer-a", 9, [enc("payload-1"), enc("payload-2")]);
     bridge.closePeer("peer-a");
 
     expect(worker.posted).toEqual([
       { type: "peer-open", peerId: "peer-a" },
-      { type: "peer-sync", peerId: "peer-a", term: 9, payload: ["payload-1", "payload-2"] },
+      {
+        type: "peer-sync",
+        peerId: "peer-a",
+        term: 9,
+        payload: [enc("payload-1"), enc("payload-2")],
+      },
       { type: "peer-close", peerId: "peer-a" },
     ]);
 
@@ -236,14 +252,14 @@ describe("WorkerBridge", () => {
       type: "peer-sync",
       peerId: "peer-a",
       term: 9,
-      payload: ["from-worker"],
+      payload: [enc("from-worker")],
     });
 
     expect(peerBatches).toEqual([
       {
         peerId: "peer-a",
         term: 9,
-        payload: ["from-worker"],
+        payload: [enc("from-worker")],
       },
     ]);
   });
@@ -252,27 +268,32 @@ describe("WorkerBridge", () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
-    const redirected: string[] = [];
+    const redirected: Uint8Array[] = [];
 
     bridge.setServerPayloadForwarder((payload) => {
       redirected.push(payload);
     });
-    runtimeMock.emitSyncPayload("server", "server-1", JSON.stringify({ routed: "peer" }), false);
+    runtimeMock.emitSyncPayload(
+      "server",
+      "server-1",
+      enc(JSON.stringify({ routed: "peer" })),
+      false,
+    );
     await Promise.resolve();
 
     const workerSyncMessages = worker.posted.filter(
-      (entry): entry is { type: "sync"; payload: string[] } =>
+      (entry): entry is { type: "sync"; payload: Uint8Array[] } =>
         typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
     );
     expect(workerSyncMessages).toHaveLength(0);
-    expect(redirected).toEqual([JSON.stringify({ routed: "peer" })]);
+    expect(redirected).toEqual([enc(JSON.stringify({ routed: "peer" }))]);
 
     bridge.replayServerConnection();
     expect(runtimeMock.removeServerCalls.count).toBe(1);
     expect(runtimeMock.addServerCalls.count).toBe(2);
 
-    bridge.applyIncomingServerPayload("from-peer-leader");
-    expect(runtimeMock.receivedFromWorker).toEqual(["from-peer-leader"]);
+    bridge.applyIncomingServerPayload(enc("from-peer-leader"));
+    expect(runtimeMock.receivedFromWorker).toEqual([enc("from-peer-leader")]);
   });
 
   it("forwards lifecycle hints to worker", () => {

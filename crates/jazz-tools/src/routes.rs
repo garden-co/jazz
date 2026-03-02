@@ -11,9 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
-};
+use jazz_tools::jazz_transport::{ConnectionId, ErrorResponse, ServerEvent, SuccessResponse};
 use jazz_tools::sync_manager::ClientId;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
@@ -25,6 +23,7 @@ use crate::middleware::auth::{
     validate_jwt_identity,
 };
 use jazz_tools::query_manager::types::SchemaHash;
+use jazz_tools::sync_manager::SyncPayload;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -65,16 +64,13 @@ struct LinkExternalResponse {
     created: bool,
 }
 
-/// Encode a ServerEvent as a length-prefixed binary frame.
-///
-/// Format: [4 bytes: u32 big-endian length][N bytes: JSON]
 fn encode_frame(event: &ServerEvent) -> Bytes {
-    let json = serde_json::to_vec(event).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len);
-    buf.extend_from_slice(&json);
-    Bytes::from(buf)
+    Bytes::from(event.encode_frame())
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncParams {
+    client_id: String,
 }
 
 /// Binary streaming events endpoint - clients connect here for all updates.
@@ -181,9 +177,13 @@ async fn events_handler(
                         Ok((target_client_id, payload)) => {
                             // Only emit if this is for our client
                             if target_client_id == client_id {
+                                let Ok(payload_bytes) = payload.to_postcard_bytes() else {
+                                    tracing::warn!("failed to encode sync payload for stream frame");
+                                    continue;
+                                };
                                 let event = ServerEvent::SyncUpdate {
                                     seq: None,
-                                    payload: Box::new(payload),
+                                    payload: payload_bytes,
                                 };
                                 yield Ok(encode_frame(&event));
                             }
@@ -234,21 +234,43 @@ async fn events_handler(
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<SyncPayloadRequest>,
+    Query(params): Query<SyncParams>,
+    body: Bytes,
 ) -> impl IntoResponse {
     use jazz_tools::sync_manager::{InboxEntry, Source};
 
-    let payload_size = serde_json::to_vec(&request.payload)
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let client_id = match ClientId::parse(&params.client_id) {
+        Some(client_id) => client_id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request("invalid client_id")),
+            )
+                .into_response();
+        }
+    };
+
+    let payload_size = body.len();
+    let payload = match SyncPayload::from_postcard_bytes(&body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "invalid postcard payload: {error}"
+                ))),
+            )
+                .into_response();
+        }
+    };
     {
         let _span = tracing::debug_span!(
             "sync_handler",
-            client_id = %request.client_id,
+            client_id = %client_id,
             payload_size,
         )
         .entered();
-        tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
+        tracing::info!(client_id = %client_id, payload = payload.variant_name(), "sync request");
     }
 
     // Check admin secret — if present and valid, promote client to Admin role
@@ -270,14 +292,14 @@ async fn sync_handler(
     // Admin-authenticated requests (server-to-server catalogue sync) don't need a session.
     // Regular clients must provide JWT or backend secret.
     if is_admin {
-        if let Err(e) = state.runtime.add_client(request.client_id, None) {
+        if let Err(e) = state.runtime.add_client(client_id, None) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
             )
                 .into_response();
         }
-        if let Err(e) = state.runtime.set_client_admin(request.client_id) {
+        if let Err(e) = state.runtime.set_client_admin(client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -298,7 +320,7 @@ async fn sync_handler(
                 Ok(None) => {
                     tracing::error!(
                         "Sync request rejected: no session (client_id={}). Client must send auth headers.",
-                        request.client_id
+                        client_id
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
@@ -315,10 +337,7 @@ async fn sync_handler(
         };
 
         // Ensure client is registered with session bound
-        if let Err(e) = state
-            .runtime
-            .ensure_client_with_session(request.client_id, session)
-        {
+        if let Err(e) = state.runtime.ensure_client_with_session(client_id, session) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -328,8 +347,8 @@ async fn sync_handler(
     }
 
     let entry = InboxEntry {
-        source: Source::Client(request.client_id),
-        payload: request.payload,
+        source: Source::Client(client_id),
+        payload,
     };
 
     match state.runtime.push_sync_inbox(entry) {

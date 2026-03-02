@@ -14,9 +14,9 @@ type WorkerMessageHandler = (event: MessageEvent<WorkerToMainMessage>) => void;
 
 class FakeWorkerScript {
   private initialized = false;
-  private pendingSyncPayloads: string[] = [];
-  readonly receivedSyncPayloads: string[] = [];
-  readonly droppedSyncPayloads: string[] = [];
+  private pendingSyncPayloads: Uint8Array[] = [];
+  readonly receivedSyncPayloads: Uint8Array[] = [];
+  readonly droppedSyncPayloads: Uint8Array[] = [];
   initMessageCount = 0;
   shutdownMessageCount = 0;
 
@@ -107,7 +107,7 @@ class FakeWorkerScript {
     this.worker.emitToMain({ type: "error", message });
   }
 
-  emitSyncToMain(...payloads: string[]): void {
+  emitSyncToMain(...payloads: Uint8Array[]): void {
     this.worker.emitToMain({ type: "sync", payload: payloads });
   }
 }
@@ -148,13 +148,13 @@ class FakeWorker {
 
 function createRuntimeHarness() {
   let outboundHandler: ((...args: unknown[]) => void) | null = null;
-  const receivedFromWorker: string[] = [];
+  const receivedFromWorker: Uint8Array[] = [];
 
   const runtime = {
     onSyncMessageToSend(handler: (...args: unknown[]) => void) {
       outboundHandler = handler;
     },
-    onSyncMessageReceived(payload: string) {
+    onSyncMessageReceived(payload: Uint8Array) {
       receivedFromWorker.push(payload);
     },
     addServer() {},
@@ -168,7 +168,12 @@ function createRuntimeHarness() {
       if (!outboundHandler) {
         throw new Error("Runtime sync handler is not installed");
       }
-      outboundHandler("server", "server-1", JSON.stringify(payload), false);
+      outboundHandler(
+        "server",
+        "server-1",
+        new TextEncoder().encode(JSON.stringify(payload)),
+        false,
+      );
     },
   };
 }
@@ -184,6 +189,8 @@ function makeBridgeOptions(): WorkerBridgeOptions {
 }
 
 describe("WorkerBridge race harness", () => {
+  const enc = (value: string): Uint8Array => new TextEncoder().encode(value);
+
   it("WB-U01 queues outbound sync until init completes", async () => {
     const worker = new FakeWorker({ dropSyncBeforeInit: true });
     const { runtime, emitServerPayload } = createRuntimeHarness();
@@ -202,8 +209,8 @@ describe("WorkerBridge race harness", () => {
     expect(bridge.getWorkerClientId()).toBe("worker-client-1");
 
     expect(worker.script.receivedSyncPayloads).toEqual([
-      JSON.stringify({ kind: "sub", seq: 1 }),
-      JSON.stringify({ kind: "sub", seq: 2 }),
+      enc(JSON.stringify({ kind: "sub", seq: 1 })),
+      enc(JSON.stringify({ kind: "sub", seq: 2 })),
     ]);
   });
 
@@ -222,9 +229,9 @@ describe("WorkerBridge race harness", () => {
     await Promise.resolve();
 
     expect(worker.script.receivedSyncPayloads).toEqual([
-      JSON.stringify({ kind: "sub", seq: 1 }),
-      JSON.stringify({ kind: "sub", seq: 2 }),
-      JSON.stringify({ kind: "sub", seq: 3 }),
+      enc(JSON.stringify({ kind: "sub", seq: 1 })),
+      enc(JSON.stringify({ kind: "sub", seq: 2 })),
+      enc(JSON.stringify({ kind: "sub", seq: 3 })),
     ]);
   });
 
@@ -250,9 +257,9 @@ describe("WorkerBridge race harness", () => {
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
 
     const initPromise = bridge.init(makeBridgeOptions());
-    worker.script.emitSyncToMain(JSON.stringify({ kind: "from-worker", seq: 1 }));
+    worker.script.emitSyncToMain(enc(JSON.stringify({ kind: "from-worker", seq: 1 })));
 
-    expect(receivedFromWorker).toEqual([JSON.stringify({ kind: "from-worker", seq: 1 })]);
+    expect(receivedFromWorker).toEqual([enc(JSON.stringify({ kind: "from-worker", seq: 1 }))]);
 
     worker.script.completeInit("worker-client-3");
     await initPromise;
@@ -288,8 +295,8 @@ describe("WorkerBridge race harness", () => {
 
     expect((bridge as any).state.phase).toBe("failed");
     expect((bridge as any).state.pendingSyncPayloadsForWorker).toEqual([
-      JSON.stringify({ kind: "sub", seq: 1 }),
-      JSON.stringify({ kind: "sub", seq: 2 }),
+      enc(JSON.stringify({ kind: "sub", seq: 1 })),
+      enc(JSON.stringify({ kind: "sub", seq: 2 })),
     ]);
     expect(worker.script.receivedSyncPayloads).toEqual([]);
   });

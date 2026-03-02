@@ -61,7 +61,7 @@ export interface Runtime {
   insertWithAck(table: string, values: any, tier: string): Promise<string>;
   updateWithAck(object_id: string, values: any, tier: string): Promise<void>;
   deleteWithAck(object_id: string, tier: string): Promise<void>;
-  onSyncMessageReceived(message_json: string): void;
+  onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: Function): void;
   addServer(): void;
   removeServer(): void;
@@ -70,7 +70,7 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
+  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
 }
 
 /**
@@ -782,8 +782,7 @@ export class JazzClient {
       createSyncOutboxRouter({
         logPrefix: "[client] ",
         retryServerPayloads: true,
-        onServerPayload: (payloadJson, isCatalogue) =>
-          this.sendSyncMessage(payloadJson, isCatalogue),
+        onServerPayload: (payload, isCatalogue) => this.sendSyncMessage(payload, isCatalogue),
         onServerPayloadError: (error) => {
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {
@@ -798,13 +797,13 @@ export class JazzClient {
     this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
+  private async sendSyncMessage(payload: Uint8Array, isCatalogue: boolean): Promise<void> {
     const serverUrl = this.streamController.getServerUrl();
     if (!serverUrl) return;
 
     await sendSyncPayload(
       serverUrl,
-      payloadJson,
+      payload,
       isCatalogue,
       {
         jwtToken: this.context.jwtToken,

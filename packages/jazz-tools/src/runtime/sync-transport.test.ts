@@ -16,10 +16,12 @@ import {
 describe("sync-transport", () => {
   const originalFetch = globalThis.fetch;
   const textEncoder = new TextEncoder();
+  const pingPayload = textEncoder.encode('{"Ping":{}}');
+  const pongPayload = textEncoder.encode('{"Pong":{}}');
 
   function encodeFrames(events: unknown[]): Uint8Array {
     const chunks: Uint8Array[] = events.map((event) => {
-      const payload = textEncoder.encode(JSON.stringify(event));
+      const payload = encodeEventFrame(event as any);
       const frame = new Uint8Array(4 + payload.length);
       new DataView(frame.buffer).setUint32(0, payload.length, false);
       frame.set(payload, 4);
@@ -34,6 +36,53 @@ describe("sync-transport", () => {
       offset += chunk.length;
     }
     return all;
+  }
+
+  function encodeEventFrame(event: {
+    type: string;
+    client_id?: string;
+    payload?: Uint8Array;
+    seq?: number | null;
+    next_sync_seq?: number | null;
+  }): Uint8Array {
+    if (event.type === "Connected") {
+      const clientIdBytes = textEncoder.encode(event.client_id ?? "");
+      const hasNext = event.next_sync_seq != null;
+      const payload = new Uint8Array(1 + 8 + 1 + (hasNext ? 8 : 0) + 4 + clientIdBytes.length);
+      let offset = 0;
+      payload[offset++] = 1; // Connected
+      offset += 8; // connection_id ignored by JS parser in tests
+      payload[offset++] = hasNext ? 1 : 0;
+      if (hasNext) {
+        new DataView(payload.buffer).setBigUint64(offset, BigInt(event.next_sync_seq!), false);
+        offset += 8;
+      }
+      new DataView(payload.buffer).setUint32(offset, clientIdBytes.length, false);
+      offset += 4;
+      payload.set(clientIdBytes, offset);
+      return payload;
+    }
+
+    if (event.type === "SyncUpdate") {
+      const messagePayload = event.payload ?? new Uint8Array();
+      const hasSeq = event.seq != null;
+      const payload = new Uint8Array(1 + 1 + (hasSeq ? 8 : 0) + messagePayload.length);
+      let offset = 0;
+      payload[offset++] = 3; // SyncUpdate
+      payload[offset++] = hasSeq ? 1 : 0;
+      if (hasSeq) {
+        new DataView(payload.buffer).setBigUint64(offset, BigInt(event.seq!), false);
+        offset += 8;
+      }
+      payload.set(messagePayload, offset);
+      return payload;
+    }
+
+    if (event.type === "Heartbeat") {
+      return Uint8Array.of(5);
+    }
+
+    throw new Error(`Unsupported test event type: ${event.type}`);
   }
 
   function streamResponse(events: unknown[]): Response {
@@ -67,19 +116,22 @@ describe("sync-transport", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {});
-    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Pong: {} }), false, {});
+    await sendSyncPayload("http://localhost:3000", pingPayload, false, {});
+    await sendSyncPayload("http://localhost:3000", pongPayload, false, {});
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-
-    expect(firstBody.client_id).toMatch(
+    const firstUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    const secondUrl = new URL(fetchMock.mock.calls[1][0] as string);
+    const firstClientId = firstUrl.searchParams.get("client_id");
+    const secondClientId = secondUrl.searchParams.get("client_id");
+    expect(firstClientId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    expect(firstBody.client_id).not.toBe("00000000-0000-0000-0000-000000000000");
-    expect(secondBody.client_id).toBe(firstBody.client_id);
+    expect(firstClientId).not.toBe("00000000-0000-0000-0000-000000000000");
+    expect(secondClientId).toBe(firstClientId);
+    expect(fetchMock.mock.calls[0][1].body).toEqual(pingPayload);
+    expect(fetchMock.mock.calls[1][1].body).toEqual(pongPayload);
   });
 
   it("uses provided client_id when supplied", async () => {
@@ -87,13 +139,13 @@ describe("sync-transport", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const providedClientId = "11111111-2222-4333-8444-555555555555";
-    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {
+    await sendSyncPayload("http://localhost:3000", pingPayload, false, {
       clientId: providedClientId,
       jwtToken: "token",
     });
 
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.client_id).toBe(providedClientId);
+    const url = new URL(fetchMock.mock.calls[0][0] as string);
+    expect(url.searchParams.get("client_id")).toBe(providedClientId);
   });
 
   it("throws on non-2xx sync POST responses", async () => {
@@ -102,51 +154,40 @@ describe("sync-transport", () => {
       .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(
-      sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {}),
-    ).rejects.toThrow("Sync POST failed: 503 Service Unavailable");
+    await expect(sendSyncPayload("http://localhost:3000", pingPayload, false, {})).rejects.toThrow(
+      "Sync POST failed: 503 Service Unavailable",
+    );
   });
 
   it("throws when fetch rejects", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(
-      sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {}),
-    ).rejects.toThrow("Sync POST failed: network down");
+    await expect(sendSyncPayload("http://localhost:3000", pingPayload, false, {})).rejects.toThrow(
+      "Sync POST failed: network down",
+    );
   });
 
   it("posts to path-prefixed sync route when provided", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload("http://localhost:3000/", JSON.stringify({ Ping: {} }), false, {
+    await sendSyncPayload("http://localhost:3000/", pingPayload, false, {
       jwtToken: "token",
       pathPrefix: "apps/app-123/",
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
+    expect(fetchMock.mock.calls[0][0]).toMatch(
+      /^http:\/\/localhost:3000\/apps\/app-123\/sync\?client_id=/,
+    );
   });
 
   it("skips catalogue payload sync when admin secret is missing", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload(
-      "http://localhost:3000",
-      JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
-            metadata: {
-              type: "catalogue_schema",
-            },
-          },
-        },
-      }),
-      true,
-      { jwtToken: "jwt-token" },
-    );
+    await sendSyncPayload("http://localhost:3000", pingPayload, true, { jwtToken: "jwt-token" });
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -155,24 +196,14 @@ describe("sync-transport", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload(
-      "http://localhost:3000",
-      JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
-            metadata: {
-              type: "catalogue_lens",
-            },
-          },
-        },
-      }),
-      true,
-      { adminSecret: "admin-secret", jwtToken: "jwt-token" },
-    );
+    await sendSyncPayload("http://localhost:3000", pingPayload, true, {
+      adminSecret: "admin-secret",
+      jwtToken: "jwt-token",
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
-      "Content-Type": "application/json",
+      "Content-Type": "application/octet-stream",
       "X-Jazz-Admin-Secret": "admin-secret",
     });
     expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
@@ -231,7 +262,7 @@ describe("sync-transport", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
         { type: "Connected", client_id: "server-client-1" },
-        { type: "SyncUpdate", payload: { Ping: {} } },
+        { type: "SyncUpdate", payload: pingPayload },
       ]),
     );
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -255,9 +286,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() =>
-      expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
-    );
+    await vi.waitFor(() => expect(onSyncMessage).toHaveBeenCalledWith(pingPayload));
     expect(clientId).toBe("server-client-1");
     await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
 
@@ -373,7 +402,7 @@ describe("sync-transport", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
         { type: "Connected", client_id: "server-client-3" },
-        { type: "SyncUpdate", payload: { Ping: {} } },
+        { type: "SyncUpdate", payload: pingPayload },
       ]),
     );
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -397,9 +426,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() =>
-      expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
-    );
+    await vi.waitFor(() => expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(pingPayload));
     expect(clientId).toBe("server-client-3");
     await vi.waitFor(() => expect(runtime.removeServer).toHaveBeenCalledTimes(1));
 
@@ -414,13 +441,11 @@ describe("sync-transport", () => {
       onClientPayload,
     });
 
-    router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
-    router("client", "client-1", JSON.stringify({ Pong: {} }), false);
+    router("server", "upstream-1", pingPayload, false);
+    router("client", "client-1", pongPayload, false);
 
-    await vi.waitFor(() =>
-      expect(onServerPayload).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), false),
-    );
-    expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
+    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledWith(pingPayload, false));
+    expect(onClientPayload).toHaveBeenCalledWith(pongPayload);
   });
 
   it("sync outbox router surfaces server-send failures", async () => {
@@ -432,7 +457,7 @@ describe("sync-transport", () => {
       onServerPayloadError,
     });
 
-    router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
+    router("server", "upstream-1", pingPayload, false);
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
   });

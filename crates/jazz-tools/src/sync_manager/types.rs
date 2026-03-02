@@ -263,6 +263,16 @@ pub enum SyncPayload {
 }
 
 impl SyncPayload {
+    /// Encode this payload using postcard.
+    pub fn to_postcard_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
+        postcard::to_allocvec(self)
+    }
+
+    /// Decode a payload from postcard bytes.
+    pub fn from_postcard_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
         let metadata = match self {

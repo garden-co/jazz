@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::sync_manager::SyncPayload;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -91,20 +92,15 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
-/// Create a valid sync request body (SyncPayloadRequest).
-fn sync_body() -> String {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payload": {
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        }
-    })
-    .to_string()
+const TEST_CLIENT_ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
+
+fn sync_url(base_url: impl AsRef<str>, client_id: &str) -> String {
+    format!("{}/sync?client_id={client_id}", base_url.as_ref())
+}
+
+fn sync_body(payload: serde_json::Value) -> Vec<u8> {
+    let payload: SyncPayload = serde_json::from_value(payload).unwrap();
+    payload.to_postcard_bytes().unwrap()
 }
 
 // ============================================================================
@@ -183,10 +179,17 @@ mod integration_tests {
         let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
 
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_body(json!({
+                "ObjectUpdated": {
+                    "object_id": TEST_CLIENT_ID,
+                    "metadata": null,
+                    "branch_name": "main",
+                    "commits": []
+                }
+            })))
             .send()
             .await
             .unwrap();
@@ -201,10 +204,17 @@ mod integration_tests {
         let server = TestServer::start().await;
 
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("Authorization", "Bearer invalid-token")
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_body(json!({
+                "ObjectUpdated": {
+                    "object_id": TEST_CLIENT_ID,
+                    "metadata": null,
+                    "branch_name": "main",
+                    "commits": []
+                }
+            })))
             .send()
             .await
             .unwrap();
@@ -220,11 +230,18 @@ mod integration_tests {
         let session_b64 = encode_session(&session);
 
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("X-Jazz-Backend-Secret", BACKEND_SECRET)
             .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_body(json!({
+                "ObjectUpdated": {
+                    "object_id": TEST_CLIENT_ID,
+                    "metadata": null,
+                    "branch_name": "main",
+                    "commits": []
+                }
+            })))
             .send()
             .await
             .unwrap();
@@ -241,11 +258,18 @@ mod integration_tests {
         let session_b64 = encode_session(&session);
 
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("X-Jazz-Backend-Secret", "wrong-secret")
             .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_body(json!({
+                "ObjectUpdated": {
+                    "object_id": TEST_CLIENT_ID,
+                    "metadata": null,
+                    "branch_name": "main",
+                    "commits": []
+                }
+            })))
             .send()
             .await
             .unwrap();
@@ -261,10 +285,17 @@ mod integration_tests {
         let session_b64 = encode_session(&session);
 
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_body(json!({
+                "ObjectUpdated": {
+                    "object_id": TEST_CLIENT_ID,
+                    "metadata": null,
+                    "branch_name": "main",
+                    "commits": []
+                }
+            })))
             .send()
             .await
             .unwrap();
@@ -282,12 +313,19 @@ mod integration_tests {
 
         // Both JWT and backend auth provided - backend should win
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("Authorization", format!("Bearer {}", jwt_token))
             .header("X-Jazz-Backend-Secret", BACKEND_SECRET)
             .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_body(json!({
+                "ObjectUpdated": {
+                    "object_id": TEST_CLIENT_ID,
+                    "metadata": null,
+                    "branch_name": "main",
+                    "commits": []
+                }
+            })))
             .send()
             .await
             .unwrap();
@@ -344,22 +382,18 @@ mod integration_tests {
     }
 
     /// Create a valid catalogue sync body for testing admin auth.
-    fn catalogue_sync_body() -> String {
-        json!({
-            "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "payload": {
-                "ObjectUpdated": {
-                    "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                    "metadata": {
-                        "id": "01234567-89ab-cdef-0123-456789abcdef",
-                        "metadata": {"type": "catalogue_schema"}
-                    },
-                    "branch_name": "main",
-                    "commits": []
-                }
+    fn catalogue_sync_body() -> Vec<u8> {
+        sync_body(json!({
+            "ObjectUpdated": {
+                "object_id": TEST_CLIENT_ID,
+                "metadata": {
+                    "id": TEST_CLIENT_ID,
+                    "metadata": {"type": "catalogue_schema"}
+                },
+                "branch_name": "main",
+                "commits": []
             }
-        })
-        .to_string()
+        }))
     }
 
     /// Test that catalogue sync without admin header returns 401.
@@ -369,8 +403,8 @@ mod integration_tests {
 
         // Send a catalogue schema sync payload without admin header
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Content-Type", "application/json")
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
+            .header("Content-Type", "application/octet-stream")
             .body(catalogue_sync_body())
             .send()
             .await
@@ -386,9 +420,9 @@ mod integration_tests {
 
         // Send a catalogue schema sync payload with wrong admin header
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("X-Jazz-Admin-Secret", "wrong-admin-secret")
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/octet-stream")
             .body(catalogue_sync_body())
             .send()
             .await
@@ -404,9 +438,9 @@ mod integration_tests {
 
         // Send a catalogue schema sync payload with valid admin header
         let resp = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), TEST_CLIENT_ID))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/octet-stream")
             .body(catalogue_sync_body())
             .send()
             .await
@@ -443,33 +477,32 @@ mod integration_tests {
             hex::encode(schema_hash.as_bytes()),
         );
 
-        let sync_payload = json!({
-            "client_id": Uuid::new_v4().to_string(),
-            "payload": {
-                "ObjectUpdated": {
-                    "object_id": object_id,
-                    "metadata": {
-                        "id": object_id,
-                        "metadata": metadata
-                    },
-                    "branch_name": "main",
-                    "commits": [
-                        {
-                            "parents": [],
-                            "content": encoded_schema,
-                            "timestamp": 1,
-                            "author": Uuid::new_v4().to_string(),
-                            "metadata": null
-                        }
-                    ]
-                }
+        let sync_client_id = Uuid::new_v4().to_string();
+        let sync_payload = sync_body(json!({
+            "ObjectUpdated": {
+                "object_id": object_id,
+                "metadata": {
+                    "id": object_id,
+                    "metadata": metadata
+                },
+                "branch_name": "main",
+                "commits": [
+                    {
+                        "parents": [],
+                        "content": encoded_schema,
+                        "timestamp": 1,
+                        "author": Uuid::new_v4().to_string(),
+                        "metadata": null
+                    }
+                ]
             }
-        });
+        }));
 
         let sync_response = client()
-            .post(format!("{}/sync", server.base_url()))
+            .post(sync_url(server.base_url(), &sync_client_id))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-            .json(&sync_payload)
+            .header("Content-Type", "application/octet-stream")
+            .body(sync_payload)
             .send()
             .await
             .unwrap();

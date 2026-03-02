@@ -561,9 +561,11 @@ fn handle_server_event(
             Ok(())
         }
         ServerEvent::SyncUpdate { seq, payload } => {
+            let payload = SyncPayload::from_postcard_bytes(&payload)
+                .map_err(|e| JazzError::Sync(format!("Invalid sync payload postcard: {e}")))?;
             let entry = InboxEntry {
                 source: Source::Server(server_id),
-                payload: *payload,
+                payload,
             };
             if let Some(sequence) = seq {
                 runtime

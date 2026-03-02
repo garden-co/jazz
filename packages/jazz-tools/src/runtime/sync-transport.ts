@@ -426,7 +426,7 @@ export function applyUserAuthHeaders(headers: Record<string, string>, auth: Sync
  */
 export async function sendSyncPayload(
   serverUrl: string,
-  payloadJson: string,
+  payload: Uint8Array,
   isCatalogue: boolean,
   auth: SyncAuth,
   logPrefix = "",
@@ -436,7 +436,7 @@ export async function sendSyncPayload(
   }
 
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    "Content-Type": "application/octet-stream",
   };
 
   if (isCatalogue) {
@@ -447,16 +447,17 @@ export async function sendSyncPayload(
     applyUserAuthHeaders(headers, auth);
   }
 
-  const body = `{"payload":${payloadJson},"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  const clientId = auth.clientId ?? fallbackClientId;
+  const syncUrl = `${buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix)}?client_id=${encodeURIComponent(clientId)}`;
 
   let response: Response;
   try {
     response = await fetchWithTimeout(
-      buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
+      syncUrl,
       {
         method: "POST",
         headers,
-        body,
+        body: payload as unknown as BodyInit,
       },
       SYNC_FETCH_TIMEOUT_MS,
     );
@@ -537,9 +538,9 @@ export async function linkExternalIdentity(
 /**
  * Read length-prefixed binary frames from a ReadableStreamDefaultReader.
  *
- * Each frame is: 4-byte big-endian length + UTF-8 JSON payload.
- * Calls `callbacks.onSyncMessage` for SyncUpdate events and
- * `callbacks.onConnected` for Connected events.
+ * Each frame is: 4-byte big-endian length + binary ServerEvent payload.
+ * Calls `callbacks.onSyncMessage` for SyncUpdate events and `callbacks.onConnected`
+ * for Connected events.
  *
  * Returns when the stream ends or is aborted.
  */
@@ -549,6 +550,8 @@ export async function readBinaryFrames(
   logPrefix = "",
 ): Promise<void> {
   let buffer = new Uint8Array(0);
+  const EVENT_CONNECTED = 1;
+  const EVENT_SYNC_UPDATE = 3;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -564,22 +567,64 @@ export async function readBinaryFrames(
     while (buffer.length >= 4) {
       const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
       if (buffer.length < 4 + len) break;
-      const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
+      const frame = buffer.slice(4, 4 + len);
       buffer = buffer.slice(4 + len);
 
-      let event: any;
       try {
-        event = JSON.parse(json);
-      } catch (error) {
-        console.error(`${logPrefix}Stream parse error:`, error);
-        continue;
-      }
+        if (frame.length < 1) {
+          console.error(`${logPrefix}Stream parse error: empty frame`);
+          continue;
+        }
 
-      try {
-        if (event.type === "Connected" && event.client_id) {
-          callbacks.onConnected?.(event.client_id);
-        } else if (event.type === "SyncUpdate") {
-          callbacks.onSyncMessage(JSON.stringify(event.payload));
+        const tag = frame[0];
+        if (tag === EVENT_CONNECTED) {
+          let offset = 1;
+          if (frame.length < offset + 8 + 1 + 4) {
+            console.error(`${logPrefix}Stream parse error: invalid Connected frame`);
+            continue;
+          }
+          offset += 8; // connection_id
+          const hasNextSeq = frame[offset] !== 0;
+          offset += 1;
+          if (hasNextSeq) {
+            if (frame.length < offset + 8 + 4) {
+              console.error(`${logPrefix}Stream parse error: invalid Connected frame`);
+              continue;
+            }
+            offset += 8;
+          }
+          const clientIdLen = new DataView(frame.buffer, frame.byteOffset + offset, 4).getUint32(
+            0,
+            false,
+          );
+          offset += 4;
+          if (frame.length < offset + clientIdLen) {
+            console.error(`${logPrefix}Stream parse error: invalid Connected frame`);
+            continue;
+          }
+          const clientId = new TextDecoder().decode(frame.slice(offset, offset + clientIdLen));
+          callbacks.onConnected?.(clientId);
+          continue;
+        }
+
+        if (tag === EVENT_SYNC_UPDATE) {
+          let offset = 1;
+          if (frame.length < offset + 1) {
+            console.error(`${logPrefix}Stream parse error: invalid SyncUpdate frame`);
+            continue;
+          }
+          const hasSeq = frame[offset] !== 0;
+          offset += 1;
+          if (hasSeq) {
+            if (frame.length < offset + 8) {
+              console.error(`${logPrefix}Stream parse error: invalid SyncUpdate frame`);
+              continue;
+            }
+            offset += 8;
+          }
+
+          callbacks.onSyncMessage(frame.slice(offset));
+          continue;
         }
       } catch (error) {
         console.error(`${logPrefix}Stream callback error:`, error);

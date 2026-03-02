@@ -19,9 +19,7 @@ use axum::{
 use base64::Engine;
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
-use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
-};
+use jazz_tools::jazz_transport::{ConnectionId, ErrorResponse, ServerEvent, SuccessResponse};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
@@ -2077,12 +2075,12 @@ fn parse_schema_hash(value: &str) -> Result<SchemaHash, (StatusCode, String)> {
 }
 
 fn encode_frame(event: &ServerEvent) -> Bytes {
-    let json = serde_json::to_vec(event).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len);
-    buf.extend_from_slice(&json);
-    Bytes::from(buf)
+    Bytes::from(event.encode_frame())
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncParams {
+    client_id: String,
 }
 
 fn decode_session_header(b64: &str) -> Option<Session> {
@@ -2996,9 +2994,13 @@ async fn events_handler(
                     match result {
                         Ok((target_client_id, seq, payload)) => {
                             if target_client_id == client_id {
+                                let Ok(payload_bytes) = payload.to_postcard_bytes() else {
+                                    warn!(app_id = %app_id, connection_id, "failed to encode sync payload for stream frame");
+                                    continue;
+                                };
                                 let event = ServerEvent::SyncUpdate {
                                     seq: Some(seq),
-                                    payload: Box::new(payload),
+                                    payload: payload_bytes,
                                 };
                                 yield Ok(encode_frame(&event));
                             }
@@ -3033,8 +3035,20 @@ async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     AxumPath(path): AxumPath<AppPath>,
     headers: HeaderMap,
-    Json(request): Json<SyncPayloadRequest>,
+    Query(params): Query<SyncParams>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let client_id = match ClientId::parse(&params.client_id) {
+        Some(client_id) => client_id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request("invalid client_id")),
+            )
+                .into_response();
+        }
+    };
+
     let app_id = match parse_app_id(&path.app_id) {
         Ok(id) => id,
         Err((status, msg)) => {
@@ -3072,10 +3086,23 @@ async fn sync_handler(
         }
     };
 
+    let payload = match SyncPayload::from_postcard_bytes(&body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "invalid postcard payload: {error}"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
     let dispatch_result = if is_admin {
         state
             .workers
-            .sync_as_admin(app_id, request.client_id, request.payload)
+            .sync_as_admin(app_id, client_id, payload.clone())
             .await
     } else {
         let session = match extract_session(&headers, app_id, &cfg, &state).await {
@@ -3096,7 +3123,7 @@ async fn sync_handler(
 
         state
             .workers
-            .sync_as_session(app_id, request.client_id, session, request.payload)
+            .sync_as_session(app_id, client_id, session, payload)
             .await
     };
 

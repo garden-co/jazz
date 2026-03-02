@@ -18,6 +18,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Once;
 
 use js_sys::Function;
+use js_sys::Uint8Array;
 use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
@@ -220,7 +221,8 @@ impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
             let is_catalogue = message.payload.is_catalogue();
-            if let Ok(payload_json) = serde_json::to_string(&message.payload) {
+            if let Ok(payload_bytes) = message.payload.to_postcard_bytes() {
+                let payload_js = Uint8Array::from(payload_bytes.as_slice());
                 let (destination_kind, destination_id) = match message.destination {
                     Destination::Server(server_id) => ("server", server_id.0.to_string()),
                     Destination::Client(client_id) => ("client", client_id.0.to_string()),
@@ -230,7 +232,7 @@ impl SyncSender for JsSyncSender {
                     &JsValue::NULL,
                     &JsValue::from_str(destination_kind),
                     &JsValue::from_str(&destination_id),
-                    &JsValue::from_str(&payload_json),
+                    &payload_js.into(),
                     &JsValue::from_bool(is_catalogue),
                 );
             }
@@ -350,12 +352,12 @@ impl WasmRuntime {
     /// Called by JS when a sync message arrives from the server.
     ///
     /// # Arguments
-    /// * `message_json` - JSON-encoded SyncPayload
+    /// * `payload` - Postcard-encoded SyncPayload bytes
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(&self, message_json: &str) -> Result<(), JsError> {
+    pub fn on_sync_message_received(&self, payload: &[u8]) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload: SyncPayload = serde_json::from_str(message_json)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+        let payload = SyncPayload::from_postcard_bytes(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))?;
 
         let entry = InboxEntry {
             source: Source::Server(ServerId::new()),
@@ -370,12 +372,12 @@ impl WasmRuntime {
     ///
     /// # Arguments
     /// * `client_id` - UUID string of the sending client
-    /// * `message_json` - JSON-encoded SyncPayload
+    /// * `payload` - Postcard-encoded SyncPayload bytes
     #[wasm_bindgen(js_name = onSyncMessageReceivedFromClient)]
     pub fn on_sync_message_received_from_client(
         &self,
         client_id: &str,
-        message_json: &str,
+        payload: &[u8],
     ) -> Result<(), JsError> {
         let _span = debug_span!(
             "wasm::onSyncMessageReceivedFromClient",
@@ -387,8 +389,8 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
 
-        let payload: SyncPayload = serde_json::from_str(message_json)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+        let payload = SyncPayload::from_postcard_bytes(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
