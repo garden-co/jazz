@@ -195,9 +195,7 @@ function generateQueryBuilderClass(
     lines.push(
       `  include<NewI extends ${includeInterface}>(relations: NewI): ${interfaceName}QueryBuilder<I & NewI> {`,
     );
-    lines.push(
-      `    const clone = this._clone() as unknown as ${interfaceName}QueryBuilder<I & NewI>;`,
-    );
+    lines.push(`    const clone = this._clone<I & NewI>();`);
     lines.push(`    clone._includes = { ...this._includes, ...relations };`);
     lines.push(`    return clone;`);
     lines.push(`  }`);
@@ -243,7 +241,7 @@ function generateQueryBuilderClass(
   // gather() method
   lines.push(`  gather(options: {`);
   lines.push(`    start: ${whereInputInterface};`);
-  lines.push(`    step: (ctx: { current: any }) => unknown;`);
+  lines.push(`    step: (ctx: { current: string }) => QueryBuilder<unknown>;`);
   lines.push(`    maxDepth?: number;`);
   lines.push(`  }): ${interfaceName}QueryBuilder<I> {`);
   lines.push(`    if (options.start === undefined) {`);
@@ -275,7 +273,7 @@ function generateQueryBuilderClass(
   lines.push(`    }`);
   lines.push(``);
   lines.push(`    const stepBuilt = JSON.parse(`);
-  lines.push(`      (stepOutput as { _build: () => string })._build(),`);
+  lines.push(`      stepOutput._build(),`);
   lines.push(`    ) as {`);
   lines.push(`      table?: unknown;`);
   lines.push(`      conditions?: Array<{ column: string; op: string; value: unknown }>;`);
@@ -341,8 +339,10 @@ function generateQueryBuilderClass(
   lines.push(``);
 
   // _clone() method
-  lines.push(`  private _clone(): ${interfaceName}QueryBuilder<I> {`);
-  lines.push(`    const clone = new ${interfaceName}QueryBuilder<I>();`);
+  lines.push(
+    `  private _clone<CloneI extends ${includeConstraint} = I>(): ${interfaceName}QueryBuilder<CloneI> {`,
+  );
+  lines.push(`    const clone = new ${interfaceName}QueryBuilder<CloneI>();`);
   lines.push(`    clone._conditions = [...this._conditions];`);
   lines.push(`    clone._includes = { ...this._includes };`);
   lines.push(`    clone._orderBys = [...this._orderBys];`);
