@@ -135,8 +135,9 @@ impl Scheduler for NapiScheduler {
 // NapiSyncSender
 // ============================================================================
 
-/// Arguments for the sync message callback (destinationKind, destinationId, payloadJson)
-type SyncCallbackParams = (String, String, String);
+/// Arguments for the sync message callback
+/// (destinationKind, destinationId, payloadJson, isCatalogue)
+type SyncCallbackParams = (String, String, String, bool);
 
 pub struct NapiSyncSender {
     callback:
@@ -152,7 +153,7 @@ impl NapiSyncSender {
 
     fn set_callback(
         &self,
-        tsfn: ThreadsafeFunction<(String, String, String), ErrorStrategy::CalleeHandled>,
+        tsfn: ThreadsafeFunction<SyncCallbackParams, ErrorStrategy::CalleeHandled>,
     ) {
         if let Ok(mut cb) = self.callback.lock() {
             *cb = Some(tsfn);
@@ -174,13 +175,14 @@ impl SyncSender for NapiSyncSender {
             Ok(json) => json,
             Err(_) => return,
         };
+        let is_catalogue = message.payload.is_catalogue();
         let (destination_kind, destination_id) = match message.destination {
             Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
             Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
         };
 
         tsfn.call(
-            Ok((destination_kind, destination_id, payload_json)),
+            Ok((destination_kind, destination_id, payload_json, is_catalogue)),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
     }
@@ -702,20 +704,22 @@ impl NapiRuntime {
         &self,
         #[napi(ts_arg_type = "(...args: any[]) => any")] callback: napi::JsFunction,
     ) -> napi::Result<()> {
-        let tsfn: ThreadsafeFunction<(String, String, String), ErrorStrategy::CalleeHandled> =
-            callback.create_threadsafe_function(
-                0,
-                |ctx: ThreadSafeCallContext<(String, String, String)>| {
-                    let destination_kind = ctx.env.create_string_from_std(ctx.value.0)?;
-                    let destination_id = ctx.env.create_string_from_std(ctx.value.1)?;
-                    let payload_json = ctx.env.create_string_from_std(ctx.value.2)?;
-                    Ok(vec![
-                        destination_kind.into_unknown(),
-                        destination_id.into_unknown(),
-                        payload_json.into_unknown(),
-                    ])
-                },
-            )?;
+        let tsfn: ThreadsafeFunction<SyncCallbackParams, ErrorStrategy::CalleeHandled> = callback
+            .create_threadsafe_function(
+            0,
+            |ctx: ThreadSafeCallContext<SyncCallbackParams>| {
+                let destination_kind = ctx.env.create_string_from_std(ctx.value.0)?;
+                let destination_id = ctx.env.create_string_from_std(ctx.value.1)?;
+                let payload_json = ctx.env.create_string_from_std(ctx.value.2)?;
+                let is_catalogue = ctx.env.get_boolean(ctx.value.3)?;
+                Ok(vec![
+                    destination_kind.into_unknown(),
+                    destination_id.into_unknown(),
+                    payload_json.into_unknown(),
+                    is_catalogue.into_unknown(),
+                ])
+            },
+        )?;
 
         let core = self
             .core

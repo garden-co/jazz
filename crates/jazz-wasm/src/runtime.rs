@@ -219,17 +219,19 @@ impl JsSyncSender {
 impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
+            let is_catalogue = message.payload.is_catalogue();
             if let Ok(payload_json) = serde_json::to_string(&message.payload) {
                 let (destination_kind, destination_id) = match message.destination {
                     Destination::Server(server_id) => ("server", server_id.0.to_string()),
                     Destination::Client(client_id) => ("client", client_id.0.to_string()),
                 };
 
-                let _ = callback.call3(
+                let _ = callback.call4(
                     &JsValue::NULL,
                     &JsValue::from_str(destination_kind),
                     &JsValue::from_str(&destination_id),
                     &JsValue::from_str(&payload_json),
+                    &JsValue::from_bool(is_catalogue),
                 );
             }
         }
