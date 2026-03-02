@@ -147,11 +147,11 @@ class FakeWorker {
 }
 
 function createRuntimeHarness() {
-  let outboundHandler: ((envelope: string) => void) | null = null;
+  let outboundHandler: ((...args: unknown[]) => void) | null = null;
   const receivedFromWorker: string[] = [];
 
   const runtime = {
-    onSyncMessageToSend(handler: (envelope: string) => void) {
+    onSyncMessageToSend(handler: (...args: unknown[]) => void) {
       outboundHandler = handler;
     },
     onSyncMessageReceived(payload: string) {
@@ -168,12 +168,7 @@ function createRuntimeHarness() {
       if (!outboundHandler) {
         throw new Error("Runtime sync handler is not installed");
       }
-      outboundHandler(
-        JSON.stringify({
-          destination: { Server: {} },
-          payload,
-        }),
-      );
+      outboundHandler("server", "server-1", JSON.stringify(payload), false);
     },
   };
 }

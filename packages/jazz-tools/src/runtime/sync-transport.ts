@@ -284,50 +284,45 @@ export function createRuntimeSyncStreamController(
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payload: unknown): void | Promise<void>;
+  onServerPayload(payloadJson: string, isCatalogue: boolean): void | Promise<void>;
   onClientPayload?(payloadJson: string): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
 }
+
+export type OutboxDestinationKind = "server" | "client";
 
 /**
  * Create a shared runtime outbox router for server/client destinations.
  */
 export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
-): (envelope: string) => void {
+): (
+  destinationKind: OutboxDestinationKind,
+  destinationId: string,
+  payloadJson: string,
+  isCatalogue: boolean,
+) => void {
   const logPrefix = options.logPrefix ?? "";
 
-  return (envelope: string) => {
-    let parsed: { destination?: unknown; payload?: unknown };
-    try {
-      parsed = JSON.parse(envelope) as { destination?: unknown; payload?: unknown };
-    } catch (error) {
-      console.error(`${logPrefix}Sync envelope parse error:`, error);
+  return (
+    destinationKind: OutboxDestinationKind,
+    _destinationId: string,
+    payloadJson: string,
+    isCatalogue: boolean,
+  ) => {
+    if (destinationKind === "client") {
+      options.onClientPayload?.(payloadJson);
       return;
     }
 
-    const destination = parsed.destination;
-    const payload = parsed.payload;
-    const isObjectDestination = destination !== null && typeof destination === "object";
-
-    if (isObjectDestination && "Client" in destination) {
-      const payloadJson = JSON.stringify(payload);
-      if (payloadJson !== undefined) {
-        options.onClientPayload?.(payloadJson);
+    Promise.resolve(options.onServerPayload(payloadJson, isCatalogue)).catch((error) => {
+      if (options.onServerPayloadError) {
+        options.onServerPayloadError(error);
+        return;
       }
-      return;
-    }
-
-    if (isObjectDestination && "Server" in destination) {
-      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
-        if (options.onServerPayloadError) {
-          options.onServerPayloadError(error);
-          return;
-        }
-        console.error(`${logPrefix}Sync POST error:`, error);
-      });
-    }
+      console.error(`${logPrefix}Sync POST error:`, error);
+    });
   };
 }
 
@@ -424,19 +419,6 @@ export function applyUserAuthHeaders(headers: Record<string, string>, auth: Sync
 }
 
 /**
- * Check if a sync payload is for a catalogue object (schema or lens).
- * Catalogue payloads use admin-secret auth instead of JWT.
- */
-export function isCataloguePayload(payload: any): boolean {
-  const metadata = payload?.ObjectUpdated?.metadata?.metadata;
-  if (metadata) {
-    const t = metadata["type"];
-    return t === "catalogue_schema" || t === "catalogue_lens";
-  }
-  return false;
-}
-
-/**
  * POST a sync payload to the server.
  *
  * User auth headers are always applied first (JWT or local auth).
@@ -444,12 +426,12 @@ export function isCataloguePayload(payload: any): boolean {
  */
 export async function sendSyncPayload(
   serverUrl: string,
-  payload: any,
+  payloadJson: string,
+  isCatalogue: boolean,
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  const cataloguePayload = isCataloguePayload(payload);
-  if (cataloguePayload && !auth.adminSecret) {
+  if (isCatalogue && !auth.adminSecret) {
     return;
   }
 
@@ -457,7 +439,7 @@ export async function sendSyncPayload(
     "Content-Type": "application/json",
   };
 
-  if (cataloguePayload) {
+  if (isCatalogue) {
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
@@ -465,10 +447,7 @@ export async function sendSyncPayload(
     applyUserAuthHeaders(headers, auth);
   }
 
-  const body = JSON.stringify({
-    payload,
-    client_id: auth.clientId ?? fallbackClientId,
-  });
+  const body = `{"payload":${payloadJson},"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
 
   let response: Response;
   try {
