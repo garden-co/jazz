@@ -330,6 +330,33 @@ impl ArraySubqueryNode {
         }]))
     }
 
+    /// Update the array column in an existing output tuple.
+    ///
+    /// `build_output_tuple` expects an *outer* tuple encoded with the base
+    /// descriptor.  Tuples stored in `current_tuples` are already encoded with
+    /// `self.output_descriptor` (base + array column).  Decoding those with
+    /// the base descriptor misreads the variable-length offset table and
+    /// corrupts the base column values.  This method decodes with the full
+    /// combined descriptor and replaces only the last (array) column.
+    fn update_output_tuple_array(&self, output_tuple: &Tuple, new_array: &Value) -> Option<Tuple> {
+        let element = output_tuple.get(0)?;
+        let outer_id = element.id();
+        let outer_content = element.content()?;
+        let commit_id = element.commit_id()?;
+
+        let mut values = decode_row(&self.output_descriptor, outer_content).ok()?;
+        let last_idx = values.len().checked_sub(1)?;
+        values[last_idx] = new_array.clone();
+
+        let output_content = encode_row(&self.output_descriptor, &values).ok()?;
+
+        Some(Tuple::new(vec![TupleElement::Row {
+            id: outer_id,
+            content: output_content,
+            commit_id,
+        }]))
+    }
+
     /// Re-evaluate all instances when inner data changes.
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
@@ -362,8 +389,12 @@ impl ArraySubqueryNode {
                     .cloned();
 
                 if let Some(old_tuple) = old_tuple {
-                    // Build new tuple with updated array
-                    if let Some(new_tuple) = self.build_output_tuple(&old_tuple, &new_array) {
+                    // Build new tuple with updated array.  Use
+                    // update_output_tuple_array (not build_output_tuple) because
+                    // old_tuple is already an output tuple encoded with the
+                    // combined descriptor.
+                    if let Some(new_tuple) = self.update_output_tuple_array(&old_tuple, &new_array)
+                    {
                         // Emit update: (old_tuple, new_tuple)
                         result.updated.push((old_tuple.clone(), new_tuple.clone()));
 
