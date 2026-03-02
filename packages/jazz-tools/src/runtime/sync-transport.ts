@@ -33,7 +33,7 @@ export interface LinkExternalResponse {
 
 /** Callbacks for stream events. */
 export interface StreamCallbacks {
-  onSyncMessage(payloadJson: string): void;
+  onSyncMessage(payload: Uint8Array): void;
   onConnected?(clientId: string): void;
 }
 
@@ -44,7 +44,7 @@ export interface SyncStreamControllerOptions {
   setClientId(clientId: string): void;
   onConnected(): void;
   onDisconnected(): void;
-  onSyncMessage(payloadJson: string): void;
+  onSyncMessage(payload: Uint8Array): void;
 }
 
 /**
@@ -53,7 +53,7 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(): void;
   removeServer(): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(payload: Uint8Array): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
@@ -278,14 +278,14 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
 }
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payloadJson: string, isCatalogue: boolean): void | Promise<void>;
-  onClientPayload?(payloadJson: string): void;
+  onServerPayload(payload: Uint8Array, isCatalogue: boolean): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
 }
@@ -300,7 +300,7 @@ export function createSyncOutboxRouter(
 ): (
   destinationKind: OutboxDestinationKind,
   destinationId: string,
-  payloadJson: string,
+  payload: Uint8Array,
   isCatalogue: boolean,
 ) => void {
   const logPrefix = options.logPrefix ?? "";
@@ -308,15 +308,15 @@ export function createSyncOutboxRouter(
   return (
     destinationKind: OutboxDestinationKind,
     _destinationId: string,
-    payloadJson: string,
+    payload: Uint8Array,
     isCatalogue: boolean,
   ) => {
     if (destinationKind === "client") {
-      options.onClientPayload?.(payloadJson);
+      options.onClientPayload?.(payload);
       return;
     }
 
-    Promise.resolve(options.onServerPayload(payloadJson, isCatalogue)).catch((error) => {
+    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
       if (options.onServerPayloadError) {
         options.onServerPayloadError(error);
         return;

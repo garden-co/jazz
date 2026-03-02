@@ -43,9 +43,9 @@ let streamConnecting = false;
 let streamAttached = false;
 const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
-let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
-let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
-let pendingSyncPayloadsForMain: string[] = [];
+let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
+let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
+let pendingSyncPayloadsForMain: Uint8Array[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
 let bootstrapCatalogueForwarding = false;
@@ -91,7 +91,7 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
   }
 }
 
-function enqueueSyncMessageForMain(payload: string): void {
+function enqueueSyncMessageForMain(payload: Uint8Array): void {
   pendingSyncPayloadsForMain.push(payload);
   if (syncBatchFlushQueued) return;
 
@@ -188,14 +188,14 @@ async function handleInit(msg: InitMessage): Promise<void> {
       (
         destinationKind: OutboxDestinationKind,
         destinationId: string,
-        payloadJson: string,
+        payload: Uint8Array,
         isCatalogue: boolean,
       ) => {
         if (destinationKind === "client") {
           const destinationClientId = destinationId;
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
-            enqueueSyncMessageForMain(payloadJson);
+            enqueueSyncMessageForMain(payload);
             return;
           }
 
@@ -209,19 +209,19 @@ async function handleInit(msg: InitMessage): Promise<void> {
             type: "peer-sync",
             peerId,
             term,
-            payload: [payloadJson],
+            payload: [payload],
           });
         } else if (destinationKind === "server") {
           if (bootstrapCatalogueForwarding) {
             if (isCatalogue) {
-              enqueueSyncMessageForMain(payloadJson);
+              enqueueSyncMessageForMain(payload);
             }
             return;
           }
 
           // Server-bound → HTTP POST to upstream
           if (activeServerUrl) {
-            void sendToServer(activeServerUrl, payloadJson, isCatalogue).catch((error) => {
+            void sendToServer(activeServerUrl, payload, isCatalogue).catch((error) => {
               if (!isExpectedFetchAbortError(error)) {
                 console.error("[worker] Sync POST error:", error);
               }
@@ -283,12 +283,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
 /** POST a sync payload to the upstream server. */
 async function sendToServer(
   serverUrl: string,
-  payloadJson: string,
+  payload: Uint8Array,
   isCatalogue: boolean,
 ): Promise<void> {
   await sendSyncPayload(
     serverUrl,
-    payloadJson,
+    payload,
     isCatalogue,
     {
       jwtToken,
@@ -389,7 +389,7 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
         onConnected: (clientId) => {
           console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;

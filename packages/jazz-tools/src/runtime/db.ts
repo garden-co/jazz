@@ -235,7 +235,7 @@ interface FollowerSyncMessage {
   fromTabId: string;
   toLeaderTabId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 interface LeaderSyncMessage {
@@ -243,7 +243,7 @@ interface LeaderSyncMessage {
   fromLeaderTabId: string;
   toTabId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 interface FollowerCloseMessage {
@@ -261,8 +261,8 @@ function resolveBroadcastChannelCtor(): (new (name: string) => BroadcastChannelL
   return ctor as new (name: string) => BroadcastChannelLike;
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+function isBinaryPayloadArray(value: unknown): value is Uint8Array[] {
+  return Array.isArray(value) && value.every((entry) => entry instanceof Uint8Array);
 }
 
 function isTabSyncMessage(value: unknown): value is TabSyncMessage {
@@ -274,7 +274,7 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromTabId === "string" &&
       typeof message.toLeaderTabId === "string" &&
       typeof message.term === "number" &&
-      isStringArray(message.payload)
+      isBinaryPayloadArray(message.payload)
     );
   }
 
@@ -283,7 +283,7 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromLeaderTabId === "string" &&
       typeof message.toTabId === "string" &&
       typeof message.term === "number" &&
-      isStringArray(message.payload)
+      isBinaryPayloadArray(message.payload)
     );
   }
 

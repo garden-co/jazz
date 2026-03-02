@@ -34,7 +34,7 @@ export interface WorkerBridgeOptions {
 export interface PeerSyncBatch {
   peerId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 type BridgePhase = "idle" | "initializing" | "ready" | "failed" | "shutting-down" | "disposed";
@@ -49,10 +49,10 @@ interface WorkerBridgeState {
   phase: BridgePhase;
   workerClientId: string | null;
   initPromise: Promise<string> | null;
-  pendingSyncPayloadsForWorker: string[];
+  pendingSyncPayloadsForWorker: Uint8Array[];
   syncBatchFlushQueued: boolean;
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
-  serverPayloadForwarder: ((payload: string) => void) | null;
+  serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
@@ -105,7 +105,7 @@ export class WorkerBridge {
       (
         destinationKind: OutboxDestinationKind,
         _destinationId: string,
-        payloadJson: string,
+        payload: Uint8Array,
         _isCatalogue: boolean,
       ) => {
         if (this.isDisposedLike()) return;
@@ -113,9 +113,9 @@ export class WorkerBridge {
         // Only forward server-bound messages (worker IS the server)
         if (destinationKind === "server") {
           if (this.state.serverPayloadForwarder) {
-            this.state.serverPayloadForwarder(payloadJson);
+            this.state.serverPayloadForwarder(payload);
           } else {
-            this.enqueueSyncMessageForWorker(payloadJson);
+            this.enqueueSyncMessageForWorker(payload);
           }
         }
       },
@@ -256,12 +256,12 @@ export class WorkerBridge {
     return this.state.workerClientId;
   }
 
-  setServerPayloadForwarder(forwarder: ((payload: string) => void) | null): void {
+  setServerPayloadForwarder(forwarder: ((payload: Uint8Array) => void) | null): void {
     if (this.isDisposedLike()) return;
     this.state.serverPayloadForwarder = forwarder;
   }
 
-  applyIncomingServerPayload(payload: string): void {
+  applyIncomingServerPayload(payload: Uint8Array): void {
     if (this.isDisposedLike()) return;
     this.runtime.onSyncMessageReceived(payload);
   }
@@ -281,7 +281,7 @@ export class WorkerBridge {
     this.worker.postMessage({ type: "peer-open", peerId });
   }
 
-  sendPeerSync(peerId: string, term: number, payload: string[]): void {
+  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
     if (this.isDisposedLike()) return;
     if (payload.length === 0) return;
     this.worker.postMessage({
@@ -297,7 +297,7 @@ export class WorkerBridge {
     this.worker.postMessage({ type: "peer-close", peerId });
   }
 
-  private enqueueSyncMessageForWorker(payload: string): void {
+  private enqueueSyncMessageForWorker(payload: Uint8Array): void {
     if (this.isDisposedLike()) return;
 
     this.state.pendingSyncPayloadsForWorker.push(payload);
