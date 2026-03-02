@@ -90,6 +90,8 @@ migrate("todos", {
 });
 ```
 
+A stub may call `migrate()` multiple times when a schema change affects more than one table. Each call is collected and all tables are included in the generated SQL.
+
 Uses side-effect collection (no export needed).
 
 > `packages/jazz-tools/src/dsl.ts` (DSL implementation)
