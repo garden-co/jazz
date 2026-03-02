@@ -260,6 +260,7 @@ describe("Svelte Todo App E2E", () => {
   // 7. Server sync between two app instances
   // -------------------------------------------------------------------------
 
+  // Longer timeout: sync can take up to 20s under full-suite load.
   it("syncs a todo between two app instances through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
@@ -281,9 +282,8 @@ describe("Svelte Todo App E2E", () => {
       adminSecret: ADMIN_SECRET,
     });
 
-    // Under heavily loaded CI, give both instances extra time to establish
-    // their event streams before sending the first mutation.
-    await new Promise((r) => setTimeout(r, 2000));
+    // Let both app instances finish server/event-stream setup before mutating.
+    await new Promise((r) => setTimeout(r, 750));
 
     // Add a todo in app 1 via the form
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -302,10 +302,10 @@ describe("Svelte Todo App E2E", () => {
     // Wait for it to appear in app 2 via server sync
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
-      45000,
+      25000,
       "Todo should sync to app 2 through the server",
     );
 
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
-  });
+  }, 60000);
 });
