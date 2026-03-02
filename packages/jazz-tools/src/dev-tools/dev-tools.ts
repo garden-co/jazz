@@ -1,4 +1,4 @@
-import { PersistenceTier, QueryExecutionOptions, WasmSchema } from "../index.js";
+import { type WasmSchema } from "../index.js";
 import { Db, DbConfig, QueryBuilder } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -133,9 +133,17 @@ function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): D
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.ANNOUNCE) {
+          const runtimeState = runtimeBridgeStateByDb.get(db);
+          if (!runtimeState?.wasmSchema || !runtimeState.dbConfig) {
+            throw new Error("DevTools bridge runtime state is not initialized.");
+          }
           respond({
             ok: true,
-            payload: { ready: true, wasmSchema, dbConfig },
+            payload: {
+              ready: true,
+              wasmSchema: runtimeState.wasmSchema,
+              dbConfig: runtimeState.dbConfig,
+            },
           });
           setRuntimeBridgeConnected(db, true);
           return;

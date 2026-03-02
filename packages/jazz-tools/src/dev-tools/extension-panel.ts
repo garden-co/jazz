@@ -46,6 +46,12 @@ let announcePromise: Promise<DevToolsBootstrap> | null = null;
 const pendingRequests = new Map<string, PendingRequest>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 
+function unsubscribeBridgeSubscription(subscriptionId: string): void {
+  void sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE, {
+    subscriptionId,
+  }).catch(() => undefined);
+}
+
 function randomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -425,30 +431,39 @@ class DevToolsDb extends Db {
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
-    session?: Session,
+    _session?: Session,
   ): () => void {
-    console.log("Subscribing all", { query, callback, options, session });
-
     const bridgeSubscriptionId = randomId();
-    pendingSubscriptionCallbacks.set(bridgeSubscriptionId, callback as any);
+    pendingSubscriptionCallbacks.set(
+      bridgeSubscriptionId,
+      callback as unknown as SubscriptionCallback,
+    );
+    let isUnsubscribed = false;
 
     void ensureDevtoolsAnnounced()
-      .then(() =>
-        sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
+      .then(async () => {
+        if (isUnsubscribed) return;
+        await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
           query: {
             ...query,
             _build: query._build(),
           },
           options,
           subscriptionId: bridgeSubscriptionId,
-        }),
-      )
+        });
+        if (isUnsubscribed) {
+          unsubscribeBridgeSubscription(bridgeSubscriptionId);
+        }
+      })
       .catch(() => {
         pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
       });
 
     return () => {
+      if (isUnsubscribed) return;
+      isUnsubscribed = true;
       pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
+      unsubscribeBridgeSubscription(bridgeSubscriptionId);
     };
   }
 }
