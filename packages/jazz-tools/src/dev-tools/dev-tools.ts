@@ -1,11 +1,5 @@
-import {
-  JazzClient,
-  PersistenceTier,
-  QueryExecutionOptions,
-  QueryInput,
-  WasmSchema,
-} from "../index.js";
-import { Db, DbConfig } from "../runtime/db.js";
+import { PersistenceTier, QueryExecutionOptions, WasmSchema } from "../index.js";
+import { Db, DbConfig, QueryBuilder } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
@@ -13,8 +7,6 @@ import {
   DevtoolsRequestEnvelope,
   DevtoolsResponseEnvelope,
   isRecord,
-  isSerializableDbConfig,
-  sanitizeDbConfigForBridge,
 } from "./protocol.js";
 
 type DevToolsStateListener = (connected: boolean) => void;
@@ -24,13 +16,12 @@ type RuntimeBridgeState = {
   dbConfig: DbConfig | null;
   connected: boolean;
   listeners: Set<DevToolsStateListener>;
-  activeSubscriptions: Map<string, { client: JazzClient; runtimeSubscriptionId: number }>;
+  activeSubscriptions: Map<string, () => void>;
 };
 
 export interface DevToolsAttachment {
   isConnected(): boolean;
   onConnectionChange(listener: DevToolsStateListener): () => void;
-  updateSchema(schema: WasmSchema): void;
 }
 
 const runtimeBridgeStateByDb = new WeakMap<Db, RuntimeBridgeState>();
@@ -50,24 +41,12 @@ function setRuntimeBridgeConnected(db: Db, connected: boolean): void {
   notifyConnectionListeners(state);
 }
 
-function updateRuntimeBridgeSchema(db: Db, wasmSchema: WasmSchema): void {
-  const state = runtimeBridgeStateByDb.get(db);
-  if (!state) return;
-  state.wasmSchema = wasmSchema;
-}
-
-function updateRuntimeBridgeConfig(db: Db, dbConfig: DbConfig): void {
-  const state = runtimeBridgeStateByDb.get(db);
-  if (!state) return;
-  state.dbConfig = dbConfig;
-}
-
 function clearRuntimeBridgeSubscriptions(db: Db): void {
   const state = runtimeBridgeStateByDb.get(db);
   if (!state) return;
-  for (const subscription of state.activeSubscriptions.values()) {
+  for (const unsubscription of state.activeSubscriptions.values()) {
     try {
-      subscription.client.unsubscribe(subscription.runtimeSubscriptionId);
+      unsubscription();
     } catch {
       // Ignore cleanup failures during bridge teardown.
     }
@@ -75,87 +54,20 @@ function clearRuntimeBridgeSubscriptions(db: Db): void {
   state.activeSubscriptions.clear();
 }
 
-function getFirstDbClient(db: Db): JazzClient | null {
-  const maybeClients = (db as unknown as { clients?: unknown }).clients;
-  if (!(maybeClients instanceof Map)) return null;
-  const firstClient = maybeClients.values().next().value;
-  return firstClient ? (firstClient as JazzClient) : null;
-}
-
-function tryGetSchemaFromDb(db: Db): WasmSchema | null {
-  const firstClient = getFirstDbClient(db);
-  if (!firstClient) {
-    return null;
-  }
-  return firstClient.getSchema();
-}
-
-function tryCreateClientForSchema(db: Db, schema: WasmSchema): JazzClient | null {
-  const maybeGetClient = (db as unknown as { getClient?: (schemaArg: WasmSchema) => JazzClient })
-    .getClient;
-  if (typeof maybeGetClient !== "function") {
-    return null;
-  }
-  try {
-    return maybeGetClient.call(db, schema);
-  } catch {
-    return null;
-  }
-}
-
-function resolveBridgeSchema(db: Db): WasmSchema | null {
-  const state = runtimeBridgeStateByDb.get(db);
-  const stateSchema = state?.wasmSchema ?? null;
-  if (stateSchema) {
-    return stateSchema;
-  }
-
-  const dbSchema = tryGetSchemaFromDb(db);
-  if (dbSchema) {
-    return dbSchema;
-  }
-
-  return null;
-}
-
-function resolveBridgeDbConfig(db: Db): DbConfig | null {
-  const state = runtimeBridgeStateByDb.get(db);
-  const stateConfig = sanitizeDbConfigForBridge(state?.dbConfig ?? null);
-  if (stateConfig) {
-    return stateConfig;
-  }
-
-  const rawConfig = (db as unknown as { config?: unknown }).config;
-  if (!isSerializableDbConfig(rawConfig)) {
-    return null;
-  }
-  return sanitizeDbConfigForBridge(rawConfig);
-}
-
-function hookRegistration(
-  db: Db,
-  options?: {
-    wasmSchema?: WasmSchema;
-    dbConfig?: DbConfig;
-  },
-): DevToolsAttachment {
+function hookRegistration(db: Db, wasmSchema: WasmSchema, dbConfig: DbConfig): DevToolsAttachment {
   let state = runtimeBridgeStateByDb.get(db);
   if (!state) {
     state = {
-      wasmSchema: options?.wasmSchema ?? null,
-      dbConfig: sanitizeDbConfigForBridge(options?.dbConfig ?? null),
+      wasmSchema,
+      dbConfig: dbConfig,
       connected: false,
       listeners: new Set(),
       activeSubscriptions: new Map(),
     };
     runtimeBridgeStateByDb.set(db, state);
   } else {
-    if (options?.wasmSchema) {
-      state.wasmSchema = options.wasmSchema;
-    }
-    if (options?.dbConfig) {
-      state.dbConfig = sanitizeDbConfigForBridge(options.dbConfig);
-    }
+    state.wasmSchema = wasmSchema;
+    state.dbConfig = dbConfig;
   }
 
   if (!registeredRuntimeBridgeDbs.has(db) && typeof window !== "undefined") {
@@ -210,24 +122,10 @@ function hookRegistration(
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.ANNOUNCE) {
-          let schema = resolveBridgeSchema(db);
-          if (!schema && state?.wasmSchema) {
-            schema = state.wasmSchema;
-          }
-          const dbConfig = resolveBridgeDbConfig(db);
-
-          if (schema && dbConfig) {
-            updateRuntimeBridgeSchema(db, schema);
-            updateRuntimeBridgeConfig(db, dbConfig);
-            tryCreateClientForSchema(db, schema);
-            const runtimeReady = Boolean(getFirstDbClient(db));
-            respond({
-              ok: true,
-              payload: { ready: runtimeReady, wasmSchema: schema, dbConfig },
-            });
-          } else {
-            respond({ ok: true, payload: { ready: false } });
-          }
+          respond({
+            ok: true,
+            payload: { ready: true, wasmSchema, dbConfig },
+          });
           setRuntimeBridgeConnected(db, true);
           return;
         }
@@ -238,9 +136,9 @@ function hookRegistration(
           if (typeof bridgeSubscriptionId !== "string") {
             throw new Error("Invalid payload for client.unsubscribe.");
           }
-          const activeSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
-          if (activeSubscription) {
-            activeSubscription.client.unsubscribe(activeSubscription.runtimeSubscriptionId);
+          const unsubActiveSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
+          if (unsubActiveSubscription) {
+            unsubActiveSubscription();
             state?.activeSubscriptions.delete(bridgeSubscriptionId);
           }
           respond({ ok: true, payload: { unsubscribed: true } });
@@ -267,28 +165,12 @@ function hookRegistration(
             ? { settledTier }
             : undefined;
 
-        if (typeof query !== "string" && !isRecord(query)) {
+        if (!isRecord(query)) {
           throw new Error(
             envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE
               ? "Invalid payload for client.subscribe."
               : "Invalid payload for client.query.",
           );
-        }
-
-        const schema = resolveBridgeSchema(db);
-        if (schema) {
-          tryCreateClientForSchema(db, schema);
-        }
-
-        const client = getFirstDbClient(db);
-        if (!client) {
-          throw new Error("No Jazz runtime client is initialized yet.");
-        }
-
-        const ensureBridgeReady = (db as unknown as { ensureBridgeReady?: () => Promise<void> })
-          .ensureBridgeReady;
-        if (typeof ensureBridgeReady === "function") {
-          await ensureBridgeReady.call(db);
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE) {
@@ -297,14 +179,14 @@ function hookRegistration(
             throw new Error("Invalid payload for client.subscribe.");
           }
 
-          const priorSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
-          if (priorSubscription) {
-            priorSubscription.client.unsubscribe(priorSubscription.runtimeSubscriptionId);
+          const unsubPriorSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
+          if (unsubPriorSubscription) {
+            unsubPriorSubscription();
             state?.activeSubscriptions.delete(bridgeSubscriptionId);
           }
 
-          const runtimeSubscriptionId = client.subscribe(
-            query as string | QueryInput,
+          const unsub = db.subscribeAll(
+            translateQueryToBuilder(query as any),
             (delta) => {
               window.postMessage(
                 {
@@ -322,15 +204,12 @@ function hookRegistration(
             options,
           );
 
-          state?.activeSubscriptions.set(bridgeSubscriptionId, {
-            client,
-            runtimeSubscriptionId,
-          });
+          state?.activeSubscriptions.set(bridgeSubscriptionId, unsub);
           respond({ ok: true, payload: { subscribed: true } });
           return;
         }
 
-        const rows = await client.query(query as string | QueryInput, options);
+        const rows = await db.all(translateQueryToBuilder(query as any), options);
         respond({ ok: true, payload: rows });
       } catch (error) {
         const errorMessage =
@@ -355,26 +234,35 @@ function hookRegistration(
         runtimeState.listeners.delete(listener);
       };
     },
-    updateSchema(schema) {
-      updateRuntimeBridgeSchema(db, schema);
-      tryCreateClientForSchema(db, schema);
-    },
   };
 }
 
-function resolveDb(input: Db | { db: Db }): Db {
-  if (input instanceof Db) {
-    return input;
+function translateQueryToBuilder(query: {
+  _schema: WasmSchema;
+  _table: string;
+  _build: string;
+}): QueryBuilder<{ id: string }> {
+  return {
+    _schema: query._schema,
+    _table: query._table,
+    _rowType: undefined as unknown as { id: string },
+    _build: () => query._build,
+  };
+}
+
+async function resolveDb(input: Promise<{ db: Db }> | Db | { db: Db }): Promise<Db> {
+  const resolved = await Promise.resolve(input);
+
+  if (resolved instanceof Db) {
+    return resolved;
   }
-  return input.db;
+  return resolved.db;
 }
 
 export async function attachDevTools(
   clientOrDb: Promise<{ db: Db }> | { db: Db } | Db,
   wasmSchema: WasmSchema,
 ): Promise<DevToolsAttachment> {
-  const resolved = await Promise.resolve(clientOrDb as Promise<{ db: Db }> | { db: Db } | Db);
-  const db = resolveDb(resolved as Db | { db: Db });
-  const dbConfig = resolveBridgeDbConfig(db);
-  return hookRegistration(db, { wasmSchema, dbConfig: dbConfig ?? undefined });
+  const db = await resolveDb(clientOrDb);
+  return hookRegistration(db, wasmSchema, db.getConfig());
 }
