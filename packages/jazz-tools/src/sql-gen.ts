@@ -194,3 +194,8 @@ export function lensToSql(lens: Lens, direction: "fwd" | "bwd"): string {
   const converter = direction === "fwd" ? lensOpToForwardSql : lensOpToBackwardSql;
   return lens.operations.map((op) => converter(lens.table, op)).join("\n") + "\n";
 }
+
+export function lensesToSql(lenses: Lens[], direction: "fwd" | "bwd"): string {
+  const ordered = direction === "bwd" ? [...lenses].reverse() : lenses;
+  return ordered.map((lens) => lensToSql(lens, direction)).join("");
+}
