@@ -1,5 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export interface Project {
   id: string;
@@ -54,33 +61,24 @@ export interface TodoRelations {
   project: Project;
 }
 
-// Helper types for nested includes
-type WithIncludesFor<T, I> = T extends { id: string }
-  ? T & { [K in keyof I & string]?: unknown }
-  : T;
-
-type WithIncludesArray<E, I> = E extends { id: string }
-  ? Array<E & { [K in keyof I & string]?: unknown }>
-  : E[];
-
 export type ProjectWithIncludes<I extends ProjectInclude = {}> = Project & {
-  [K in keyof I & keyof ProjectRelations]?: I[K] extends true
-    ? ProjectRelations[K]
-    : I[K] extends object
-      ? ProjectRelations[K] extends (infer E)[]
-        ? WithIncludesArray<E, I[K]>
-        : ProjectRelations[K] & WithIncludesFor<ProjectRelations[K], I[K]>
-      : never;
+  todosViaProject?: I["todosViaProject"] extends true
+    ? Todo[]
+    : I["todosViaProject"] extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
+      ? TodoWithIncludes<QueryInclude>[]
+      : I["todosViaProject"] extends TodoInclude
+        ? TodoWithIncludes<I["todosViaProject"]>[]
+        : never;
 };
 
 export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
-  [K in keyof I & keyof TodoRelations]?: I[K] extends true
-    ? TodoRelations[K]
-    : I[K] extends object
-      ? TodoRelations[K] extends (infer E)[]
-        ? WithIncludesArray<E, I[K]>
-        : TodoRelations[K] & WithIncludesFor<TodoRelations[K], I[K]>
-      : never;
+  project?: I["project"] extends true
+    ? Project
+    : I["project"] extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
+      ? ProjectWithIncludes<QueryInclude>
+      : I["project"] extends ProjectInclude
+        ? ProjectWithIncludes<I["project"]>
+        : never;
 };
 
 export const wasmSchema: WasmSchema = {
@@ -133,10 +131,12 @@ export const wasmSchema: WasmSchema = {
   },
 };
 
-export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {
+export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<
+  ProjectWithIncludes<I>
+> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Project;
+  declare readonly _rowType: ProjectWithIncludes<I>;
   declare readonly _initType: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
@@ -312,10 +312,12 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
   }
 }
 
-export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<Todo> {
+export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<
+  TodoWithIncludes<I>
+> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Todo;
+  declare readonly _rowType: TodoWithIncludes<I>;
   declare readonly _initType: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
@@ -491,7 +493,13 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
   }
 }
 
-export const app = {
+export interface GeneratedApp {
+  projects: ProjectQueryBuilder;
+  todos: TodoQueryBuilder;
+  wasmSchema: WasmSchema;
+}
+
+export const app: GeneratedApp = {
   projects: new ProjectQueryBuilder(),
   todos: new TodoQueryBuilder(),
   wasmSchema,

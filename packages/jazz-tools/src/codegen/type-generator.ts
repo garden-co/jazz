@@ -205,53 +205,51 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
  *
  * Example output:
  *   export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
- *     [K in keyof I & keyof TodoRelations]?: I[K] extends true
- *       ? TodoRelations[K]
- *       : I[K] extends object
- *         ? TodoRelations[K] extends (infer E)[]
- *           ? WithIncludesArray<E, I[K]>
- *           : TodoRelations[K] & WithIncludesFor<TodoRelations[K], I[K]>
- *         : never;
+ *     project?: I["project"] extends true
+ *       ? Project
+ *       : I["project"] extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
+ *         ? ProjectWithIncludes<QueryInclude>
+ *         : I["project"] extends ProjectInclude
+ *           ? ProjectWithIncludes<I["project"]>
+ *           : never;
  *   };
  */
 function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
   const lines: string[] = [];
-
-  // Check if any table has relations - only emit helper types if needed
-  const hasAnyRelations = [...relations.values()].some((rels) => rels.length > 0);
-
-  if (hasAnyRelations) {
-    // Generate helper types only when there are relations that use them
-    lines.push(`// Helper types for nested includes`);
-    lines.push(`type WithIncludesFor<T, I> = T extends { id: string }`);
-    lines.push(`  ? T & { [K in keyof I & string]?: unknown }`);
-    lines.push(`  : T;`);
-    lines.push(``);
-    lines.push(`type WithIncludesArray<E, I> = E extends { id: string }`);
-    lines.push(`  ? Array<E & { [K in keyof I & string]?: unknown }>`);
-    lines.push(`  : E[];`);
-    lines.push(``);
-  }
 
   for (const [tableName, rels] of relations) {
     if (rels.length === 0) continue;
 
     const baseInterface = tableNameToInterface(tableName);
     const includeInterface = baseInterface + "Include";
-    const relationsInterface = baseInterface + "Relations";
 
     lines.push(
       `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = ${baseInterface} & {`,
     );
-    lines.push(`  [K in keyof I & keyof ${relationsInterface}]?: I[K] extends true`);
-    lines.push(`    ? ${relationsInterface}[K]`);
-    lines.push(`    : I[K] extends object`);
-    lines.push(`      ? ${relationsInterface}[K] extends (infer E)[]`);
-    lines.push(`        ? WithIncludesArray<E, I[K]>`);
-    lines.push(
-      `        : ${relationsInterface}[K] & WithIncludesFor<${relationsInterface}[K], I[K]>`,
-    );
-    lines.push(`      : never;`);
+    for (const rel of rels) {
+      const targetInterface = tableNameToInterface(rel.toTable);
+      const targetInclude = targetInterface + "Include";
+      const targetQueryBuilder = targetInterface + "QueryBuilder";
+      const targetWithIncludes = targetInterface + "WithIncludes";
+      const includeSelector = `I["${rel.name}"]`;
+      const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
+      const queryBuilderType = rel.isArray
+        ? `${targetWithIncludes}<QueryInclude>[]`
+        : `${targetWithIncludes}<QueryInclude>`;
+      const nestedIncludeType = rel.isArray
+        ? `${targetWithIncludes}<${includeSelector}>[]`
+        : `${targetWithIncludes}<${includeSelector}>`;
+
+      lines.push(`  ${rel.name}?: ${includeSelector} extends true`);
+      lines.push(`    ? ${trueType}`);
+      lines.push(
+        `    : ${includeSelector} extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}>`,
+      );
+      lines.push(`      ? ${queryBuilderType}`);
+      lines.push(`      : ${includeSelector} extends ${targetInclude}`);
+      lines.push(`        ? ${nestedIncludeType}`);
+      lines.push(`        : never;`);
+    }
     lines.push(`};`);
     lines.push(``);
   }
