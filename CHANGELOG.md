@@ -1,3 +1,7 @@
+Released Jazz 0.20.11:
+- Wait for CoValue sync before acknowledging storage reconciliation batches, so reconciliation completion reflects actual sync state.
+- CoValue migration failures now resolve as unavailable (`$jazz.loadingState === "unavailable"`) instead of throwing during load.
+
 Released Jazz 0.20.10:
 - Added optional restricted deletion mode for CoLists via schema permissions (`co.list().withPermission({ writer: "appendOnly" })`), so only manager/admin roles can delete when append-only mode is enabled.
 - Added periodic full storage reconciliation to keep locally stored CoValues in sync with the server, with interruption handling and resume support.
