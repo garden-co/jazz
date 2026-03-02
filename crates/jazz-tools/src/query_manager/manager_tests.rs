@@ -4847,6 +4847,128 @@ fn array_subquery_delta_on_inner_insert() {
 }
 
 #[test]
+fn array_subquery_reevaluate_all_does_not_corrupt_base_columns() {
+    // When the inner table changes after subscription, reevaluate_all re-builds
+    // the output tuple from the stored current_tuple.  Those stored tuples are
+    // encoded with the *combined* descriptor (base cols + array col), but
+    // build_output_tuple was decoding them with the *base* descriptor only,
+    // causing the variable-length offset table to be misread and garbling
+    // base column values on every subsequent fire.
+    //
+    // ASCII flow:
+    //
+    //   insert Alice (no posts)
+    //   subscribe → [Alice, []] Added   ← outer tuple encoded with base desc (correct)
+    //   insert Post → reevaluate_all    ← old_tuple now encoded with combined desc
+    //                → [???, [Post]] Updated  ← name garbled before fix
+
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Insert Alice with NO posts — ensures the stored current_tuple after the
+    // first fire carries an empty-array combined encoding.
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts").correlate("author_id", "users.id")
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    // Consume and verify the initial Added delta.
+    let initial_updates = qm.take_updates();
+    let initial_delta = initial_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have initial update");
+    assert_eq!(initial_delta.added.len(), 1, "Initial: 1 user row Added");
+
+    let output_descriptor = users_with_posts_descriptor();
+    let initial_values =
+        decode_row(&output_descriptor, &initial_delta.added[0].data).expect("decode initial row");
+    assert_eq!(
+        initial_values[0],
+        Value::Integer(1),
+        "Initial: id must be 1"
+    );
+    assert_eq!(
+        initial_values[1],
+        Value::Text("Alice".into()),
+        "Initial: name must be Alice"
+    );
+    assert_eq!(
+        initial_values[2].as_array().expect("posts array").len(),
+        0,
+        "Initial: posts must be empty"
+    );
+
+    // Now insert a post — this triggers reevaluate_all on the ArraySubqueryNode.
+    // The old_tuple in current_tuples is the combined-descriptor-encoded row
+    // from the initial fire.  Before the fix, build_output_tuple decodes it
+    // with the base descriptor, corrupting the variable-length name field.
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("First Post".into()),
+            Value::Integer(1), // author_id = Alice
+        ],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let second_updates = qm.take_updates();
+    let second_delta = second_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have delta after post insert");
+
+    assert!(
+        !second_delta.updated.is_empty() || !second_delta.added.is_empty(),
+        "Expected an Updated or Added row after inner insert"
+    );
+
+    let new_row_data = if !second_delta.updated.is_empty() {
+        &second_delta.updated[0].1.data
+    } else {
+        &second_delta.added[0].data
+    };
+
+    let new_values = decode_row(&output_descriptor, new_row_data).expect("decode updated row");
+
+    // These are the assertions that expose the bug: before the fix, the
+    // variable-length offset table mismatch causes id and name to be garbled.
+    assert_eq!(
+        new_values[0],
+        Value::Integer(1),
+        "After inner insert: id must not be corrupted"
+    );
+    assert_eq!(
+        new_values[1],
+        Value::Text("Alice".into()),
+        "After inner insert: name must not be corrupted"
+    );
+    assert_eq!(
+        new_values[2].as_array().expect("posts array").len(),
+        1,
+        "After inner insert: posts array must contain 1 post"
+    );
+}
+
+#[test]
 fn array_subquery_delta_on_outer_insert() {
     // Test: after subscription, inserting a new user should emit a delta
     // with the new user row (with their posts array).
