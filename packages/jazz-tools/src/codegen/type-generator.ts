@@ -205,13 +205,15 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
  *
  * Example output:
  *   export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
- *     project?: I["project"] extends true
- *       ? Project
- *       : I["project"] extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
- *         ? ProjectWithIncludes<QueryInclude>
- *         : I["project"] extends ProjectInclude
- *           ? ProjectWithIncludes<I["project"]>
- *           : never;
+ *     project?: NonNullable<I["project"]> extends infer RelationInclude
+ *       ? RelationInclude extends true
+ *         ? Project
+ *         : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
+ *           ? ProjectWithIncludes<QueryInclude>
+ *           : RelationInclude extends ProjectInclude
+ *             ? ProjectWithIncludes<RelationInclude>
+ *             : never
+ *       : never;
  *   };
  */
 function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
@@ -231,24 +233,26 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
       const targetInclude = targetInterface + "Include";
       const targetQueryBuilder = targetInterface + "QueryBuilder";
       const targetWithIncludes = targetInterface + "WithIncludes";
-      const includeSelector = `I["${rel.name}"]`;
+      const includeSelector = `NonNullable<I["${rel.name}"]>`;
       const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
       const queryBuilderType = rel.isArray
         ? `${targetWithIncludes}<QueryInclude>[]`
         : `${targetWithIncludes}<QueryInclude>`;
       const nestedIncludeType = rel.isArray
-        ? `${targetWithIncludes}<${includeSelector}>[]`
-        : `${targetWithIncludes}<${includeSelector}>`;
+        ? `${targetWithIncludes}<RelationInclude>[]`
+        : `${targetWithIncludes}<RelationInclude>`;
 
-      lines.push(`  ${rel.name}?: ${includeSelector} extends true`);
-      lines.push(`    ? ${trueType}`);
+      lines.push(`  ${rel.name}?: ${includeSelector} extends infer RelationInclude`);
+      lines.push(`    ? RelationInclude extends true`);
+      lines.push(`      ? ${trueType}`);
       lines.push(
-        `    : ${includeSelector} extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}>`,
+        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}>`,
       );
-      lines.push(`      ? ${queryBuilderType}`);
-      lines.push(`      : ${includeSelector} extends ${targetInclude}`);
-      lines.push(`        ? ${nestedIncludeType}`);
-      lines.push(`        : never;`);
+      lines.push(`        ? ${queryBuilderType}`);
+      lines.push(`        : RelationInclude extends ${targetInclude}`);
+      lines.push(`          ? ${nestedIncludeType}`);
+      lines.push(`          : never`);
+      lines.push(`    : never;`);
     }
     lines.push(`};`);
     lines.push(``);
