@@ -43,9 +43,6 @@ jobs:
       JAZZ_E2E_ADMIN_SECRET: d0a2f110-36a8-45b9-8632-ecbc09128e2a
       JAZZ_E2E_SERVER_PORT: "1625"
       COREPACK_HOME: /home/runner/.local/share/corepack
-      RUSTC_WRAPPER: sccache
-      SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 8G
 
     steps:
       - uses: actions/checkout@v6
@@ -72,31 +69,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
           components: clippy, rustfmt
-      
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
-          path: /home/runner/.cache/sccache
-
-      - name: Show sccache stats (before build)
-        run: sccache --show-stats || true
 
       - name: Pnpm Build
         run: pnpm build
-      
-      - name: Show sccache stats (after pnpm build)
-        run: sccache --show-stats || true
       
       - name: Todo Client Local First Expo App Pre Build
         working-directory: ./examples/todo-client-localfirst-expo
@@ -116,7 +93,6 @@ jobs:
           set -euo pipefail
           npm install -g sandbox
           sandbox --version
-
 
       - name: Start Vercel Sandbox and run jazz-tools server
         env:
