@@ -453,6 +453,51 @@ describe("Better-Auth server plugin", async () => {
       );
     });
 
+    it("should be case-insensitive for email", async () => {
+      let OTP: string = "";
+
+      sendVerificationOTPSpy.mockImplementationOnce(({ otp }) => {
+        OTP = otp;
+      });
+
+      await auth.api.sendVerificationOTP({
+        headers: {
+          "x-jazz-auth": JSON.stringify({
+            accountID: "123",
+            secretSeed: [1, 2, 3],
+            accountSecret: "123",
+          }),
+        },
+        body: {
+          email: "EMAIL@email.it",
+          type: "sign-in",
+        },
+      });
+
+      expect(accountCreationSpy).toHaveBeenCalledTimes(0);
+      expect(sendVerificationOTPSpy).toHaveBeenCalledTimes(1);
+      expect(verificationCreationSpy).toHaveBeenCalledTimes(2);
+      expect(verificationCreationSpy.mock.calls[0]?.[0]).toMatchObject(
+        expect.objectContaining({
+          identifier: "jazz-auth-sign-in-otp-email@email.it",
+          value: expect.stringContaining('"accountID":"123"'),
+        }),
+      );
+
+      await auth.api.signInEmailOTP({
+        body: {
+          email: "EMAIL@email.it",
+          otp: OTP,
+        },
+      });
+
+      expect(accountCreationSpy).toHaveBeenCalledTimes(1);
+      expect(accountCreationSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ accountID: "123" }),
+        expect.any(Object),
+      );
+    });
+
     it("should not expect Jazz's credentials using Email OTP for sign-in an already registered user", async () => {
       // 1. User registration
       const userData = {
