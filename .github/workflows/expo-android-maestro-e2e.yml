@@ -73,6 +73,7 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - name: Pnpm Build
         run: pnpm turbo build
