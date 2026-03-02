@@ -145,14 +145,15 @@ function generateQueryBuilderClass(
 
   // Determine Include type - use the interface if it exists, otherwise empty object
   const includeConstraint = hasRelations ? `${interfaceName}Include` : "Record<string, never>";
+  const rowType = hasRelations ? `${interfaceName}WithIncludes<I>` : interfaceName;
 
   lines.push(
-    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}> implements QueryBuilder<${interfaceName}> {`,
+    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}> implements QueryBuilder<${rowType}> {`,
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
   // Phantom fields used only for type inference.
-  lines.push(`  declare readonly _rowType: ${interfaceName};`);
+  lines.push(`  declare readonly _rowType: ${rowType};`);
   lines.push(`  declare readonly _initType: ${interfaceName}Init;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
   lines.push(`  private _includes: Partial<${includeConstraint}> = {};`);

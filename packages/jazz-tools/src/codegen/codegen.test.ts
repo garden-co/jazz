@@ -931,7 +931,9 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export class TodoQueryBuilder<I extends Record<string, never> = {}>");
+    expect(output).toContain(
+      "export class TodoQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<Todo> {",
+    );
     expect(output).toContain("declare readonly _rowType: Todo;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
@@ -949,7 +951,10 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export class TodoQueryBuilder<I extends TodoInclude = {}>");
+    expect(output).toContain(
+      "export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<TodoWithIncludes<I>> {",
+    );
+    expect(output).toContain("declare readonly _rowType: TodoWithIncludes<I>;");
   });
 
   it("generates include method for tables with relations", () => {
