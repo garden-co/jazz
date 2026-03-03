@@ -513,7 +513,9 @@ mod tests {
 
         // Query
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, object_id);
@@ -539,7 +541,9 @@ mod tests {
 
         // Verify update
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results[0].1[1], Value::Text("Charlie".to_string()));
 
@@ -548,7 +552,9 @@ mod tests {
 
         // Verify deleted
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);
     }
