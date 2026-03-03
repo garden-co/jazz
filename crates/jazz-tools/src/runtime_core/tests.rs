@@ -1149,25 +1149,68 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         )
         .unwrap();
 
+    // Initial delivery should still wait for the requested remote tier.
     let values = vec![
         Value::Uuid(ObjectId::new()),
         Value::Text("local-first".into()),
     ];
-    let id = s.a.insert("users", values, None).unwrap();
+    let first_id = s.a.insert("users", values, None).unwrap();
     s.a.immediate_tick();
 
     let calls = received.lock().unwrap();
     assert!(
+        calls.is_empty(),
+        "Initial delivery should wait for EdgeServer settlement"
+    );
+    drop(calls);
+
+    // Worker settlement is not enough for an EdgeServer subscription.
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "Worker tier should not unlock first delivery for EdgeServer reads"
+    );
+
+    // Reach EdgeServer settlement for the initial snapshot.
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+
+    let calls = received.lock().unwrap();
+    assert!(
         !calls.is_empty(),
-        "Immediate local updates should deliver before EdgeServer settlement"
+        "First delivery should happen once EdgeServer settlement is reached"
     );
     let first_delivery = &calls[0];
     assert_eq!(
         first_delivery.len(),
         1,
-        "Should include the local row immediately"
+        "First snapshot should include one row"
     );
-    assert_eq!(first_delivery[0].0, id);
+    assert_eq!(first_delivery[0].0, first_id);
+    drop(calls);
+
+    // After initial delivery, local updates should callback immediately.
+    let second_values = vec![
+        Value::Uuid(ObjectId::new()),
+        Value::Text("local-second".into()),
+    ];
+    let second_id = s.a.insert("users", second_values, None).unwrap();
+    s.a.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "Second local write should trigger immediate callback"
+    );
+    let second_delivery = &calls[1];
+    assert_eq!(
+        second_delivery.len(),
+        1,
+        "Second callback should contain one added row"
+    );
+    assert_eq!(second_delivery[0].0, second_id);
 }
 
 fn noop_waker() -> std::task::Waker {

@@ -777,6 +777,7 @@ impl QueryManager {
                 Some(required) => subscription.achieved_tiers.iter().any(|t| t >= required),
             };
             let allow_local_while_waiting = !tier_satisfied
+                && subscription.settled_once
                 && subscription.local_updates == LocalUpdates::Immediate
                 && subscription.has_pending_local_updates;
 
