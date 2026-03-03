@@ -1,5 +1,21 @@
 # jazz-tools
 
+## 2.0.0-alpha.11
+
+### Patch Changes
+
+- 969a139: Overhauled durability APIs to use a single `DurabilityTier` model across reads and writes.
+  - Reads now take `{ tier, localUpdates }`, where `localUpdates` defaults to `"immediate"` so local writes are reflected right away even when waiting for a more remote durability tier.
+  - Writes now use the base methods with optional `{ tier }` and environment-aware defaults (`"worker"` for clients, `"edge"` for backend contexts).
+  - Renamed the top tier from `"core"` to `"global"` for clearer semantics.
+  - Added multi-tier node identity support so single-node deployments (like CLI and cloud-server today) can acknowledge both `"edge"` and `"global"`.
+
+- 98ba0f9: Fixed array subquery incremental updates so parent row fields stay correct. Previously, when related rows changed after subscribing, update payloads could return corrupted parent values (for example, garbled `id` or `name`).
+- 48053ac: fix(codegen): generate DROP COLUMN statements for all affected tables in multi-table migrations
+- debd2c3: Add `asBackend()` for server-side Jazz clients using backend-secret auth, and enforce backend-role limits so backend sync can write row data but cannot write schema/permissions catalogue entries.
+- a955504: Allow backend `JazzClient` and `SessionClient` query/subscribe calls to consume generated query builders directly. Query-builder payloads with `_schema` are now translated automatically to runtime query JSON (`relation_ir`), so backend code can call `context.forRequest(...).query(app.todos.where(...))` without manual `translateQuery(...)`.
+  - jazz-wasm@2.0.0-alpha.11
+
 ## 2.0.0-alpha.10
 
 ### Patch Changes
