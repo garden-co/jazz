@@ -8,23 +8,29 @@ import {
   type UniffiRustArcPtr,
   type UniffiRustFutureContinuationCallback as RuntimeUniffiRustFutureContinuationCallback,
   type UniffiResult,
-} from "uniffi-bindgen-react-native";
+} from 'uniffi-bindgen-react-native';
 
 interface NativeModuleInterface {
   ubrn_uniffi_internal_fn_func_ffi__string_to_byte_length(
     string: string,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): number;
   ubrn_uniffi_internal_fn_func_ffi__string_to_arraybuffer(
     string: string,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_internal_fn_func_ffi__arraybuffer_to_string(
     buffer: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): string;
-  ubrn_uniffi_jazz_rn_fn_clone_rnruntime(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): bigint;
-  ubrn_uniffi_jazz_rn_fn_free_rnruntime(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): void;
+  ubrn_uniffi_jazz_rn_fn_clone_rnruntime(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rnruntime(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_constructor_rnruntime_new(
     schemaJson: Uint8Array,
     appId: Uint8Array,
@@ -32,131 +38,137 @@ interface NativeModuleInterface {
     userBranch: Uint8Array,
     tier: Uint8Array,
     dataPath: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_client(
     ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_server(
     ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
     ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_close(
     ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete(
-    ptr: bigint,
-    objectId: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_flush(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_get_schema_hash(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert(
-    ptr: bigint,
-    table: Uint8Array,
-    valuesJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
-    ptr: bigint,
-    callback: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received(
-    ptr: bigint,
-    messageJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received_from_client(
-    ptr: bigint,
-    clientId: Uint8Array,
-    messageJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_to_send(
-    ptr: bigint,
-    callback: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_query(
-    ptr: bigint,
-    queryJson: Uint8Array,
-    sessionJson: Uint8Array,
-    settledTier: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
-    ptr: bigint,
-    clientId: Uint8Array,
-    role: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
     ptr: bigint,
     queryJson: Uint8Array,
     sessionJson: Uint8Array,
-    settledTier: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
   ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete(
+    ptr: bigint,
+    objectId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
     ptr: bigint,
     handle: bigint,
     callback: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_flush(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_get_schema_hash(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert(
+    ptr: bigint,
+    table: Uint8Array,
+    valuesJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
+    ptr: bigint,
+    callback: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received(
+    ptr: bigint,
+    messageJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received_from_client(
+    ptr: bigint,
+    clientId: Uint8Array,
+    messageJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_to_send(
+    ptr: bigint,
+    callback: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_query(
+    ptr: bigint,
+    queryJson: Uint8Array,
+    sessionJson: Uint8Array,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
+    ptr: bigint,
+    clientId: Uint8Array,
+    role: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_subscribe(
     ptr: bigint,
     queryJson: Uint8Array,
     callback: bigint,
     sessionJson: Uint8Array,
-    settledTier: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
   ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_unsubscribe(
     ptr: bigint,
     handle: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_update(
     ptr: bigint,
     objectId: Uint8Array,
     valuesJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
-    vtable: UniffiVTableCallbackInterfaceBatchedTickCallback,
+    vtable: UniffiVTableCallbackInterfaceBatchedTickCallback
   ): void;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_subscriptioncallback(
-    vtable: UniffiVTableCallbackInterfaceSubscriptionCallback,
+    vtable: UniffiVTableCallbackInterfaceSubscriptionCallback
   ): void;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_syncmessagecallback(
-    vtable: UniffiVTableCallbackInterfaceSyncMessageCallback,
+    vtable: UniffiVTableCallbackInterfaceSyncMessageCallback
   ): void;
-  ubrn_uniffi_jazz_rn_fn_func_current_timestamp_ms(uniffi_out_err: UniffiRustCallStatus): bigint;
-  ubrn_uniffi_jazz_rn_fn_func_generate_id(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_func_current_timestamp_ms(
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_func_generate_id(
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_checksum_func_current_timestamp_ms(): number;
   ubrn_uniffi_jazz_rn_checksum_func_generate_id(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
@@ -177,7 +189,7 @@ interface NativeModuleInterface {
   ubrn_ffi_jazz_rn_uniffi_contract_version(): number;
   ubrn_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
     pointer: bigint,
-    uniffi_out_err: UniffiRustCallStatus,
+    uniffi_out_err: UniffiRustCallStatus
   ): UniffiRustArcPtr;
 }
 
@@ -186,11 +198,15 @@ interface NativeModuleInterface {
 //
 // We use a getter here rather than simply `globalThis.NativeJazzRn` so that
 // if/when the startup sequence isn't just so, an empty value isn't inadvertantly cached.
-const getter: () => NativeModuleInterface = () => (globalThis as any).NativeJazzRn;
+const getter: () => NativeModuleInterface = () =>
+  (globalThis as any).NativeJazzRn;
 export default getter;
 
 // Structs and function types for calling back into Typescript from Rust.
-export type UniffiRustFutureContinuationCallback = (data: bigint, pollResult: number) => void;
+export type UniffiRustFutureContinuationCallback = (
+  data: bigint,
+  pollResult: number
+) => void;
 type UniffiForeignFutureFree = (handle: bigint) => void;
 type UniffiCallbackInterfaceFree = (handle: bigint) => void;
 export type UniffiForeignFuture = {
@@ -203,7 +219,7 @@ export type UniffiForeignFutureStructU8 = {
 };
 export type UniffiForeignFutureCompleteU8 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructU8,
+  result: UniffiForeignFutureStructU8
 ) => void;
 export type UniffiForeignFutureStructI8 = {
   returnValue: number;
@@ -211,7 +227,7 @@ export type UniffiForeignFutureStructI8 = {
 };
 export type UniffiForeignFutureCompleteI8 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructI8,
+  result: UniffiForeignFutureStructI8
 ) => void;
 export type UniffiForeignFutureStructU16 = {
   returnValue: number;
@@ -219,7 +235,7 @@ export type UniffiForeignFutureStructU16 = {
 };
 export type UniffiForeignFutureCompleteU16 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructU16,
+  result: UniffiForeignFutureStructU16
 ) => void;
 export type UniffiForeignFutureStructI16 = {
   returnValue: number;
@@ -227,7 +243,7 @@ export type UniffiForeignFutureStructI16 = {
 };
 export type UniffiForeignFutureCompleteI16 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructI16,
+  result: UniffiForeignFutureStructI16
 ) => void;
 export type UniffiForeignFutureStructU32 = {
   returnValue: number;
@@ -235,7 +251,7 @@ export type UniffiForeignFutureStructU32 = {
 };
 export type UniffiForeignFutureCompleteU32 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructU32,
+  result: UniffiForeignFutureStructU32
 ) => void;
 export type UniffiForeignFutureStructI32 = {
   returnValue: number;
@@ -243,7 +259,7 @@ export type UniffiForeignFutureStructI32 = {
 };
 export type UniffiForeignFutureCompleteI32 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructI32,
+  result: UniffiForeignFutureStructI32
 ) => void;
 export type UniffiForeignFutureStructU64 = {
   returnValue: bigint;
@@ -251,7 +267,7 @@ export type UniffiForeignFutureStructU64 = {
 };
 export type UniffiForeignFutureCompleteU64 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructU64,
+  result: UniffiForeignFutureStructU64
 ) => void;
 export type UniffiForeignFutureStructI64 = {
   returnValue: bigint;
@@ -259,7 +275,7 @@ export type UniffiForeignFutureStructI64 = {
 };
 export type UniffiForeignFutureCompleteI64 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructI64,
+  result: UniffiForeignFutureStructI64
 ) => void;
 export type UniffiForeignFutureStructF32 = {
   returnValue: number;
@@ -267,7 +283,7 @@ export type UniffiForeignFutureStructF32 = {
 };
 export type UniffiForeignFutureCompleteF32 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructF32,
+  result: UniffiForeignFutureStructF32
 ) => void;
 export type UniffiForeignFutureStructF64 = {
   returnValue: number;
@@ -275,7 +291,7 @@ export type UniffiForeignFutureStructF64 = {
 };
 export type UniffiForeignFutureCompleteF64 = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructF64,
+  result: UniffiForeignFutureStructF64
 ) => void;
 export type UniffiForeignFutureStructPointer = {
   returnValue: bigint;
@@ -283,7 +299,7 @@ export type UniffiForeignFutureStructPointer = {
 };
 export type UniffiForeignFutureCompletePointer = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructPointer,
+  result: UniffiForeignFutureStructPointer
 ) => void;
 export type UniffiForeignFutureStructRustBuffer = {
   returnValue: Uint8Array;
@@ -291,25 +307,25 @@ export type UniffiForeignFutureStructRustBuffer = {
 };
 export type UniffiForeignFutureCompleteRustBuffer = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructRustBuffer,
+  result: UniffiForeignFutureStructRustBuffer
 ) => void;
 export type UniffiForeignFutureStructVoid = {
   callStatus: UniffiRustCallStatus;
 };
 export type UniffiForeignFutureCompleteVoid = (
   callbackData: bigint,
-  result: UniffiForeignFutureStructVoid,
+  result: UniffiForeignFutureStructVoid
 ) => void;
 type UniffiCallbackInterfaceBatchedTickCallbackMethod0 = (
-  uniffiHandle: bigint,
+  uniffiHandle: bigint
 ) => UniffiResult<void>;
 type UniffiCallbackInterfaceSubscriptionCallbackMethod0 = (
   uniffiHandle: bigint,
-  deltaJson: Uint8Array,
+  deltaJson: Uint8Array
 ) => UniffiResult<void>;
 type UniffiCallbackInterfaceSyncMessageCallbackMethod0 = (
   uniffiHandle: bigint,
-  messageJson: Uint8Array,
+  messageJson: Uint8Array
 ) => UniffiResult<void>;
 export type UniffiVTableCallbackInterfaceBatchedTickCallback = {
   requestBatchedTick: UniffiCallbackInterfaceBatchedTickCallbackMethod0;
