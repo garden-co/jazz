@@ -113,15 +113,14 @@ jobs:
           cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "$TARGET"
           sandbox copy "${COMMON[@]}" "target/$TARGET/release/jazz-tools" "$SANDBOX_ID:/tmp/jazz-tools"
 
-          # sleep keeps the shell alive so sandbox exec's HTTP connection closes cleanly
-          # (without it, nohup+& causes the sandbox side to hang up and the CLI throws TypeError: terminated)
-          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" \
-            chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' >/tmp/server.log 2>&1 &
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" chmod +x /tmp/jazz-tools
 
-          sleep 10 # wait for server to start
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -c \
+            "(/tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' </dev/null >/tmp/server.log 2>&1 &)"
 
-          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" "tail -n 200 /tmp/server.log" | tee -a vercel-sandbox.log
-          exit 1
+          sleep 10
+
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" tail -n 200 /tmp/server.log | tee -a vercel-sandbox.log
 
       - name: Run Maestro Cloud flows
         id: maestro
