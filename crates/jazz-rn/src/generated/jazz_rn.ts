@@ -204,7 +204,12 @@ export interface SyncMessageCallback {
   /**
    * Called by Rust when it has an outbox message to send.
    */
-  onSyncMessage(messageJson: string): void;
+  onSyncMessage(
+    destinationKind: string,
+    destinationId: string,
+    payloadJson: string,
+    isCatalogue: boolean
+  ): void;
 }
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
@@ -215,11 +220,22 @@ const uniffiCallbackInterfaceSyncMessageCallback: {
   // Create the VTable using a series of closures.
   // ts automatically converts these into C callback functions.
   vtable: {
-    onSyncMessage: (uniffiHandle: bigint, messageJson: Uint8Array) => {
+    onSyncMessage: (
+      uniffiHandle: bigint,
+      destinationKind: Uint8Array,
+      destinationId: Uint8Array,
+      payloadJson: Uint8Array,
+      isCatalogue: number
+    ) => {
       const uniffiMakeCall = (): void => {
         const jsCallback =
           FfiConverterTypeSyncMessageCallback.lift(uniffiHandle);
-        return jsCallback.onSyncMessage(FfiConverterString.lift(messageJson));
+        return jsCallback.onSyncMessage(
+          FfiConverterString.lift(destinationKind),
+          FfiConverterString.lift(destinationId),
+          FfiConverterString.lift(payloadJson),
+          FfiConverterBool.lift(isCatalogue)
+        );
       };
       const uniffiResult = UniffiResult.ready<void>();
       const uniffiHandleSuccess = (obj: any) => {};
@@ -1451,7 +1467,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message() !==
-    26254
+    45812
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message'

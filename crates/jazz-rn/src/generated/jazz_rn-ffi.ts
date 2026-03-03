@@ -325,7 +325,10 @@ type UniffiCallbackInterfaceSubscriptionCallbackMethod0 = (
 ) => UniffiResult<void>;
 type UniffiCallbackInterfaceSyncMessageCallbackMethod0 = (
   uniffiHandle: bigint,
-  messageJson: Uint8Array
+  destinationKind: Uint8Array,
+  destinationId: Uint8Array,
+  payloadJson: Uint8Array,
+  isCatalogue: number
 ) => UniffiResult<void>;
 export type UniffiVTableCallbackInterfaceBatchedTickCallback = {
   requestBatchedTick: UniffiCallbackInterfaceBatchedTickCallbackMethod0;

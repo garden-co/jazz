@@ -94,6 +94,26 @@ function swallowMissingObjectMutation(context: string, error: unknown): boolean 
   return true;
 }
 
+function assertSyncMessageArgs(
+  destinationKind: unknown,
+  destinationId: unknown,
+  payloadJson: unknown,
+  isCatalogue: unknown,
+): asserts destinationKind is OutboxDestinationKind {
+  if (destinationKind !== "server" && destinationKind !== "client") {
+    throw new Error("Invalid RN sync callback destination kind");
+  }
+  if (typeof destinationId !== "string") {
+    throw new Error("Invalid RN sync callback destination id");
+  }
+  if (typeof payloadJson !== "string") {
+    throw new Error("Invalid RN sync callback payload");
+  }
+  if (typeof isCatalogue !== "boolean") {
+    throw new Error("Invalid RN sync callback catalogue flag");
+  }
+}
+
 export class JazzRnRuntimeAdapter implements Runtime {
   private readonly handleMap = new Map<number, bigint>();
   private closed = false;
@@ -254,6 +274,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
         isCatalogue: boolean,
       ) => {
         try {
+          assertSyncMessageArgs(destinationKind, destinationId, payloadJson, isCatalogue);
           callback(destinationKind, destinationId, payloadJson, isCatalogue);
         } catch (error) {
           swallowCallbackError("sync message", error);
