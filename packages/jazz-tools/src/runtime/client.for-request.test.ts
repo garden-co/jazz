@@ -30,6 +30,7 @@ function makeClient() {
   const subscribeCalls: Array<
     [string, string | undefined, string | undefined, string | undefined]
   > = [];
+  const unsubscribeCalls: number[] = [];
   const subscribeCallbacks: Array<Function> = [];
 
   const runtime: Runtime = {
@@ -66,7 +67,9 @@ function makeClient() {
       subscribeCallbacks.push(onUpdate);
       return 1;
     },
-    unsubscribe: () => {},
+    unsubscribe: (handle: number) => {
+      unsubscribeCalls.push(handle);
+    },
     insertDurable: async () => "00000000-0000-0000-0000-000000000001",
     updateDurable: async () => {},
     deleteDurable: async () => {},
@@ -97,8 +100,13 @@ function makeClient() {
     client: new JazzClientCtor(runtime, context, "edge"),
     queryCalls,
     subscribeCalls,
+    unsubscribeCalls,
     subscribeCallbacks,
   };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
 }
 
 function makeClientWithContext(context: AppContext): JazzClient {
@@ -270,7 +278,7 @@ describe("JazzClient.forRequest", () => {
     expect(parsed).toHaveProperty("relation_ir");
   });
 
-  it("accepts query builders for subscribe calls", () => {
+  it("accepts query builders for subscribe calls", async () => {
     const { client, subscribeCalls } = makeClient();
 
     const builder = {
@@ -282,10 +290,12 @@ describe("JazzClient.forRequest", () => {
     const subId = client.subscribe(builder, () => {});
 
     expect(subId).toBe(1);
+    expect(subscribeCalls).toHaveLength(0);
+    await flushMicrotasks();
     expect(subscribeCalls[0][0]).toBe(builder._build());
   });
 
-  it("translates schema-aware query builders for subscribe calls", () => {
+  it("translates schema-aware query builders for subscribe calls", async () => {
     const { client, subscribeCalls } = makeClient();
 
     const builder = {
@@ -303,15 +313,18 @@ describe("JazzClient.forRequest", () => {
     const subId = client.subscribe(builder, () => {});
 
     expect(subId).toBe(1);
+    expect(subscribeCalls).toHaveLength(0);
+    await flushMicrotasks();
     const parsed = JSON.parse(subscribeCalls[0][0]) as Record<string, unknown>;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
 
-  it("forwards structured RN delta payloads to subscription callbacks", () => {
+  it("forwards structured RN delta payloads to subscription callbacks", async () => {
     const { client, subscribeCallbacks } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
+    await flushMicrotasks();
 
     subscribeCallbacks[0](
       JSON.stringify({
@@ -345,10 +358,11 @@ describe("JazzClient.forRequest", () => {
     });
   });
 
-  it("forwards partial structured deltas without throwing", () => {
+  it("forwards partial structured deltas without throwing", async () => {
     const { client, subscribeCallbacks } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
+    await flushMicrotasks();
 
     expect(() =>
       subscribeCallbacks[0](
@@ -369,9 +383,219 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
-  it("passes query propagation options to runtime subscribe", () => {
+  it("passes query propagation options to runtime subscribe", async () => {
     const { client, subscribeCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
+    await flushMicrotasks();
     expect(subscribeCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  it("returns provisional subscription handle synchronously", () => {
+    const { client, subscribeCalls } = makeClient();
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    expect(subId).toBe(1);
+    expect(subscribeCalls).toHaveLength(0);
+  });
+
+  it("defers runtime subscribe to a microtask", async () => {
+    const { client, subscribeCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {});
+    expect(subscribeCalls).toHaveLength(0);
+    await flushMicrotasks();
+    expect(subscribeCalls).toHaveLength(1);
+  });
+
+  it("cancel-before-bind: unsubscribe before microtask prevents runtime subscribe", async () => {
+    const { client, subscribeCalls, unsubscribeCalls } = makeClient();
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    client.unsubscribe(subId);
+    await flushMicrotasks();
+    expect(subscribeCalls).toHaveLength(0);
+    expect(unsubscribeCalls).toHaveLength(0);
+  });
+
+  it("unsubscribe after bind unsubscribes runtime handle", async () => {
+    const { client, unsubscribeCalls } = makeClient();
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    await flushMicrotasks();
+    client.unsubscribe(subId);
+    expect(unsubscribeCalls).toEqual([1]);
+  });
+
+  it("unsubscribe unknown handle is a no-op", () => {
+    const { client } = makeClient();
+    expect(() => client.unsubscribe(123_456)).not.toThrow();
+  });
+
+  it("subscribe bind failure cleans up subscription state", async () => {
+    const runtime: Runtime = {
+      insert: () => "00000000-0000-0000-0000-000000000001",
+      update: () => {},
+      delete: () => {},
+      query: async () => [],
+      subscribe: () => {
+        throw new Error("subscribe failed");
+      },
+      unsubscribe: () => {},
+      insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "00000000-0000-0000-0000-000000000001",
+      getSchema: () => ({}),
+      getSchemaHash: () => "schema-hash",
+    };
+    const context: AppContext = {
+      appId: "test-app",
+      schema: {},
+      serverUrl: "http://localhost:1625",
+      backendSecret: "test-backend-secret",
+    };
+    const JazzClientCtor = JazzClient as unknown as {
+      new (
+        runtime: Runtime,
+        context: AppContext,
+        defaultDurabilityTier: "worker" | "edge" | "global",
+      ): JazzClient;
+    };
+    const client = new JazzClientCtor(runtime, context, "edge");
+
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    await flushMicrotasks();
+
+    // Should not throw after failed bind; state must already be cleaned up.
+    expect(() => client.unsubscribe(subId)).not.toThrow();
+  });
+
+  it("uses runtime-provided scheduler when available", () => {
+    const scheduleCalls: Array<() => void> = [];
+    const subscribeCalls: string[] = [];
+    const runtime: Runtime = {
+      schedule: (task) => {
+        scheduleCalls.push(task);
+      },
+      insert: () => "00000000-0000-0000-0000-000000000001",
+      update: () => {},
+      delete: () => {},
+      query: async () => [],
+      subscribe: (queryJson: string) => {
+        subscribeCalls.push(queryJson);
+        return 1;
+      },
+      unsubscribe: () => {},
+      insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "00000000-0000-0000-0000-000000000001",
+      getSchema: () => ({}),
+      getSchemaHash: () => "schema-hash",
+    };
+    const context: AppContext = {
+      appId: "test-app",
+      schema: {},
+      serverUrl: "http://localhost:1625",
+      backendSecret: "test-backend-secret",
+    };
+    const JazzClientCtor = JazzClient as unknown as {
+      new (
+        runtime: Runtime,
+        context: AppContext,
+        defaultDurabilityTier: "worker" | "edge" | "global",
+      ): JazzClient;
+    };
+    const client = new JazzClientCtor(runtime, context, "edge");
+
+    client.subscribe('{"table":"todos"}', () => {});
+    expect(scheduleCalls).toHaveLength(1);
+    expect(subscribeCalls).toHaveLength(0);
+
+    scheduleCalls[0]();
+    expect(subscribeCalls).toEqual(['{"table":"todos"}']);
+  });
+
+  it("browser default scheduler uses postTask with user-visible priority", () => {
+    const priorWindow = (globalThis as { window?: unknown }).window;
+    const priorDocument = (globalThis as { document?: unknown }).document;
+    const priorScheduler = (globalThis as { scheduler?: unknown }).scheduler;
+
+    const postTask = vi.fn((task: () => void) => {
+      task();
+      return Promise.resolve();
+    });
+
+    Object.defineProperty(globalThis, "window", { value: {}, configurable: true });
+    Object.defineProperty(globalThis, "document", { value: {}, configurable: true });
+    Object.defineProperty(globalThis, "scheduler", { value: { postTask }, configurable: true });
+
+    try {
+      const subscribeCalls: string[] = [];
+      const runtime: Runtime = {
+        insert: () => "00000000-0000-0000-0000-000000000001",
+        update: () => {},
+        delete: () => {},
+        query: async () => [],
+        subscribe: (queryJson: string) => {
+          subscribeCalls.push(queryJson);
+          return 1;
+        },
+        unsubscribe: () => {},
+        insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+        updateDurable: async () => {},
+        deleteDurable: async () => {},
+        onSyncMessageReceived: () => {},
+        onSyncMessageToSend: () => {},
+        addServer: () => {},
+        removeServer: () => {},
+        addClient: () => "00000000-0000-0000-0000-000000000001",
+        getSchema: () => ({}),
+        getSchemaHash: () => "schema-hash",
+      };
+      const context: AppContext = {
+        appId: "test-app",
+        schema: {},
+        serverUrl: "http://localhost:1625",
+        backendSecret: "test-backend-secret",
+      };
+      const JazzClientCtor = JazzClient as unknown as {
+        new (
+          runtime: Runtime,
+          context: AppContext,
+          defaultDurabilityTier: "worker" | "edge" | "global",
+        ): JazzClient;
+      };
+      const client = new JazzClientCtor(runtime, context, "edge");
+
+      client.subscribe('{"table":"todos"}', () => {});
+
+      expect(postTask).toHaveBeenCalledTimes(1);
+      expect(postTask).toHaveBeenCalledWith(expect.any(Function), { priority: "user-visible" });
+      expect(subscribeCalls).toEqual(['{"table":"todos"}']);
+    } finally {
+      if (priorWindow === undefined) {
+        delete (globalThis as { window?: unknown }).window;
+      } else {
+        Object.defineProperty(globalThis, "window", { value: priorWindow, configurable: true });
+      }
+      if (priorDocument === undefined) {
+        delete (globalThis as { document?: unknown }).document;
+      } else {
+        Object.defineProperty(globalThis, "document", { value: priorDocument, configurable: true });
+      }
+      if (priorScheduler === undefined) {
+        delete (globalThis as { scheduler?: unknown }).scheduler;
+      } else {
+        Object.defineProperty(globalThis, "scheduler", {
+          value: priorScheduler,
+          configurable: true,
+        });
+      }
+    }
   });
 });
