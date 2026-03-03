@@ -38,11 +38,12 @@ fn init_tracing() {
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
-use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +54,7 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager,
+    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
     SyncPayload,
 };
 
@@ -83,13 +84,13 @@ struct WasmLensEdgeDebug {
 }
 
 /// Parse a persistence tier string from JS.
-fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
+fn parse_tier(tier: &str) -> Result<DurabilityTier, JsError> {
     match tier {
-        "worker" => Ok(PersistenceTier::Worker),
-        "edge" => Ok(PersistenceTier::EdgeServer),
-        "core" => Ok(PersistenceTier::CoreServer),
+        "worker" => Ok(DurabilityTier::Worker),
+        "edge" => Ok(DurabilityTier::EdgeServer),
+        "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(JsError::new(&format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'core'.",
+            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
             tier
         ))),
     }
@@ -98,23 +99,67 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 #[derive(Debug, serde::Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
+    local_updates: Option<String>,
 }
 
-fn parse_propagation(options_json: Option<String>) -> Result<QueryPropagation, JsError> {
+fn parse_read_durability_options(
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<(ReadDurabilityOptions, QueryPropagation), JsError> {
+    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
     let Some(raw) = options_json else {
-        return Ok(QueryPropagation::Full);
+        return Ok((
+            ReadDurabilityOptions {
+                tier: parsed_tier,
+                local_updates: LocalUpdates::Immediate,
+            },
+            QueryPropagation::Full,
+        ));
     };
 
     let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
         .map_err(|e| JsError::new(&format!("Invalid query options JSON: {}", e)))?;
 
-    match options.propagation.as_deref() {
+    let propagation = match options.propagation.as_deref() {
         None | Some("full") => Ok(QueryPropagation::Full),
         Some("local-only") => Ok(QueryPropagation::LocalOnly),
         Some(other) => Err(JsError::new(&format!(
             "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
             other
         ))),
+    }?;
+
+    let local_updates = match options.local_updates.as_deref() {
+        None | Some("immediate") => Ok(LocalUpdates::Immediate),
+        Some("deferred") => Ok(LocalUpdates::Deferred),
+        Some(other) => Err(JsError::new(&format!(
+            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
+            other
+        ))),
+    }?;
+
+    Ok((
+        ReadDurabilityOptions {
+            tier: parsed_tier,
+            local_updates,
+        },
+        propagation,
+    ))
+}
+
+fn parse_node_durability_tiers(tier: Option<&str>) -> Result<Vec<DurabilityTier>, JsError> {
+    let Some(raw) = tier else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![parse_tier(raw)?])
+}
+
+fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
+    match tier {
+        Some("worker") => "worker",
+        Some("edge") => "edge",
+        Some("global") => "global",
+        _ => "client",
     }
 }
 
@@ -266,7 +311,7 @@ impl WasmRuntime {
     /// * `app_id` - Application identifier
     /// * `env` - Environment (e.g., "dev", "prod")
     /// * `user_branch` - User's branch name (e.g., "main")
-    /// * `tier` - Optional persistence tier ("worker", "edge", "core").
+    /// * `tier` - Optional node durability tier ("worker", "edge", "global").
     ///            Set for server nodes to enable ack emission.
     #[wasm_bindgen(constructor)]
     pub fn new(
@@ -280,12 +325,7 @@ impl WasmRuntime {
         console_error_panic_hook::set_once();
         init_tracing();
 
-        let tier_label = match tier.as_deref() {
-            Some("worker") => "worker",
-            Some("edge") => "edge",
-            Some("core") => "core",
-            _ => "client",
-        };
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
         let _span = info_span!(
             "WasmRuntime::new",
             tier = tier_label,
@@ -303,12 +343,12 @@ impl WasmRuntime {
         let schema: Schema = wasm_schema;
 
         // Parse optional tier
-        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+        let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
-        if let Some(t) = persistence_tier {
-            sync_manager = sync_manager.with_tier(t);
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
@@ -431,7 +471,7 @@ impl WasmRuntime {
 
     /// Execute a query and return results as a Promise.
     ///
-    /// Optional `settled_tier` holds delivery until the tier confirms.
+    /// Optional durability tier controls remote settlement behavior.
     #[wasm_bindgen]
     pub fn query(
         &self,
@@ -452,12 +492,11 @@ impl WasmRuntime {
             None
         };
 
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query_with_propagation(query, session, tier, propagation)
+            core.query_with_propagation(query, session, durability, propagation)
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -526,9 +565,9 @@ impl WasmRuntime {
 
     /// Insert a row and return a Promise that resolves when the tier acks.
     ///
-    /// `tier` must be one of: "worker", "edge", "core".
-    #[wasm_bindgen(js_name = insertWithAck)]
-    pub fn insert_with_ack(
+    /// `tier` must be one of: "worker", "edge", "global".
+    #[wasm_bindgen(js_name = insertDurable)]
+    pub fn insert_durable(
         &self,
         table: &str,
         values: JsValue,
@@ -555,8 +594,8 @@ impl WasmRuntime {
     }
 
     /// Update a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = updateWithAck)]
-    pub fn update_with_ack(
+    #[wasm_bindgen(js_name = updateDurable)]
+    pub fn update_durable(
         &self,
         object_id: &str,
         values: JsValue,
@@ -586,8 +625,8 @@ impl WasmRuntime {
     }
 
     /// Delete a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = deleteWithAck)]
-    pub fn delete_with_ack(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
+    #[wasm_bindgen(js_name = deleteDurable)]
+    pub fn delete_durable(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -618,7 +657,7 @@ impl WasmRuntime {
     /// - with upstream server: first callback waits for protocol QuerySettled convergence
     /// - without upstream server: first callback is local-immediate
     ///
-    /// Pass `settled_tier` to override this default.
+    /// Pass durability options to override this default.
     ///
     /// # Returns
     /// Subscription handle (f64) for later unsubscription.
@@ -644,8 +683,7 @@ impl WasmRuntime {
             None
         };
 
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
 
         let callback = move |delta: SubscriptionDelta| {
             let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
@@ -699,11 +737,11 @@ impl WasmRuntime {
         let handle = self
             .core
             .borrow_mut()
-            .subscribe_with_settled_tier_and_propagation(
+            .subscribe_with_durability_and_propagation(
                 query,
                 callback,
                 session,
-                tier,
+                durability,
                 propagation,
             )
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
@@ -933,12 +971,7 @@ impl WasmRuntime {
         console_error_panic_hook::set_once();
         init_tracing();
 
-        let tier_label = match tier.as_deref() {
-            Some("worker") => "worker",
-            Some("edge") => "edge",
-            Some("core") => "core",
-            _ => "client",
-        };
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
         let _span = info_span!(
             "WasmRuntime::openPersistent",
             tier = tier_label,
@@ -956,13 +989,13 @@ impl WasmRuntime {
 
         let schema: Schema = wasm_schema;
 
-        // Parse optional tier
-        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+        // Parse optional node durability tiers
+        let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
-        if let Some(t) = persistence_tier {
-            sync_manager = sync_manager.with_tier(t);
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));

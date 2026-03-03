@@ -1,6 +1,6 @@
 import { onDestroy } from "svelte";
 import type { QueryBuilder } from "../runtime/db.js";
-import type { PersistenceTier } from "../runtime/client.js";
+import type { DurabilityTier } from "../runtime/client.js";
 import { getJazzContext } from "./context.svelte.js";
 
 /**
@@ -30,7 +30,7 @@ export class QuerySubscription<T extends { id: string }> {
 
   #unsubscribe: (() => void) | null = null;
 
-  constructor(query: QueryBuilder<T>, tier?: PersistenceTier) {
+  constructor(query: QueryBuilder<T>, tier?: DurabilityTier) {
     const ctx = getJazzContext();
     this.current = tier ? undefined : [];
 
@@ -48,7 +48,7 @@ export class QuerySubscription<T extends { id: string }> {
             this.current = delta.all;
             this.loading = false;
           },
-          tier ? { settledTier: tier } : undefined,
+          tier ? { tier } : undefined,
         );
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));

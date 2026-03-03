@@ -9,7 +9,7 @@
 //! "obj:{uuid}:meta"                                       → JSON metadata
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "ack:{commit_hex}"                                      → JSON HashSet<PersistenceTier>
+//! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
 //! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
 //! ```
@@ -29,7 +29,7 @@ use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::DurabilityTier;
 
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
@@ -305,7 +305,7 @@ impl Storage for OpfsBTreeStorage {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError> {
         store_ack_tier_core(
             commit_id,
@@ -605,17 +605,17 @@ mod tests {
         let commit_id = CommitId([99u8; 32]);
 
         storage
-            .store_ack_tier(commit_id, PersistenceTier::Worker)
+            .store_ack_tier(commit_id, DurabilityTier::Worker)
             .unwrap();
         storage
-            .store_ack_tier(commit_id, PersistenceTier::EdgeServer)
+            .store_ack_tier(commit_id, DurabilityTier::EdgeServer)
             .unwrap();
 
         let key = super::super::key_codec::ack_key(commit_id);
         let data = storage.tree_read(&key).unwrap().unwrap();
-        let tiers: HashSet<PersistenceTier> = serde_json::from_slice(&data).unwrap();
-        assert!(tiers.contains(&PersistenceTier::Worker));
-        assert!(tiers.contains(&PersistenceTier::EdgeServer));
+        let tiers: HashSet<DurabilityTier> = serde_json::from_slice(&data).unwrap();
+        assert!(tiers.contains(&DurabilityTier::Worker));
+        assert!(tiers.contains(&DurabilityTier::EdgeServer));
     }
 
     #[test]

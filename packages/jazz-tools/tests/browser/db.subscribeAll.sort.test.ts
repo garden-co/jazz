@@ -98,10 +98,10 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 10, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 20, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 30, done: false });
-        const idD = db.insert(todos, { title: "D", rank: 40, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 10, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 20, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 30, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 40, done: false });
 
         await waitForCondition(
           () => latestRows(deltas.map((delta) => delta.all)).length === 4,
@@ -110,7 +110,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(deltas.map((delta) => delta.all))).toEqual([idA, idB, idC, idD]);
 
-        db.update(todos, idD, { rank: 15 });
+        await db.update(todos, idD, { rank: 15 });
 
         await waitForCondition(
           () => {
@@ -140,9 +140,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
 
         await waitForCondition(
           () => deltas.some((delta) => delta.all.length === 3),
@@ -153,7 +153,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         const before = deltas[deltas.length - 1].all.map((row) => row.id);
         expect(before).toEqual([idA, idB, idC]);
 
-        db.update(todos, idB, { title: "B-updated" });
+        await db.update(todos, idB, { title: "B-updated" });
 
         await waitForCondition(
           () => deltas.some((delta) => hasUpdateForId(delta, idB)),
@@ -177,9 +177,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
 
         await waitForCondition(
           () => snapshots.some((rows) => rows.length === 3),
@@ -187,7 +187,7 @@ describe("db.subscribeAll sorting browser integration", () => {
           "expected initial sorted rows",
         );
 
-        db.update(todos, idA, { rank: 10 });
+        await db.update(todos, idA, { rank: 10 });
 
         await waitForCondition(
           () => {
@@ -213,9 +213,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
 
         await waitForCondition(
           () => snapshots.some((rows) => rows.length === 3),
@@ -223,7 +223,7 @@ describe("db.subscribeAll sorting browser integration", () => {
           "expected initial sorted rows",
         );
 
-        db.deleteFrom(todos, idB);
+        await db.deleteFrom(todos, idB);
 
         await waitForCondition(
           () => {
@@ -249,9 +249,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 10, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 5, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 1, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 10, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 5, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 1, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -262,7 +262,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         const expectedById = [idA, idB, idC].toSorted((a, b) => a.localeCompare(b));
         expect(latestIds(snapshots)).toEqual(expectedById);
 
-        db.update(todos, idB, { title: "B-still" });
+        await db.update(todos, idB, { title: "B-still" });
 
         await waitForCondition(
           () => latestRows(snapshots).some((row) => row.id === idB && row.title === "B-still"),
@@ -288,9 +288,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -299,7 +299,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(snapshots)).toEqual([idC, idB, idA]);
 
-        db.update(todos, idA, { rank: 10 });
+        await db.update(todos, idA, { rank: 10 });
 
         await waitForCondition(
           () => latestRows(snapshots)[0]?.id === idA,
@@ -322,9 +322,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 1, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 1, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 1, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 1, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -356,9 +356,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idZ = db.insert(todos, { title: "Z", rank: 1, done: false });
-        const idM = db.insert(todos, { title: "M", rank: 2, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idZ = await db.insert(todos, { title: "Z", rank: 1, done: false });
+        const idM = await db.insert(todos, { title: "M", rank: 2, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -367,7 +367,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(snapshots)).toEqual([idZ, idA, idM]);
 
-        db.update(todos, idM, { rank: 1 });
+        await db.update(todos, idM, { rank: 1 });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3 && latestRows(snapshots)[1]?.id === idM,
@@ -390,9 +390,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -402,7 +402,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         const before = latestIds(snapshots);
         expect(before).toEqual([idA, idB, idC]);
 
-        db.update(todos, idB, { rank: 2 });
+        await db.update(todos, idB, { rank: 2 });
 
         await waitForCondition(
           () => latestRows(snapshots).some((row) => row.id === idB && row.rank === 2),
@@ -428,10 +428,10 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
-        const idD = db.insert(todos, { title: "D", rank: 4, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 2,
@@ -440,7 +440,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(snapshots)).toEqual([idB, idC]);
 
-        db.update(todos, idD, { rank: 0 });
+        await db.update(todos, idD, { rank: 0 });
 
         await waitForCondition(
           () => {
@@ -466,9 +466,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -476,9 +476,9 @@ describe("db.subscribeAll sorting browser integration", () => {
           "expected initial rows",
         );
 
-        db.update(todos, idC, { rank: 0 });
-        db.deleteFrom(todos, idA);
-        const idD = db.insert(todos, { title: "D", rank: 2, done: false });
+        await db.update(todos, idC, { rank: 0 });
+        await db.deleteFrom(todos, idA);
+        const idD = await db.insert(todos, { title: "D", rank: 2, done: false });
 
         await waitForCondition(
           () => {
@@ -505,8 +505,8 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idB = db.insert(todos, { title: "B", rank: 20, done: false });
-        const idD = db.insert(todos, { title: "D", rank: 40, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 20, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 40, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 2,
@@ -515,14 +515,14 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(snapshots)).toEqual([idB, idD]);
 
-        const idA = db.insert(todos, { title: "A", rank: 10, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 10, done: false });
         await waitForCondition(
           () => latestRows(snapshots)[0]?.id === idA,
           10_000,
           "expected top insert to appear first",
         );
 
-        const idC = db.insert(todos, { title: "C", rank: 30, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 30, done: false });
         await waitForCondition(
           () => {
             const ids = latestIds(snapshots);
@@ -532,7 +532,7 @@ describe("db.subscribeAll sorting browser integration", () => {
           "expected middle insert to appear in middle",
         );
 
-        const idE = db.insert(todos, { title: "E", rank: 50, done: false });
+        const idE = await db.insert(todos, { title: "E", rank: 50, done: false });
         await waitForCondition(
           () => latestRows(snapshots)[4]?.id === idE,
           10_000,
@@ -551,9 +551,9 @@ describe("db.subscribeAll sorting browser integration", () => {
     const dbName = uniqueDbName("restart");
 
     const db1 = await createDb({ appId, dbName });
-    const idA = db1.insert(todos, { title: "A", rank: 3, done: false });
-    const idB = db1.insert(todos, { title: "B", rank: 1, done: false });
-    const idC = db1.insert(todos, { title: "C", rank: 2, done: false });
+    const idA = await db1.insert(todos, { title: "A", rank: 3, done: false });
+    const idB = await db1.insert(todos, { title: "B", rank: 1, done: false });
+    const idC = await db1.insert(todos, { title: "C", rank: 2, done: false });
     await db1.shutdown();
 
     const db2 = await createDb({ appId, dbName });
@@ -584,9 +584,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       });
 
       try {
-        const idNull = db.insert(todos, { title: "N", rank: undefined, done: false });
-        const idOne = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idTwo = db.insert(todos, { title: "B", rank: 2, done: false });
+        const idNull = await db.insert(todos, { title: "N", rank: undefined, done: false });
+        const idOne = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idTwo = await db.insert(todos, { title: "B", rank: 2, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -597,7 +597,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         const initial = latestIds(snapshots);
         expect(initial).toEqual(expect.arrayContaining([idNull, idOne, idTwo]));
 
-        db.update(todos, idNull, { title: "N-updated" });
+        await db.update(todos, idNull, { title: "N-updated" });
 
         await waitForCondition(
           () => latestRows(snapshots).some((row) => row.id === idNull && row.title === "N-updated"),
@@ -623,9 +623,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 3, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 1, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 3, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 1, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -636,7 +636,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         const expected = [idA, idB, idC].toSorted((a, b) => b.localeCompare(a));
         expect(latestIds(snapshots)).toEqual(expected);
 
-        db.update(todos, idB, { title: "B-updated" });
+        await db.update(todos, idB, { title: "B-updated" });
 
         await waitForCondition(
           () => latestRows(snapshots).some((row) => row.id === idB && row.title === "B-updated"),
@@ -662,10 +662,10 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 2, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 3, done: false });
-        const idD = db.insert(todos, { title: "D", rank: 4, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 2,
@@ -674,7 +674,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(snapshots)).toEqual([idB, idC]);
 
-        db.deleteFrom(todos, idA);
+        await db.deleteFrom(todos, idA);
 
         await waitForCondition(
           () => {
@@ -708,9 +708,9 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       try {
-        const idA = db.insert(todos, { title: "A", rank: 1, done: false });
-        const idB = db.insert(todos, { title: "B", rank: 1, done: false });
-        const idC = db.insert(todos, { title: "C", rank: 2, done: false });
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 1, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 2, done: false });
 
         await waitForCondition(
           () => latestRows(snapshots).length === 3,
@@ -721,7 +721,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         const expectedTieOrder = [idA, idB].toSorted((a, b) => b.localeCompare(a));
         expect(latestIds(snapshots)).toEqual([...expectedTieOrder, idC]);
 
-        db.update(todos, idC, { rank: 1 });
+        await db.update(todos, idC, { rank: 1 });
 
         await waitForCondition(
           () =>

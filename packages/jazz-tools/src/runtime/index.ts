@@ -2,9 +2,10 @@ export {
   JazzClient,
   type LinkExternalIdentityOptions,
   type LinkExternalIdentityResult,
+  type LocalUpdatesMode,
   SessionClient,
   loadWasmModule,
-  type PersistenceTier,
+  type DurabilityTier,
   type QueryExecutionOptions,
   type QueryInput,
   type QueryPropagation,
@@ -12,6 +13,7 @@ export {
   type Row,
   type Runtime,
   type SubscriptionCallback,
+  type WriteDurabilityOptions,
   type WasmModule,
 } from "./client.js";
 export type { AppContext, LocalAuthMode, Session } from "./context.js";

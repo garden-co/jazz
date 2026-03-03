@@ -7033,10 +7033,10 @@ fn subscribe_with_sync_local_only_sends_to_connected_tier() {
 #[test]
 fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     use crate::sync_manager::QueryPropagation;
-    use crate::sync_manager::{Destination, PersistenceTier, ServerId, SyncPayload};
+    use crate::sync_manager::{Destination, DurabilityTier, ServerId, SyncPayload};
     use uuid::Uuid;
 
-    let sync_manager = SyncManager::new().with_tier(PersistenceTier::Worker);
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let schema = test_schema();
     let (mut worker_qm, _storage) = create_query_manager(sync_manager, schema);
 

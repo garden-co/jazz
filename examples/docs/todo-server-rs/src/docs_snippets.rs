@@ -5,7 +5,7 @@ use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
 use jazz_tools::{
-    JazzClient, ObjectId, PersistenceTier, QueryBuilder, Session, SessionClient, Value,
+    DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, SessionClient, Value,
 };
 use serde_json::json;
 
@@ -117,7 +117,7 @@ pub async fn subscribe_todos(
 pub async fn read_todos_settled_edge(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client
-        .query(query, Some(PersistenceTier::EdgeServer))
+        .query(query, Some(DurabilityTier::EdgeServer))
         .await?;
     Ok(rows.len())
 }

@@ -39,13 +39,13 @@ function makeClient() {
     query: async (
       queryJson: string,
       sessionJson?: string | null,
-      settledTier?: string | null,
+      tier?: string | null,
       optionsJson?: string | null,
     ) => {
       queryCalls.push([
         queryJson,
         sessionJson ?? undefined,
-        settledTier ?? undefined,
+        tier ?? undefined,
         optionsJson ?? undefined,
       ]);
       return [];
@@ -54,22 +54,22 @@ function makeClient() {
       queryJson: string,
       onUpdate: Function,
       sessionJson?: string | null,
-      settledTier?: string | null,
+      tier?: string | null,
       optionsJson?: string | null,
     ) => {
       subscribeCalls.push([
         queryJson,
         sessionJson ?? undefined,
-        settledTier ?? undefined,
+        tier ?? undefined,
         optionsJson ?? undefined,
       ]);
       subscribeCallbacks.push(onUpdate);
       return 1;
     },
     unsubscribe: () => {},
-    insertWithAck: async () => "00000000-0000-0000-0000-000000000001",
-    updateWithAck: async () => {},
-    deleteWithAck: async () => {},
+    insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+    updateDurable: async () => {},
+    deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
     onSyncMessageToSend: () => {},
     addServer: () => {},
@@ -87,10 +87,14 @@ function makeClient() {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (runtime: Runtime, context: AppContext): JazzClient;
+    new (
+      runtime: Runtime,
+      context: AppContext,
+      defaultDurabilityTier: "worker" | "edge" | "global",
+    ): JazzClient;
   };
   return {
-    client: new JazzClientCtor(runtime, context),
+    client: new JazzClientCtor(runtime, context, "edge"),
     queryCalls,
     subscribeCalls,
     subscribeCallbacks,

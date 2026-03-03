@@ -12,17 +12,20 @@ use futures::executor::block_on;
 
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{
-    RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
+    ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
+    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
-    ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
+    SyncManager, SyncPayload,
 };
 
 // ============================================================================
@@ -108,14 +111,14 @@ fn parse_session(session_json: Option<String>) -> Result<Option<Session>, JazzRn
     }
 }
 
-fn parse_tier(tier: &str) -> Result<PersistenceTier, JazzRnError> {
+fn parse_tier(tier: &str) -> Result<DurabilityTier, JazzRnError> {
     match tier {
-        "worker" => Ok(PersistenceTier::Worker),
-        "edge" => Ok(PersistenceTier::EdgeServer),
-        "core" => Ok(PersistenceTier::CoreServer),
+        "worker" => Ok(DurabilityTier::Worker),
+        "edge" => Ok(DurabilityTier::EdgeServer),
+        "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(JazzRnError::InvalidTier {
             message: format!(
-                "Invalid tier '{}'. Must be 'worker', 'edge', or 'core'.",
+                "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
                 tier
             ),
         }),
@@ -305,7 +308,7 @@ impl RnRuntime {
 
             let mut sync_manager = SyncManager::new();
             if let Some(t) = persistence_tier {
-                sync_manager = sync_manager.with_tier(t);
+                sync_manager = sync_manager.with_durability_tier(t);
             }
 
             let app_id_obj =
@@ -449,19 +452,27 @@ impl RnRuntime {
         &self,
         query_json: String,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
     ) -> Result<String, JazzRnError> {
         with_panic_boundary("query", || {
             let query = parse_query(&query_json)?;
             let session = parse_session(session_json)?;
-            let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+            let tier = tier.as_deref().map(parse_tier).transpose()?;
 
             // NOTE: query() triggers immediate_tick() internally.
             // We then block for the first callback result to be delivered.
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let fut = core.query(query, session, tier);
+            let fut = core.query_with_propagation(
+                query,
+                session,
+                ReadDurabilityOptions {
+                    tier,
+                    local_updates: LocalUpdates::Immediate,
+                },
+                QueryPropagation::Full,
+            );
             let results = block_on(fut).map_err(runtime_err)?;
 
             let rows_json: Vec<serde_json::Value> = results
@@ -487,19 +498,19 @@ impl RnRuntime {
         query_json: String,
         callback: Box<dyn SubscriptionCallback>,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
     ) -> Result<u64, JazzRnError> {
         with_panic_boundary("subscribe", || {
             let query = parse_query(&query_json)?;
             let session = parse_session(session_json)?;
-            let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
+            let tier = tier.as_deref().map(parse_tier).transpose()?;
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
 
             let handle = core
-                .subscribe_with_settled_tier(
+                .subscribe_with_durability_and_propagation(
                     query,
                     {
                         move |delta: SubscriptionDelta| {
@@ -526,7 +537,11 @@ impl RnRuntime {
                         }
                     },
                     session,
-                    tier,
+                    ReadDurabilityOptions {
+                        tier,
+                        local_updates: LocalUpdates::Immediate,
+                    },
+                    QueryPropagation::Full,
                 )
                 .map_err(runtime_err)?;
 

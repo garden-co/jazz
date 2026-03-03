@@ -1,6 +1,6 @@
 import jazzRn from "jazz-rn";
 import type { WasmSchema } from "../drivers/types.js";
-import type { PersistenceTier } from "../runtime/client.js";
+import type { DurabilityTier } from "../runtime/client.js";
 import { JazzRnRuntimeAdapter } from "./jazz-rn-runtime-adapter.js";
 
 export interface CreateJazzRnRuntimeOptions {
@@ -8,7 +8,7 @@ export interface CreateJazzRnRuntimeOptions {
   appId: string;
   env?: string;
   userBranch?: string;
-  tier?: PersistenceTier;
+  tier?: DurabilityTier;
   dataPath?: string;
 }
 
