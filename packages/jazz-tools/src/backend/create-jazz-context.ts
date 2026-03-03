@@ -97,6 +97,7 @@ export class JazzContext {
   private createClient(schema: WasmSchema): JazzClient {
     const schemaJson = serializeRuntimeSchema(schema);
     this.initializedSchemaJson = schemaJson;
+    const nodeTier = this.config.tier ?? "edge";
 
     this.runtime = new NapiRuntime(
       schemaJson,
@@ -104,7 +105,7 @@ export class JazzContext {
       this.config.env ?? "dev",
       this.config.userBranch ?? "main",
       this.config.dataPath,
-      this.config.tier,
+      nodeTier,
     );
 
     const context: AppContext = {
@@ -119,7 +120,7 @@ export class JazzContext {
       localAuthToken: this.config.localAuthToken,
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
-      tier: this.config.tier,
+      tier: nodeTier,
       defaultDurabilityTier: "edge",
     };
 
