@@ -1,6 +1,11 @@
 appId: dev.jazz.todo.localfirstexpo
 ---
 - launchApp
+
+- extendedWaitUntil:
+    visible: "Todos"
+    timeout: 4000
+
 - assertVisible: "Todos"
 
 - tapOn:
