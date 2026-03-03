@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node", "@playwright/test", "vite/client"]
+  },
+  "include": ["playwright.config.ts", "src/**/*.ts", "src/**/*.tsx", "cases/offline-storage/App.tsx", "vite.config.ts"]
+}

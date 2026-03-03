@@ -9,6 +9,7 @@ packages:
   - crates/jazz-napi
   - crates/jazz-rn
   - crates/jazz-nitro
+  - tests/e2e
 
 catalogs:
   default:
