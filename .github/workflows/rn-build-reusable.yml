@@ -111,29 +111,9 @@ jobs:
             aarch64-apple-ios
             aarch64-apple-ios-sim
             x86_64-apple-ios
-      
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
-          path: /home/runner/.cache/sccache
-
-      - name: Show sccache stats (before build)
-        run: sccache --show-stats || true
 
       - name: Build iOS artifacts
         run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:ios
-
-      - name: Show sccache stats (after build)
-        run: sccache --show-stats || true
 
       - name: Upload iOS artifact
         uses: actions/upload-artifact@v4

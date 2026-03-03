@@ -81,33 +81,6 @@ jobs:
           EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
         run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Run Maestro Cloud flows
-        id: maestro
-        uses: mobile-dev-inc/action-maestro-cloud@v2
-        with:
-          api-key: ${{ secrets.MAESTRO_KEY }}
-          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
-          app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
-          workspace: .maestro/flows
-
-      - name: Verify server evidence
-        if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
-        env:
-          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
-          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          SCOPE=()
-          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
-          sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
-            "$SANDBOX_ID:/tmp/server.log" server.log || true
-
-          SYNC="$(grep -c 'sync request' server.log || true)"
-          EVENTS="$(grep -c 'events stream connecting' server.log || true)"
-          echo "sync requests: $SYNC | event connections: $EVENTS"
-          test "$SYNC" -gt 0 && test "$EVENTS" -gt 0
-
       - name: Install Vercel Sandbox CLI
         run: npm install -g sandbox
 
@@ -143,7 +116,7 @@ jobs:
           # sleep keeps the shell alive so sandbox exec's HTTP connection closes cleanly
           # (without it, nohup+& causes the sandbox side to hang up and the CLI throws TypeError: terminated)
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" \
-            sh -lc "chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' >/tmp/server.log 2>&1 & sleep 5"
+            sh -lc "chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' >/tmp/server.log 2>&1 &"
 
           URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^ )]+' | head -n1 || true)"
           HOST="${SANDBOX_ID//_/-}"
@@ -164,6 +137,33 @@ jobs:
           echo "::error::Timed out waiting for sandbox health"
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -lc "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
           exit 1
+
+      - name: Run Maestro Cloud flows
+        id: maestro
+        uses: mobile-dev-inc/action-maestro-cloud@v2
+        with:
+          api-key: ${{ secrets.MAESTRO_KEY }}
+          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
+          app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
+          workspace: .maestro/flows
+
+      - name: Verify server evidence
+        if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
+            "$SANDBOX_ID:/tmp/server.log" server.log || true
+
+          SYNC="$(grep -c 'sync request' server.log || true)"
+          EVENTS="$(grep -c 'events stream connecting' server.log || true)"
+          echo "sync requests: $SYNC | event connections: $EVENTS"
+          test "$SYNC" -gt 0 && test "$EVENTS" -gt 0
 
       - name: Stop sandbox
         if: always()
