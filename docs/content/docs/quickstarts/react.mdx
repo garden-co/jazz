@@ -84,7 +84,7 @@ Deep dive: [Reading Data](/docs/reading-data).
   ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
 </include>
 
-Because writes hit the local runtime first, subscriptions update immediately with local-first UX.
+Because writes hit the local runtime first, subscriptions update immediately with local-first UX. For tier-gated reads, the first callback still waits for the requested tier.
 
 Mutation API details: [Writing Data](/docs/writing-data).
 

@@ -178,6 +178,7 @@ One-hop flow (browser main thread -> worker):
 5. On first settle only, worker emits `QuerySettled { query_id, tier: Worker }`.
 6. Main receives that payload, queues it in `pending_query_settled`, then `QueryManager::process()` moves it into `subscription.achieved_tiers`.
 7. First delivery is held until `achieved_tiers` satisfies `durability_tier`; then the first callback is a full snapshot.
+8. If local updates are configured as immediate, only later local write-driven updates bypass tier waiting. Initial delivery remains tier-gated.
 
 > [`sync_manager/inbox.rs:279`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L279)
 > [`sync_manager/inbox.rs:285`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L285)

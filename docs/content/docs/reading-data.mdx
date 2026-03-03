@@ -195,7 +195,7 @@ Defaults:
 
 - Browser/client default tier is `worker`.
 - Backend/server-connected default tier is `edge`.
-- `localUpdates: "immediate"` keeps local subscription updates synchronous while durability gating is active.
+- `localUpdates: "immediate"` keeps local subscription updates synchronous after the first tier-confirmed snapshot. The initial delivery remains tier-gated.
 
 Tradeoff summary:
 

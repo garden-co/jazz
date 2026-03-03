@@ -95,6 +95,7 @@ End-to-end path:
 5. Receiver stores `(query_id, tier)` in `pending_query_settled`.
 6. In local `QueryManager::process()`, pending `QuerySettled` is consumed before local subscription settle/delivery.
 7. Delivery gate checks `achieved_tiers >= durability_tier`; if satisfied, first delivery is full snapshot, else delivery is held.
+8. With `local_updates = Immediate`, local write deltas can bypass tier waiting only after that first delivery (`settled_once = true`). Initial delivery never bypasses tier gating.
 
 > [`query_manager/subscriptions.rs:160`](../../crates/jazz-tools/src/query_manager/subscriptions.rs#L160)
 > [`query_manager/server_queries.rs:23`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L23)
@@ -112,6 +113,7 @@ Why this ordering matters:
 - `ObjectUpdated` may arrive in the same batch as `QuerySettled`.
 - Because `QuerySettled` is applied before local delivery checks, first delivery can unblock in the same tick once both data and tier condition are true.
 - If tier is not satisfied, query state still settles locally; only delivery is deferred.
+- `local_updates = Immediate` changes post-initial behavior only: later local writes can still notify immediately while waiting on higher-tier confirmation.
 
 ## PersistenceAck Integration (Detailed)
 
