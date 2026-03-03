@@ -24,8 +24,8 @@ use jazz_tools::runtime_core::{
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
-    SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
+    Source, SyncManager, SyncPayload,
 };
 
 // ============================================================================
@@ -279,7 +279,13 @@ pub trait BatchedTickCallback: Send + Sync {
 #[uniffi::export(callback_interface)]
 pub trait SyncMessageCallback: Send + Sync {
     /// Called by Rust when it has an outbox message to send.
-    fn on_sync_message(&self, message_json: String);
+    fn on_sync_message(
+        &self,
+        destination_kind: String,
+        destination_id: String,
+        payload_json: String,
+        is_catalogue: bool,
+    );
 }
 
 #[uniffi::export(callback_interface)]
@@ -349,15 +355,25 @@ impl RnSyncSender {
 }
 
 impl SyncSender for RnSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let Ok(json) = serde_json::to_string(&message) else {
+    fn send_sync_message(&self, message: OutboxEntry,  _sender_tier: &'static str) {
+        let is_catalogue = message.payload.is_catalogue();
+        let Ok(payload_json) = serde_json::to_string(&message.payload) else {
             return;
+        };
+        let (destination_kind, destination_id) = match message.destination {
+            Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
+            Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
         };
 
         if let Ok(guard) = self.callback.lock() {
             if let Some(cb) = guard.as_ref() {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cb.on_sync_message(json);
+                    cb.on_sync_message(
+                        destination_kind,
+                        destination_id,
+                        payload_json,
+                        is_catalogue,
+                    );
                 }));
             }
         }
