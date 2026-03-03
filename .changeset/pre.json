@@ -22,6 +22,7 @@
     "wequencer": "0.1.0"
   },
   "changesets": [
+    "blue-pets-reflect",
     "bright-oranges-march",
     "cold-load-history",
     "durability-tier-overhaul-summary",
