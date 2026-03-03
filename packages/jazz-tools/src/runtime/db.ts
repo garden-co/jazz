@@ -17,7 +17,7 @@ import {
   JazzClient,
   loadWasmModule,
   type WasmModule,
-  type PersistenceTier,
+  type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
 } from "./client.js";
@@ -480,6 +480,7 @@ export class Db {
         localAuthMode: this.config.localAuthMode,
         localAuthToken: this.config.localAuthToken,
         adminSecret: this.config.adminSecret,
+        tier: this.worker ? undefined : "worker",
       });
 
       // In worker mode, set up the bridge for this client
@@ -917,159 +918,50 @@ export class Db {
   }
 
   /**
-   * Insert a new row into a table.
-   *
-   * This is a **synchronous** operation - the row is created immediately
-   * in the local WASM runtime. Sync to server happens asynchronously.
+   * Insert a new row into a table and wait for durability at the requested tier.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @returns The new row's ID (UUID string)
-   *
-   * @example
-   * ```typescript
-   * const id = db.insert(app.todos, { title: "Buy milk", done: false });
-   * ```
+   * @param options Optional durability tier override
+   * @returns Promise resolving to the new row's ID
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): string {
-    const client = this.getClient(table._schema);
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.create(table._table, values);
-  }
-
-  /**
-   * Insert a new row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param data Init object with column values
-   * @param tier Acknowledgement tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acknowledges
-   *
-   * @example
-   * ```typescript
-   * const id = await db.insertWithAck(app.todos, { title: "Buy milk", done: false }, "edge");
-   * ```
-   */
-  async insertWithAck<T, Init>(
+  async insert<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    tier: PersistenceTier,
+    options?: { tier?: DurabilityTier },
   ): Promise<string> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.createWithAck(table._table, values, tier);
+    return client.create(table._table, values, options);
   }
 
   /**
-   * @deprecated Use insertWithAck().
+   * Update an existing row and wait for durability at the requested tier.
    */
-  async insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    tier: PersistenceTier,
-  ): Promise<string> {
-    return this.insertWithAck(table, data, tier);
-  }
-
-  /**
-   * Update an existing row.
-   *
-   * This is a **synchronous** operation - the row is updated immediately
-   * in the local WASM runtime. Sync to server happens asynchronously.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to update
-   * @param data Partial object with fields to update
-   *
-   * @example
-   * ```typescript
-   * db.update(app.todos, id, { done: true });
-   * ```
-   */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    const client = this.getClient(table._schema);
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.update(id, updates);
-  }
-
-  /**
-   * Update an existing row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to update
-   * @param data Partial object with fields to update
-   * @param tier Acknowledgement tier to wait for
-   */
-  async updateWithAck<T, Init>(
+  async update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    tier: PersistenceTier,
+    options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    await client.updateWithAck(id, updates, tier);
+    await client.update(id, updates, options);
   }
 
   /**
-   * @deprecated Use updateWithAck().
+   * Delete a row and wait for durability at the requested tier.
    */
-  async updatePersisted<T, Init>(
+  async deleteFrom<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.updateWithAck(table, id, data, tier);
-  }
-
-  /**
-   * Delete a row.
-   *
-   * This is a **synchronous** operation - the row is deleted immediately
-   * in the local WASM runtime. Sync to server happens asynchronously.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to delete
-   *
-   * @example
-   * ```typescript
-   * db.deleteFrom(app.todos, id);
-   * ```
-   */
-  deleteFrom<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const client = this.getClient(table._schema);
-    client.delete(id);
-  }
-
-  /**
-   * Delete a row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to delete
-   * @param tier Acknowledgement tier to wait for
-   */
-  async deleteFromWithAck<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    tier: PersistenceTier,
+    options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
-    await client.deleteWithAck(id, tier);
-  }
-
-  /**
-   * @deprecated Use deleteFromWithAck().
-   */
-  async deleteFromPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.deleteFromWithAck(table, id, tier);
+    await client.delete(id, options);
   }
 
   /**
@@ -1155,7 +1047,7 @@ export class Db {
    * Execute a query and return the first matching row, or null.
    *
    * @param query QueryBuilder instance
-   * @param settledTier Optional tier to hold delivery until confirmed
+   * @param options Optional read durability options
    * @returns First matching typed object, or null if none found
    */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {

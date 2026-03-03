@@ -91,14 +91,15 @@ export async function combinedQuery(db: Db) {
 // #region reading-tier-expo
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
   return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length), {
-    settledTier: "edge",
+    tier: "edge",
+    localUpdates: "immediate",
   });
 }
 // #endregion reading-tier-expo
 
-// #region writing-ack-expo
-export async function writeWithAck(db: Db, todoTitle: string) {
-  const id = await db.insertWithAck(
+// #region writing-durability-expo
+export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
+  const id = await db.insert(
     app.todos,
     {
       title: todoTitle,
@@ -106,10 +107,10 @@ export async function writeWithAck(db: Db, todoTitle: string) {
       owner_id: EXAMPLE_OWNER_ID,
       project: EXAMPLE_PROJECT_ID,
     },
-    "worker",
+    { tier: "worker" },
   );
 
-  await db.updateWithAck(app.todos, id, { done: true }, "worker");
-  await db.deleteFromWithAck(app.todos, id, "worker");
+  await db.update(app.todos, id, { done: true }, { tier: "worker" });
+  await db.deleteFrom(app.todos, id, { tier: "worker" });
 }
-// #endregion writing-ack-expo
+// #endregion writing-durability-expo

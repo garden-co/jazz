@@ -21,12 +21,12 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
-    QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta,
-    SyncSender,
+    QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
+    SubscriptionDelta, SyncSender,
 };
 use crate::schema_manager::{QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
 
 // ============================================================================
 // TokioScheduler
@@ -301,15 +301,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // Queries
     // =========================================================================
 
-    /// Execute a one-shot query, optionally waiting for a settled tier.
+    /// Execute a one-shot query with durability options.
     pub fn query(
         &self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability: ReadDurabilityOptions,
     ) -> Result<QueryFuture, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.query(query, session, settled_tier))
+        Ok(core.query_with_propagation(query, session, durability, QueryPropagation::Full))
     }
 
     // =========================================================================
@@ -513,7 +513,9 @@ mod tests {
 
         // Query
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, object_id);
@@ -539,7 +541,9 @@ mod tests {
 
         // Verify update
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results[0].1[1], Value::Text("Charlie".to_string()));
 
@@ -548,7 +552,9 @@ mod tests {
 
         // Verify deleted
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);
     }

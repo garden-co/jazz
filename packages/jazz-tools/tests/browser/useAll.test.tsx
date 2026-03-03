@@ -327,7 +327,7 @@ describe("useAll browser integration", () => {
         </JazzProvider>,
       );
 
-      conditionsClient.db.insert(todos, testCase.insert);
+      await conditionsClient.db.insert(todos, testCase.insert);
 
       await waitForCondition(
         () => getText("rows").split("|").includes(testCase.pick),
@@ -357,21 +357,21 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "p1",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "p2",
       done: false,
       priority: 2,
       owner_id: undefined,
       tags: ["x"],
     });
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "p3",
       done: false,
       priority: 3,
@@ -401,7 +401,7 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "completely unrelated",
       done: false,
       priority: 1,
@@ -431,8 +431,8 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    const userId = client.db.insert(users, { name: "Owner", team_id: undefined });
-    client.db.insert(todos, {
+    const userId = await client.db.insert(users, { name: "Owner", team_id: undefined });
+    await client.db.insert(todos, {
       title: "owned-todo",
       done: false,
       priority: 1,
@@ -465,13 +465,13 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    const orgId = client.db.insert(orgs, { name: "Hop Org" });
-    const teamId = client.db.insert(teams, {
+    const orgId = await client.db.insert(orgs, { name: "Hop Org" });
+    const teamId = await client.db.insert(teams, {
       name: "Hop Team",
       org_id: orgId,
       parent_id: undefined,
     });
-    client.db.insert(users, { name: "Hop User", team_id: teamId });
+    await client.db.insert(users, { name: "Hop User", team_id: teamId });
 
     await waitForCondition(
       () => getText("rows").includes("Hop Org"),
@@ -505,13 +505,17 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    const rootId = client.db.insert(teams, {
+    const rootId = await client.db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const midId = client.db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
-    client.db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const midId = await client.db.insert(teams, {
+      name: "mid",
+      org_id: undefined,
+      parent_id: rootId,
+    });
+    await client.db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
 
     await waitForCondition(
       () => {
@@ -531,14 +535,14 @@ describe("useAll browser integration", () => {
       }),
     );
 
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "open-task",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "done-task",
       done: true,
       priority: 2,

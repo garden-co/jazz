@@ -42,7 +42,7 @@ export interface JazzRuntime extends HybridObject<{ ios: "rust"; android: "rust"
   query(
     queryJson: string,
     sessionJson: string | undefined,
-    settledTier: string | undefined,
+    tier: string | undefined,
   ): Promise<string>;
 
   // --- Subscriptions ---
@@ -52,7 +52,7 @@ export interface JazzRuntime extends HybridObject<{ ios: "rust"; android: "rust"
     queryJson: string,
     onUpdate: (deltaJson: string) => void,
     sessionJson: string | undefined,
-    settledTier: string | undefined,
+    tier: string | undefined,
   ): number;
 
   /** Unsubscribe by handle. */

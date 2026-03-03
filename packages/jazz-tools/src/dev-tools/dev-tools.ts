@@ -1,6 +1,6 @@
 import {
   JazzClient,
-  PersistenceTier,
+  DurabilityTier,
   QueryExecutionOptions,
   QueryInput,
   WasmSchema,
@@ -260,11 +260,11 @@ function hookRegistration(
 
         const queryPayload = isRecord(envelope.payload) ? envelope.payload : {};
         const query = queryPayload.query;
-        const settledTier = queryPayload.settledTier as PersistenceTier | undefined;
+        const tier = queryPayload.tier as DurabilityTier | undefined;
         const options = isRecord(queryPayload.options)
           ? (queryPayload.options as QueryExecutionOptions)
-          : settledTier
-            ? { settledTier }
+          : tier
+            ? { tier }
             : undefined;
 
         if (typeof query !== "string" && !isRecord(query)) {

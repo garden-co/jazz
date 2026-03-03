@@ -22,20 +22,20 @@ export declare class NapiRuntime {
   query(
     queryJson: string,
     sessionJson?: string | undefined | null,
-    settledTier?: string | undefined | null,
+    tier?: string | undefined | null,
     optionsJson?: string | undefined | null,
   ): Promise<any>;
   subscribe(
     queryJson: string,
     onUpdate: (...args: any[]) => any,
     sessionJson?: string | undefined | null,
-    settledTier?: string | undefined | null,
+    tier?: string | undefined | null,
     optionsJson?: string | undefined | null,
   ): number;
   unsubscribe(handle: number): void;
-  insertWithAck(table: string, values: any, tier: string): Promise<string>;
-  updateWithAck(objectId: string, values: any, tier: string): Promise<void>;
-  deleteWithAck(objectId: string, tier: string): Promise<void>;
+  insertDurable(table: string, values: any, tier: string): Promise<string>;
+  updateDurable(objectId: string, values: any, tier: string): Promise<void>;
+  deleteDurable(objectId: string, tier: string): Promise<void>;
   onSyncMessageReceived(messageJson: string): void;
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;

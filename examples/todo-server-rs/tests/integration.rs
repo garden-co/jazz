@@ -17,7 +17,7 @@ use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz_tools::{
-    AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
+    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -806,7 +806,7 @@ async fn test_server_resync() {
         let query = QueryBuilder::new("todos").build();
         let results = tokio::time::timeout(
             Duration::from_secs(10),
-            client.query(query, Some(PersistenceTier::EdgeServer)),
+            client.query(query, Some(DurabilityTier::EdgeServer)),
         )
         .await
         .expect("Query with EdgeServer tier should resolve within 10s")

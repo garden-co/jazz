@@ -3,7 +3,7 @@ export { JazzProvider, useDb, type JazzProviderProps } from "./provider.js";
 export { useAll, useAllSuspense } from "./use-all.js";
 
 export type {
-  PersistenceTier,
+  DurabilityTier,
   QueryBuilder,
   RowDelta,
   SubscriptionDelta,

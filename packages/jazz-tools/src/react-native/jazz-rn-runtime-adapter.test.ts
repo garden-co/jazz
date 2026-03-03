@@ -151,18 +151,18 @@ describe("JazzRnRuntimeAdapter", () => {
     });
   });
 
-  it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
+  it("supports worker-tier persisted mutations and rejects global tiers", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertWithAck("todos", [], "worker")).resolves.toBe("row-1");
+    await expect(adapter.insertDurable("todos", [], "worker")).resolves.toBe("row-1");
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updateWithAck("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deleteWithAck("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateDurable("row-1", {}, "worker")).resolves.toBeUndefined();
+    await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertWithAck("todos", [], "edge")).toThrow("supports only 'worker' tier");
+    expect(() => adapter.insertDurable("todos", [], "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {

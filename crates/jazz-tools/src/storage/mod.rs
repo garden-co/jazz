@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{SchemaHash, Value};
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
 // Storage Types
@@ -184,7 +184,7 @@ pub trait Storage {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError>;
 
     // ================================================================
@@ -325,7 +325,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError> {
         (**self).store_ack_tier(commit_id, tier)
     }
@@ -435,7 +435,7 @@ pub struct MemoryStorage {
     indices: HashMap<IndexKey, IndexEntries>,
 
     /// Persistence ack tiers per commit.
-    ack_tiers: HashMap<CommitId, HashSet<PersistenceTier>>,
+    ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -674,7 +674,7 @@ impl Storage for MemoryStorage {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError> {
         self.ack_tiers.entry(commit_id).or_default().insert(tier);
         Ok(())

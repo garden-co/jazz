@@ -8,7 +8,7 @@ use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
-    ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, QueryPropagation,
+    ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
     SyncManager,
 };
 
@@ -178,14 +178,25 @@ pub(crate) struct QuerySubscription {
     /// Flag indicating this subscription has settled at least once.
     /// Used to ensure one-shot queries receive an initial callback (even if empty).
     pub(crate) settled_once: bool,
-    /// Required persistence tier before first delivery (None = immediate).
-    pub(crate) settled_tier: Option<PersistenceTier>,
+    /// Required durability tier before non-local delivery (None = immediate).
+    pub(crate) durability_tier: Option<DurabilityTier>,
+    /// How local writes behave while waiting for durability.
+    pub(crate) local_updates: LocalUpdates,
+    /// True when this subscription observed a local write since last delivery.
+    pub(crate) has_pending_local_updates: bool,
     /// Tiers that have confirmed settlement for this query.
-    pub(crate) achieved_tiers: HashSet<PersistenceTier>,
+    pub(crate) achieved_tiers: HashSet<DurabilityTier>,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocalUpdates {
+    #[default]
+    Immediate,
+    Deferred,
 }
 
 /// Update for a query subscription.
@@ -761,12 +772,16 @@ impl QueryManager {
                 );
             }
 
-            let tier_satisfied = match &subscription.settled_tier {
-                None => true, // No tier requirement → immediate (current behavior)
+            let tier_satisfied = match &subscription.durability_tier {
+                None => true, // No durability requirement → immediate
                 Some(required) => subscription.achieved_tiers.iter().any(|t| t >= required),
             };
+            let allow_local_while_waiting = !tier_satisfied
+                && subscription.settled_once
+                && subscription.local_updates == LocalUpdates::Immediate
+                && subscription.has_pending_local_updates;
 
-            if !tier_satisfied {
+            if !tier_satisfied && !allow_local_while_waiting {
                 // Graph state updated by settle(), but don't deliver yet
                 tracing::trace!("tier not satisfied, holding delivery");
                 continue;
@@ -802,6 +817,7 @@ impl QueryManager {
                     ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
+                subscription.has_pending_local_updates = false;
             } else if !delta.is_empty() {
                 let ordered_ids_after: Vec<ObjectId> = subscription
                     .graph
@@ -830,6 +846,7 @@ impl QueryManager {
                     ordered_delta: ordered.delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
+                subscription.has_pending_local_updates = false;
             }
         }
 
@@ -1157,14 +1174,15 @@ impl QueryManager {
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
     }
-    /// Mark subscriptions dirty for a table.
-    /// Checks all tables involved in the subscription (including joined tables).
-    /// Also marks server-side subscriptions for downstream clients.
-    pub(super) fn mark_subscriptions_dirty(&mut self, table: &str) {
+    /// Mark subscriptions dirty for a table based on update origin.
+    fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {
         // Mark local subscriptions dirty
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_dirty_for_table(table);
+                if local_update {
+                    subscription.has_pending_local_updates = true;
+                }
             }
         }
 
@@ -1174,6 +1192,19 @@ impl QueryManager {
                 server_sub.graph.mark_dirty_for_table(table);
             }
         }
+    }
+
+    /// Mark subscriptions dirty from external updates (default behavior).
+    ///
+    /// Checks all tables involved in the subscription (including joined tables).
+    /// Also marks server-side subscriptions for downstream clients.
+    pub(super) fn mark_subscriptions_dirty(&mut self, table: &str) {
+        self.mark_subscriptions_dirty_with_origin(table, false);
+    }
+
+    /// Mark subscriptions dirty from local writes.
+    pub(super) fn mark_subscriptions_dirty_local(&mut self, table: &str) {
+        self.mark_subscriptions_dirty_with_origin(table, true);
     }
 
     /// Mark a row as updated in all subscriptions for a table.
