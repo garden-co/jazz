@@ -118,7 +118,7 @@ jobs:
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -c \
             "(/tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' </dev/null >/tmp/server.log 2>&1 &)"
 
-          sleep 10
+          sleep 5
 
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" tail -n 200 /tmp/server.log | tee -a vercel-sandbox.log
 
