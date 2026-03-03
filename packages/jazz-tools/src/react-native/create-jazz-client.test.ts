@@ -63,8 +63,8 @@ async function setupCreateClient(options: SetupOptions = {}) {
     );
 
     class MockSubscriptionsOrchestrator {
-      constructor(config: { appId: string }, instanceDb: unknown) {
-        managerCtor(config, instanceDb);
+      constructor(config: { appId: string }, instanceDb: unknown, sessionArg: Session | null) {
+        managerCtor(config, instanceDb, sessionArg);
       }
 
       init = managerInit;
@@ -133,7 +133,7 @@ describe("react-native/create-jazz-client", () => {
     expect(actualResolvedConfig).toEqual(resolvedConfig);
     expect(createDb).toHaveBeenCalledWith(resolvedConfig);
     expect(resolveClientSession).toHaveBeenCalledWith(resolvedConfig);
-    expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db);
+    expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db, session);
     expect(managerInit).toHaveBeenCalledTimes(1);
     expect(client.db).toBe(db);
     expect(client.session).toEqual(session);
@@ -220,7 +220,7 @@ describe("react-native/create-jazz-client", () => {
     await expect(createJazzClient(config)).rejects.toBe(initError);
     expect(createDb).toHaveBeenCalledWith(resolvedConfig);
     expect(resolveClientSession).toHaveBeenCalledWith(resolvedConfig);
-    expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db);
+    expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db, session);
     expect(managerInit).toHaveBeenCalledTimes(1);
     expect(managerShutdown).not.toHaveBeenCalled();
     expect(dbShutdown).not.toHaveBeenCalled();
