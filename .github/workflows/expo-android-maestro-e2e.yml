@@ -124,7 +124,7 @@ jobs:
 
           sleep 5 # wait for server to start
 
-          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" "tail -n 200 /tmp/server.log" | tee -a vercel-sandbox.log
           exit 1
 
       - name: Run Maestro Cloud flows
