@@ -15,16 +15,16 @@ schema/current.ts ──► node ./packages/jazz-tools/dist/cli.js build ──�
 
 ## Design Decisions
 
-| Decision           | Choice                 | Rationale                                       |
-| ------------------ | ---------------------- | ----------------------------------------------- |
-| Schema source      | WasmSchema JSON        | Types already resolved, consistent with runtime |
-| Relations          | `col.ref('table')`     | All refs are UUIDs, simple syntax               |
-| Relation naming    | Strip `_id` suffix     | `parent_id` → `.include({ parent })`            |
-| Reverse relations  | `tableViaColumn`       | `blockersViaBlocking` — auto-derived            |
-| Output             | Single `schema/app.ts` | Simple imports, easy to understand              |
-| Subscription shape | Full state + delta     | `{ all, added, updated, removed }`              |
-| DB interface       | Generic + schema       | `createDb(config)`, `db.all(query)`             |
-| Mutations          | Sync (WASM pre-loaded) | `createDb()` is async, mutations are sync       |
+| Decision           | Choice                 | Rationale                                                      |
+| ------------------ | ---------------------- | -------------------------------------------------------------- |
+| Schema source      | WasmSchema JSON        | Types already resolved, consistent with runtime                |
+| Relations          | `col.ref('table')`     | All refs are UUIDs, simple syntax                              |
+| Relation naming    | Strip `_id` suffix     | `parent_id` → `.include({ parent })`                           |
+| Reverse relations  | `tableViaColumn`       | `blockersViaBlocking` — auto-derived                           |
+| Output             | Single `schema/app.ts` | Simple imports, easy to understand                             |
+| Subscription shape | Full state + delta     | `{ all, added, updated, removed }`                             |
+| DB interface       | Generic + schema       | `createDb(config)`, `db.all(query)`                            |
+| Mutations          | Async local-first      | local state updates immediately; promises are durability-gated |
 
 ## Part 1: Schema DSL Extension
 
@@ -103,7 +103,7 @@ Generates fluent, immutable query builders per table:
 
 ### Db Class
 
-`createDb(config)` is the main entry point for application code. It's async because it pre-loads the WASM module, but once initialized, all mutations are synchronous (local-first: writes don't wait for the network). The Db lazily creates and memoizes `JazzClient` instances per schema hash, so multiple schemas can coexist in one app.
+`createDb(config)` is the main entry point for application code. It's async because it pre-loads the WASM module. Once initialized, mutations apply local-first immediately and return promises that resolve at the configured durability tier. The Db lazily creates and memoizes `JazzClient` instances per schema hash, so multiple schemas can coexist in one app.
 
 > `packages/jazz-tools/src/runtime/db.ts:93-450` (Db class)
 > `packages/jazz-tools/src/runtime/db.ts:479-484` (createDb factory)
@@ -115,16 +115,19 @@ Generates fluent, immutable query builders per table:
 
 `options` supports:
 
-- `settledTier?: "worker" | "edge" | "core"`
+- `tier?: "worker" | "edge" | "global"`
+- `localUpdates?: "immediate" | "deferred"` (default: `immediate`)
 - `propagation?: "full" | "local-only"` (default `full`)
 
-### Mutations (Synchronous)
+### Mutations (Async Local-First)
 
-- `db.insert(table, data)` — sync, returns ID immediately
-- `db.update(table, id, data)` — sync partial update
-- `db.deleteFrom(table, id)` — sync deletion
+- `db.insert(table, data, options?)` — applies local write immediately and resolves with new ID at durability tier
+- `db.update(table, id, data, options?)` — applies local update immediately and resolves at durability tier
+- `db.deleteFrom(table, id, options?)` — applies local delete immediately and resolves at durability tier
 
-Also: `insertPersisted()`, `updatePersisted()`, `deleteFromPersisted()` — async variants that wait for durability ack.
+`options` supports:
+
+- `tier?: "worker" | "edge" | "global"`
 
 ### Subscriptions
 
@@ -162,9 +165,10 @@ The TS runtime intentionally treats upstream attachment as replay boundary for s
 
 - `JazzProvider` — async `createDb(config)` on mount, provides `Db` through context, calls `db.shutdown()` on unmount
 - `useDb()` — context hook returning `Db` (throws outside provider)
-- `useAll(query, tier?)` — `useSyncExternalStore` wrapper over `db.subscribeAll(...)`
+- `useAll(query)` — `useSyncExternalStore` wrapper over `db.subscribeAll(...)`
+- `useAllSuspense(query)` — suspense-enabled query hook
 
-`useAll(query)` (no tier) returns `T[]` immediately from the synchronous initial subscription callback path. `useAll(query, tier)` returns `T[] | undefined` until the requested tier settles.
+`useAll(query)` returns `T[] | undefined` and resolves as subscription data arrives. Durability-tier gating is configured through `db.subscribeAll(..., options)` when needed.
 
 > `packages/jazz-tools/package.json` (`./react` export)
 > `packages/jazz-tools/src/react/provider.tsx`

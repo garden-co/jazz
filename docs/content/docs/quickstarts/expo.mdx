@@ -5,7 +5,7 @@ description: Build a local-first Expo app with Jazz React Native bindings. Schem
 
 import AuthMethods from "../../partials/quickstarts/auth-methods.mdx";
 import FluentImmutableCallout from "../../partials/quickstarts/fluent-immutable-callout.mdx";
-import PersistenceTiersTable from "../../partials/quickstarts/persistence-tiers-table.mdx";
+import DurabilityTiersTable from "../../partials/quickstarts/durability-tiers-table.mdx";
 import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
 import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
@@ -70,13 +70,13 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
 
 <QuickstartWhereOperatorsSummary />
 
-By default `useAll` returns results immediately from the local replica. Use settled tiers when you need explicit confirmation boundaries.
+By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
 
 Deep dive: [Reading Data](/docs/reading-data).
 
 ## Write data with `useDb`
 
-`useDb` returns the `Db` handle for mutations. Mutations are synchronous at the local runtime level and sync to the server in the background.
+`useDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
 <include cwd lang="tsx" title="src/TodoList.tsx">
   ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#writing-use-db-expo
@@ -86,32 +86,32 @@ Because writes hit the local runtime first, subscriptions update immediately wit
 
 Mutation API details: [Writing Data](/docs/writing-data).
 
-## Persistence tiers
+## Durability tiers
 
-<PersistenceTiersTable />
+<DurabilityTiersTable />
 
 <Callout title="Tier support">
   `worker` is the universal baseline. Higher-tier acknowledgements depend on deployment/runtime
   support, so pick the highest tier your app path guarantees.
 </Callout>
 
-### Reading with a settled tier
+### Reading with a durability tier
 
-Use `db.subscribeAll` (or `db.all`) with a settled tier when you need tier-gated delivery.
+Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-gated delivery.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#reading-tier-expo
 </include>
 
-### Writing with an ack tier
+### Writing with a durability tier
 
-Use `*WithAck` APIs when you need explicit write acknowledgement before proceeding:
+Use base mutation APIs with `{ tier }` when you need explicit write durability acknowledgement before proceeding:
 
 <include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#writing-ack-expo
+  ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#writing-durability-expo
 </include>
 
-Tier semantics in depth: [Reading Data](/docs/reading-data#read-settled-tiers) and [Writing Data](/docs/writing-data#write-ack-tiers).
+Tier semantics in depth: [Reading Data](/docs/reading-data#read-durability-options) and [Writing Data](/docs/writing-data#write-durability-tiers).
 
 ## Querying in depth
 

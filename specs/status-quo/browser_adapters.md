@@ -72,7 +72,7 @@ Current behavior:
 1. `JazzProvider` (`react/provider.tsx`) resolves local-auth defaults, then runs `Promise.all([createDb(config), resolveClientSession(config)])` on mount.
 2. Provider context stores `{ db, session }`; `useDb()` and `useSession()` read from this context and throw outside provider boundaries.
 3. On unmount, provider calls `db.shutdown()` for clean worker/runtime teardown.
-4. `useAll(query, tier?)` (`react/use-all.ts`) wraps `db.subscribeAll(...)`; without a tier it starts with `[]`, and with a tier it starts as `undefined` until settlement.
+4. `useAll(query)` (`react/use-all.ts`) wraps `db.subscribeAll(...)` and streams reactive updates.
 5. `useLinkExternalIdentity` (`react/use-link-external-identity.ts`) bridges local synthetic identity to external JWT identity and can fall back to active synthetic profile state.
 
 ### TypeScript Adapter (`jazz-tools` / `jazz-tools/backend`)
@@ -90,7 +90,7 @@ Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/
 1. Build a `DbConfig` (app/env/branch/auth/tier/server options).
 2. Initialize with `Promise.all([createDb(config), resolveClientSession(config)])`.
 3. Read via `db.all(...)`/`db.one(...)` or `db.subscribeAll(...)`.
-4. Mutate via sync local-first APIs (`insert`, `update`, `deleteFrom`) and optional ack-tier APIs (`insertWithAck`, `updateWithAck`, `deleteFromWithAck`).
+4. Mutate via async local-first APIs (`insert`, `update`, `deleteFrom`) with optional `{ tier }` overrides.
 5. Tear down with `db.shutdown()`.
 
 ## Runtime Layers and Responsibilities
@@ -100,7 +100,7 @@ Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/
 - High-level typed API (`insert`, `update`, `deleteFrom`, `all`, `one`, `subscribeAll`).
 - Creates and memoizes `JazzClient` per schema key.
 - Creates worker + bridge in browser mode.
-- Waits for bridge init before ack-tier mutations.
+- Waits for bridge init before durability-tiered mutations.
 
 2. `JazzClient` (`runtime/client.ts`)
 
@@ -163,19 +163,14 @@ Payloads are JSON strings for sync messages (`payload: string`).
 
 ### 2. Mutation Path
 
-No-ack mutation (`insert`, `update`, `deleteFrom`):
-
-1. Call hits main-thread `JazzClient` runtime synchronously.
-2. Main runtime emits server-destination sync envelope.
-3. `WorkerBridge` forwards envelope payload as `sync` message to worker.
-4. Worker ingests message as peer-client sync input.
-5. Worker runtime may emit upstream server sync and/or client sync updates.
-
-Ack mutation (`insertWithAck`, `updateWithAck`, `deleteFromWithAck`):
+Durability mutation (`insert`, `update`, `deleteFrom` with optional `{ tier }`):
 
 1. `Db` waits for bridge init (`ensureBridgeReady()`).
-2. Uses runtime persisted mutation API with requested tier (`worker`, `edge`, `core`).
-3. Promise resolves when tier ack arrives through runtime sync protocol.
+2. Call uses the main-thread `JazzClient` durable mutation API.
+3. Local runtime applies the write immediately and emits server-destination sync envelope.
+4. `WorkerBridge` forwards envelope payload as `sync` message to worker.
+5. Worker ingests message as peer-client sync input and may emit upstream server sync and/or client sync updates.
+6. Promise resolves when the requested durability tier (`worker`, `edge`, `global`) is acknowledged.
 
 ### 3. Query Path
 
