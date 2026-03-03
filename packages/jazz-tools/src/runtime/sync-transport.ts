@@ -54,7 +54,7 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(): void;
   removeServer(): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(payload: string): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
@@ -279,14 +279,14 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
 }
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payloadJson: string, isCatalogue: boolean): void | Promise<void>;
-  onClientPayload?(payloadJson: string): void;
+  onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
 }
@@ -301,7 +301,7 @@ export function createSyncOutboxRouter(
 ): (
   destinationKind: OutboxDestinationKind,
   destinationId: string,
-  payloadJson: string,
+  payload: Uint8Array | string,
   isCatalogue: boolean,
 ) => void {
   const logPrefix = options.logPrefix ?? "";
@@ -309,15 +309,15 @@ export function createSyncOutboxRouter(
   return (
     destinationKind: OutboxDestinationKind,
     _destinationId: string,
-    payloadJson: string,
+    payload: Uint8Array | string,
     isCatalogue: boolean,
   ) => {
     if (destinationKind === "client") {
-      options.onClientPayload?.(payloadJson);
+      options.onClientPayload?.(payload as Uint8Array);
       return;
     }
 
-    Promise.resolve(options.onServerPayload(payloadJson, isCatalogue)).catch((error) => {
+    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
       if (options.onServerPayloadError) {
         options.onServerPayloadError(error);
         return;

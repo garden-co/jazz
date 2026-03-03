@@ -58,7 +58,7 @@ pub trait Scheduler {
 /// No `Send` bound — WASM types are `!Send`. Send is enforced
 /// by the concrete wrapping type where needed.
 pub trait SyncSender {
-    fn send_sync_message(&self, message: OutboxEntry);
+    fn send_sync_message(&self, message: OutboxEntry, sender_tier: &'static str);
 }
 
 // ============================================================================
@@ -97,7 +97,7 @@ impl VecSyncSender {
 }
 
 impl SyncSender for VecSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
+    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
         self.messages.lock().unwrap().push(message);
     }
 }
