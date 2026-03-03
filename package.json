@@ -30,9 +30,6 @@
     "turbo": "^2.0.0",
     "typescript": "catalog:default"
   },
-  "onlyBuiltDependencies": [
-    "wasm-pack"
-  ],
   "packageManager": "pnpm@10.14.0",
   "pnpm": {
     "overrides": {
@@ -42,5 +39,8 @@
     "patchedDependencies": {
       "uniffi-bindgen-react-native@0.29.3-1": "patches/uniffi-bindgen-react-native@0.29.3-1.patch"
     }
-  }
+  },
+  "onlyBuiltDependencies": [
+    "wasm-pack"
+  ]
 }

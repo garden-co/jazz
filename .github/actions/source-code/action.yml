@@ -3,9 +3,9 @@ description: Get and build source code
 
 inputs:
   cache:
-    description: 'Enable caching'
+    description: "Enable caching"
     required: false
-    default: 'true'
+    default: "true"
 
 runs:
   using: "composite"
@@ -22,7 +22,7 @@ runs:
     - name: Install Node.js
       uses: useblacksmith/setup-node@v5
       with:
-        node-version-file: '.nvmrc'
+        node-version-file: ".nvmrc"
         cache: ${{ inputs.cache == 'true' && 'pnpm' || '' }}
 
     - name: Get pnpm store directory
