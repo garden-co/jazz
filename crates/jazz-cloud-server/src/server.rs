@@ -649,10 +649,21 @@ enum WorkerCommand {
         session: Session,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    EnsureClientAsBackend {
+        app_id: AppId,
+        client_id: ClientId,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     SyncAsSession {
         app_id: AppId,
         client_id: ClientId,
         session: Session,
+        payload: SyncPayload,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SyncAsBackend {
+        app_id: AppId,
+        client_id: ClientId,
         payload: SyncPayload,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
@@ -678,7 +689,9 @@ impl WorkerCommand {
         match self {
             WorkerCommand::CreateRuntime { app_id, .. }
             | WorkerCommand::EnsureClientWithSession { app_id, .. }
+            | WorkerCommand::EnsureClientAsBackend { app_id, .. }
             | WorkerCommand::SyncAsSession { app_id, .. }
+            | WorkerCommand::SyncAsBackend { app_id, .. }
             | WorkerCommand::SyncAsAdmin { app_id, .. }
             | WorkerCommand::GetCatalogueSchema { app_id, .. }
             | WorkerCommand::GetSchemaHashes { app_id, .. } => *app_id,
@@ -846,6 +859,21 @@ impl WorkerPool {
         Self::await_result(worker, response_rx).await
     }
 
+    async fn ensure_client_as_backend(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::EnsureClientAsBackend {
+            app_id,
+            client_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
     async fn sync_as_session(
         &self,
         app_id: AppId,
@@ -858,6 +886,23 @@ impl WorkerPool {
             app_id,
             client_id,
             session,
+            payload,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn sync_as_backend(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        payload: SyncPayload,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::SyncAsBackend {
+            app_id,
+            client_id,
             payload,
             response: response_tx,
         };
@@ -1642,6 +1687,32 @@ async fn run_worker_loop(
                         );
                     }
                 }
+                WorkerCommand::EnsureClientAsBackend {
+                    app_id,
+                    client_id,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
+                                Err(err.to_string())
+                            } else {
+                                Ok(())
+                            }
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "ensure-backend response receiver dropped"
+                        );
+                    }
+                }
                 WorkerCommand::SyncAsSession {
                     app_id,
                     client_id,
@@ -1673,6 +1744,38 @@ async fn run_worker_loop(
                             app_id = %app_id,
                             client_id = %client_id,
                             "session-sync response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::SyncAsBackend {
+                    app_id,
+                    client_id,
+                    payload,
+                    response,
+                } => {
+                    let result = match app_runtimes.get(&app_id) {
+                        Some(runtime) => {
+                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
+                                source: Source::Client(client_id),
+                                payload,
+                            }) {
+                                Err(err.to_string())
+                            } else {
+                                runtime.runtime.flush().await.map_err(|err| err.to_string())
+                            }
+                        }
+                        None => Err(format!("missing runtime for app {app_id}")),
+                    };
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "backend-sync response receiver dropped"
                         );
                     }
                 }
@@ -2576,6 +2679,22 @@ fn validate_admin_secret(
     }
 }
 
+fn validate_backend_secret(
+    headers: &HeaderMap,
+    app_config: &AppConfig,
+    meta_store: &MetaStore,
+) -> Result<bool, (StatusCode, &'static str)> {
+    let provided = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match provided {
+        Some(got) if meta_store.verify_secret(got, &app_config.backend_secret_hash) => Ok(true),
+        Some(_) => Err((StatusCode::UNAUTHORIZED, "Invalid backend secret")),
+        None => Ok(false),
+    }
+}
+
 fn validate_internal_secret(
     headers: &HeaderMap,
     expected_secret: &str,
@@ -2932,13 +3051,9 @@ async fn events_handler(
         ));
     }
 
-    let session = extract_session(&headers, app_id, &cfg, &state)
-        .await
-        .map_err(|(status, msg)| (status, msg.to_string()))?
-        .ok_or((
-            StatusCode::UNAUTHORIZED,
-            "session required for event stream".to_string(),
-        ))?;
+    let is_backend = validate_backend_secret(&headers, &cfg, &state.meta_store)
+        .map_err(|(status, msg)| (status, msg.to_string()))?;
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
 
     let client_id = match params.client_id {
         Some(s) => ClientId::parse(&s)
@@ -2946,12 +3061,30 @@ async fn events_handler(
         None => ClientId::new(),
     };
 
-    if let Err(err) = state
-        .workers
-        .ensure_client_with_session(app_id, client_id, session)
-        .await
-    {
-        return Err(worker_dispatch_status_and_message(err));
+    if is_backend && !has_session_header {
+        if let Err(err) = state
+            .workers
+            .ensure_client_as_backend(app_id, client_id)
+            .await
+        {
+            return Err(worker_dispatch_status_and_message(err));
+        }
+    } else {
+        let session = extract_session(&headers, app_id, &cfg, &state)
+            .await
+            .map_err(|(status, msg)| (status, msg.to_string()))?
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                "session required for event stream".to_string(),
+            ))?;
+
+        if let Err(err) = state
+            .workers
+            .ensure_client_with_session(app_id, client_id, session)
+            .await
+        {
+            return Err(worker_dispatch_status_and_message(err));
+        }
     }
 
     let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
@@ -3078,11 +3211,23 @@ async fn sync_handler(
             return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
     };
+    let is_backend = match validate_backend_secret(&headers, &cfg, &state.meta_store) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
 
     let dispatch_result = if is_admin {
         state
             .workers
             .sync_as_admin(app_id, request.client_id, request.payload)
+            .await
+    } else if is_backend && !has_session_header {
+        state
+            .workers
+            .sync_as_backend(app_id, request.client_id, request.payload)
             .await
     } else {
         let session = match extract_session(&headers, app_id, &cfg, &state).await {

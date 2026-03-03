@@ -109,12 +109,14 @@ pub(super) type BranchSyncData = (
 ///
 /// Determines how incoming writes from a client are routed:
 /// - `User`: Requires session, ReBAC for rows, rejected for catalogue
+/// - `Backend`: Trusted backend data access (rows only, no catalogue writes)
 /// - `Admin`: Full access (catalogue + data, no ReBAC)
 /// - `Peer`: Trusted relay (server-to-server), bypasses all auth
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientRole {
     #[default]
     User,
+    Backend,
     Admin,
     Peer,
 }

@@ -665,6 +665,117 @@ fn admin_writes_row_directly() {
 }
 
 #[test]
+fn backend_writes_row_directly() {
+    // Backend role can write row objects directly without ReBAC.
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Backend);
+    sm.take_outbox();
+
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"updated".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn backend_catalogue_writes_are_denied() {
+    // Backend role should not be able to write catalogue objects.
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Backend);
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"schema data".to_vec(),
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| {
+        matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied { object_id, .. }),
+            } if *id == client_id && *object_id == obj_id
+        )
+    }));
+    assert!(sm.object_manager.get(obj_id).is_none());
+}
+
+#[test]
 fn user_with_session_goes_to_permission_check() {
     // User with session sends row data → queued for ReBAC
     let mut sm = SyncManager::new();
