@@ -12,7 +12,7 @@ import type {
   WorkerLifecycleEvent,
   WorkerToMainMessage,
 } from "../worker/worker-protocol.js";
-import { OutboxDestinationKind } from "./sync-transport.js";
+import { createSyncOutboxRouter } from "./sync-transport.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -102,23 +102,17 @@ export class WorkerBridge {
 
     // Wire main → worker: outgoing sync messages from runtime
     this.runtime.onSyncMessageToSend(
-      (
-        destinationKind: OutboxDestinationKind,
-        _destinationId: string,
-        payloadJson: string,
-        _isCatalogue: boolean,
-      ) => {
-        if (this.isDisposedLike()) return;
+      createSyncOutboxRouter({
+        onServerPayload: (payloadJson) => {
+          if (this.isDisposedLike()) return;
 
-        // Only forward server-bound messages (worker IS the server)
-        if (destinationKind === "server") {
           if (this.state.serverPayloadForwarder) {
             this.state.serverPayloadForwarder(payloadJson);
           } else {
             this.enqueueSyncMessageForWorker(payloadJson);
           }
-        }
-      },
+        },
+      }),
     );
 
     // Register a server so the runtime sends sync messages to it

@@ -1,4 +1,20 @@
 declare module "jazz-wasm" {
+  type SyncOutboxCallbackArgs =
+    | [
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ]
+    | [
+        err: unknown,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ];
+  type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
+
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
 
@@ -26,7 +42,7 @@ declare module "jazz-wasm" {
     ): number;
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string): void;
-    onSyncMessageToSend(callback: Function): void;
+    onSyncMessageToSend(callback: SyncOutboxCallback): void;
     addServer(): void;
     removeServer(): void;
     addClient(): string;
