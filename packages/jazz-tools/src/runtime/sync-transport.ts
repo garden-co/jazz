@@ -292,26 +292,72 @@ export interface SyncOutboxRouterOptions {
 }
 
 export type OutboxDestinationKind = "server" | "client";
+export type RuntimeSyncOutboxCallbackArgs =
+  | [
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payloadJson: string,
+      isCatalogue: boolean,
+    ]
+  | [
+      err: unknown,
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payloadJson: string,
+      isCatalogue: boolean,
+    ];
+export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
+
+function isOutboxDestinationKind(value: unknown): value is OutboxDestinationKind {
+  return value === "server" || value === "client";
+}
+
+function normalizeOutboxCallbackArgs(args: unknown[]): {
+  destinationKind: OutboxDestinationKind;
+  payloadJson: string;
+  isCatalogue: boolean;
+} | null {
+  // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[0])) {
+    const payloadJson = args[2];
+    if (typeof payloadJson !== "string") return null;
+    return {
+      destinationKind: args[0],
+      payloadJson,
+      isCatalogue: Boolean(args[3]),
+    };
+  }
+
+  // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[1])) {
+    const payloadJson = args[3];
+    if (typeof payloadJson !== "string") return null;
+    return {
+      destinationKind: args[1],
+      payloadJson,
+      isCatalogue: Boolean(args[4]),
+    };
+  }
+
+  return null;
+}
 
 /**
  * Create a shared runtime outbox router for server/client destinations.
  */
 export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
-): (
-  destinationKind: OutboxDestinationKind,
-  destinationId: string,
-  payloadJson: string,
-  isCatalogue: boolean,
-) => void {
+): RuntimeSyncOutboxCallback {
   const logPrefix = options.logPrefix ?? "";
 
-  return (
-    destinationKind: OutboxDestinationKind,
-    _destinationId: string,
-    payloadJson: string,
-    isCatalogue: boolean,
-  ) => {
+  return (...args: RuntimeSyncOutboxCallbackArgs) => {
+    const normalized = normalizeOutboxCallbackArgs(args);
+    if (!normalized) {
+      console.error(`${logPrefix}Invalid sync outbox callback arguments`, args);
+      return;
+    }
+
+    const { destinationKind, payloadJson, isCatalogue } = normalized;
     if (destinationKind === "client") {
       options.onClientPayload?.(payloadJson);
       return;
