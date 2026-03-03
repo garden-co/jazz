@@ -20,6 +20,7 @@ declare module "jazz-wasm" {
 
   export class WasmRuntime {
     constructor(schemaJson: string, appId: string, env: string, userBranch: string, tier?: string);
+    schedule?: (task: () => void) => void;
 
     insert(table: string, values: unknown): string;
     insertDurable(table: string, values: unknown, tier: string): Promise<string>;
