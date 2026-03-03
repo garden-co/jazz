@@ -1117,6 +1117,59 @@ fn rc_subscribe_settled_tier() {
     assert_eq!(first_delivery[0].0, id);
 }
 
+#[test]
+fn rc_subscribe_remote_tier_immediate_local_updates() {
+    let mut s = create_3tier_rc();
+
+    let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                let rows: Vec<(ObjectId, Vec<Value>)> = delta
+                    .ordered_delta
+                    .added
+                    .iter()
+                    .filter_map(|row| {
+                        decode_row(&delta.descriptor, &row.row.data)
+                            .ok()
+                            .map(|vals| (row.row.id, vals))
+                    })
+                    .collect();
+                received_clone.lock().unwrap().push(rows);
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    let values = vec![
+        Value::Uuid(ObjectId::new()),
+        Value::Text("local-first".into()),
+    ];
+    let id = s.a.insert("users", values, None).unwrap();
+    s.a.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert!(
+        !calls.is_empty(),
+        "Immediate local updates should deliver before EdgeServer settlement"
+    );
+    let first_delivery = &calls[0];
+    assert_eq!(
+        first_delivery.len(),
+        1,
+        "Should include the local row immediately"
+    );
+    assert_eq!(first_delivery[0].0, id);
+}
+
 fn noop_waker() -> std::task::Waker {
     fn noop(_: *const ()) {}
     fn clone(_: *const ()) -> std::task::RawWaker {
