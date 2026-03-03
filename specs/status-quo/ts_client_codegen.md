@@ -131,7 +131,7 @@ Generates fluent, immutable query builders per table:
 
 ### Subscriptions
 
-`db.subscribeAll(query, callback, options?)` — the local-first alternative to polling. The callback fires whenever the query's results change (local writes, sync updates). It receives `{ all, added, updated, removed }` — the full result set plus a delta.
+`db.subscribeAll(query, callback, options?)` — the local-first alternative to polling. The callback fires whenever the query's results change (local writes, sync updates). It receives `{ all, added, updated, removed }` — the full result set plus a delta. With tier-gated reads, initial delivery still waits for the requested tier; `localUpdates: "immediate"` affects only subsequent local-write updates.
 
 The SubscriptionManager preserves object identity for unchanged items: if a new todo is added, existing todo objects in the array keep the same JavaScript reference. This makes React's `useMemo`/referential equality checks work naturally.
 

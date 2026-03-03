@@ -223,6 +223,7 @@ Delivery semantics after settle:
 - if required durability tier is not achieved, graph state updates but delivery is held
 - first delivery is a full snapshot via `current_result_as_delta()`
 - later deliveries are incremental deltas
+- with `localUpdates/immediate`, only post-first-settlement local writes bypass tier waiting; initial snapshot remains tier-gated
 
 > [`query_manager/manager.rs:640`](../../crates/jazz-tools/src/query_manager/manager.rs#L640)
 > [`query_manager/manager.rs:651`](../../crates/jazz-tools/src/query_manager/manager.rs#L651)

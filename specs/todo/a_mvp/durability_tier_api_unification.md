@@ -83,8 +83,8 @@ Removed APIs:
 
 `localUpdates` controls delivery of updates caused by local writes while durability gating is active:
 
-1. `"immediate"` (default): local write-driven subscription updates deliver synchronously.
-2. `"deferred"`: preserve strict tier gating for delivery.
+1. `"immediate"` (default): the initial delivery still waits for `ReadOptions.tier`; after that first settled snapshot, local write-driven subscription updates deliver synchronously.
+2. `"deferred"`: preserve strict tier gating for both initial and subsequent deliveries.
 
 ## Runtime semantics
 
