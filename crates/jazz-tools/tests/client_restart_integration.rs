@@ -8,7 +8,7 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::storage::{Storage, SurrealKvStorage};
 use jazz_tools::{
-    AppContext, AppId, ColumnType, JazzClient, PersistenceTier, QueryBuilder, SchemaBuilder,
+    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -212,7 +212,7 @@ async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
     timeout: Duration,
-    settled_tier: Option<PersistenceTier>,
+    durability_tier: Option<DurabilityTier>,
 ) -> Vec<(jazz_tools::ObjectId, Vec<Value>)> {
     let query = QueryBuilder::new("todos").build();
     let deadline = tokio::time::Instant::now() + timeout;
@@ -221,7 +221,7 @@ async fn wait_for_todos_count(
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(rows)) = tokio::time::timeout(
             Duration::from_secs(8),
-            client.query(query.clone(), settled_tier),
+            client.query(query.clone(), durability_tier),
         )
         .await
         {
@@ -246,7 +246,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(_)) = tokio::time::timeout(
             Duration::from_secs(8),
-            client.query(query.clone(), Some(PersistenceTier::EdgeServer)),
+            client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
         )
         .await
         {
@@ -329,7 +329,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         1,
         Duration::from_secs(20),
-        Some(PersistenceTier::EdgeServer),
+        Some(DurabilityTier::EdgeServer),
     )
     .await;
 
@@ -348,7 +348,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         1,
         Duration::from_secs(25),
-        Some(PersistenceTier::EdgeServer),
+        Some(DurabilityTier::EdgeServer),
     )
     .await;
     assert_eq!(
@@ -372,7 +372,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         2,
         Duration::from_secs(25),
-        Some(PersistenceTier::EdgeServer),
+        Some(DurabilityTier::EdgeServer),
     )
     .await;
     assert_eq!(
