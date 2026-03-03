@@ -51,7 +51,7 @@ pub use schema_manager::AppId;
 #[cfg(feature = "client")]
 pub use sync_manager::ClientId;
 #[cfg(feature = "client")]
-pub use sync_manager::PersistenceTier;
+pub use sync_manager::DurabilityTier;
 #[cfg(feature = "client")]
 pub use sync_manager::ServerId;
 

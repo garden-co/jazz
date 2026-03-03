@@ -1,6 +1,6 @@
 import {
   JazzClient,
-  PersistenceTier,
+  DurabilityTier,
   QueryExecutionOptions,
   QueryInput,
   RequestLike,
@@ -438,15 +438,12 @@ class DevToolsJazzClient implements JazzClient {
   forRequest(request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: Value[]): string {
-    throw new Error("Method not implemented.");
-  }
-  createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
+  create(table: string, values: Value[], options?: { tier?: DurabilityTier }): Promise<string> {
     throw new Error("Method not implemented.");
   }
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
-    const payload = { query, options, settledTier: options?.settledTier };
+    const payload = { query, options, tier: options?.tier };
     const rows = await sendDevtoolsRequest<Row[]>(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload);
     return rows;
   }
@@ -457,20 +454,14 @@ class DevToolsJazzClient implements JazzClient {
   ): Promise<Row[]> {
     throw new Error("Method not implemented.");
   }
-  update(objectId: string, updates: Record<string, Value>): void {
-    throw new Error("Method not implemented.");
-  }
-  updateWithAck(
+  update(
     objectId: string,
     updates: Record<string, Value>,
-    tier: PersistenceTier,
+    options?: { tier?: DurabilityTier },
   ): Promise<void> {
     throw new Error("Method not implemented.");
   }
-  delete(objectId: string): void {
-    throw new Error("Method not implemented.");
-  }
-  deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
+  delete(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
     throw new Error("Method not implemented.");
   }
   subscribe(
@@ -488,7 +479,7 @@ class DevToolsJazzClient implements JazzClient {
         sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
           query,
           options,
-          settledTier: options?.settledTier,
+          tier: options?.tier,
           subscriptionId: bridgeSubscriptionId,
         }),
       )

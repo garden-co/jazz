@@ -23,8 +23,8 @@ export interface BackendContextConfig extends Omit<
   dataPath: string;
   /** Optional default schema source (typically generated `app` export). */
   app?: BackendSchemaSource;
-  /** Optional persistence tier for ack semantics. */
-  tier?: "worker" | "edge" | "core";
+  /** Optional node durability tier identity. */
+  tier?: "worker" | "edge" | "global";
 }
 
 interface ResolvedBackendContextConfig extends BackendContextConfig {
@@ -120,6 +120,7 @@ export class JazzContext {
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
       tier: this.config.tier,
+      defaultDurabilityTier: "edge",
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);

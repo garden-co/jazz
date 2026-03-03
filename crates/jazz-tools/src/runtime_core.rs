@@ -39,7 +39,7 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -108,6 +108,7 @@ pub struct SubscriptionHandle(pub u64);
 
 // Re-export QueryHandle from query_manager for convenience
 pub use crate::query_manager::manager::QueryHandle as QMQueryHandle;
+pub use subscriptions::ReadDurabilityOptions;
 
 /// Errors from runtime operations.
 #[derive(Debug, Clone)]
@@ -238,7 +239,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
     /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<CommitId, Vec<(PersistenceTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,

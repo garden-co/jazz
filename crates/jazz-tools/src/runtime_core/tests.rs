@@ -203,7 +203,7 @@ fn test_park_sync_message() {
 // =========================================================================
 
 use crate::sync_manager::{
-    ClientId, ClientRole, Destination, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source,
+    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncPayload,
 };
 
@@ -233,7 +233,7 @@ fn create_3tier_rc() -> ThreeTierRC {
     );
 
     // B = Worker server
-    let sm_b = SyncManager::new().with_tier(PersistenceTier::Worker);
+    let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id.clone(), "dev", "main").unwrap();
     let mut b = RuntimeCore::new(
         mgr_b,
@@ -243,7 +243,7 @@ fn create_3tier_rc() -> ThreeTierRC {
     );
 
     // C = EdgeServer
-    let sm_c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+    let sm_c = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mgr_c = SchemaManager::new(sm_c, schema, app_id, "dev", "main").unwrap();
     let mut c = RuntimeCore::new(
         mgr_c,
@@ -482,7 +482,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     );
 
     let mgr_b = SchemaManager::new(
-        SyncManager::new().with_tier(PersistenceTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
         schema.clone(),
         app_id.clone(),
         "dev",
@@ -497,7 +497,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     );
 
     let mgr_c = SchemaManager::new(
-        SyncManager::new().with_tier(PersistenceTier::EdgeServer),
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
         schema,
         app_id,
         "dev",
@@ -711,7 +711,7 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (id, mut receiver) =
-        s.a.insert_persisted("users", values, None, PersistenceTier::Worker)
+        s.a.insert_persisted("users", values, None, DurabilityTier::Worker)
             .unwrap();
     assert!(!id.0.is_nil());
 
@@ -735,7 +735,7 @@ fn rc_insert_persisted_holds_until_correct_tier() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (_id, mut receiver) =
-        s.a.insert_persisted("users", values, None, PersistenceTier::EdgeServer)
+        s.a.insert_persisted("users", values, None, DurabilityTier::EdgeServer)
             .unwrap();
 
     pump_a_to_b(&mut s);
@@ -762,7 +762,7 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (_id, mut receiver) =
-        s.a.insert_persisted("users", values, None, PersistenceTier::Worker)
+        s.a.insert_persisted("users", values, None, DurabilityTier::Worker)
             .unwrap();
 
     pump_3tier(&mut s);
@@ -786,7 +786,7 @@ fn rc_update_persisted_resolves_on_ack() {
             id,
             vec![("name".into(), Value::Text("Bob".into()))],
             None,
-            PersistenceTier::Worker,
+            DurabilityTier::Worker,
         )
         .unwrap();
 
@@ -812,7 +812,7 @@ fn rc_delete_persisted_resolves_on_ack() {
     pump_a_to_b(&mut s);
 
     let mut receiver =
-        s.a.delete_persisted(id, None, PersistenceTier::Worker)
+        s.a.delete_persisted(id, None, DurabilityTier::Worker)
             .unwrap();
 
     pump_a_to_b(&mut s);
@@ -835,12 +835,12 @@ fn rc_multiple_persisted_inserts_independent() {
 
     let values1 = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (_id1, mut receiver1) =
-        s.a.insert_persisted("users", values1, None, PersistenceTier::Worker)
+        s.a.insert_persisted("users", values1, None, DurabilityTier::Worker)
             .unwrap();
 
     let values2 = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".into())];
     let (_id2, mut receiver2) =
-        s.a.insert_persisted("users", values2, None, PersistenceTier::Worker)
+        s.a.insert_persisted("users", values2, None, DurabilityTier::Worker)
             .unwrap();
 
     pump_3tier(&mut s);
@@ -864,7 +864,7 @@ fn rc_query_no_settled_tier_immediate() {
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let id = s.a.insert("users", values, None).unwrap();
 
-    let mut future = s.a.query(Query::new("users"), None, None);
+    let mut future = s.a.query(Query::new("users"), None);
 
     let waker = noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
@@ -885,8 +885,15 @@ fn rc_query_settled_tier_holds() {
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let id = s.a.insert("users", values, None).unwrap();
 
-    let mut future =
-        s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
 
     let waker = noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
@@ -912,8 +919,15 @@ fn rc_query_settled_tier_holds() {
 fn rc_query_settled_tier_empty_resolves() {
     let mut s = create_3tier_rc();
 
-    let mut future =
-        s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
 
     let waker = noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
@@ -954,8 +968,15 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     s.b.sync_sender().take();
 
     // One-shot settled query on A should wait for Worker settlement.
-    let mut future =
-        s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
 
     let waker = noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
@@ -1050,7 +1071,7 @@ fn rc_subscribe_settled_tier() {
     let received_clone = received.clone();
 
     let _handle =
-        s.a.subscribe_with_settled_tier(
+        s.a.subscribe_with_durability_and_propagation(
             Query::new("users"),
             move |delta| {
                 let rows: Vec<(ObjectId, Vec<Value>)> = delta
@@ -1066,7 +1087,11 @@ fn rc_subscribe_settled_tier() {
                 received_clone.lock().unwrap().push(rows);
             },
             None,
-            Some(PersistenceTier::Worker),
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::Worker),
+                local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            },
+            crate::sync_manager::QueryPropagation::Full,
         )
         .unwrap();
 

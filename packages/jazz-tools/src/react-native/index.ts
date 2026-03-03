@@ -24,7 +24,7 @@ export {
 } from "../synthetic-users.js";
 
 export type {
-  PersistenceTier,
+  DurabilityTier,
   QueryBuilder,
   RowDelta,
   SubscriptionDelta,

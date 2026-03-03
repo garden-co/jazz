@@ -89,7 +89,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
           observedSnapshots.push(delta.all);
         },
       });
-      const insertedId = db.insert(todosTable, { title: "first", done: false });
+      const insertedId = await db.insert(todosTable, { title: "first", done: false });
 
       await waitForCondition(
         () => observedSnapshots.some((snapshot) => snapshot.some((row) => row.id === insertedId)),
@@ -134,21 +134,21 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         },
       });
 
-      db.insert(todosTable, { title: "alpha", done: false });
+      await db.insert(todosTable, { title: "alpha", done: false });
       await waitForCondition(
         () => snapshots.some((rows) => rows.length === 1),
         5_000,
         "SO-I02 expected first snapshot",
       );
 
-      db.insert(todosTable, { title: "beta", done: false });
+      await db.insert(todosTable, { title: "beta", done: false });
       await waitForCondition(
         () => snapshots.some((rows) => rows.length === 2),
         5_000,
         "SO-I02 expected second snapshot",
       );
 
-      db.insert(todosTable, { title: "gamma", done: false });
+      await db.insert(todosTable, { title: "gamma", done: false });
       await waitForCondition(
         () => snapshots.some((rows) => rows.length === 3),
         5_000,
@@ -186,7 +186,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         },
       });
 
-      const insertedId = db.insert(todosTable, { title: "shared", done: false });
+      const insertedId = await db.insert(todosTable, { title: "shared", done: false });
       await waitForCondition(
         () => listenerA.length > 0 && listenerB.length > 0,
         5_000,
@@ -226,8 +226,8 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       });
 
       offA();
-      db.insert(todosTable, { title: "remaining-1", done: false });
-      db.insert(todosTable, { title: "remaining-2", done: true });
+      await db.insert(todosTable, { title: "remaining-1", done: false });
+      await db.insert(todosTable, { title: "remaining-2", done: true });
 
       await waitForCondition(
         () => listenerB.some((rows) => rows.length === 2),
@@ -257,7 +257,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         },
       });
 
-      db.insert(todosTable, { title: "before-shutdown", done: false });
+      await db.insert(todosTable, { title: "before-shutdown", done: false });
       await waitForCondition(
         () => events.length > 0,
         5_000,

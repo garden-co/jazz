@@ -43,25 +43,25 @@ export interface RequestLike {
  */
 export interface Runtime {
   insert(table: string, values: any): string;
+  insertDurable(table: string, values: any, tier: string): Promise<string>;
   update(object_id: string, values: any): void;
+  updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   delete(object_id: string): void;
+  deleteDurable(object_id: string, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
   subscribe(
     query_json: string,
     on_update: Function,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
     options_json?: string | null,
   ): number;
   unsubscribe(handle: number): void;
-  insertWithAck(table: string, values: any, tier: string): Promise<string>;
-  updateWithAck(object_id: string, values: any, tier: string): Promise<void>;
-  deleteWithAck(object_id: string, tier: string): Promise<void>;
   onSyncMessageReceived(message_json: string): void;
   onSyncMessageToSend(callback: Function): void;
   addServer(): void;
@@ -79,13 +79,19 @@ export interface Runtime {
  *
  * - `worker`: Persisted in web worker / local storage
  * - `edge`: Persisted at edge server
- * - `core`: Persisted at core server
+ * - `global`: Persisted at global server
  */
-export type PersistenceTier = "worker" | "edge" | "core";
+export type DurabilityTier = "worker" | "edge" | "global";
+export type LocalUpdatesMode = "immediate" | "deferred";
 export type QueryPropagation = "full" | "local-only";
 export interface QueryExecutionOptions {
-  settledTier?: PersistenceTier;
+  tier?: DurabilityTier;
+  localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
+}
+
+export interface WriteDurabilityOptions {
+  tier?: DurabilityTier;
 }
 
 /**
@@ -142,25 +148,46 @@ function resolveQueryJson(query: string | QueryInput): string {
   return translateQuery(builtQuery, schema);
 }
 
-function normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
-  if (!options) {
-    return { propagation: "full" };
+function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
+  if (!tier) return undefined;
+  if (Array.isArray(tier)) {
+    return tier[0];
+  }
+  return tier;
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function resolveDefaultDurabilityTier(context: AppContext): DurabilityTier {
+  if (context.defaultDurabilityTier) {
+    return context.defaultDurabilityTier;
   }
 
-  return {
-    settledTier: options.settledTier,
-    propagation: options.propagation ?? "full",
-  };
+  if (isBrowserRuntime()) {
+    return "worker";
+  }
+
+  // In non-browser environments, default to edge when connected to a server.
+  // For local/in-memory runtimes without a server, keep worker semantics.
+  return context.serverUrl ? "edge" : "worker";
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
-  if ((options.propagation ?? "full") === "full") {
+  const payload: { propagation?: QueryPropagation; local_updates?: LocalUpdatesMode } = {};
+  if ((options.propagation ?? "full") !== "full") {
+    payload.propagation = options.propagation;
+  }
+  if ((options.localUpdates ?? "immediate") !== "immediate") {
+    payload.local_updates = options.localUpdates;
+  }
+
+  if (!payload.propagation && !payload.local_updates) {
     return undefined;
   }
 
-  return JSON.stringify({
-    propagation: options.propagation,
-  });
+  return JSON.stringify(payload);
 }
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -361,10 +388,16 @@ export class JazzClient {
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
   private resolvedSession: Session | null;
+  private defaultDurabilityTier: DurabilityTier;
 
-  private constructor(runtime: Runtime, context: AppContext) {
+  private constructor(
+    runtime: Runtime,
+    context: AppContext,
+    defaultDurabilityTier: DurabilityTier,
+  ) {
     this.runtime = runtime;
     this.context = context;
+    this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
@@ -399,10 +432,14 @@ export class JazzClient {
       resolvedContext.appId,
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
-      resolvedContext.tier,
+      resolveNodeTier(resolvedContext.tier),
     );
 
-    const client = new JazzClient(runtime, resolvedContext);
+    const client = new JazzClient(
+      runtime,
+      resolvedContext,
+      resolveDefaultDurabilityTier(resolvedContext),
+    );
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
@@ -432,10 +469,14 @@ export class JazzClient {
       resolvedContext.appId,
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
-      resolvedContext.tier,
+      resolveNodeTier(resolvedContext.tier),
     );
 
-    const client = new JazzClient(runtime, resolvedContext);
+    const client = new JazzClient(
+      runtime,
+      resolvedContext,
+      resolveDefaultDurabilityTier(resolvedContext),
+    );
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
@@ -456,7 +497,7 @@ export class JazzClient {
    * @returns Connected JazzClient instance
    */
   static connectWithRuntime(runtime: Runtime, context: AppContext): JazzClient {
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, context, resolveDefaultDurabilityTier(context));
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
@@ -507,34 +548,31 @@ export class JazzClient {
     return this.forSession(sessionFromRequest(request));
   }
 
-  /**
-   * Insert a new row into a table (sync, fire-and-forget).
-   *
-   * @param table Table name
-   * @param values Array of column values
-   * @returns The new row's ID (UUID string)
-   */
-  create(table: string, values: Value[]): string {
-    return this.runtime.insert(table, values);
+  private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+    return {
+      tier: options?.tier ?? this.defaultDurabilityTier,
+      localUpdates: options?.localUpdates ?? "immediate",
+      propagation: options?.propagation ?? "full",
+    };
+  }
+
+  private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
+    return options?.tier ?? this.defaultDurabilityTier;
   }
 
   /**
-   * Insert a row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table name
-   * @param values Array of column values
-   * @param tier Acknowledgement tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acknowledges
+   * Insert a new row into a table and wait for durability at the requested tier.
    */
-  async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertWithAck(table, values, tier);
+  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
+    const tier = this.resolveWriteTier(options);
+    return this.runtime.insertDurable(table, values, tier);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
    * @param query Query builder or JSON-encoded query specification
-   * @param settledTier Optional tier to hold delivery until confirmed
+   * @param options Optional read durability options
    * @returns Array of matching rows
    */
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
@@ -542,7 +580,7 @@ export class JazzClient {
   }
 
   /**
-   * Internal query with optional session and settled tier.
+   * Internal query with optional session and read durability options.
    * @internal
    */
   async queryInternal(
@@ -550,54 +588,37 @@ export class JazzClient {
     session?: Session,
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
-    const normalizedOptions = normalizeQueryExecutionOptions(options);
+    const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
-      normalizedOptions.settledTier,
+      normalizedOptions.tier,
       optionsJson,
     );
     return results as Row[];
   }
 
   /**
-   * Update a row by ID (sync, fire-and-forget).
-   *
-   * @param objectId Row ID (UUID string)
-   * @param updates Object mapping column names to new values
+   * Update a row by ID and wait for durability at the requested tier.
    */
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.runtime.update(objectId, updates);
-  }
-
-  /**
-   * Update a row and wait for acknowledgement at the specified tier.
-   */
-  async updateWithAck(
+  async update(
     objectId: string,
     updates: Record<string, Value>,
-    tier: PersistenceTier,
+    options?: WriteDurabilityOptions,
   ): Promise<void> {
-    await this.runtime.updateWithAck(objectId, updates, tier);
+    const tier = this.resolveWriteTier(options);
+    await this.runtime.updateDurable(objectId, updates, tier);
   }
 
   /**
-   * Delete a row by ID (sync, fire-and-forget).
-   *
-   * @param objectId Row ID (UUID string)
+   * Delete a row by ID and wait for durability at the requested tier.
    */
-  delete(objectId: string): void {
-    this.runtime.delete(objectId);
-  }
-
-  /**
-   * Delete a row and wait for acknowledgement at the specified tier.
-   */
-  async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deleteWithAck(objectId, tier);
+  async delete(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+    const tier = this.resolveWriteTier(options);
+    await this.runtime.deleteDurable(objectId, tier);
   }
 
   /**
@@ -605,7 +626,7 @@ export class JazzClient {
    *
    * @param query Query builder or JSON-encoded query specification
    * @param callback Called with delta whenever results change
-   * @param settledTier Optional tier to hold initial delivery until confirmed
+   * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
@@ -617,7 +638,7 @@ export class JazzClient {
   }
 
   /**
-   * Internal subscribe with optional session and settled tier.
+   * Internal subscribe with optional session and read durability options.
    * @internal
    */
   subscribeInternal(
@@ -626,7 +647,7 @@ export class JazzClient {
     session?: Session,
     options?: QueryExecutionOptions,
   ): number {
-    const normalizedOptions = normalizeQueryExecutionOptions(options);
+    const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -639,7 +660,7 @@ export class JazzClient {
         callback(delta);
       },
       sessionJson,
-      normalizedOptions.settledTier,
+      normalizedOptions.tier,
       optionsJson,
     );
     this.subscriptions.set(subId, callback);

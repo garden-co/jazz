@@ -38,19 +38,19 @@ impl SyncManager {
                 let persisted =
                     self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
-                // Emit ack back to server if we have a tier
-                if let Some(tier) = self.my_tier
-                    && !persisted.is_empty()
-                {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Server(server_id),
-                        payload: SyncPayload::PersistenceAck {
-                            object_id,
-                            branch_name,
-                            confirmed_commits: persisted,
-                            tier,
-                        },
-                    });
+                // Emit ack back to server for each local durability identity.
+                if !persisted.is_empty() {
+                    for tier in self.my_tiers.iter().copied() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Server(server_id),
+                            payload: SyncPayload::PersistenceAck {
+                                object_id,
+                                branch_name,
+                                confirmed_commits: persisted.clone(),
+                                tier,
+                            },
+                        });
+                    }
                 }
 
                 // Forward to clients whose scope includes this object/branch
@@ -405,19 +405,19 @@ impl SyncManager {
                 let persisted =
                     self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
-                // Emit ack back to client if we have a tier
-                if let Some(tier) = self.my_tier
-                    && !persisted.is_empty()
-                {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Client(client_id),
-                        payload: SyncPayload::PersistenceAck {
-                            object_id,
-                            branch_name,
-                            confirmed_commits: persisted,
-                            tier,
-                        },
-                    });
+                // Emit ack back to client for each local durability identity.
+                if !persisted.is_empty() {
+                    for tier in self.my_tiers.iter().copied() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::PersistenceAck {
+                                object_id,
+                                branch_name,
+                                confirmed_commits: persisted.clone(),
+                                tier,
+                            },
+                        });
+                    }
                 }
 
                 // Forward to servers

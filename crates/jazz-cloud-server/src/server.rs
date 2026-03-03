@@ -28,11 +28,12 @@ use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchema, Value,
 };
+use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncManager, SyncPayload,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -1057,7 +1058,10 @@ impl MetaStore {
             )
             .build();
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new().with_durability_tiers(vec![
+            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
+        ]);
         let schema_manager = SchemaManager::new(
             sync_manager,
             meta_schema,
@@ -1097,7 +1101,7 @@ impl MetaStore {
         let query = QueryBuilder::new("apps").build();
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("meta query error: {e}"))?;
 
         let rows = future
@@ -1115,7 +1119,7 @@ impl MetaStore {
             .build();
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("meta query error: {e}"))?;
         let mut rows = future
             .await
@@ -1253,7 +1257,7 @@ impl MetaStore {
 
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("external identity query error: {e}"))?;
         let mut rows = future
             .await
@@ -1486,7 +1490,10 @@ impl AppRuntime {
             )
         })?;
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new().with_durability_tiers(vec![
+            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
+        ]);
         let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
         let db_path = data_dir.join("jazz.surrealkv");

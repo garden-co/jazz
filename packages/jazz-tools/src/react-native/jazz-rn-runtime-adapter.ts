@@ -32,18 +32,14 @@ export interface JazzRnRuntimeBinding {
         }
       | undefined,
   ): void;
-  query(
-    queryJson: string,
-    sessionJson: string | undefined,
-    settledTier: string | undefined,
-  ): string;
+  query(queryJson: string, sessionJson: string | undefined, tier: string | undefined): string;
   removeServer(): void;
   setClientRole(clientId: string, role: string): void;
   subscribe(
     queryJson: string,
     callback: { onUpdate(deltaJson: string): void },
     sessionJson: string | undefined,
-    settledTier: string | undefined,
+    tier: string | undefined,
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string): void;
@@ -141,13 +137,9 @@ export class JazzRnRuntimeAdapter implements Runtime {
   async query(
     query_json: string,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
   ): Promise<any> {
-    const rowsJson = this.binding.query(
-      query_json,
-      session_json ?? undefined,
-      settled_tier ?? undefined,
-    );
+    const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
     return JSON.parse(rowsJson);
   }
 
@@ -155,7 +147,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     query_json: string,
     on_update: Function,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
   ): number {
     const handle = this.binding.subscribe(
       query_json,
@@ -170,7 +162,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
         },
       },
       session_json ?? undefined,
-      settled_tier ?? undefined,
+      tier ?? undefined,
     );
 
     const numericHandle = Number(handle);
@@ -187,21 +179,21 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertWithAck(table: string, values: any, tier: string): Promise<string> {
+  insertDurable(table: string, values: any, tier: string): Promise<string> {
     assertWorkerTier(tier);
     const id = this.insert(table, values);
     this.binding.flush();
     return Promise.resolve(id);
   }
 
-  updateWithAck(object_id: string, values: any, tier: string): Promise<void> {
+  updateDurable(object_id: string, values: any, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
     return Promise.resolve();
   }
 
-  deleteWithAck(object_id: string, tier: string): Promise<void> {
+  deleteDurable(object_id: string, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.delete(object_id);
     this.binding.flush();
