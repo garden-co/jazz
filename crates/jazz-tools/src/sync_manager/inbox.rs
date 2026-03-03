@@ -170,6 +170,19 @@ impl SyncManager {
                         // Trusted — apply directly
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
+                    ClientRole::Backend => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
                     ClientRole::User => {
                         // User requires session
                         let Some(session) = &client.session else {
@@ -239,6 +252,19 @@ impl SyncManager {
                 let branch_name = *branch_name;
                 match client.role {
                     ClientRole::Peer | ClientRole::Admin => {
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
+                    ClientRole::Backend => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
                     ClientRole::User => {

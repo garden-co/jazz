@@ -129,6 +129,25 @@ describe("sync-transport", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
   });
 
+  it("posts non-catalogue payloads with backend secret when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {
+      backendSecret: "backend-secret",
+      jwtToken: "jwt-token",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Jazz-Backend-Secret": "backend-secret",
+    });
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
+  });
+
   it("skips catalogue payload sync when admin secret is missing", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -295,6 +314,31 @@ describe("sync-transport", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
     expect(clientId).toBe("server-client-2");
+
+    controller.stop();
+  });
+
+  it("stream controller uses backend secret auth when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse([]));
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const controller = new SyncStreamController({
+      getAuth: () => ({ backendSecret: "backend-secret" }),
+      getClientId: () => "initial-client-id",
+      setClientId: vi.fn(),
+      onConnected: vi.fn(),
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+    });
+
+    controller.start("http://localhost:3000");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      Accept: "application/octet-stream",
+      "X-Jazz-Backend-Secret": "backend-secret",
+    });
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
 
     controller.stop();
   });
