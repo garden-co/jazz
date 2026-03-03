@@ -88,7 +88,7 @@ jobs:
           if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
           COMMON=(--token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}")
 
-          CREATE_OUT="$(sandbox create "${COMMON[@]}" --runtime node22 --timeout 60m --publish-port "$JAZZ_E2E_SERVER_PORT")"
+          CREATE_OUT="$(sandbox create "${COMMON[@]}" --runtime node22 --timeout 60m --publish-port "$JAZZ_E2E_SERVER_PORT" 2>&1)"
           echo "$CREATE_OUT" | tee vercel-sandbox.log
 
           SANDBOX_ID="$(echo "$CREATE_OUT" | grep -Eo 'sbx_[[:alnum:]]+|sb_[[:alnum:]]+' | head -n1)"
