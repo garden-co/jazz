@@ -158,7 +158,7 @@ export default function App() {
 
   return (
     <JazzProvider client={client}>
-      <DevtoolsProvider wasmSchema={wasmSchema}>
+      <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
         <ConfigResetProvider onReset={handleReset}>
           <BrowserRouter>
             <InspectorRoutes />

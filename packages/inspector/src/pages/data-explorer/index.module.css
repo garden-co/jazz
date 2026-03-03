@@ -15,11 +15,32 @@
 }
 
 .sidebarTitle {
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #8c9ab0;
+}
+
+.sidebarHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.propagationSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #9aa6ba;
+}
+
+.propagationLabel {
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .tableList {
