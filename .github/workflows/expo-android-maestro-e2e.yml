@@ -148,6 +148,7 @@ jobs:
           sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
             "$SANDBOX_ID:/tmp/server.log" server.log || true
 
+          cat server.log
           SYNC="$(grep -c 'sync request' server.log || true)"
           EVENTS="$(grep -c 'events stream connecting' server.log || true)"
           echo "sync requests: $SYNC | event connections: $EVENTS"
