@@ -528,6 +528,14 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     .await;
     client_a.shutdown().await.expect("shutdown client a");
     drop(seed_server);
+    wait_for_todos_count_on_disk(app_id, server_data.path(), 1, Duration::from_secs(20)).await;
+    wait_for_catalogue_manifest_schema_count_on_disk(
+        app_id,
+        server_data.path(),
+        1,
+        Duration::from_secs(20),
+    )
+    .await;
 
     // Phase 2: restart with delayed server->client ObjectUpdated sends.
     let delayed_server = ServerProcess::start_with_options(
@@ -550,27 +558,13 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     .await
     .expect("connect client b");
 
-    let query = QueryBuilder::new("todos").build();
-    let mut rows = None;
-    for _ in 0..3 {
-        match tokio::time::timeout(
-            Duration::from_secs(8),
-            client_b.query(query.clone(), Some(DurabilityTier::EdgeServer)),
-        )
-        .await
-        {
-            Ok(Ok(result_rows)) => {
-                rows = Some(result_rows);
-                break;
-            }
-            Ok(Err(err)) => panic!("client b query error: {err}"),
-            Err(_) => {
-                // Stream can race startup; retry to exercise ordering once connected.
-                continue;
-            }
-        }
-    }
-    let rows = rows.expect("client b query timeout after retries");
+    let rows = wait_for_todos_count(
+        &client_b,
+        1,
+        Duration::from_secs(20),
+        Some(DurabilityTier::EdgeServer),
+    )
+    .await;
 
     assert_eq!(
         rows.len(),
