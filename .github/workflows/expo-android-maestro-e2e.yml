@@ -122,20 +122,7 @@ jobs:
           HOST="${SANDBOX_ID//_/-}"
           CANDIDATES=("${URL:-}" "https://$HOST.vercel.run" "https://$HOST.vercel.app")
 
-          for _ in $(seq 1 120); do
-            for c in "${CANDIDATES[@]}"; do
-              [ -z "$c" ] && continue
-              if curl --fail --silent --max-time 5 "${c%/}/health" >/dev/null 2>&1; then
-                echo "SERVER_PUBLIC_URL=${c%/}" >> "$GITHUB_ENV"
-                echo "Health OK: $c"
-                exit 0
-              fi
-            done
-            sleep 1
-          done
-
-          echo "::error::Timed out waiting for sandbox health"
-          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -lc "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
           exit 1
 
       - name: Run Maestro Cloud flows
