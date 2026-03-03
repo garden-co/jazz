@@ -73,14 +73,6 @@ jobs:
         working-directory: examples/todo-client-localfirst-expo
         run: pnpm expo prebuild --clean
 
-      - name: Build release APK
-        working-directory: examples/todo-client-localfirst-expo/android
-        env:
-          EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
-          EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
-          EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
-        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
-
       - name: Install Vercel Sandbox CLI
         run: npm install -g sandbox
 
@@ -103,6 +95,10 @@ jobs:
           if [ -z "$SANDBOX_ID" ]; then echo "::error::Could not parse sandbox ID"; exit 1; fi
           echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
 
+          SERVER_PUBLIC_URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^[:space:]]+' | head -n1)"
+          if [ -z "$SERVER_PUBLIC_URL" ]; then echo "::error::Could not parse sandbox public URL"; exit 1; fi
+          echo "SERVER_PUBLIC_URL=$SERVER_PUBLIC_URL" >> "$GITHUB_ENV"
+
           ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" uname -m | tr -d '\r' | tail -n1)"
           case "$ARCH" in
             x86_64|amd64)  TARGET=x86_64-unknown-linux-gnu ;;
@@ -121,6 +117,14 @@ jobs:
           sleep 5
 
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" tail -n 200 /tmp/server.log | tee -a vercel-sandbox.log
+
+      - name: Build release APK
+        working-directory: examples/todo-client-localfirst-expo/android
+        env:
+          EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
+          EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
+          EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
 
       - name: Run Maestro Cloud flows
         id: maestro
