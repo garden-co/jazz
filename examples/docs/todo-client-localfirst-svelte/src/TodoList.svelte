@@ -22,32 +22,32 @@
 
 	let title = $state('');
 
-	function handleSubmit(e: SubmitEvent) {
+	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!title.trim()) return;
 		// #region writing-insert-svelte
-		db.insert(app.todos, { title: title.trim(), done: false });
+		await db.insert(app.todos, { title: title.trim(), done: false });
 		// #endregion writing-insert-svelte
 		title = '';
 	}
 
 	// #region writing-mutations-svelte
-	function toggleTodo(todo: { id: string; done: boolean }) {
-		db.update(app.todos, todo.id, { done: !todo.done });
+	async function toggleTodo(todo: { id: string; done: boolean }) {
+		await db.update(app.todos, todo.id, { done: !todo.done });
 	}
 
-	function removeTodo(id: string) {
-		db.deleteFrom(app.todos, id);
+	async function removeTodo(id: string) {
+		await db.deleteFrom(app.todos, id);
 	}
 	// #endregion writing-mutations-svelte
 
-	// #region writing-persisted-svelte
+	// #region writing-durability-svelte
 	async function addImportantTodo(todoTitle: string) {
-		const id = await db.insertWithAck(app.todos, { title: todoTitle, done: false }, 'edge');
-		await db.updateWithAck(app.todos, id, { done: true }, 'edge');
-		await db.deleteFromWithAck(app.todos, id, 'core');
+		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
+		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
+		await db.deleteFrom(app.todos, id, { tier: 'global' });
 	}
-	// #endregion writing-persisted-svelte
+	// #endregion writing-durability-svelte
 </script>
 
 <form onsubmit={handleSubmit}>

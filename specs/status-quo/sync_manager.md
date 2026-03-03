@@ -1,6 +1,6 @@
 # Sync Manager — Status Quo
 
-The Sync Manager coordinates data flow between nodes in the multi-tier topology (browser ↔ edge server ↔ core server). Its job is to ensure each node has the data it needs — no more, no less.
+The Sync Manager coordinates data flow between nodes in the multi-tier topology (browser ↔ edge server ↔ global server). Its job is to ensure each node has the data it needs — no more, no less.
 
 The fundamental asymmetry: **upward** (to servers), we push everything — the server is trusted and needs all data for query evaluation. **Downward** (to clients), we push only what matches the client's active queries — clients are untrusted and shouldn't see data they haven't asked for.
 
@@ -48,10 +48,10 @@ The effective scope is computed dynamically via `is_in_scope()` rather than stor
 
 > `crates/groove/src/sync_manager.rs:133-144`
 
-### PersistenceTier
+### DurabilityTier
 
 ```
-Worker | EdgeServer | CoreServer
+Worker | EdgeServer | GlobalServer
 ```
 
 Used in PersistenceAck and QuerySettled for tier-aware durability.
@@ -75,7 +75,7 @@ Used in PersistenceAck and QuerySettled for tier-aware durability.
 
 Note: the spec originally called these `QueryRegistration`/`QueryUnregistration` — renamed to `QuerySubscription`/`QueryUnsubscription` in implementation.
 
-`QuerySubscription` now carries `propagation` (`full` default, `local-only` optional). `local-only` prevents forwarding beyond the local persistence tier.
+`QuerySubscription` now carries `propagation` (`full` default, `local-only` optional). `local-only` prevents forwarding beyond the local durability tier.
 
 > [`sync_manager/types.rs:83`](../../crates/jazz-tools/src/sync_manager/types.rs#L83)
 > [`sync_manager/types.rs:235`](../../crates/jazz-tools/src/sync_manager/types.rs#L235)
@@ -165,7 +165,7 @@ A key boundary: the SyncManager never touches query graphs or SQL. When a client
 
 ## QuerySettled and PersistenceAck
 
-### QuerySettled: read-settlement signal
+### QuerySettled: read-durability signal
 
 `QuerySettled` is a tier-tagged signal that says: "this query has settled here at tier `T`."
 
@@ -177,7 +177,7 @@ One-hop flow (browser main thread -> worker):
 4. If `propagation=full`, worker forwards upstream; if `local-only`, worker stops propagation at worker tier.
 5. On first settle only, worker emits `QuerySettled { query_id, tier: Worker }`.
 6. Main receives that payload, queues it in `pending_query_settled`, then `QueryManager::process()` moves it into `subscription.achieved_tiers`.
-7. First delivery is held until `achieved_tiers` satisfies `settled_tier`; then the first callback is a full snapshot.
+7. First delivery is held until `achieved_tiers` satisfies `durability_tier`; then the first callback is a full snapshot.
 
 > [`sync_manager/inbox.rs:279`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L279)
 > [`sync_manager/inbox.rs:285`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L285)
@@ -189,7 +189,7 @@ One-hop flow (browser main thread -> worker):
 > [`query_manager/manager.rs:640`](../../crates/jazz-tools/src/query_manager/manager.rs#L640)
 > [`query_manager/manager.rs:651`](../../crates/jazz-tools/src/query_manager/manager.rs#L651)
 
-Key consequence: this is what makes `settled_tier` meaningful. Query state can settle and accumulate while delivery is gated, then unblock exactly when the required tier confirmation arrives.
+Key consequence: this is what makes `durability_tier` meaningful. Query state can settle and accumulate while delivery is gated, then unblock exactly when the required tier confirmation arrives.
 
 ### PersistenceAck: write-durability signal
 
@@ -201,7 +201,7 @@ One-hop flow (browser main thread -> worker):
 2. Worker applies commits; for newly persisted commit IDs and if `my_tier` is set, worker emits `PersistenceAck` back to the sender.
 3. Main receives `PersistenceAck`, stores tier state in storage, updates in-memory `commit.ack_state.confirmed_tiers`, and queues `(commit_id, tier)` for runtime consumers.
 4. `RuntimeCore` drains received acks and resolves ack watchers whose requested tier is `<= acked_tier`.
-5. `insert_persisted` / `update_persisted` / `delete_persisted` receivers resolve at this step.
+5. Durable write watchers resolve at this step.
 
 > [`sync_manager/inbox.rs:391`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L391)
 > [`sync_manager/inbox.rs:395`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L395)
@@ -216,7 +216,7 @@ Key consequence: delivery and durability are decoupled on purpose.
 
 - `QuerySettled` gates first query result delivery semantics.
 - `PersistenceAck` gates persisted-write completion semantics.
-- Both use the same ordered tier lattice (`Worker < EdgeServer < CoreServer`), but they answer different questions.
+- Both use the same ordered tier lattice (`Worker < EdgeServer < GlobalServer`), but they answer different questions.
 
 > [`sync_manager/types.rs:22`](../../crates/jazz-tools/src/sync_manager/types.rs#L22)
 
