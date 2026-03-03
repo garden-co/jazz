@@ -23,6 +23,12 @@ use super::encoding::{decode_lens_transform, decode_schema, encode_lens_transfor
 use super::lens::Lens;
 use super::types::AppId;
 
+#[derive(Debug, Clone)]
+struct KnownSchema {
+    schema: Schema,
+    original_json: String,
+}
+
 /// SchemaManager coordinates schema evolution with query execution.
 ///
 /// It manages:
@@ -68,8 +74,7 @@ pub struct SchemaManager {
     /// Schemas known to this manager (for server mode).
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
-    known_schemas: Arc<HashMap<SchemaHash, Schema>>,
-    known_schema_json: HashMap<SchemaHash, String>,
+    known_schemas: Arc<HashMap<SchemaHash, KnownSchema>>,
     known_schemas_dirty: bool,
 }
 
@@ -99,12 +104,13 @@ impl SchemaManager {
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
-        known_schemas.insert(current_hash, schema);
-        let mut known_schema_json = HashMap::new();
-        known_schema_json.insert(
+        known_schemas.insert(
             current_hash,
-            serde_json::to_string(&context.current_schema)
-                .expect("serializing current schema should not fail"),
+            KnownSchema {
+                schema,
+                original_json: serde_json::to_string(&context.current_schema)
+                    .expect("serializing current schema should not fail"),
+            },
         );
 
         Ok(Self {
@@ -112,7 +118,6 @@ impl SchemaManager {
             query_manager,
             app_id,
             known_schemas: Arc::new(known_schemas),
-            known_schema_json,
             known_schemas_dirty: true,
         })
     }
@@ -142,7 +147,6 @@ impl SchemaManager {
             query_manager,
             app_id,
             known_schemas: Arc::new(HashMap::new()),
-            known_schema_json: HashMap::new(),
             known_schemas_dirty: false,
         }
     }
@@ -168,7 +172,14 @@ impl SchemaManager {
             return;
         }
 
-        Arc::make_mut(&mut self.known_schemas).insert(hash, schema.clone());
+        Arc::make_mut(&mut self.known_schemas).insert(
+            hash,
+            KnownSchema {
+                original_json: serde_json::to_string(&schema)
+                    .expect("serializing schema should not fail"),
+                schema: schema.clone(),
+            },
+        );
         self.known_schemas_dirty = true;
 
         // If we have a current schema context, also try the lens-path activation
@@ -180,12 +191,14 @@ impl SchemaManager {
 
     /// Get a known schema by hash.
     pub fn get_known_schema(&self, hash: &SchemaHash) -> Option<&Schema> {
-        self.known_schemas.get(hash)
+        self.known_schemas.get(hash).map(|known| &known.schema)
     }
 
     /// Get original schema JSON for a known schema hash.
     pub fn get_known_schema_json(&self, hash: &SchemaHash) -> Option<&str> {
-        self.known_schema_json.get(hash).map(String::as_str)
+        self.known_schemas
+            .get(hash)
+            .map(|known| known.original_json.as_str())
     }
 
     /// Check if a schema is known (either current, live, or in known_schemas).
@@ -516,11 +529,11 @@ impl SchemaManager {
         let historical_schemas: Vec<Schema> = self
             .known_schemas
             .iter()
-            .filter_map(|(hash, schema)| {
+            .filter_map(|(hash, known)| {
                 if *hash == current_hash {
                     None
                 } else {
-                    Some(schema.clone())
+                    Some(known.schema.clone())
                 }
             })
             .collect();
@@ -637,12 +650,20 @@ impl SchemaManager {
 
         // Always store/overwrite original JSON for this hash so API retrieval
         // reflects the latest pushed schema_json for that hash.
-        self.known_schema_json.insert(hash, schema_json);
-
-        // Always add to known_schemas (server or client)
-        // This allows server-mode query execution even without lens paths
-        if !self.known_schemas.contains_key(&hash) {
-            Arc::make_mut(&mut self.known_schemas).insert(hash, schema.clone());
+        // Always add/update known_schemas (server or client). This allows
+        // server-mode query execution even without lens paths.
+        let entry = Arc::make_mut(&mut self.known_schemas)
+            .entry(hash)
+            .or_insert_with(|| {
+                self.known_schemas_dirty = true;
+                KnownSchema {
+                    schema: schema.clone(),
+                    original_json: schema_json.clone(),
+                }
+            });
+        entry.original_json = schema_json;
+        if entry.schema != schema {
+            entry.schema = schema.clone();
             self.known_schemas_dirty = true;
         }
 
@@ -789,6 +810,7 @@ impl SchemaManager {
             .known_schemas
             .get(&ctx.schema_hash)
             .ok_or(QueryError::UnknownSchema(ctx.schema_hash))?
+            .schema
             .clone();
 
         // Build a SchemaContext with target as current
@@ -801,10 +823,10 @@ impl SchemaManager {
         }
 
         // Add other known schemas as potential live schemas
-        for (hash, schema) in self.known_schemas.iter() {
+        for (hash, known) in self.known_schemas.iter() {
             if *hash != ctx.schema_hash {
                 // Add to pending - will activate if lens path exists to target
-                temp_context.add_pending_schema(schema.clone());
+                temp_context.add_pending_schema(known.schema.clone());
             }
         }
 
@@ -821,9 +843,9 @@ impl SchemaManager {
         for branch_name in temp_context.all_branch_names() {
             let branch_str = branch_name.as_str();
             if let Some(composed) = ComposedBranchName::parse(&branch_name)
-                && let Some(schema) = self.known_schemas.get(&composed.schema_hash)
+                && let Some(known) = self.known_schemas.get(&composed.schema_hash)
             {
-                for (table_name, table_schema) in schema {
+                for (table_name, table_schema) in &known.schema {
                     self.query_manager.ensure_indices_for_branch(
                         table_name.as_str(),
                         branch_str,
@@ -911,8 +933,13 @@ impl SchemaManager {
         // Sync known schemas to QueryManager for server-mode lazy activation
         // This enables QueryManager to activate branches when rows arrive
         if self.known_schemas_dirty {
-            self.query_manager
-                .set_known_schemas(Arc::clone(&self.known_schemas));
+            let schemas = Arc::new(
+                self.known_schemas
+                    .iter()
+                    .map(|(hash, known)| (*hash, known.schema.clone()))
+                    .collect(),
+            );
+            self.query_manager.set_known_schemas(schemas);
             self.known_schemas_dirty = false;
         }
 
