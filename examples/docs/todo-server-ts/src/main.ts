@@ -65,11 +65,27 @@ function rowToTodo(id: string, values: Value[]): Todo | null {
   }
 
   return {
-    id,
+    id: normalizeTodoId(id),
     title: titleVal.value,
     done: doneVal.value,
     description: descVal?.type === "Text" && descVal.value ? descVal.value : undefined,
   };
+}
+
+function normalizeTodoId(id: string): string {
+  if (id.startsWith("uuid:")) {
+    return id.slice("uuid:".length);
+  }
+  if (id.startsWith("urn:uuid:")) {
+    return id.slice("urn:uuid:".length);
+  }
+  return id;
+}
+
+async function findTodoRowById(client: JazzClient, id: string) {
+  const normalizedId = normalizeTodoId(id);
+  const rows = await client.query(schemaApp.todos);
+  return rows.find((row) => normalizeTodoId(row.id) === normalizedId);
 }
 
 // ============================================================================
@@ -160,7 +176,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         { type: "Text", value: ownerId },
       ];
 
-      const id = await client.create("todos", values);
+      const id = normalizeTodoId(await client.create("todos", values));
 
       const todo: Todo = {
         id,
@@ -221,10 +237,8 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // Get a single todo
   app.get("/todos/:id", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { id } = req.params;
-
-      const rows = await client.query(schemaApp.todos.where({ id }));
-      const row = rows.find((r) => r.id === id);
+      const id = normalizeTodoId(req.params.id);
+      const row = await findTodoRowById(client, id);
 
       if (!row) {
         res.status(404).json({ error: "Todo not found" });
@@ -246,7 +260,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // Update a todo
   app.put("/todos/:id", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { id } = req.params;
+      const id = normalizeTodoId(req.params.id);
       const body = req.body as UpdateTodoRequest;
 
       const updates: Record<string, Value> = {};
@@ -263,8 +277,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
       if (Object.keys(updates).length === 0) {
         // No updates, just return the current todo
-        const rows = await client.query(schemaApp.todos.where({ id }));
-        const row = rows.find((r) => r.id === id);
+        const row = await findTodoRowById(client, id);
 
         if (!row) {
           res.status(404).json({ error: "Todo not found" });
@@ -279,8 +292,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       await client.update(id, updates);
 
       // Fetch updated todo
-      const rows = await client.query(schemaApp.todos.where({ id }));
-      const row = rows.find((r) => r.id === id);
+      const row = await findTodoRowById(client, id);
 
       if (!row) {
         res.status(404).json({ error: "Todo not found after update" });
@@ -300,7 +312,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // Delete a todo
   app.delete("/todos/:id", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { id } = req.params;
+      const id = normalizeTodoId(req.params.id);
 
       await client.delete(id);
       res.status(204).send();
