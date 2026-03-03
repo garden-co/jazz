@@ -651,7 +651,7 @@ mod tests {
     use groove::runtime_tokio::TokioRuntime;
     use groove::schema_manager::{AppId, SchemaManager};
     use groove::storage::SurrealKvStorage;
-    use groove::sync_manager::{ClientId, PersistenceTier, SyncManager, SyncPayload};
+    use groove::sync_manager::{ClientId, DurabilityTier, SyncManager, SyncPayload};
     use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::{RwLock, broadcast};
@@ -667,7 +667,8 @@ mod tests {
         let storage =
             SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
         let schema_manager =
             SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
         let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
@@ -756,7 +757,8 @@ mod tests {
             )
             .build();
         let schema_hash = SchemaHash::compute(&schema);
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
         let schema_manager = SchemaManager::new(
             sync_manager,
             schema,

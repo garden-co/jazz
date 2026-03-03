@@ -68,7 +68,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         table: &str,
         values: Vec<Value>,
         session: Option<&Session>,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(ObjectId, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
@@ -76,10 +76,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
-        self.ack_watchers
-            .entry(result.row_commit_id)
-            .or_default()
-            .push((tier, sender));
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(());
+        } else {
+            self.ack_watchers
+                .entry(result.row_commit_id)
+                .or_default()
+                .push((tier, sender));
+        }
 
         self.immediate_tick();
         Ok((result.row_id, receiver))
@@ -92,7 +101,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         object_id: ObjectId,
         values: Vec<(String, Value)>,
         session: Option<&Session>,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let current_values = self.merge_row_update_values(object_id, values)?;
 
@@ -103,10 +112,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
-        self.ack_watchers
-            .entry(commit_id)
-            .or_default()
-            .push((tier, sender));
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(());
+        } else {
+            self.ack_watchers
+                .entry(commit_id)
+                .or_default()
+                .push((tier, sender));
+        }
 
         self.immediate_tick();
         Ok(receiver)
@@ -149,7 +167,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         object_id: ObjectId,
         session: Option<&Session>,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let handle = self
             .schema_manager
@@ -158,10 +176,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
-        self.ack_watchers
-            .entry(handle.delete_commit_id)
-            .or_default()
-            .push((tier, sender));
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(());
+        } else {
+            self.ack_watchers
+                .entry(handle.delete_commit_id)
+                .or_default()
+                .push((tier, sender));
+        }
 
         self.immediate_tick();
         Ok(receiver)

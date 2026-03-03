@@ -5,7 +5,7 @@ use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
 use jazz_tools::{
-    JazzClient, ObjectId, PersistenceTier, QueryBuilder, Session, SessionClient, Value,
+    DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, SessionClient, Value,
 };
 use serde_json::json;
 
@@ -113,15 +113,15 @@ pub async fn subscribe_todos(
 }
 // #endregion reading-subscriptions-rust
 
-// #region reading-settled-tier-rust
-pub async fn read_todos_settled_edge(client: &JazzClient) -> jazz_tools::Result<usize> {
+// #region reading-durability-tier-rust
+pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client
-        .query(query, Some(PersistenceTier::EdgeServer))
+        .query(query, Some(DurabilityTier::EdgeServer))
         .await?;
     Ok(rows.len())
 }
-// #endregion reading-settled-tier-rust
+// #endregion reading-durability-tier-rust
 
 // #region reading-filters-rust
 pub async fn read_todos_with_filters(client: &JazzClient) -> jazz_tools::Result<usize> {
@@ -198,13 +198,15 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 }
 // #endregion writing-crud-rust
 
-// #region writing-ack-tier-rust
-pub async fn write_todo_with_default_ack(client: &JazzClient) -> jazz_tools::Result<ObjectId> {
+// #region writing-durability-tier-rust
+pub async fn write_todo_with_default_durability(
+    client: &JazzClient,
+) -> jazz_tools::Result<ObjectId> {
     let id = client
         .create(
             "todos",
             vec![
-                Value::Text("Write docs with default ack behavior".to_string()),
+                Value::Text("Write docs with default durability behavior".to_string()),
                 Value::Boolean(false),
                 Value::Text(String::new()),
                 Value::Null,
@@ -213,8 +215,8 @@ pub async fn write_todo_with_default_ack(client: &JazzClient) -> jazz_tools::Res
         )
         .await?;
 
-    // Rust currently does not expose per-write ack tier arguments.
+    // Rust currently does not expose per-write durability tier arguments.
     // Writes apply locally first, then sync asynchronously to higher tiers.
     Ok(id)
 }
-// #endregion writing-ack-tier-rust
+// #endregion writing-durability-tier-rust

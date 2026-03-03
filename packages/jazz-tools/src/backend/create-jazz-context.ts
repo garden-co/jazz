@@ -23,8 +23,8 @@ export interface BackendContextConfig extends Omit<
   dataPath: string;
   /** Optional default schema source (typically generated `app` export). */
   app?: BackendSchemaSource;
-  /** Optional persistence tier for ack semantics. */
-  tier?: "worker" | "edge" | "core";
+  /** Optional node durability tier identity. */
+  tier?: "worker" | "edge" | "global";
 }
 
 interface ResolvedBackendContextConfig extends BackendContextConfig {
@@ -97,6 +97,7 @@ export class JazzContext {
   private createClient(schema: WasmSchema): JazzClient {
     const schemaJson = serializeRuntimeSchema(schema);
     this.initializedSchemaJson = schemaJson;
+    const nodeTier = this.config.tier ?? "edge";
 
     this.runtime = new NapiRuntime(
       schemaJson,
@@ -104,7 +105,7 @@ export class JazzContext {
       this.config.env ?? "dev",
       this.config.userBranch ?? "main",
       this.config.dataPath,
-      this.config.tier,
+      nodeTier,
     );
 
     const context: AppContext = {
@@ -119,7 +120,8 @@ export class JazzContext {
       localAuthToken: this.config.localAuthToken,
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
-      tier: this.config.tier,
+      tier: nodeTier,
+      defaultDurabilityTier: "edge",
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);

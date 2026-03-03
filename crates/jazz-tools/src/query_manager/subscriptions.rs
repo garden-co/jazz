@@ -6,14 +6,14 @@ use std::{
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
-use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
+use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
 
 #[cfg(test)]
 use super::encoding::decode_row;
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::manager::{
-    CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QuerySubscriptionFailure,
-    QueryUpdate,
+    CatalogueUpdate, LocalUpdates, QueryError, QueryManager, QuerySubscription,
+    QuerySubscriptionFailure, QueryUpdate,
 };
 use super::query::{Query, QueryBuilder};
 use super::session::Session;
@@ -25,7 +25,7 @@ use crate::object::ObjectId;
 
 impl QueryManager {
     fn should_send_local_subscription_upstream(&self, propagation: QueryPropagation) -> bool {
-        propagation == QueryPropagation::Full || !self.sync_manager.has_persistence_tier()
+        propagation == QueryPropagation::Full || !self.sync_manager.has_durability_identity()
     }
 
     /// Create a query builder for a table.
@@ -48,17 +48,34 @@ impl QueryManager {
     /// - Column name translation for old schema indices
     /// - Lens transforms for rows from old schema branches
     ///
-    /// `settled_tier`: If Some, holds first delivery until the specified tier confirms.
+    /// `durability_tier`: If Some, holds non-local delivery until the tier confirms.
     pub fn subscribe_with_session(
         &mut self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_session_with_local_updates(
+            query,
+            session,
+            durability_tier,
+            LocalUpdates::Immediate,
+        )
+    }
+
+    /// Subscribe with explicit local update behavior while waiting for durability.
+    pub fn subscribe_with_session_with_local_updates(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+        local_updates: LocalUpdates,
     ) -> Result<QuerySubscriptionId, QueryError> {
         self.subscribe_with_session_and_propagation(
             query,
             session,
-            settled_tier,
+            durability_tier,
+            local_updates,
             QueryPropagation::Full,
         )
     }
@@ -67,11 +84,12 @@ impl QueryManager {
         &mut self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
+        local_updates: LocalUpdates,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         let _span =
-            tracing::debug_span!("QM::subscribe", table = %query.table, ?settled_tier).entered();
+            tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -94,6 +112,7 @@ impl QueryManager {
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
+        let achieved_tiers = self.sync_manager.local_durability_tiers();
 
         tracing::debug!(
             sub_id = id.0,
@@ -110,8 +129,10 @@ impl QueryManager {
                 session,
                 needs_recompile: false,
                 settled_once: false,
-                settled_tier,
-                achieved_tiers: HashSet::new(),
+                durability_tier,
+                local_updates,
+                has_pending_local_updates: false,
+                achieved_tiers,
                 current_ordered_ids: Vec::new(),
                 propagation,
             },
@@ -166,7 +187,9 @@ impl QueryManager {
                 session,
                 needs_recompile: false,
                 settled_once: false,
-                settled_tier: None,
+                durability_tier: None,
+                local_updates: LocalUpdates::Immediate,
+                has_pending_local_updates: false,
                 achieved_tiers: HashSet::new(),
                 current_ordered_ids: Vec::new(),
                 propagation: QueryPropagation::Full,
@@ -191,12 +214,28 @@ impl QueryManager {
         &mut self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        self.subscribe_with_sync_and_propagation(
+        self.subscribe_with_sync_with_local_updates(
             query,
             session,
-            settled_tier,
+            durability_tier,
+            LocalUpdates::Immediate,
+        )
+    }
+
+    pub fn subscribe_with_sync_with_local_updates(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+        local_updates: LocalUpdates,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_sync_and_propagation_with_local_updates(
+            query,
+            session,
+            durability_tier,
+            local_updates,
             QueryPropagation::Full,
         )
     }
@@ -206,14 +245,32 @@ impl QueryManager {
         &mut self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
+        propagation: QueryPropagation,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_sync_and_propagation_with_local_updates(
+            query,
+            session,
+            durability_tier,
+            LocalUpdates::Immediate,
+            propagation,
+        )
+    }
+
+    pub fn subscribe_with_sync_and_propagation_with_local_updates(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+        local_updates: LocalUpdates,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Create local subscription
         let sub_id = self.subscribe_with_session_and_propagation(
             query.clone(),
             session.clone(),
-            settled_tier,
+            durability_tier,
+            local_updates,
             propagation,
         )?;
 

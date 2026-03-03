@@ -365,7 +365,7 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const id = db.insert(todos, {
+    const id = await db.insert(todos, {
       title: "watch-me",
       done: false,
       priority: 1,
@@ -379,7 +379,7 @@ describe("db.subscribeAll browser integration", () => {
       "expected add delta",
     );
 
-    db.update(todos, id, { title: "watch-me-updated" });
+    await db.update(todos, id, { title: "watch-me-updated" });
 
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 2, id)),
@@ -387,7 +387,7 @@ describe("db.subscribeAll browser integration", () => {
       "expected update delta",
     );
 
-    db.update(todos, id, { done: true });
+    await db.update(todos, id, { done: true });
 
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 1, id)),
@@ -410,7 +410,7 @@ describe("db.subscribeAll browser integration", () => {
         }),
       );
 
-      const insertedId = conditionsDb.insert(todos, testCase.insert);
+      const insertedId = await conditionsDb.insert(todos, testCase.insert);
 
       await waitForCondition(
         () => deltas.some((delta) => hasChangeForId(delta, 0, insertedId)),
@@ -435,7 +435,7 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const id = db.insert(todos, {
+    const id = await db.insert(todos, {
       title: "bytes-hit",
       done: false,
       priority: 1,
@@ -472,21 +472,21 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "p1",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "p2",
       done: false,
       priority: 2,
       owner_id: undefined,
       tags: ["x"],
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "p3",
       done: false,
       priority: 3,
@@ -518,7 +518,7 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const insertedId = db.insert(todos, {
+    const insertedId = await db.insert(todos, {
       title: "completely unrelated",
       done: false,
       priority: 1,
@@ -547,7 +547,7 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const userId = db.insert(users, { name: "Owner", team_id: undefined });
+    const userId = await db.insert(users, { name: "Owner", team_id: undefined });
 
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 0, userId)),
@@ -571,9 +571,13 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const orgId = db.insert(orgs, { name: "Hop Org" });
-    const teamId = db.insert(teams, { name: "Hop Team", org_id: orgId, parent_id: undefined });
-    db.insert(users, { name: "Hop User", team_id: teamId });
+    const orgId = await db.insert(orgs, { name: "Hop Org" });
+    const teamId = await db.insert(teams, {
+      name: "Hop Team",
+      org_id: orgId,
+      parent_id: undefined,
+    });
+    await db.insert(users, { name: "Hop User", team_id: teamId });
 
     await waitForCondition(
       () =>
@@ -590,11 +594,19 @@ describe("db.subscribeAll browser integration", () => {
       await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("scalar-fk-update") }),
     );
 
-    const orgAId = db.insert(orgs, { name: "Org A" });
-    const orgBId = db.insert(orgs, { name: "Org B" });
-    const teamAId = db.insert(teams, { name: "Team A", org_id: orgAId, parent_id: undefined });
-    const teamBId = db.insert(teams, { name: "Team B", org_id: orgBId, parent_id: undefined });
-    const userId = db.insert(users, { name: "Mover", team_id: teamAId });
+    const orgAId = await db.insert(orgs, { name: "Org A" });
+    const orgBId = await db.insert(orgs, { name: "Org B" });
+    const teamAId = await db.insert(teams, {
+      name: "Team A",
+      org_id: orgAId,
+      parent_id: undefined,
+    });
+    const teamBId = await db.insert(teams, {
+      name: "Team B",
+      org_id: orgBId,
+      parent_id: undefined,
+    });
+    const userId = await db.insert(users, { name: "Mover", team_id: teamAId });
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -616,7 +628,7 @@ describe("db.subscribeAll browser integration", () => {
       "expected initial team hop result",
     );
 
-    db.update(users, userId, { team_id: teamBId });
+    await db.update(users, userId, { team_id: teamBId });
 
     await waitForCondition(
       () => {
@@ -638,9 +650,9 @@ describe("db.subscribeAll browser integration", () => {
       await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("array-fk-update") }),
     );
 
-    const partAId = db.insert(fileParts, { label: "A" });
-    const partBId = db.insert(fileParts, { label: "B" });
-    const fileId = db.insert(files, { name: "File", parts: [partAId] });
+    const partAId = await db.insert(fileParts, { label: "A" });
+    const partBId = await db.insert(fileParts, { label: "B" });
+    const fileId = await db.insert(files, { name: "File", parts: [partAId] });
 
     const deltas: Array<SubscriptionDelta<FilePart>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -662,7 +674,7 @@ describe("db.subscribeAll browser integration", () => {
       "expected initial UUID[] hop result",
     );
 
-    db.update(files, fileId, { parts: [partBId] });
+    await db.update(files, fileId, { parts: [partBId] });
 
     await waitForCondition(
       () => {
@@ -701,9 +713,13 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const rootId = db.insert(teams, { name: "root", org_id: undefined, parent_id: undefined });
-    const midId = db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
-    const leafId = db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const rootId = await db.insert(teams, {
+      name: "root",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const midId = await db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
+    const leafId = await db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
 
     await waitForCondition(
       () => {

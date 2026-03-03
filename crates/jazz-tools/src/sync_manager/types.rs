@@ -19,12 +19,12 @@ pub struct PolicyError {
 // ID Types
 // ============================================================================
 
-/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < CoreServer).
+/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < GlobalServer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub enum PersistenceTier {
+pub enum DurabilityTier {
     Worker,
     EdgeServer,
-    CoreServer,
+    GlobalServer,
 }
 
 /// Unique identifier for a server connection.
@@ -247,13 +247,13 @@ pub enum SyncPayload {
         object_id: ObjectId,
         branch_name: BranchName,
         confirmed_commits: HashSet<CommitId>,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     },
 
     /// Query settlement notification — a query has settled at a given persistence tier.
     QuerySettled {
         query_id: QueryId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
         /// Highest stream sequence known to be emitted before this notification.
         through_seq: u64,
     },

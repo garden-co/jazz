@@ -120,7 +120,7 @@ impl QueryManager {
         tracing::trace!(%object_id, table, "index_insert complete");
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(table);
+        self.mark_subscriptions_dirty_local(table);
         tracing::trace!(table, "mark_subscriptions_dirty");
 
         tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
@@ -232,7 +232,7 @@ impl QueryManager {
         )?;
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(table);
+        self.mark_subscriptions_dirty_local(table);
 
         Ok(InsertHandle {
             row_id: object_id,
@@ -939,7 +939,7 @@ impl QueryManager {
         tracing::trace!(%id, table = %table_name.0, "index_update complete");
 
         // Mark subscriptions dirty and notify about content update
-        self.mark_subscriptions_dirty(&table_name.0);
+        self.mark_subscriptions_dirty_local(&table_name.0);
         self.mark_row_updated_in_subscriptions(&table_name.0, id);
         tracing::trace!(table = %table_name.0, "mark_subscriptions_dirty");
 
@@ -1077,7 +1077,7 @@ impl QueryManager {
         tracing::trace!(%id, table = %table, "index_remove complete (soft delete)");
 
         // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_local(&table);
         self.mark_row_deleted_in_subscriptions(&table, id);
         tracing::trace!(table = %table, "mark_subscriptions_dirty (delete)");
 
@@ -1160,7 +1160,7 @@ impl QueryManager {
         )?;
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(table);
+        self.mark_subscriptions_dirty_local(table);
         self.mark_row_deleted_in_subscriptions(table, id);
 
         Ok(DeleteHandle {
@@ -1255,7 +1255,7 @@ impl QueryManager {
         self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_local(&table);
 
         Ok(InsertHandle {
             row_id: id,
@@ -1347,7 +1347,7 @@ impl QueryManager {
         );
 
         // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_local(&table);
         self.mark_row_deleted_in_subscriptions(&table, id);
 
         Ok(DeleteHandle {

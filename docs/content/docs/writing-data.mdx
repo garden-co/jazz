@@ -1,15 +1,14 @@
 ---
 title: Writing Data
-description: Insert, update, and delete APIs with local-first execution, framework context hooks, and write acknowledgement tiers.
+description: Insert, update, and delete APIs with local-first execution, framework context hooks, and write durability tiers.
 ---
 
 ## Local-First Writes
 
 `insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
-That keeps UI latency low because your app does not wait for any network hop.
+That keeps UI latency low because local state updates do not wait for any network hop.
 
-Use this mode when you want the fastest local response and can tolerate async sync
-to higher durability tiers.
+Mutation methods return promises that resolve when the requested durability tier is reached.
 
 ## Mutating from Framework Context
 
@@ -69,20 +68,25 @@ Notes:
 - Does not clear `localStorage` auth/synthetic-user data.
 - Reopens a clean worker runtime, so the same `db` instance remains usable.
 
-## Write Ack Tiers
+## Write Durability Tiers
 
 ### API Reference
 
-- `insertWithAck(table, data, tier)`
-- `updateWithAck(table, id, data, tier)`
-- `deleteFromWithAck(table, id, tier)`
-- `tier`: `"worker" | "edge" | "core"`
+- `insert(table, data, options?)`
+- `update(table, id, data, options?)`
+- `deleteFrom(table, id, options?)`
+- `options.tier`: `"worker" | "edge" | "global"`
 
-Ack tiers control when the returned promise resolves:
+Durability tiers control when the returned promise resolves:
 
 - `worker`: waits until the local worker/storage tier acknowledges the write.
 - `edge`: waits until the edge server acknowledges the write.
-- `core`: waits until the core server acknowledges the write.
+- `global`: waits until the global server acknowledges the write.
+
+Defaults:
+
+- Browser/client default tier is `worker`.
+- Backend/server-connected default tier is `edge`.
 
 Tradeoff summary:
 
@@ -91,33 +95,30 @@ Tradeoff summary:
 
 In practical terms:
 
-- Local-first writes (`insert`/`update`/`deleteFrom`) optimize for immediate UX.
-- Acked writes (`*WithAck`) optimize for explicit durability checkpoints.
+- Local-first updates remain immediate for UI/subscription state.
+- Mutation promises resolve at the selected durability checkpoint.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-ack-tier-ts
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
     </include>
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-ack-tier-rust
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
 
-`insertPersisted` / `updatePersisted` / `deleteFromPersisted` are legacy aliases.
-Prefer the explicit `*WithAck` APIs in new code.
+## Combining Write Durability with Read Durability
 
-## Combining Write Acks with Settled Reads
+Write durability tiers and read durability options are complementary knobs:
 
-Write ack tiers and read settled tiers are complementary knobs:
+- Write tiers define when a mutation is considered durably acknowledged.
+- Read options define when query/subscription delivery is considered sufficiently confirmed.
 
-- Write acks define when a mutation is considered durably acknowledged.
-- Settled reads define when a query result is considered sufficiently confirmed.
-
-See [Read Settled Tiers](/docs/reading-data#read-settled-tiers) for read-side semantics.
+See [Read Durability Options](/docs/reading-data#read-durability-options) for read-side semantics.
 
 ## Backend Request Context Reminder
 

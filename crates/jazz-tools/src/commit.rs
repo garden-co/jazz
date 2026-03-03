@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::object::ObjectId;
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::DurabilityTier;
 
 /// BLAKE3 hash identifying a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -16,7 +16,7 @@ pub struct CommitId(pub [u8; 32]);
 /// Tracks which persistence tiers have confirmed storing this commit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitAckState {
-    pub confirmed_tiers: HashSet<PersistenceTier>,
+    pub confirmed_tiers: HashSet<DurabilityTier>,
 }
 
 /// Storage state of a commit (runtime only, not serialized).
@@ -172,10 +172,8 @@ mod tests {
         };
 
         let mut ack_state = CommitAckState::default();
-        ack_state.confirmed_tiers.insert(PersistenceTier::Worker);
-        ack_state
-            .confirmed_tiers
-            .insert(PersistenceTier::EdgeServer);
+        ack_state.confirmed_tiers.insert(DurabilityTier::Worker);
+        ack_state.confirmed_tiers.insert(DurabilityTier::EdgeServer);
 
         let commit2 = Commit {
             parents: smallvec![],

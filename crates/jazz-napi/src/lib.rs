@@ -23,18 +23,20 @@ use napi_derive::napi;
 
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{
-    RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
+    ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
+    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{Storage, SurrealKvStorage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager,
+    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
     SyncPayload,
 };
 
@@ -49,34 +51,73 @@ fn convert_updates(partial: HashMap<String, Value>) -> Vec<(String, Value)> {
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
+    local_updates: Option<String>,
 }
 
-fn parse_propagation(options_json: Option<String>) -> napi::Result<QueryPropagation> {
+fn parse_read_durability_options(
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> napi::Result<(ReadDurabilityOptions, QueryPropagation)> {
+    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
     let Some(raw) = options_json else {
-        return Ok(QueryPropagation::Full);
+        return Ok((
+            ReadDurabilityOptions {
+                tier: parsed_tier,
+                local_updates: LocalUpdates::Immediate,
+            },
+            QueryPropagation::Full,
+        ));
     };
 
     let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
         .map_err(|e| napi::Error::from_reason(format!("Invalid query options JSON: {}", e)))?;
 
-    match options.propagation.as_deref() {
+    let propagation = match options.propagation.as_deref() {
         None | Some("full") => Ok(QueryPropagation::Full),
         Some("local-only") => Ok(QueryPropagation::LocalOnly),
         Some(other) => Err(napi::Error::from_reason(format!(
             "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
             other
         ))),
-    }
+    }?;
+
+    let local_updates = match options.local_updates.as_deref() {
+        None | Some("immediate") => Ok(LocalUpdates::Immediate),
+        Some("deferred") => Ok(LocalUpdates::Deferred),
+        Some(other) => Err(napi::Error::from_reason(format!(
+            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
+            other
+        ))),
+    }?;
+
+    Ok((
+        ReadDurabilityOptions {
+            tier: parsed_tier,
+            local_updates,
+        },
+        propagation,
+    ))
+}
+
+fn parse_node_durability_tiers(tier: Option<&str>) -> napi::Result<Vec<DurabilityTier>> {
+    let Some(raw) = tier else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![parse_tier(raw)?])
+}
+
+fn parse_node_durability_tier(tier: Option<String>) -> napi::Result<Vec<DurabilityTier>> {
+    parse_node_durability_tiers(tier.as_deref())
 }
 
 // ============================================================================
-fn parse_tier(tier: &str) -> napi::Result<PersistenceTier> {
+fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
     match tier {
-        "worker" => Ok(PersistenceTier::Worker),
-        "edge" => Ok(PersistenceTier::EdgeServer),
-        "core" => Ok(PersistenceTier::CoreServer),
+        "worker" => Ok(DurabilityTier::Worker),
+        "edge" => Ok(DurabilityTier::EdgeServer),
+        "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(napi::Error::from_reason(format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'core'.",
+            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
             tier
         ))),
     }
@@ -216,12 +257,12 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
 
         // Parse optional tier
-        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+        let node_tiers = parse_node_durability_tier(tier)?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
-        if let Some(t) = persistence_tier {
-            sync_manager = sync_manager.with_tier(t);
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
 
         // Create schema manager
@@ -380,7 +421,7 @@ impl NapiRuntime {
         env: Env,
         query_json: String,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
         options_json: Option<String>,
     ) -> napi::Result<napi::JsObject> {
         let query = parse_query(&query_json)?;
@@ -394,15 +435,14 @@ impl NapiRuntime {
                 None
             };
 
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
         let future = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.query_with_propagation(query, session, tier, propagation)
+            core.query_with_propagation(query, session, durability, propagation)
         };
 
         // Create a deferred/promise pair
@@ -445,7 +485,7 @@ impl NapiRuntime {
         query_json: String,
         #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: napi::JsFunction,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
         options_json: Option<String>,
     ) -> napi::Result<f64> {
         let query = parse_query(&query_json)?;
@@ -459,8 +499,7 @@ impl NapiRuntime {
                 None
             };
 
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
         // Create a ThreadsafeFunction for the JS callback.
         // The closure converts our serde_json::Value into a JsUnknown to pass to JS.
@@ -524,11 +563,11 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let handle = core
-            .subscribe_with_settled_tier_and_propagation(
+            .subscribe_with_durability_and_propagation(
                 query,
                 callback,
                 session,
-                tier,
+                durability,
                 propagation,
             )
             .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
@@ -550,8 +589,8 @@ impl NapiRuntime {
     // Persisted CRUD Operations
     // =========================================================================
 
-    #[napi(js_name = "insertWithAck", ts_return_type = "Promise<string>")]
-    pub fn insert_with_ack(
+    #[napi(js_name = "insertDurable", ts_return_type = "Promise<string>")]
+    pub fn insert_durable(
         &self,
         env: Env,
         table: String,
@@ -583,8 +622,8 @@ impl NapiRuntime {
         Ok(promise)
     }
 
-    #[napi(js_name = "updateWithAck", ts_return_type = "Promise<void>")]
-    pub fn update_with_ack(
+    #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
+    pub fn update_durable(
         &self,
         env: Env,
         object_id: String,
@@ -619,8 +658,8 @@ impl NapiRuntime {
         Ok(promise)
     }
 
-    #[napi(js_name = "deleteWithAck", ts_return_type = "Promise<void>")]
-    pub fn delete_with_ack(
+    #[napi(js_name = "deleteDurable", ts_return_type = "Promise<void>")]
+    pub fn delete_durable(
         &self,
         env: Env,
         object_id: String,

@@ -65,9 +65,9 @@ function createRuntimeMock(): {
     query: async () => [],
     subscribe: () => 1,
     unsubscribe: () => undefined,
-    insertWithAck: async () => "id",
-    updateWithAck: async () => undefined,
-    deleteWithAck: async () => undefined,
+    insertDurable: async () => "id",
+    updateDurable: async () => undefined,
+    deleteDurable: async () => undefined,
     onSyncMessageReceived: (messageJson: string) => {
       receivedFromWorker.push(messageJson);
     },

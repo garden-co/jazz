@@ -5,7 +5,7 @@ description: Build a local-first React app with Jazz. Schema, provider, reactive
 
 import AuthMethods from "../../partials/quickstarts/auth-methods.mdx";
 import FluentImmutableCallout from "../../partials/quickstarts/fluent-immutable-callout.mdx";
-import PersistenceTiersTable from "../../partials/quickstarts/persistence-tiers-table.mdx";
+import DurabilityTiersTable from "../../partials/quickstarts/durability-tiers-table.mdx";
 import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
 import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
@@ -72,48 +72,49 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
 
 <QuickstartWhereOperatorsSummary />
 
-By default `useAll` returns results immediately from the local replica. Use settled tiers when you need explicit confirmation boundaries.
+By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
 
 Deep dive: [Reading Data](/docs/reading-data).
 
 ## Write data with `useDb`
 
-`useDb` returns the `Db` handle for mutations. Mutations are synchronous at the local runtime level and sync to the server in the background.
+`useDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
 <include cwd lang="tsx" title="src/TodoList.tsx">
   ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
 </include>
 
-Because writes hit the local runtime first, subscriptions update immediately with local-first UX.
+Because writes hit the local runtime first, subscriptions update immediately with local-first UX. For tier-gated reads, the first callback still waits for the requested tier.
 
 Mutation API details: [Writing Data](/docs/writing-data).
 
-## Persistence tiers
+## Durability tiers
 
-<PersistenceTiersTable />
+<DurabilityTiersTable />
 
 <Callout title="Which tier to use?">
   `worker` is the right default for most UI interactions. Use `edge` when you need to confirm data
-  has synced to the nearest server. Use `core` when you need globally consistent acknowledgement.
+  has synced to the nearest server. Use `global` when you need the broadest server-side durability
+  acknowledgement.
 </Callout>
 
-### Reading with a settled tier
+### Reading with a durability tier
 
-Use `db.subscribeAll` (or `db.all`) with a settled tier when you need tier-gated delivery.
+Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-gated delivery.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#reading-tier-react
 </include>
 
-### Writing with an ack tier
+### Writing with a durability tier
 
-Use `*WithAck` APIs to wait for specific durability tiers:
+Use base mutation APIs with `{ tier }` to wait for specific durability tiers:
 
 <include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#writing-ack-react
+  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#writing-durability-react
 </include>
 
-Tier semantics in depth: [Reading Data](/docs/reading-data#read-settled-tiers) and [Writing Data](/docs/writing-data#write-ack-tiers).
+Tier semantics in depth: [Reading Data](/docs/reading-data#read-durability-options) and [Writing Data](/docs/writing-data#write-durability-tiers).
 
 ## Querying in depth
 

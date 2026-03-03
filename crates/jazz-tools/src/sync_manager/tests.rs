@@ -1912,8 +1912,8 @@ fn setup_3tier() -> ThreeTierSetup {
     let c_server_for_b = ServerId::new();
 
     let a = SyncManager::new();
-    let mut b = SyncManager::new().with_tier(PersistenceTier::Worker);
-    let mut c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+    let mut b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut c = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
 
     // A connects to B as server
     b.add_client(a_client_of_b);
@@ -1990,7 +1990,7 @@ fn persistence_ack_direct() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::Worker),
+            .contains(&DurabilityTier::Worker),
         "A should have received Worker ack from B"
     );
 }
@@ -2031,7 +2031,7 @@ fn persistence_ack_relay() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::EdgeServer),
+            .contains(&DurabilityTier::EdgeServer),
         "A should have received EdgeServer ack relayed through B"
     );
 }
@@ -2070,14 +2070,14 @@ fn persistence_ack_both_tiers() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::Worker),
+            .contains(&DurabilityTier::Worker),
         "Should have Worker ack from B"
     );
     assert!(
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::EdgeServer),
+            .contains(&DurabilityTier::EdgeServer),
         "Should have EdgeServer ack from C"
     );
 }
@@ -2134,7 +2134,7 @@ fn persistence_ack_idempotent() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::Worker)
+            .contains(&DurabilityTier::Worker)
     );
 }
 
@@ -2217,7 +2217,7 @@ fn persistence_ack_survives_reload() {
     io.append_commit(obj_id, &"main".into(), commit).unwrap();
 
     // Store ack tier
-    io.store_ack_tier(commit_id, PersistenceTier::EdgeServer)
+    io.store_ack_tier(commit_id, DurabilityTier::EdgeServer)
         .unwrap();
 
     // Load branch and verify ack_state is populated
@@ -2231,7 +2231,7 @@ fn persistence_ack_survives_reload() {
         loaded.commits[0]
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::EdgeServer),
+            .contains(&DurabilityTier::EdgeServer),
         "Loaded commit should have EdgeServer ack"
     );
 }
@@ -2243,7 +2243,7 @@ fn ack_state_does_not_affect_commit_id_sync() {
     let mut ack_state = crate::commit::CommitAckState::default();
     ack_state
         .confirmed_tiers
-        .insert(PersistenceTier::CoreServer);
+        .insert(DurabilityTier::GlobalServer);
 
     let commit1 = make_test_commit(b"same-content", vec![]);
     let mut commit2 = make_test_commit(b"same-content", vec![]);

@@ -108,7 +108,7 @@ describe("backend/create-jazz-context", () => {
       "dev",
       "main",
       "/tmp/jazz.db",
-      undefined,
+      "edge",
     );
   });
 

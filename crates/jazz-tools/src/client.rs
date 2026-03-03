@@ -7,13 +7,15 @@ use std::time::Duration;
 
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
+use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, Value};
+use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::SchemaManager;
 use crate::storage::{Storage, StorageError, SurrealKvStorage};
 use crate::sync_manager::{
-    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 use bytes::BytesMut;
 use futures::StreamExt;
@@ -353,17 +355,24 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx))
     }
 
-    /// One-shot query, optionally waiting for a settled tier.
+    /// One-shot query, optionally waiting for a durability tier.
     ///
     /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
     pub async fn query(
         &self,
         query: Query,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .runtime
-            .query(query, None, settled_tier)
+            .query(
+                query,
+                None,
+                ReadDurabilityOptions {
+                    tier: durability_tier,
+                    local_updates: LocalUpdates::Immediate,
+                },
+            )
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
@@ -478,12 +487,19 @@ impl<'a> SessionClient<'a> {
     pub async fn query(
         &self,
         query: Query,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .client
             .runtime
-            .query(query, Some(self.session.clone()), settled_tier)
+            .query(
+                query,
+                Some(self.session.clone()),
+                ReadDurabilityOptions {
+                    tier: durability_tier,
+                    local_updates: LocalUpdates::Immediate,
+                },
+            )
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await

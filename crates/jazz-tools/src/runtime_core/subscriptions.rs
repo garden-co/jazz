@@ -1,5 +1,21 @@
 use super::*;
+use crate::query_manager::manager::LocalUpdates;
 use crate::sync_manager::QueryPropagation;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadDurabilityOptions {
+    pub tier: Option<DurabilityTier>,
+    pub local_updates: LocalUpdates,
+}
+
+impl Default for ReadDurabilityOptions {
+    fn default() -> Self {
+        Self {
+            tier: None,
+            local_updates: LocalUpdates::Immediate,
+        }
+    }
+}
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     // =========================================================================
@@ -17,11 +33,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + Send + 'static,
     {
-        self.subscribe_impl(
+        self.subscribe_with_durability_and_propagation(
             query,
-            Box::new(callback),
+            callback,
             session,
-            None,
+            ReadDurabilityOptions::default(),
             QueryPropagation::Full,
         )
     }
@@ -37,99 +53,45 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     where
         F: Fn(SubscriptionDelta) + 'static,
     {
-        self.subscribe_impl(
-            query,
-            Box::new(callback),
-            session,
-            None,
-            QueryPropagation::Full,
-        )
-    }
-
-    /// Subscribe with optional settled tier.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn subscribe_with_settled_tier<F>(
-        &mut self,
-        query: Query,
-        callback: F,
-        session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
-    ) -> Result<SubscriptionHandle, RuntimeError>
-    where
-        F: Fn(SubscriptionDelta) + Send + 'static,
-    {
-        self.subscribe_with_settled_tier_and_propagation(
+        self.subscribe_with_durability_and_propagation(
             query,
             callback,
             session,
-            settled_tier,
+            ReadDurabilityOptions::default(),
             QueryPropagation::Full,
         )
     }
 
-    /// Subscribe with settled tier (WASM version - no Send required).
-    #[cfg(target_arch = "wasm32")]
-    pub fn subscribe_with_settled_tier<F>(
-        &mut self,
-        query: Query,
-        callback: F,
-        session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
-    ) -> Result<SubscriptionHandle, RuntimeError>
-    where
-        F: Fn(SubscriptionDelta) + 'static,
-    {
-        self.subscribe_with_settled_tier_and_propagation(
-            query,
-            callback,
-            session,
-            settled_tier,
-            QueryPropagation::Full,
-        )
-    }
-
-    /// Subscribe with settled tier and explicit propagation mode.
+    /// Subscribe with explicit durability and propagation options.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn subscribe_with_settled_tier_and_propagation<F>(
+    pub fn subscribe_with_durability_and_propagation<F>(
         &mut self,
         query: Query,
         callback: F,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> Result<SubscriptionHandle, RuntimeError>
     where
         F: Fn(SubscriptionDelta) + Send + 'static,
     {
-        self.subscribe_impl(
-            query,
-            Box::new(callback),
-            session,
-            settled_tier,
-            propagation,
-        )
+        self.subscribe_impl(query, Box::new(callback), session, durability, propagation)
     }
 
-    /// Subscribe with settled tier and explicit propagation mode (WASM version).
+    /// Subscribe with explicit durability and propagation options (WASM version).
     #[cfg(target_arch = "wasm32")]
-    pub fn subscribe_with_settled_tier_and_propagation<F>(
+    pub fn subscribe_with_durability_and_propagation<F>(
         &mut self,
         query: Query,
         callback: F,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> Result<SubscriptionHandle, RuntimeError>
     where
         F: Fn(SubscriptionDelta) + 'static,
     {
-        self.subscribe_impl(
-            query,
-            Box::new(callback),
-            session,
-            settled_tier,
-            propagation,
-        )
+        self.subscribe_impl(query, Box::new(callback), session, durability, propagation)
     }
 
     /// Internal subscribe implementation.
@@ -138,14 +100,26 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         query: Query,
         callback: SubscriptionCallback,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> Result<SubscriptionHandle, RuntimeError> {
-        let _span = debug_span!("subscribe", table = query.table.as_str()).entered();
+        let _span = debug_span!(
+            "subscribe",
+            table = query.table.as_str(),
+            ?durability.tier,
+            local_updates = ?durability.local_updates
+        )
+        .entered();
         let query_sub_id = self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync_and_propagation(query, session, settled_tier, propagation)
+            .subscribe_with_sync_and_propagation_with_local_updates(
+                query,
+                session,
+                durability.tier,
+                durability.local_updates,
+                propagation,
+            )
             .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
 
         let handle = SubscriptionHandle(self.next_subscription_handle);
@@ -195,31 +169,42 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     // Queries
     // =========================================================================
 
-    /// Execute a one-shot query, optionally waiting for a settled tier.
-    pub fn query(
-        &mut self,
-        query: Query,
-        session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
-    ) -> QueryFuture {
-        self.query_with_propagation(query, session, settled_tier, QueryPropagation::Full)
+    /// Execute a one-shot query.
+    pub fn query(&mut self, query: Query, session: Option<Session>) -> QueryFuture {
+        self.query_with_propagation(
+            query,
+            session,
+            ReadDurabilityOptions::default(),
+            QueryPropagation::Full,
+        )
     }
 
     pub fn query_with_propagation(
         &mut self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> QueryFuture {
-        let _span = debug_span!("query", table = query.table.as_str(), ?settled_tier).entered();
+        let _span = debug_span!(
+            "query",
+            table = query.table.as_str(),
+            ?durability.tier,
+            local_updates = ?durability.local_updates
+        )
+        .entered();
         let (sender, receiver) = oneshot::channel();
 
         let sub_id = match self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync_and_propagation(query, session, settled_tier, propagation)
-        {
+            .subscribe_with_sync_and_propagation_with_local_updates(
+                query,
+                session,
+                durability.tier,
+                durability.local_updates,
+                propagation,
+            ) {
             Ok(id) => id,
             Err(e) => {
                 let _ = sender.send(Err(RuntimeError::QueryError(format!("{:?}", e))));
