@@ -2362,3 +2362,120 @@ fn ack_state_does_not_affect_commit_id_sync() {
 
     assert_eq!(commit1.id(), commit2.id());
 }
+
+// ========================================================================
+// QuerySubscription session fallback (inbox.rs fix)
+// ========================================================================
+
+/// Helper: push a QuerySubscription from a client and drain pending subs.
+fn push_query_subscription(
+    sm: &mut SyncManager,
+    client_id: ClientId,
+    payload_session: Option<Session>,
+) -> Vec<PendingQuerySubscription> {
+    use crate::query_manager::query::QueryBuilder;
+    let query = QueryBuilder::new("messages").branch("main").build();
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: payload_session,
+            propagation: QueryPropagation::Full,
+        },
+    });
+    sm.process_inbox(&mut MemoryStorage::new());
+    sm.take_pending_query_subscriptions()
+}
+
+#[test]
+fn query_subscription_falls_back_to_client_session_when_payload_omits_it() {
+    // Demo/anonymous clients send session: None in the payload.
+    // The server established a session during the SSE handshake; that should be used.
+    //
+    //   client.session = Some("alice")   (server-established)
+    //   payload session = None           (client sent nothing)
+    //   → effective session = Some("alice")
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let pending = push_query_subscription(&mut sm, client_id, None);
+
+    assert_eq!(pending.len(), 1);
+    let session = pending[0]
+        .session
+        .as_ref()
+        .expect("should fall back to server-established session");
+    assert_eq!(session.user_id, "alice");
+}
+
+#[test]
+fn query_subscription_uses_client_session_when_payload_supplies_one() {
+    // Authenticated client sends a matching session in the payload.
+    // server session wins regardless (same value in the honest case).
+    //
+    //   client.session = Some("alice")
+    //   payload session = Some("alice")
+    //   → effective session = Some("alice")
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let pending = push_query_subscription(&mut sm, client_id, Some(Session::new("alice")));
+
+    assert_eq!(pending.len(), 1);
+    let session = pending[0]
+        .session
+        .as_ref()
+        .expect("session should be present");
+    assert_eq!(session.user_id, "alice");
+}
+
+#[test]
+fn query_subscription_ignores_spoofed_payload_session() {
+    // A client with an established server session sends a different session
+    // in the payload — the server-established one must win.
+    //
+    //   client.session = Some("alice")
+    //   payload session = Some("mallory")   ← spoofed
+    //   → effective session = Some("alice")
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let pending = push_query_subscription(&mut sm, client_id, Some(Session::new("mallory")));
+
+    assert_eq!(pending.len(), 1);
+    let session = pending[0]
+        .session
+        .as_ref()
+        .expect("session should be present");
+    assert_eq!(session.user_id, "alice", "spoofed payload session must be ignored");
+}
+
+#[test]
+fn query_subscription_demo_client_no_server_session_no_payload_session() {
+    // Fully anonymous/demo client: no server session, no payload session.
+    // Queries should proceed with session: None (the query layer handles
+    // the open-access policy for demo mode).
+    //
+    //   client.session = None
+    //   payload session = None
+    //   → effective session = None
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    // No set_client_session call — client is fully anonymous.
+
+    let pending = push_query_subscription(&mut sm, client_id, None);
+
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0].session.is_none(),
+        "anonymous client should produce session: None"
+    );
+}
