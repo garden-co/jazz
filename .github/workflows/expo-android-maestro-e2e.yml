@@ -116,7 +116,7 @@ jobs:
           # sleep keeps the shell alive so sandbox exec's HTTP connection closes cleanly
           # (without it, nohup+& causes the sandbox side to hang up and the CLI throws TypeError: terminated)
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" \
-            sh -lc "chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' >/tmp/server.log 2>&1 &"
+            chmod +x /tmp/jazz-tools && nohup /tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' >/tmp/server.log 2>&1 &
 
           URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^ )]+' | head -n1 || true)"
           HOST="${SANDBOX_ID//_/-}"
