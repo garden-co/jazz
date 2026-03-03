@@ -9,12 +9,16 @@ const mocks = vi.hoisted(() => {
   const runtimeCtor = vi.fn();
   const runtimeInstances: Array<{ flush: ReturnType<typeof vi.fn> }> = [];
   const clients: Array<{
+    asBackend: ReturnType<typeof vi.fn>;
     forRequest: ReturnType<typeof vi.fn>;
     forSession: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
   }> = [];
   const connectWithRuntime = vi.fn((_runtime: unknown, _context: AppContext) => {
     const client = {
+      asBackend: vi.fn(function (this: unknown) {
+        return this;
+      }),
       forRequest: vi.fn(() => ({ kind: "request-client" })),
       forSession: vi.fn(() => ({ kind: "session-client" })),
       shutdown: vi.fn(async () => undefined),
@@ -112,7 +116,7 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
-  it("BC-U02: supports request/session-scoped helpers", () => {
+  it("BC-U02: supports backend/request/session-scoped helpers", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -125,12 +129,15 @@ describe("backend/create-jazz-context", () => {
     };
     const session: Session = { user_id: "u1", claims: {} };
 
+    const backendClient = context.asBackend();
     const requestClient = context.forRequest(req);
     const sessionClient = context.forSession(session);
 
+    expect(backendClient).toBe(mocks.clients[0]);
     expect(requestClient).toEqual({ kind: "request-client" });
     expect(sessionClient).toEqual({ kind: "session-client" });
     expect(mocks.clients).toHaveLength(1);
+    expect(mocks.clients[0].asBackend).toHaveBeenCalledTimes(1);
     expect(mocks.clients[0].forRequest).toHaveBeenCalledWith(req);
     expect(mocks.clients[0].forSession).toHaveBeenCalledWith(session);
   });

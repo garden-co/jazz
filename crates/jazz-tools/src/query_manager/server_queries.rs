@@ -17,7 +17,12 @@ impl QueryManager {
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
         self.sync_manager
             .get_client(client_id)
-            .map(|client| matches!(client.role, ClientRole::Peer | ClientRole::Admin))
+            .map(|client| {
+                matches!(
+                    client.role,
+                    ClientRole::Peer | ClientRole::Admin | ClientRole::Backend
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -295,7 +300,10 @@ impl QueryManager {
             .clients
             .iter()
             .filter_map(|(client_id, client)| {
-                if matches!(client.role, ClientRole::Peer | ClientRole::Admin) {
+                if matches!(
+                    client.role,
+                    ClientRole::Peer | ClientRole::Admin | ClientRole::Backend
+                ) {
                     Some(*client_id)
                 } else {
                     None
