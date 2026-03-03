@@ -18,6 +18,7 @@ import {
   isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type SyncStreamController,
+  type SyncAuth,
   type LinkExternalResponse,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
@@ -389,6 +390,7 @@ export class JazzClient {
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
+  private useBackendSyncAuth = false;
 
   private constructor(
     runtime: Runtime,
@@ -401,11 +403,7 @@ export class JazzClient {
     this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
-      getAuth: () => ({
-        jwtToken: this.context.jwtToken,
-        localAuthMode: this.context.localAuthMode,
-        localAuthToken: this.context.localAuthToken,
-      }),
+      getAuth: () => this.getSyncAuth(),
       getClientId: () => this.serverClientId,
       setClientId: (clientId) => {
         this.serverClientId = clientId;
@@ -546,6 +544,39 @@ export class JazzClient {
    */
   forRequest(request: RequestLike): SessionClient {
     return this.forSession(sessionFromRequest(request));
+  }
+
+  /**
+   * Enable backend-scoped sync auth for this client.
+   *
+   * In backend mode, sync/event transport uses `X-Jazz-Backend-Secret` instead
+   * of end-user auth headers and intentionally does not send admin headers.
+   */
+  asBackend(): JazzClient {
+    if (!this.context.backendSecret) {
+      throw new Error("backendSecret required for backend mode");
+    }
+    if (!this.context.serverUrl) {
+      throw new Error("serverUrl required for backend mode");
+    }
+    this.useBackendSyncAuth = true;
+    this.streamController.updateAuth();
+    return this;
+  }
+
+  private getSyncAuth(): SyncAuth {
+    if (this.useBackendSyncAuth) {
+      return {
+        backendSecret: this.context.backendSecret,
+      };
+    }
+
+    return {
+      jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+      adminSecret: this.context.adminSecret,
+    };
   }
 
   private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
@@ -852,10 +883,7 @@ export class JazzClient {
       payloadJson,
       isCatalogue,
       {
-        jwtToken: this.context.jwtToken,
-        localAuthMode: this.context.localAuthMode,
-        localAuthToken: this.context.localAuthToken,
-        adminSecret: this.context.adminSecret,
+        ...this.getSyncAuth(),
         clientId: this.serverClientId,
         pathPrefix: this.streamController.getPathPrefix(),
       },

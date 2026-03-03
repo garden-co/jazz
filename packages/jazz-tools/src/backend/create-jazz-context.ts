@@ -68,7 +68,7 @@ function resolveSchema(input: BackendSchemaInput): WasmSchema {
 /**
  * Server-side Jazz context with lazy runtime setup.
  *
- * The first call to `client()`, `forRequest()`, or `forSession()` initializes
+ * The first call to `client()`, `asBackend()`, `forRequest()`, or `forSession()` initializes
  * a NAPI runtime and JazzClient using the provided app/schema source. Later
  * calls reuse the same initialized runtime.
  */
@@ -88,7 +88,7 @@ export class JazzContext {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
       throw new Error(
-        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling client()/forRequest()/forSession().",
+        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling client()/asBackend()/forRequest()/forSession().",
       );
     }
     return resolveSchema(selected);
@@ -146,6 +146,13 @@ export class JazzContext {
     }
 
     return this.clientInstance;
+  }
+
+  /**
+   * Get a backend-scoped client authenticated with `backendSecret`.
+   */
+  asBackend(source?: BackendSchemaInput): JazzClient {
+    return this.client(source).asBackend();
   }
 
   /**

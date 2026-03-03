@@ -600,6 +600,23 @@ pub fn derive_external_principal_id(app_id: AppId, issuer: &str, subject: &str) 
     format!("external:{encoded}")
 }
 
+/// Check if backend secret is valid.
+pub fn validate_backend_secret(
+    provided: Option<&str>,
+    config: &AuthConfig,
+) -> Result<(), (StatusCode, &'static str)> {
+    match (&config.backend_secret, provided) {
+        (Some(expected), Some(got)) if expected == got => Ok(()),
+        (Some(_), Some(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid backend secret")),
+        (Some(_), None) => Err((
+            StatusCode::UNAUTHORIZED,
+            "Backend secret required for backend access",
+        )),
+        (None, Some(_)) => Err((StatusCode::FORBIDDEN, "Backend auth not configured")),
+        (None, None) => Err((StatusCode::UNAUTHORIZED, "Backend secret required")),
+    }
+}
+
 /// Check if admin secret is valid.
 ///
 /// Catalogue operations (schema/lens sync) require admin authentication.

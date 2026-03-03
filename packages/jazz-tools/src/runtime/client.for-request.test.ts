@@ -101,7 +101,60 @@ function makeClient() {
   };
 }
 
+function makeClientWithContext(context: AppContext): JazzClient {
+  const runtime: Runtime = {
+    insert: () => "00000000-0000-0000-0000-000000000001",
+    update: () => {},
+    delete: () => {},
+    query: async () => [],
+    subscribe: () => 1,
+    unsubscribe: () => {},
+    insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+    updateDurable: async () => {},
+    deleteDurable: async () => {},
+    onSyncMessageReceived: () => {},
+    onSyncMessageToSend: () => {},
+    addServer: () => {},
+    removeServer: () => {},
+    addClient: () => "00000000-0000-0000-0000-000000000001",
+    getSchema: () => ({}),
+    getSchemaHash: () => "schema-hash",
+  };
+
+  const JazzClientCtor = JazzClient as unknown as {
+    new (
+      runtime: Runtime,
+      context: AppContext,
+      defaultDurabilityTier: "worker" | "edge" | "global",
+    ): JazzClient;
+  };
+  return new JazzClientCtor(runtime, context, "edge");
+}
+
 describe("JazzClient.forRequest", () => {
+  it("enables backend mode when backend secret + server URL are configured", () => {
+    const { client } = makeClient();
+    expect(client.asBackend()).toBe(client);
+  });
+
+  it("throws when backend mode is requested without backend secret", () => {
+    const client = makeClientWithContext({
+      appId: "test-app",
+      schema: {},
+      serverUrl: "http://localhost:1625",
+    });
+    expect(() => client.asBackend()).toThrow("backendSecret required for backend mode");
+  });
+
+  it("throws when backend mode is requested without server URL", () => {
+    const client = makeClientWithContext({
+      appId: "test-app",
+      schema: {},
+      backendSecret: "test-backend-secret",
+    });
+    expect(() => client.asBackend()).toThrow("serverUrl required for backend mode");
+  });
+
   it("extracts sub + claims from a bearer JWT", async () => {
     const { client, queryCalls } = makeClient();
     const token = makeJwt({

@@ -11,6 +11,7 @@ export interface SyncAuth {
   jwtToken?: string;
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
+  backendSecret?: string;
   adminSecret?: string;
   clientId?: string;
   pathPrefix?: string;
@@ -39,7 +40,7 @@ export interface StreamCallbacks {
 
 export interface SyncStreamControllerOptions {
   logPrefix?: string;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
   onConnected(): void;
@@ -59,7 +60,7 @@ export interface RuntimeSyncTarget {
 export interface RuntimeSyncStreamControllerOptions {
   logPrefix?: string;
   getRuntime(): RuntimeSyncTarget | null | undefined;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
 }
@@ -207,7 +208,7 @@ export class SyncStreamController {
     const headers: Record<string, string> = {
       Accept: "application/octet-stream",
     };
-    applyUserAuthHeaders(headers, this.options.getAuth());
+    applySyncAuthHeaders(headers, this.options.getAuth());
 
     const abortController = new AbortController();
     this.streamAbortController = abortController;
@@ -419,6 +420,22 @@ export function applyUserAuthHeaders(headers: Record<string, string>, auth: Sync
 }
 
 /**
+ * Apply runtime sync auth headers.
+ *
+ * Precedence:
+ * 1. Backend privileged auth (`X-Jazz-Backend-Secret`)
+ * 2. End-user auth (JWT/local)
+ */
+export function applySyncAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
+  if (auth.backendSecret) {
+    headers["X-Jazz-Backend-Secret"] = auth.backendSecret;
+    return;
+  }
+
+  applyUserAuthHeaders(headers, auth);
+}
+
+/**
  * POST a sync payload to the server.
  *
  * User auth headers are always applied first (JWT or local auth).
@@ -444,7 +461,7 @@ export async function sendSyncPayload(
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
   } else {
-    applyUserAuthHeaders(headers, auth);
+    applySyncAuthHeaders(headers, auth);
   }
 
   const body = `{"payload":${payloadJson},"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
