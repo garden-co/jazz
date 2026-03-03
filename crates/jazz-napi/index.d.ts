@@ -23,12 +23,14 @@ export declare class NapiRuntime {
     queryJson: string,
     sessionJson?: string | undefined | null,
     settledTier?: string | undefined | null,
+    optionsJson?: string | undefined | null,
   ): Promise<any>;
   subscribe(
     queryJson: string,
     onUpdate: (...args: any[]) => any,
     sessionJson?: string | undefined | null,
     settledTier?: string | undefined | null,
+    optionsJson?: string | undefined | null,
   ): number;
   unsubscribe(handle: number): void;
   insertWithAck(table: string, values: any, tier: string): Promise<string>;

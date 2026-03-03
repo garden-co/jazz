@@ -2,6 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
 
+const schemaWithTodos = {
+  todos: {
+    columns: [
+      {
+        name: "done",
+        column_type: { type: "Boolean" as const },
+        nullable: false,
+      },
+    ],
+  },
+} as AppContext["schema"];
+
 function toBase64Url(value: unknown): string {
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
   return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -172,6 +184,35 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0][0]).toBe(builder._build());
   });
 
+  it("translates schema-aware query builders for session-scoped query calls", async () => {
+    const { client, queryCalls } = makeClient();
+    const token = makeJwt({ sub: "user-901" });
+
+    const scopedClient = client.forRequest({
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    });
+
+    const builder = {
+      _schema: schemaWithTodos,
+      _build() {
+        return JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "done", op: "eq", value: true }],
+          includes: {},
+          orderBy: [],
+        });
+      },
+    };
+
+    await scopedClient.query(builder);
+
+    const parsed = JSON.parse(queryCalls[0][0]) as Record<string, unknown>;
+    expect(parsed.table).toBe("todos");
+    expect(parsed).toHaveProperty("relation_ir");
+  });
+
   it("accepts query builders for subscribe calls", () => {
     const { client, subscribeCalls } = makeClient();
 
@@ -185,6 +226,29 @@ describe("JazzClient.forRequest", () => {
 
     expect(subId).toBe(1);
     expect(subscribeCalls[0][0]).toBe(builder._build());
+  });
+
+  it("translates schema-aware query builders for subscribe calls", () => {
+    const { client, subscribeCalls } = makeClient();
+
+    const builder = {
+      _schema: schemaWithTodos,
+      _build() {
+        return JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        });
+      },
+    };
+
+    const subId = client.subscribe(builder, () => {});
+
+    expect(subId).toBe(1);
+    const parsed = JSON.parse(subscribeCalls[0][0]) as Record<string, unknown>;
+    expect(parsed.table).toBe("todos");
+    expect(parsed).toHaveProperty("relation_ir");
   });
 
   it("forwards structured RN delta payloads to subscription callbacks", () => {
