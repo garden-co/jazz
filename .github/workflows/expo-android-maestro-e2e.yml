@@ -103,7 +103,7 @@ jobs:
           if [ -z "$SANDBOX_ID" ]; then echo "::error::Could not parse sandbox ID"; exit 1; fi
           echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
 
-          ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -lc 'uname -m' | tr -d '\r' | tail -n1)"
+          ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" uname -m | tr -d '\r' | tail -n1)"
           case "$ARCH" in
             x86_64|amd64)  TARGET=x86_64-unknown-linux-gnu ;;
             aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
@@ -121,6 +121,8 @@ jobs:
           URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^ )]+' | head -n1 || true)"
           HOST="${SANDBOX_ID//_/-}"
           CANDIDATES=("${URL:-}" "https://$HOST.vercel.run" "https://$HOST.vercel.app")
+
+          sleep 5 # wait for server to start
 
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" "tail -n 200 /tmp/server.log || true" | tee -a vercel-sandbox.log
           exit 1
