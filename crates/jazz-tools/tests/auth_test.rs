@@ -442,6 +442,12 @@ mod integration_tests {
             MetadataKey::SchemaHash.as_str().to_string(),
             hex::encode(schema_hash.as_bytes()),
         );
+        let pushed_schema_json =
+            r#"{"users":{"columns":{"name":{"Text":null},"id":{"Uuid":null}}}}"#;
+        metadata.insert(
+            MetadataKey::SchemaJson.as_str().to_string(),
+            pushed_schema_json.to_string(),
+        );
 
         let sync_payload = json!({
             "client_id": Uuid::new_v4().to_string(),
@@ -496,8 +502,7 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(schema_response.status(), StatusCode::OK);
-        let schema_json: Value = schema_response.json().await.unwrap();
-        let expected_schema_json = serde_json::to_value(schema.clone()).unwrap();
-        assert_eq!(schema_json, expected_schema_json);
+        let schema_body = schema_response.text().await.unwrap();
+        assert_eq!(schema_body, pushed_schema_json);
     }
 }

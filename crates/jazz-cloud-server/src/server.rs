@@ -11,7 +11,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
     },
     response::{Html, IntoResponse, Json},
     routing::{get, patch, post},
@@ -25,9 +25,7 @@ use jazz_tools::jazz_transport::{
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{
-    ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchema, Value,
-};
+use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
@@ -676,7 +674,7 @@ enum WorkerCommand {
     GetCatalogueSchema {
         app_id: AppId,
         schema_hash: SchemaHash,
-        response: tokio::sync::oneshot::Sender<Result<Option<Schema>, String>>,
+        response: tokio::sync::oneshot::Sender<Result<Option<String>, String>>,
     },
     GetSchemaHashes {
         app_id: AppId,
@@ -931,7 +929,7 @@ impl WorkerPool {
         &self,
         app_id: AppId,
         schema_hash: SchemaHash,
-    ) -> Result<Option<Schema>, WorkerDispatchError> {
+    ) -> Result<Option<String>, WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::GetCatalogueSchema {
             app_id,
@@ -1822,7 +1820,7 @@ async fn run_worker_loop(
                         .and_then(|runtime| {
                             let maybe_schema = runtime
                                 .runtime
-                                .known_schema(&schema_hash)
+                                .known_schema_json(&schema_hash)
                                 .map_err(|err| err.to_string())?;
                             Ok(maybe_schema.as_ref().cloned())
                         });
@@ -3314,7 +3312,9 @@ async fn schema_catalogue_handler(
         .get_catalogue_schema(app_id, schema_hash)
         .await
     {
-        Ok(Some(schema)) => Json(schema).into_response(),
+        Ok(Some(schema_json)) => {
+            ([(CONTENT_TYPE, "application/json")], schema_json).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::not_found("schema catalogue not found")),

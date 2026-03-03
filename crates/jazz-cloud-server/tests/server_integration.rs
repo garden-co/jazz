@@ -736,6 +736,11 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
         MetadataKey::SchemaHash.as_str().to_string(),
         hex::encode(schema_hash.as_bytes()),
     );
+    let pushed_schema_json = r#"{"users":{"columns":{"name":{"Text":null},"id":{"Uuid":null}}}}"#;
+    metadata.insert(
+        MetadataKey::SchemaJson.as_str().to_string(),
+        pushed_schema_json.to_string(),
+    );
 
     let sync_payload = json!({
         "client_id": Uuid::new_v4().to_string(),
@@ -790,8 +795,6 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
         .get_schema_by_hash(&created.app_id, "admin-secret", &expected_hash)
         .await;
     assert_eq!(schema_response.status(), StatusCode::OK);
-
-    let schema_json: Value = schema_response.json().await.expect("schema json");
-    let expected_schema_json = serde_json::to_value(schema.clone()).expect("expected schema json");
-    assert_eq!(schema_json, expected_schema_json);
+    let schema_body = schema_response.text().await.expect("schema body");
+    assert_eq!(schema_body, pushed_schema_json);
 }

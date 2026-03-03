@@ -1203,6 +1203,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+        metadata.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v2).unwrap(),
+        );
 
         // Process the catalogue update
         manager_b
@@ -1255,6 +1259,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+        schema_metadata.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v2).unwrap(),
+        );
 
         manager_b
             .process_catalogue_update(v2_object_id, &schema_metadata, &v2_encoded)
@@ -1351,6 +1359,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         metadata_v2.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+        metadata_v2.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v2).unwrap(),
+        );
 
         let mut metadata_v3 = HashMap::new();
         metadata_v3.insert(
@@ -1362,6 +1374,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         metadata_v3.insert(MetadataKey::SchemaHash.to_string(), v3_hash.to_string());
+        metadata_v3.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v3).unwrap(),
+        );
 
         ingest_remote_catalogue_object(
             &mut qm,
@@ -1467,6 +1483,10 @@ mod tests {
                 AppId::from_name("other-app").uuid().to_string(),
             );
             metadata.insert(MetadataKey::SchemaHash.to_string(), hash.to_string());
+            metadata.insert(
+                MetadataKey::SchemaJson.to_string(),
+                serde_json::to_string(&schema).unwrap(),
+            );
 
             manager
                 .process_catalogue_update(hash.to_object_id(), &metadata, &encode_schema(&schema))
@@ -1568,12 +1588,26 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         metadata.insert(MetadataKey::SchemaHash.to_string(), v1_hash.to_string());
+        metadata.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v1).unwrap(),
+        );
 
         manager
             .process_catalogue_update(v1_hash.to_object_id(), &metadata, &encode_schema(&v1))
             .unwrap();
+        let mut metadata_overwrite = metadata.clone();
+        let overwritten_json = " {\"users\":{\"columns\":{\"name\":{\"Text\":null},\"id\":{\"Uuid\":null},\"birthday\":{\"Timestamp\":null}}}} ";
+        metadata_overwrite.insert(
+            MetadataKey::SchemaJson.to_string(),
+            overwritten_json.to_string(),
+        );
         manager
-            .process_catalogue_update(v1_hash.to_object_id(), &metadata, &encode_schema(&v1))
+            .process_catalogue_update(
+                v1_hash.to_object_id(),
+                &metadata_overwrite,
+                &encode_schema(&v1),
+            )
             .unwrap();
 
         let after = (
@@ -1583,6 +1617,10 @@ mod tests {
             manager.is_schema_known(&v1_hash),
         );
         assert_eq!(after, before, "same-schema pushes should be idempotent");
+        assert_eq!(
+            manager.get_known_schema_json(&v1_hash),
+            Some(overwritten_json)
+        );
     }
 
     /// Malformed schema payload should fail decode path deterministically.
@@ -1616,6 +1654,7 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         metadata.insert(MetadataKey::SchemaHash.to_string(), target_hash.to_string());
+        metadata.insert(MetadataKey::SchemaJson.to_string(), "{}".to_string());
 
         let err = manager
             .process_catalogue_update(ObjectId::new(), &metadata, b"\xFF")
@@ -1955,6 +1994,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         v2_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+        v2_metadata.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v2).unwrap(),
+        );
 
         client
             .process_catalogue_update(v2_hash.to_object_id(), &v2_metadata, &v2_encoded)
@@ -1975,6 +2018,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         v3_metadata.insert(MetadataKey::SchemaHash.to_string(), v3_hash.to_string());
+        v3_metadata.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v3).unwrap(),
+        );
 
         client
             .process_catalogue_update(v3_hash.to_object_id(), &v3_metadata, &v3_encoded)
@@ -2839,6 +2886,10 @@ mod tests {
             test_app_id().uuid().to_string(),
         );
         schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+        schema_metadata.insert(
+            MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(&v2).unwrap(),
+        );
 
         client
             .process_catalogue_update(v2_hash.to_object_id(), &schema_metadata, &v2_encoded)

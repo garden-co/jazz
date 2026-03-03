@@ -65,6 +65,8 @@ pub enum SchemaError {
     },
     /// Schema not found in context.
     SchemaNotFound(SchemaHash),
+    /// Catalogue schema metadata missing `schema_json`.
+    MissingSchemaJson,
     /// Lens not found.
     LensNotFound {
         source: SchemaHash,
@@ -93,6 +95,9 @@ impl std::fmt::Display for SchemaError {
             }
             SchemaError::SchemaNotFound(hash) => {
                 write!(f, "Schema not found: {}", hash.short())
+            }
+            SchemaError::MissingSchemaJson => {
+                write!(f, "Catalogue schema metadata missing schema_json")
             }
             SchemaError::LensNotFound { source, target } => {
                 write!(

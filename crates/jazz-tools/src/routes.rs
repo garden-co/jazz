@@ -6,7 +6,10 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     response::{IntoResponse, Json},
     routing::{get, post},
 };
@@ -408,14 +411,13 @@ async fn schema_handler(
         }
     };
 
-    match state.runtime.known_schema(&schema_hash) {
-        Ok(Some(schema)) => {
+    match state.runtime.known_schema_json(&schema_hash) {
+        Ok(Some(schema_json)) => {
             tracing::info!(
                 requested_hash = %schema_hash.short(),
                 "schema request: returning requested hash"
             );
-            let body = schema.clone();
-            Json(body).into_response()
+            ([(CONTENT_TYPE, "application/json")], schema_json).into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -682,13 +684,13 @@ mod tests {
     use std::collections::HashMap;
 
     use axum::body;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
     use groove::runtime_tokio::TokioRuntime;
-    use groove::schema_manager::{AppId, SchemaManager};
+    use groove::schema_manager::{AppId, SchemaManager, encode_schema};
     use groove::storage::SurrealKvStorage;
     use groove::sync_manager::{ClientId, DurabilityTier, SyncManager, SyncPayload};
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tempfile::TempDir;
     use tokio::sync::{RwLock, broadcast};
     use tower::util::ServiceExt;
@@ -880,5 +882,120 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_hash_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn schema_handler_returns_verbatim_pushed_schema_json() {
+        let data_dir = TempDir::new().expect("temp dir");
+        let db_path = data_dir.path().join("groove.surrealkv");
+        let storage =
+            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+        let schema_manager =
+            SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        let auth_config = AuthConfig {
+            backend_secret: None,
+            admin_secret: Some("admin-secret".to_string()),
+            allow_anonymous: true,
+            allow_demo: true,
+            jwks_url: None,
+            jwks_set: None,
+        };
+
+        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
+
+        let state = Arc::new(ServerState {
+            runtime,
+            app_id: AppId::from_name("test-app"),
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            sync_broadcast: sync_tx,
+            auth_config,
+            external_identity_store: Arc::new(
+                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
+            ),
+            external_identities: RwLock::new(HashMap::new()),
+        });
+
+        let app = axum::Router::new()
+            .route("/sync", post(sync_handler))
+            .route("/schema/:hash", get(schema_handler))
+            .route("/schemas", get(schema_hashes_handler))
+            .with_state(state);
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let object_id = schema_hash.to_object_id().to_string();
+        let schema_json = r#"{"users":{"columns":{"name":{"Text":null},"id":{"Uuid":null}}}}"#;
+        let encoded_schema = encode_schema(&schema);
+
+        let sync_payload = json!({
+            "client_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "payload": {
+                "ObjectUpdated": {
+                    "object_id": object_id,
+                    "metadata": {
+                        "id": object_id,
+                        "metadata": {
+                            "type": "catalogue_schema",
+                            "app_id": AppId::from_name("test-app").to_string(),
+                            "schema_hash": schema_hash.to_string(),
+                            "schema_json": schema_json,
+                        }
+                    },
+                    "branch_name": "main",
+                    "commits": [
+                        {
+                            "parents": [],
+                            "content": encoded_schema,
+                            "timestamp": 1,
+                            "author": "fedcba98-7654-3210-fedc-ba9876543210",
+                            "metadata": null
+                        }
+                    ]
+                }
+            }
+        });
+
+        let sync_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sync")
+                    .header("content-type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(sync_payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sync_response.status(), StatusCode::OK);
+
+        let schema_response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/schema/{}", schema_hash))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(schema_response.status(), StatusCode::OK);
+        let body = body::to_bytes(schema_response.into_body(), usize::MAX)
+            .await
+            .expect("schema body");
+        assert_eq!(std::str::from_utf8(&body).unwrap(), schema_json);
     }
 }

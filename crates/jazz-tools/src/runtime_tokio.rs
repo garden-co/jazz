@@ -453,6 +453,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
+    /// Get persisted original schema JSON by hash from catalogue state.
+    pub fn known_schema_json(
+        &self,
+        schema_hash: &SchemaHash,
+    ) -> Result<Option<String>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core
+            .schema_manager()
+            .get_known_schema_json(schema_hash)
+            .map(str::to_string))
+    }
+
     /// Access the underlying storage (for flushing, etc).
     ///
     /// The callback receives `&S` while holding the core lock.

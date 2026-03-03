@@ -17,6 +17,8 @@ pub enum MetadataKey {
     AppId,
     /// Schema content hash on catalogue schema objects.
     SchemaHash,
+    /// Original schema JSON string on catalogue schema objects.
+    SchemaJson,
     /// Source schema hash on catalogue lens objects.
     SourceHash,
     /// Target schema hash on catalogue lens objects.
@@ -33,6 +35,7 @@ impl MetadataKey {
             Self::Delete => "delete",
             Self::AppId => "app_id",
             Self::SchemaHash => "schema_hash",
+            Self::SchemaJson => "schema_json",
             Self::SourceHash => "source_hash",
             Self::TargetHash => "target_hash",
             Self::NoSync => "nosync",

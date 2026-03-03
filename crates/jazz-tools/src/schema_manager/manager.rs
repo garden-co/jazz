@@ -69,6 +69,7 @@ pub struct SchemaManager {
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
     known_schemas: Arc<HashMap<SchemaHash, Schema>>,
+    known_schema_json: HashMap<SchemaHash, String>,
     known_schemas_dirty: bool,
 }
 
@@ -99,12 +100,19 @@ impl SchemaManager {
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
         known_schemas.insert(current_hash, schema);
+        let mut known_schema_json = HashMap::new();
+        known_schema_json.insert(
+            current_hash,
+            serde_json::to_string(&context.current_schema)
+                .expect("serializing current schema should not fail"),
+        );
 
         Ok(Self {
             context,
             query_manager,
             app_id,
             known_schemas: Arc::new(known_schemas),
+            known_schema_json,
             known_schemas_dirty: true,
         })
     }
@@ -134,6 +142,7 @@ impl SchemaManager {
             query_manager,
             app_id,
             known_schemas: Arc::new(HashMap::new()),
+            known_schema_json: HashMap::new(),
             known_schemas_dirty: false,
         }
     }
@@ -172,6 +181,11 @@ impl SchemaManager {
     /// Get a known schema by hash.
     pub fn get_known_schema(&self, hash: &SchemaHash) -> Option<&Schema> {
         self.known_schemas.get(hash)
+    }
+
+    /// Get original schema JSON for a known schema hash.
+    pub fn get_known_schema_json(&self, hash: &SchemaHash) -> Option<&str> {
+        self.known_schema_json.get(hash).map(String::as_str)
     }
 
     /// Check if a schema is known (either current, live, or in known_schemas).
@@ -446,7 +460,7 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&self.context.current_schema);
 
-        let metadata = self.schema_metadata(&schema_hash);
+        let metadata = self.schema_metadata(&schema_hash, &self.context.current_schema);
         self.query_manager
             .sync_manager_mut()
             .create_object_with_content(storage, object_id, metadata, content);
@@ -466,7 +480,7 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(schema);
 
-        let metadata = self.schema_metadata(&schema_hash);
+        let metadata = self.schema_metadata(&schema_hash, schema);
         self.query_manager
             .sync_manager_mut()
             .create_object_with_content(storage, object_id, metadata, content);
@@ -522,7 +536,11 @@ impl SchemaManager {
     }
 
     /// Build metadata for a schema catalogue object.
-    fn schema_metadata(&self, schema_hash: &SchemaHash) -> HashMap<String, String> {
+    fn schema_metadata(
+        &self,
+        schema_hash: &SchemaHash,
+        schema: &Schema,
+    ) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
         metadata.insert(
             crate::metadata::MetadataKey::Type.to_string(),
@@ -535,6 +553,10 @@ impl SchemaManager {
         metadata.insert(
             crate::metadata::MetadataKey::SchemaHash.to_string(),
             schema_hash.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::SchemaJson.to_string(),
+            serde_json::to_string(schema).expect("serializing schema should not fail"),
         );
         metadata
     }
@@ -608,6 +630,14 @@ impl SchemaManager {
             .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
 
         let hash = SchemaHash::compute(&schema);
+        let schema_json = metadata
+            .get(crate::metadata::MetadataKey::SchemaJson.as_str())
+            .ok_or(SchemaError::MissingSchemaJson)?
+            .clone();
+
+        // Always store/overwrite original JSON for this hash so API retrieval
+        // reflects the latest pushed schema_json for that hash.
+        self.known_schema_json.insert(hash, schema_json);
 
         // Always add to known_schemas (server or client)
         // This allows server-mode query execution even without lens paths

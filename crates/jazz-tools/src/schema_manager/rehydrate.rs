@@ -1,8 +1,5 @@
-use std::collections::HashMap;
-
 use tracing::{info, warn};
 
-use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::{CatalogueManifest, Storage};
 
@@ -25,33 +22,6 @@ fn latest_catalogue_content<S: Storage + ?Sized>(
             .map(|commit| commit.content)
             .filter(|content| !content.is_empty())
     }))
-}
-
-fn schema_metadata_for_rehydrate(app_id: AppId, schema_hash: &str) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CatalogueSchema.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
-    metadata
-}
-
-fn lens_metadata_for_rehydrate(
-    app_id: AppId,
-    source_hash: &str,
-    target_hash: &str,
-) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CatalogueLens.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata.insert(MetadataKey::SourceHash.to_string(), source_hash.to_string());
-    metadata.insert(MetadataKey::TargetHash.to_string(), target_hash.to_string());
-    metadata
 }
 
 /// Rehydrate server schema state from persisted catalogue manifest operations.
@@ -81,7 +51,7 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
     let mut schema_count = 0usize;
     let mut lens_count = 0usize;
 
-    for (object_id, schema_hash) in schema_seen {
+    for (object_id, _schema_hash) in schema_seen {
         let Some(content) = latest_catalogue_content(storage, object_id)? else {
             warn!(
                 app_id = %app_id,
@@ -91,7 +61,17 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
             continue;
         };
 
-        let metadata = schema_metadata_for_rehydrate(app_id, &schema_hash.to_string());
+        let Some(metadata) = storage.load_object_metadata(object_id).map_err(|err| {
+            format!("failed to load metadata for schema object {object_id}: {err:?}")
+        })?
+        else {
+            warn!(
+                app_id = %app_id,
+                object_id = %object_id,
+                "catalogue schema in manifest missing object metadata"
+            );
+            continue;
+        };
         if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
         {
             warn!(
@@ -105,7 +85,7 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
         }
     }
 
-    for (object_id, lens) in lens_seen {
+    for (object_id, _lens) in lens_seen {
         let Some(content) = latest_catalogue_content(storage, object_id)? else {
             warn!(
                 app_id = %app_id,
@@ -115,11 +95,17 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
             continue;
         };
 
-        let metadata = lens_metadata_for_rehydrate(
-            app_id,
-            &lens.source_hash.to_string(),
-            &lens.target_hash.to_string(),
-        );
+        let Some(metadata) = storage.load_object_metadata(object_id).map_err(|err| {
+            format!("failed to load metadata for lens object {object_id}: {err:?}")
+        })?
+        else {
+            warn!(
+                app_id = %app_id,
+                object_id = %object_id,
+                "catalogue lens in manifest missing object metadata"
+            );
+            continue;
+        };
         if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
         {
             warn!(
