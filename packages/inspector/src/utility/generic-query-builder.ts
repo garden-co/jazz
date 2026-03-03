@@ -31,7 +31,6 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
   }
 
   where(conditions: GenericWhereInput): GenericQueryBuilder {
-    return this;
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -55,21 +54,18 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
   }
 
   orderBy(column: string, direction: "asc" | "desc" = "asc"): GenericQueryBuilder {
-    return this;
     const clone = this._clone();
     clone._orderBys.push([column, direction]);
     return clone;
   }
 
   limit(n: number): GenericQueryBuilder {
-    return this;
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
   offset(n: number): GenericQueryBuilder {
-    return this;
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
@@ -88,7 +84,6 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
   }
 
   private _clone(): GenericQueryBuilder {
-    return this;
     const clone = new GenericQueryBuilder(this._table, this._schema);
     clone._conditions = [...this._conditions];
     clone._orderBys = [...this._orderBys];
