@@ -10,7 +10,7 @@ export function TodoList() {
   // #endregion reading-reactive-hooks-react
 
   // #region reading-filtering-react
-  const incompleteTodos = useAll(
+  const _incompleteTodos = useAll(
     app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
   );
   // #endregion reading-filtering-react
