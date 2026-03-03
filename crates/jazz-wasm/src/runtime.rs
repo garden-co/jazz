@@ -408,18 +408,7 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
     pub fn on_sync_message_received(&self, payload: JsValue) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload = if let Some(json) = payload.as_string() {
-            SyncPayload::from_json(&json)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))?
-        } else if payload.is_instance_of::<Uint8Array>() {
-            let bytes = Uint8Array::new(&payload).to_vec();
-            SyncPayload::from_bytes(&bytes)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))?
-        } else {
-            return Err(JsError::new(
-                "Invalid sync payload type: expected Uint8Array or JSON string",
-            ));
-        };
+        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Server(ServerId::new()),
@@ -439,7 +428,7 @@ impl WasmRuntime {
     pub fn on_sync_message_received_from_client(
         &self,
         client_id: &str,
-        payload: &[u8],
+        payload: JsValue,
     ) -> Result<(), JsError> {
         let _span = debug_span!(
             "wasm::onSyncMessageReceivedFromClient",
@@ -451,8 +440,7 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
 
-        let payload = SyncPayload::from_bytes(payload)
-            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))?;
+        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
@@ -461,6 +449,21 @@ impl WasmRuntime {
 
         self.core.borrow_mut().park_sync_message(entry);
         Ok(())
+    }
+
+    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
+        if let Some(json) = payload.as_string() {
+            SyncPayload::from_json(&json)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+        } else if payload.is_instance_of::<Uint8Array>() {
+            let bytes = Uint8Array::new(&payload).to_vec();
+            SyncPayload::from_bytes(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+        } else {
+            Err(JsError::new(
+                "Invalid sync payload type: expected Uint8Array or JSON string",
+            ))
+        }
     }
 
     /// Register a callback for outgoing sync messages.
