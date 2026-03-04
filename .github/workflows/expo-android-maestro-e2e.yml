@@ -118,6 +118,11 @@ jobs:
 
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" tail -n 200 /tmp/server.log | tee -a vercel-sandbox.log
 
+      - name: Verify Server URL 
+        run: |
+          echo "Verifying server URL: ${SERVER_PUBLIC_URL}"
+          curl --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health"
+
       - name: Build release APK
         working-directory: examples/todo-client-localfirst-expo/android
         env:
