@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::object::ObjectId;
 
@@ -10,8 +10,7 @@ use super::*;
 /// `PartialEq`/`Eq` are implemented manually because `f64` does not implement
 /// `Eq`. We use bitwise comparison (`f64::to_bits`) so that NaN == NaN and
 /// -0.0 != 0.0, which is the correct semantics for storage identity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
+#[derive(Debug, Clone)]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
@@ -28,6 +27,137 @@ pub enum Value {
     /// The schema is external (from ColumnType::Row).
     Row(Vec<Value>),
     Null,
+}
+
+/// Use internally-tagged enum for JSON serialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+enum ValueHuman {
+    Integer(i32),
+    BigInt(i64),
+    Double(f64),
+    Boolean(bool),
+    Text(String),
+    Timestamp(u64),
+    Uuid(ObjectId),
+    Bytea(Vec<u8>),
+    Array(Vec<ValueHuman>),
+    Row(Vec<ValueHuman>),
+    Null,
+}
+
+/// Use externally-tagged enum for binary serialization (postcard does not support internally-tagged enums).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ValueBinary {
+    Integer(i32),
+    BigInt(i64),
+    Double(f64),
+    Boolean(bool),
+    Text(String),
+    Timestamp(u64),
+    Uuid(ObjectId),
+    Bytea(Vec<u8>),
+    Array(Vec<ValueBinary>),
+    Row(Vec<ValueBinary>),
+    Null,
+}
+
+impl From<&Value> for ValueHuman {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Integer(v) => ValueHuman::Integer(*v),
+            Value::BigInt(v) => ValueHuman::BigInt(*v),
+            Value::Double(v) => ValueHuman::Double(*v),
+            Value::Boolean(v) => ValueHuman::Boolean(*v),
+            Value::Text(v) => ValueHuman::Text(v.clone()),
+            Value::Timestamp(v) => ValueHuman::Timestamp(*v),
+            Value::Uuid(v) => ValueHuman::Uuid(*v),
+            Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
+            Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
+            Value::Row(v) => ValueHuman::Row(v.iter().map(ValueHuman::from).collect()),
+            Value::Null => ValueHuman::Null,
+        }
+    }
+}
+
+impl From<ValueHuman> for Value {
+    fn from(value: ValueHuman) -> Self {
+        match value {
+            ValueHuman::Integer(v) => Value::Integer(v),
+            ValueHuman::BigInt(v) => Value::BigInt(v),
+            ValueHuman::Double(v) => Value::Double(v),
+            ValueHuman::Boolean(v) => Value::Boolean(v),
+            ValueHuman::Text(v) => Value::Text(v),
+            ValueHuman::Timestamp(v) => Value::Timestamp(v),
+            ValueHuman::Uuid(v) => Value::Uuid(v),
+            ValueHuman::Bytea(v) => Value::Bytea(v),
+            ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
+            ValueHuman::Row(v) => Value::Row(v.into_iter().map(Value::from).collect()),
+            ValueHuman::Null => Value::Null,
+        }
+    }
+}
+
+impl From<&Value> for ValueBinary {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Integer(v) => ValueBinary::Integer(*v),
+            Value::BigInt(v) => ValueBinary::BigInt(*v),
+            Value::Double(v) => ValueBinary::Double(*v),
+            Value::Boolean(v) => ValueBinary::Boolean(*v),
+            Value::Text(v) => ValueBinary::Text(v.clone()),
+            Value::Timestamp(v) => ValueBinary::Timestamp(*v),
+            Value::Uuid(v) => ValueBinary::Uuid(*v),
+            Value::Bytea(v) => ValueBinary::Bytea(v.clone()),
+            Value::Array(v) => ValueBinary::Array(v.iter().map(ValueBinary::from).collect()),
+            Value::Row(v) => ValueBinary::Row(v.iter().map(ValueBinary::from).collect()),
+            Value::Null => ValueBinary::Null,
+        }
+    }
+}
+
+impl From<ValueBinary> for Value {
+    fn from(value: ValueBinary) -> Self {
+        match value {
+            ValueBinary::Integer(v) => Value::Integer(v),
+            ValueBinary::BigInt(v) => Value::BigInt(v),
+            ValueBinary::Double(v) => Value::Double(v),
+            ValueBinary::Boolean(v) => Value::Boolean(v),
+            ValueBinary::Text(v) => Value::Text(v),
+            ValueBinary::Timestamp(v) => Value::Timestamp(v),
+            ValueBinary::Uuid(v) => Value::Uuid(v),
+            ValueBinary::Bytea(v) => Value::Bytea(v),
+            ValueBinary::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
+            ValueBinary::Row(v) => Value::Row(v.into_iter().map(Value::from).collect()),
+            ValueBinary::Null => Value::Null,
+        }
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            ValueHuman::from(self).serialize(serializer)
+        } else {
+            ValueBinary::from(self).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            ValueHuman::deserialize(deserializer).map(Value::from)
+        } else {
+            ValueBinary::deserialize(deserializer).map(Value::from)
+        }
+    }
 }
 
 impl PartialEq for Value {
