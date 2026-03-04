@@ -272,7 +272,7 @@ impl SyncSender for JsSyncSender {
                 Destination::Server(server_id) => ("server", server_id.0.to_string()),
                 Destination::Client(client_id) => ("client", client_id.0.to_string()),
             };
-            if self.use_binary_encoding {
+            if self.use_binary_encoding || destination_kind == "client" {
                 if let Ok(payload_bytes) = message.payload.to_bytes() {
                     let payload_js = Uint8Array::from(payload_bytes.as_slice());
                     let _ = callback.call4(
@@ -997,7 +997,7 @@ impl WasmRuntime {
         user_branch: &str,
         db_name: &str,
         tier: Option<String>,
-        use_binary_encoding: Option<bool>,
+        use_binary_encoding: bool,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
@@ -1054,7 +1054,7 @@ impl WasmRuntime {
         schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
+        let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
