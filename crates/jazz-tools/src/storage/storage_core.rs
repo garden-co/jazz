@@ -299,6 +299,26 @@ pub(super) fn index_scan_all_core(
         .unwrap_or_default()
 }
 
+pub(super) fn index_scan_ordered_core(
+    table: &str,
+    column: &str,
+    branch: &str,
+    offset: usize,
+    limit: usize,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Vec<ObjectId> {
+    let prefix = index_prefix(table, column, branch);
+    scan_prefix_keys(&prefix)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| parse_uuid_from_index_key(key))
+                .skip(offset)
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(super) fn index_range_core(
     table: &str,
     column: &str,

@@ -10,6 +10,9 @@ use super::{SourceContext, SourceNode};
 
 /// Source node that scans an index via Storage.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
+///
+/// When `window` is set and the condition is `All`, uses the ordered windowed
+/// scan to load only the needed range of keys from storage.
 #[derive(Debug)]
 pub struct IndexScanNode {
     pub table: TableName,
@@ -19,6 +22,9 @@ pub struct IndexScanNode {
 
     /// Output tuple descriptor (single element, unmaterialized).
     output_descriptor: TupleDescriptor,
+
+    /// Optional (offset, limit) window for ordered index scans.
+    window: Option<(usize, usize)>,
 
     /// Current set of tuples (length-1) matching the condition.
     current_tuples: AHashSet<Tuple>,
@@ -45,6 +51,7 @@ impl IndexScanNode {
             branch: branch.into(),
             condition,
             output_descriptor,
+            window: None,
             current_tuples: AHashSet::new(),
             last_scanned_ids: AHashSet::new(),
             dirty: true,
@@ -65,17 +72,33 @@ impl IndexScanNode {
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_descriptor
     }
+
+    /// Set the window for ordered index scans (offset, limit).
+    pub fn set_window(&mut self, offset: usize, limit: usize) {
+        self.window = Some((offset, limit));
+    }
 }
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
-        let new_ids: AHashSet<ObjectId> = match &self.condition {
-            ScanCondition::All => ctx
+        let new_ids: AHashSet<ObjectId> = match (&self.condition, self.window) {
+            (ScanCondition::All, Some((offset, limit))) => ctx
+                .storage
+                .index_scan_ordered(
+                    self.table.as_str(),
+                    self.column.as_str(),
+                    &self.branch,
+                    offset,
+                    limit,
+                )
+                .into_iter()
+                .collect(),
+            (ScanCondition::All, None) => ctx
                 .storage
                 .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
                 .into_iter()
                 .collect(),
-            ScanCondition::Eq(value) => ctx
+            (ScanCondition::Eq(value), _) => ctx
                 .storage
                 .index_lookup(
                     self.table.as_str(),
@@ -85,7 +108,7 @@ impl SourceNode for IndexScanNode {
                 )
                 .into_iter()
                 .collect(),
-            ScanCondition::Range { min, max } => {
+            (ScanCondition::Range { min, max }, _) => {
                 let start = min.as_ref();
                 let end = max.as_ref();
                 ctx.storage

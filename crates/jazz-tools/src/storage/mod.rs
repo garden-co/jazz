@@ -263,6 +263,26 @@ pub trait Storage {
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
 
+    /// Ordered scan with offset/limit — returns row IDs in index key order,
+    /// skipping `offset` entries and returning at most `limit`.
+    ///
+    /// For the `_id` column the key order matches `ObjectId` byte order, so
+    /// callers sorting by id can push pagination down to storage.
+    fn index_scan_ordered(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        self.index_scan_all(table, column, branch)
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect()
+    }
+
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}
 
@@ -398,6 +418,17 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         (**self).index_scan_all(table, column, branch)
+    }
+
+    fn index_scan_ordered(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        (**self).index_scan_ordered(table, column, branch, offset, limit)
     }
 
     fn flush(&self) {
@@ -855,6 +886,26 @@ impl Storage for MemoryStorage {
             return Vec::new();
         };
         index.values().flat_map(|ids| ids.iter().copied()).collect()
+    }
+
+    fn index_scan_ordered(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let Some(index) = self.indices.get(&key) else {
+            return Vec::new();
+        };
+        index
+            .values()
+            .flat_map(|ids| ids.iter().copied())
+            .skip(offset)
+            .take(limit)
+            .collect()
     }
 }
 

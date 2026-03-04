@@ -14,9 +14,11 @@ export function TodoList() {
     todosQuery = todosQuery.where({ done: true });
   }
 
+  const [page, setPage] = useState(0);
+
   // #region reading-reactive-hooks-react
   const db = useDb();
-  const todos = useAll(todosQuery) ?? [];
+  const todos = useAll(todosQuery.limit(50).offset(page * 50));
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
@@ -27,6 +29,11 @@ export function TodoList() {
     if (!title.trim() || !sessionUserId) return;
     db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
     setTitle("");
+  };
+
+  const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFilterTitle(e.target.value);
+    setPage(0);
   };
 
   return (
@@ -47,7 +54,7 @@ export function TodoList() {
         <input
           type="text"
           value={filterTitle}
-          onChange={(e) => setFilterTitle(e.target.value)}
+          onChange={handleFilterChange}
           placeholder="Filter by title (contains)"
           aria-label="Filter by title"
         />
@@ -60,23 +67,29 @@ export function TodoList() {
           Done only
         </label>
       </div>
-      <ul id="todo-list">
-        {todos.map((todo) => (
-          <li key={todo.id} className={todo.done ? "done" : ""}>
-            <input
-              type="checkbox"
-              checked={todo.done}
-              onChange={() => db.update(app.todos, todo.id, { done: !todo.done })}
-              className="toggle"
-            />
-            <span>{todo.title}</span>
-            {todo.description && <small>{todo.description}</small>}
-            <button className="delete-btn" onClick={() => db.deleteFrom(app.todos, todo.id)}>
-              &times;
-            </button>
-          </li>
-        ))}
-      </ul>
+      {todos && (
+        <>
+          <ul id="todo-list">
+            {todos.map((todo) => (
+              <li key={todo.id} className={todo.done ? "done" : ""}>
+                <input
+                  type="checkbox"
+                  checked={todo.done}
+                  onChange={() => db.update(app.todos, todo.id, { done: !todo.done })}
+                  className="toggle"
+                />
+                <span>{todo.title}</span>
+                {todo.description && <small>{todo.description}</small>}
+                <button className="delete-btn" onClick={() => db.deleteFrom(app.todos, todo.id)}>
+                  &times;
+                </button>
+              </li>
+            ))}
+          </ul>
+          Page {page + 1} {page > 0 && <button onClick={() => setPage(page - 1)}>Previous</button>}{" "}
+          {page < 10 && <button onClick={() => setPage(page + 1)}>Next</button>}
+        </>
+      )}
     </>
   );
 }

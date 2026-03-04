@@ -37,9 +37,9 @@ use super::{
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        index_range_core, index_remove_core, index_scan_all_core, index_scan_ordered_core,
+        load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
+        set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -404,6 +404,19 @@ impl Storage for OpfsBTreeStorage {
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
+    }
+
+    fn index_scan_ordered(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        index_scan_ordered_core(table, column, branch, offset, limit, |prefix| {
+            self.tree_scan_keys(prefix)
+        })
     }
 
     fn flush(&self) {

@@ -8317,3 +8317,230 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
         "Untrusted downstream should keep current result-only sync behavior"
     );
 }
+
+// ============================================================================
+// Windowed index scan tests
+// ============================================================================
+//
+// These test that limit+offset queries sorted by id (the default) load only
+// the needed range of keys from storage, producing correct results and
+// correct reactive deltas on insert/delete.
+
+#[test]
+fn windowed_scan_returns_correct_page() {
+    // Insert 6 rows, query with offset=2 limit=2 (default id ASC order).
+    // Expect the 3rd and 4th rows in id order.
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        ids.push(h.row_id);
+    }
+    ids.sort();
+
+    let query = qm.query("users").offset(2).limit(2).build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 2);
+    let result_ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    assert_eq!(result_ids, &ids[2..4]);
+}
+
+#[test]
+fn windowed_scan_insert_before_window_shifts() {
+    // Start with rows [A, B, C, D] sorted by id, window offset=1 limit=2 → [B, C].
+    // Insert E whose id sorts before A → new order [E, A, B, C, D], window → [A, B].
+    //
+    //   before:  [A  B  C  D]
+    //                ^--^        window(1,2)
+    //   insert E (sorts first):
+    //   after:   [E  A  B  C  D]
+    //                ^--^        window(1,2) = [A, B]
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Create rows with controlled id ordering by generating many and picking sorted ones.
+    let mut handles = Vec::new();
+    for i in 0..4 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        handles.push(h);
+    }
+    handles.sort_by_key(|h| h.row_id);
+
+    let query = qm.query("users").offset(1).limit(2).build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let initial = qm.get_subscription_results(sub_id);
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[0].0, handles[1].row_id);
+    assert_eq!(initial[1].0, handles[2].row_id);
+
+    // Insert a row. Its UUID is random — we can't control where it sorts.
+    // Instead, verify the window is still correct after insert.
+    let new_h = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("NewUser".into()), Value::Integer(99)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let mut all_ids: Vec<_> = handles.iter().map(|h| h.row_id).collect();
+    all_ids.push(new_h.row_id);
+    all_ids.sort();
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    let result_ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    assert_eq!(result_ids, &all_ids[1..3]);
+
+    qm.unsubscribe_with_sync(sub_id);
+}
+
+#[test]
+fn windowed_scan_delete_within_window_shifts() {
+    // Start with [A, B, C, D, E] sorted by id, window offset=1 limit=2 → [B, C].
+    // Delete B → [A, C, D, E], window → [C, D].
+    //
+    //   before:  [A  B  C  D  E]
+    //                ^--^          window(1,2)
+    //   delete B:
+    //   after:   [A  C  D  E]
+    //                ^--^          window(1,2) = [C, D]
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        handles.push(h);
+    }
+    handles.sort_by_key(|h| h.row_id);
+
+    let query = qm.query("users").offset(1).limit(2).build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let initial = qm.get_subscription_results(sub_id);
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[0].0, handles[1].row_id);
+    assert_eq!(initial[1].0, handles[2].row_id);
+
+    // Delete the first row in the window (handles[1])
+    qm.delete(&mut storage, handles[1].row_id).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, handles[2].row_id);
+    assert_eq!(results[1].0, handles[3].row_id);
+
+    qm.unsubscribe_with_sync(sub_id);
+}
+
+#[test]
+fn windowed_scan_delete_before_window_shifts() {
+    // Start with [A, B, C, D, E] sorted by id, window offset=2 limit=2 → [C, D].
+    // Delete A → [B, C, D, E], window → [D, E].
+    //
+    //   before:  [A  B  C  D  E]
+    //                   ^--^       window(2,2)
+    //   delete A:
+    //   after:   [B  C  D  E]
+    //                   ^--^       window(2,2) = [D, E]
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        handles.push(h);
+    }
+    handles.sort_by_key(|h| h.row_id);
+
+    let query = qm.query("users").offset(2).limit(2).build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let initial = qm.get_subscription_results(sub_id);
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[0].0, handles[2].row_id);
+    assert_eq!(initial[1].0, handles[3].row_id);
+
+    // Delete the first row overall (before the window)
+    qm.delete(&mut storage, handles[0].row_id).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, handles[3].row_id);
+    assert_eq!(results[1].0, handles[4].row_id);
+
+    qm.unsubscribe_with_sync(sub_id);
+}
+
+#[test]
+fn windowed_scan_with_filter_falls_back_to_full_scan() {
+    // When a WHERE filter is present, windowed scan is not eligible.
+    // Verify correct results with limit+offset+filter.
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    for i in 0..10 {
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text(format!("User{i}")), Value::Integer(i * 10)],
+        )
+        .unwrap();
+    }
+
+    // Filter score >= 50, then limit 2 offset 1 in id order
+    let query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(50))
+        .offset(1)
+        .limit(2)
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    // Rows with score >= 50: scores 50,60,70,80,90 (5 rows).
+    // In id order, offset 1 limit 2 gives 2nd and 3rd of those 5.
+    assert_eq!(results.len(), 2);
+}

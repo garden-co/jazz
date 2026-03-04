@@ -37,9 +37,9 @@ use super::{
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        index_range_core, index_remove_core, index_scan_all_core, index_scan_ordered_core,
+        load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
+        set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -459,6 +459,22 @@ impl Storage for SurrealKvStorage {
             return Vec::new();
         };
         index_scan_all_core(table, column, branch, |prefix| {
+            Self::scan_prefix_keys(&txn, prefix)
+        })
+    }
+
+    fn index_scan_ordered(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<ObjectId> {
+        let Ok(txn) = self.begin_read_txn() else {
+            return Vec::new();
+        };
+        index_scan_ordered_core(table, column, branch, offset, limit, |prefix| {
             Self::scan_prefix_keys(&txn, prefix)
         })
     }

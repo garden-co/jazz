@@ -32,6 +32,7 @@ use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
+use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::RelExpr;
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
@@ -515,8 +516,10 @@ impl QueryGraph {
         let mut phase2_input = materialize_id;
         let mut current_descriptor = descriptor.clone();
 
-        // Policy filter node (if session provided and table has SELECT policy)
-        if let (Some(session), Some(policy)) = (&session, select_policy) {
+        // Policy filter node (if session provided and table has a non-trivial SELECT policy)
+        if let (Some(session), Some(policy)) = (&session, select_policy)
+            && !matches!(policy, PolicyExpr::True)
+        {
             let branch_for_policy = branches
                 .first()
                 .cloned()
@@ -578,6 +581,29 @@ impl QueryGraph {
 
         // Sort node (default: id ASC when order_by is omitted)
         let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
+
+        // Windowed index scan: when sorting by id ASC with limit, and no
+        // post-scan filtering, push offset+limit down to the index scan so
+        // storage only returns the needed key range.
+        let use_windowed_scan = plan.limit.is_some()
+            && plan.recursive.is_none()
+            && !plan.include_deleted
+            && branches.len() == 1
+            && phase1_outputs.len() == 1
+            && phase2_input == materialize_id
+            && is_id_asc_only_sort(&sort_keys)
+            && matches!(
+                graph.get_node(phase1_outputs[0]),
+                Some(GraphNode::IndexScan(n)) if matches!(n.condition, ScanCondition::All)
+            );
+
+        if use_windowed_scan {
+            let scan_id = phase1_outputs[0];
+            if let Some(GraphNode::IndexScan(scan_node)) = graph.get_node_mut(scan_id) {
+                scan_node.set_window(plan.offset, plan.limit.unwrap());
+            }
+        }
+
         if !sort_keys.is_empty() {
             let sort_tuple_desc =
                 TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
@@ -587,8 +613,8 @@ impl QueryGraph {
             phase2_input = sort_id;
         }
 
-        // LimitOffset node (if limit or offset specified)
-        if plan.limit.is_some() || plan.offset > 0 {
+        // LimitOffset node (skip when windowed scan already handles pagination)
+        if !use_windowed_scan && (plan.limit.is_some() || plan.offset > 0) {
             let limit_tuple_desc =
                 TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
             let limit_offset_node =
@@ -2297,6 +2323,12 @@ fn sort_keys_from_order_by(
             }
         })
         .collect()
+}
+
+fn is_id_asc_only_sort(sort_keys: &[SortKey]) -> bool {
+    sort_keys.len() == 1
+        && matches!(sort_keys[0].target, SortTarget::RowId)
+        && matches!(sort_keys[0].direction, SortDirection::Ascending)
 }
 
 fn build_remaining_predicate_from_disjuncts(
