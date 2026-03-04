@@ -285,7 +285,8 @@ impl<'a> Tokenizer<'a> {
                 self.advance();
                 Token::Gt
             }
-            '\'' | '"' => Token::StringLit(self.read_string()?),
+            '\'' => Token::StringLit(self.read_string()?),
+            '"' => Token::Ident(self.read_string()?),
             '-' if self.input[self.pos..].starts_with("-") && {
                 let next = self.input[self.pos + 1..].chars().next();
                 next.map(|c| c.is_ascii_digit()).unwrap_or(false)
@@ -1561,6 +1562,26 @@ mod tests {
         assert_eq!(completed.name.as_str(), "completed");
         assert_eq!(completed.column_type, ColumnType::Boolean);
         assert!(!completed.nullable);
+    }
+
+    #[test]
+    fn parse_quoted_identifiers() {
+        let sql = r#"
+            CREATE TABLE "data_entry_entries" (
+                "table" TEXT NOT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        assert_eq!(schema.len(), 1);
+
+        let entries = schema.get(&TableName::new("data_entry_entries")).unwrap();
+        assert_eq!(entries.columns.columns.len(), 1);
+
+        let table = &entries.columns.columns[0];
+        assert_eq!(table.name.as_str(), "table");
+        assert_eq!(table.column_type, ColumnType::Text);
+        assert!(!table.nullable);
     }
 
     #[test]
