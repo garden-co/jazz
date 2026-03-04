@@ -855,15 +855,17 @@ impl QueryGraph {
         }
 
         // Apply select_columns if specified
-        if let Some(cols) = &spec.select_columns {
-            let selected: Vec<_> = cols
-                .iter()
+        let base_columns = if let Some(cols) = &spec.select_columns {
+            cols.iter()
                 .filter_map(|name| columns.iter().find(|c| c.name.as_str() == name).cloned())
-                .collect();
-            Some(RowDescriptor::new(selected))
+                .collect()
         } else {
-            Some(RowDescriptor::new(columns))
-        }
+            columns
+        };
+
+        // Row id is carried in Value::Row { id: Some(...), .. } rather than
+        // as a prepended column.
+        Some(RowDescriptor::new(base_columns))
     }
 
     /// Compile a recursive relation specification into a RecursiveRelationNode.
