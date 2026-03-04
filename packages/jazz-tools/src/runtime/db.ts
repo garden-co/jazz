@@ -477,22 +477,30 @@ export class Db {
 
     if (!this.clients.has(key)) {
       // Create in-memory runtime (works for both direct and worker mode)
-      const client = JazzClient.connectSync(this.wasmModule, {
-        appId: this.config.appId,
-        schema,
-        driver: this.config.driver,
-        // In worker mode, don't connect to server directly — worker handles it
-        serverUrl: this.worker ? undefined : this.config.serverUrl,
-        serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
-        env: this.config.env,
-        userBranch: this.config.userBranch,
-        jwtToken: this.config.jwtToken,
-        localAuthMode: this.config.localAuthMode,
-        localAuthToken: this.config.localAuthToken,
-        adminSecret: this.config.adminSecret,
-        tier: this.worker ? undefined : "worker",
-        defaultDurabilityTier: this.config.serverUrl ? "edge" : undefined,
-      });
+      const client = JazzClient.connectSync(
+        this.wasmModule,
+        {
+          appId: this.config.appId,
+          schema,
+          driver: this.config.driver,
+          // In worker mode, don't connect to server directly — worker handles it
+          serverUrl: this.worker ? undefined : this.config.serverUrl,
+          serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
+          env: this.config.env,
+          userBranch: this.config.userBranch,
+          jwtToken: this.config.jwtToken,
+          localAuthMode: this.config.localAuthMode,
+          localAuthToken: this.config.localAuthToken,
+          adminSecret: this.config.adminSecret,
+          tier: this.worker ? undefined : "worker",
+          defaultDurabilityTier: this.config.serverUrl ? "edge" : undefined,
+        },
+        {
+          // Worker-bridged runtimes exchange postcard payloads with peers;
+          // direct browser/server routing keeps JSON payloads.
+          useBinaryEncoding: this.worker !== null,
+        },
+      );
 
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
