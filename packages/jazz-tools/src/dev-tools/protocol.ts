@@ -75,6 +75,6 @@ export function sanitizeDbConfigForBridge(dbConfig: DbConfig | null): DbConfig |
     localAuthMode: dbConfig.localAuthMode,
     localAuthToken: dbConfig.localAuthToken,
     adminSecret: dbConfig.adminSecret,
-    dbName: dbConfig.dbName,
+    driver: dbConfig.driver,
   };
 }

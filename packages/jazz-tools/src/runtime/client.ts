@@ -843,11 +843,6 @@ export class JazzClient {
   async shutdown(): Promise<void> {
     this.streamController.stop();
 
-    // Close driver if it supports it
-    if (this.context.driver?.close) {
-      await this.context.driver.close();
-    }
-
     // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
     if (this.runtime.close) {
       await this.runtime.close();
