@@ -493,7 +493,13 @@ export class Db {
           localAuthToken: this.config.localAuthToken,
           adminSecret: this.config.adminSecret,
           tier: this.worker ? undefined : "worker",
-          defaultDurabilityTier: this.config.serverUrl ? "edge" : undefined,
+          // Keep worker-bridged browser clients on worker durability by default.
+          // For direct (non-worker) clients connected to a server, default to edge.
+          defaultDurabilityTier: this.worker
+            ? undefined
+            : this.config.serverUrl
+              ? "edge"
+              : undefined,
         },
         {
           // Worker-bridged runtimes exchange postcard payloads with peers;
