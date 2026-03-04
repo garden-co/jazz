@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { SqliteBackend } from "./backend-sqlite.js";
+import type { DocsBackend } from "./backend-sqlite.js";
 import { callTool, toolDefinitions } from "./tools.js";
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,7 @@ export interface RunServerOptions {
 // Backend selection
 // ---------------------------------------------------------------------------
 
-async function selectBackend(dbPath: string, txtPath: string): Promise<SqliteBackend> {
+async function selectBackend(dbPath: string, txtPath: string): Promise<DocsBackend> {
   try {
     // Step 1: confirm node:sqlite is importable
     const { DatabaseSync } = await import("node:sqlite");
@@ -113,7 +113,7 @@ export async function runServer(opts: RunServerOptions = {}): Promise<void> {
             jsonrpc: "2.0",
             id,
             result: {
-              content: [{ type: "text", text: JSON.stringify(result) }],
+              content: [{ type: "text", text: result }],
             },
           });
         } catch (err: unknown) {
