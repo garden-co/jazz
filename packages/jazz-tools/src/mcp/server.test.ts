@@ -199,7 +199,7 @@ describe("tools/list", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/call search_docs", () => {
-  it("returns content array with text type", async () => {
+  it("returns content array with text type and ANSI-formatted output", async () => {
     const [res] = await exchange([
       {
         jsonrpc: "2.0",
@@ -208,13 +208,11 @@ describe("tools/call search_docs", () => {
         params: { name: "search_docs", arguments: { query: "installation" } },
       },
     ]);
-    const content = (res.result as any).content as Array<{
-      type: string;
-      text: string;
-    }>;
+    const content = (res.result as any).content as Array<{ type: string; text: string }>;
     expect(content[0].type).toBe("text");
-    const parsed = JSON.parse(content[0].text);
-    expect(Array.isArray(parsed)).toBe(true);
+    // Title and slug appear in output (may be wrapped in ANSI codes)
+    expect(content[0].text).toContain("Getting Started");
+    expect(content[0].text).toContain("getting-started");
   });
 
   it("respects optional limit argument", async () => {
@@ -223,20 +221,18 @@ describe("tools/call search_docs", () => {
         jsonrpc: "2.0",
         id: 4,
         method: "tools/call",
-        params: {
-          name: "search_docs",
-          arguments: { query: "installation", limit: 1 },
-        },
+        params: { name: "search_docs", arguments: { query: "installation", limit: 1 } },
       },
     ]);
-    const content = (res.result as any).content[0].text;
-    const results = JSON.parse(content);
-    expect(results.length).toBeLessThanOrEqual(1);
+    const text = (res.result as any).content[0].text as string;
+    // With limit 1, only one slug should appear
+    const slugOccurrences = text.split("getting-started").length - 1;
+    expect(slugOccurrences).toBeLessThanOrEqual(1);
   });
 });
 
 describe("tools/call get_doc", () => {
-  it("returns body and related for known slug", async () => {
+  it("returns ANSI-formatted output with title, description, and body", async () => {
     const [res] = await exchange([
       {
         jsonrpc: "2.0",
@@ -245,10 +241,10 @@ describe("tools/call get_doc", () => {
         params: { name: "get_doc", arguments: { slug: "getting-started" } },
       },
     ]);
-    const content = (res.result as any).content[0].text;
-    const doc = JSON.parse(content);
-    expect(typeof doc.body).toBe("string");
-    expect(Array.isArray(doc.related)).toBe(true);
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain("Getting Started");
+    expect(text).toContain("Learn how to install Jazz.");
+    expect(text).toContain("npm install jazz-tools");
   });
 
   it("returns error when slug param is missing", async () => {
@@ -265,7 +261,7 @@ describe("tools/call get_doc", () => {
 });
 
 describe("tools/call list_pages", () => {
-  it("returns array of pages with title, slug, description", async () => {
+  it("returns ANSI-formatted output with title, slug, and description per page", async () => {
     const [res] = await exchange([
       {
         jsonrpc: "2.0",
@@ -274,17 +270,10 @@ describe("tools/call list_pages", () => {
         params: { name: "list_pages", arguments: {} },
       },
     ]);
-    const content = (res.result as any).content[0].text;
-    const pages = JSON.parse(content) as Array<{
-      title: string;
-      slug: string;
-      description: string;
-    }>;
-    expect(Array.isArray(pages)).toBe(true);
-    expect(pages.length).toBeGreaterThan(0);
-    expect(typeof pages[0].title).toBe("string");
-    expect(typeof pages[0].slug).toBe("string");
-    expect(typeof pages[0].description).toBe("string");
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain("Getting Started");
+    expect(text).toContain("getting-started");
+    expect(text).toContain("Learn how to install Jazz.");
   });
 });
 

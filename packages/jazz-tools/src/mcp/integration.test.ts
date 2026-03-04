@@ -120,29 +120,26 @@ describe("MCP integration: full lifecycle", () => {
     expect(names).toContain("list_pages");
   });
 
-  it("search_docs → array with title/slug/section/snippet per item", async () => {
+  it("search_docs → returns results with title and slug for a known term", async () => {
     server.send({
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "search_docs", arguments: { query: "CoValue" } },
+      params: { name: "search_docs", arguments: { query: "schema table" } },
     });
     const res = await server.recv();
     const content = (
       (res.result as Record<string, unknown>).content as Array<{ type: string; text: string }>
     )[0];
     expect(content.type).toBe("text");
-    const results = JSON.parse(content.text) as Array<Record<string, unknown>>;
-    expect(Array.isArray(results)).toBe(true);
-    if (results.length > 0) {
-      expect(typeof results[0].title).toBe("string");
-      expect(typeof results[0].slug).toBe("string");
-      expect(typeof results[0].snippet).toBe("string");
-    }
+    // Should find real results — "schema" and "table" appear throughout the docs
+    expect(content.text).not.toBe("No results found.");
+    // eslint-disable-next-line no-control-regex
+    expect(content.text).toMatch(/\u001b\[1m\u001b\[36m/); // bold cyan heading present
   });
 
-  it("get_doc → body is non-empty string, related is array", async () => {
-    // First get a known slug via list_pages, then fetch it
+  it("get_doc → markdown with title heading and body content", async () => {
+    // Get a slug from list_pages first
     server.send({
       jsonrpc: "2.0",
       id: 4,
@@ -150,11 +147,14 @@ describe("MCP integration: full lifecycle", () => {
       params: { name: "list_pages", arguments: {} },
     });
     const listRes = await server.recv();
-    const pages = JSON.parse(
-      ((listRes.result as Record<string, unknown>).content as Array<{ text: string }>)[0].text,
-    ) as Array<{ slug: string }>;
-    expect(pages.length).toBeGreaterThan(0);
-    const slug = pages[0].slug;
+    const listText = (
+      (listRes.result as Record<string, unknown>).content as Array<{ text: string }>
+    )[0].text;
+    // Slug appears dim-wrapped: \u001b[2m{slug}\u001b[0m
+    // eslint-disable-next-line no-control-regex
+    const slugMatch = listText.match(/\u001b\[2m([^\u001b\n]+)\u001b\[0m/);
+    expect(slugMatch).not.toBeNull();
+    const slug = slugMatch![1].trim();
 
     server.send({
       jsonrpc: "2.0",
@@ -163,15 +163,15 @@ describe("MCP integration: full lifecycle", () => {
       params: { name: "get_doc", arguments: { slug } },
     });
     const res = await server.recv();
-    const doc = JSON.parse(
-      ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0].text,
-    ) as { body: string; related: unknown[] };
-    expect(typeof doc.body).toBe("string");
-    expect(doc.body.length).toBeGreaterThan(0);
-    expect(Array.isArray(doc.related)).toBe(true);
+    const text = ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0]
+      .text;
+    // Title appears bold-wrapped at the start
+    // eslint-disable-next-line no-control-regex
+    expect(text).toMatch(/\u001b\[1m\S/);
+    expect(text.length).toBeGreaterThan(0);
   });
 
-  it("list_pages → array of { title, slug, description }", async () => {
+  it("list_pages → markdown list with title, slug, description per page", async () => {
     server.send({
       jsonrpc: "2.0",
       id: 6,
@@ -179,14 +179,12 @@ describe("MCP integration: full lifecycle", () => {
       params: { name: "list_pages", arguments: {} },
     });
     const res = await server.recv();
-    const pages = JSON.parse(
-      ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0].text,
-    ) as Array<{ title: string; slug: string; description: string }>;
-    expect(Array.isArray(pages)).toBe(true);
-    expect(pages.length).toBeGreaterThan(0);
-    expect(typeof pages[0].title).toBe("string");
-    expect(typeof pages[0].slug).toBe("string");
-    expect(typeof pages[0].description).toBe("string");
+    const text = ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0]
+      .text;
+    expect(typeof text).toBe("string");
+    expect(text.length).toBeGreaterThan(0);
+    // Each page's title and slug appear in the output
+    expect(text).toContain("Authentication");
   });
 
   it("stdin EOF → process exits cleanly with code 0", async () => {

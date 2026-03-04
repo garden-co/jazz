@@ -186,6 +186,21 @@ describe("resolveIncludes", () => {
     expect(result).toContain("another-region");
   });
 
+  it("handles extra attributes such as meta alongside cwd and lang", async () => {
+    const mdxFilePath = join(tmpDir, "content", "docs", "api-reference.mdx");
+    const content = `<include
+  cwd
+  lang="ts"
+  meta='title="examples/snippets.ts"'
+>
+  ../../examples/snippets.ts#query-example
+</include>`;
+    const result = await resolveIncludes(content, mdxFilePath);
+    expect(result).not.toContain("<include");
+    expect(result).toContain("```ts");
+    expect(result).toContain("const results = await db.all(app.todos.where({ done: false }));");
+  });
+
   it("leaves content without include directives unchanged", async () => {
     const mdxFilePath = join(tmpDir, "content", "docs", "getting-started.mdx");
     const content = "## Section\n\nJust plain text.";

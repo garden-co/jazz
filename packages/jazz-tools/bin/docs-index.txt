@@ -13,7 +13,6 @@ Jazz 2 supports three auth methods:
 Browser clients default to anonymous local auth when no JWT/backend auth is configured.
 On first load, Jazz auto-generates a device token and persists it in `localStorage`.
 
-  
     ```tsx
 const anonymousAuthClient = createJazzClient({
   appId: "my-app",
@@ -22,16 +21,13 @@ const anonymousAuthClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
-  
-  
+
     ```svelte
-<!-- #region auth-anon-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
@@ -45,11 +41,8 @@ const anonymousAuthClient = createJazzClient({
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-anon-svelte -->
-
 ```
-  
-  
+
     ```ts
 
   return createDb({
@@ -59,11 +52,9 @@ const anonymousAuthClient = createJazzClient({
   });
 }
 ```
-  
 
 If you want to force a specific device token, pass `localAuthToken` as an explicit override:
 
-  
     ```tsx
 const anonymousAuthWithTokenClient = createJazzClient({
   appId: "my-app",
@@ -72,16 +63,13 @@ const anonymousAuthWithTokenClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
-  
-  
+
     ```svelte
-<!-- #region auth-anon-token-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
@@ -96,11 +84,8 @@ const anonymousAuthWithTokenClient = createJazzClient({
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-anon-token-svelte -->
-
 ```
-  
-  
+
     ```ts
 
   return createDb({
@@ -110,13 +95,11 @@ const anonymousAuthWithTokenClient = createJazzClient({
   });
 }
 ```
-  
 
 ## 2. Add Demo Auth with a Local Account Switcher
 
 When you want to test multi-user flows locally, switch to `demo` profiles and expose the switcher UI.
 
-  
     ```tsx
 const demoAuthAppId = "my-app";
 const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
@@ -129,18 +112,14 @@ const demoAuthClient = createJazzClient({
 
   return (
     <>
-      
-      
-        
-      
+
     </>
   );
 }
 ```
-  
-  
+
     ```svelte
-<!-- #region auth-demo-svelte -->
+
 <script lang="ts">
 	import {
 		createJazzClient,
@@ -164,11 +143,8 @@ const demoAuthClient = createJazzClient({
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-demo-svelte -->
-
 ```
-  
-  
+
     ```ts
 
   const appId = "my-app";
@@ -188,7 +164,6 @@ const demoAuthClient = createJazzClient({
   });
 }
 ```
-  
 
 Switching profiles persists locally; by default switchers refresh the page after profile change.
 
@@ -200,7 +175,6 @@ Once your auth provider is in place, send provider JWTs and link the current loc
 
 Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created data:
 
-  
     ```tsx
 const externalAuthAppId = "my-app";
 const externalAuthServerUrl = "http://127.0.0.1:4200";
@@ -228,17 +202,15 @@ const externalAuthJwtClient = createJazzClient({
   }
 
   return (
-    
+
       <button onClick={() => onSignedIn()}>Sign in</button>
-      
-    
+
   );
 }
 ```
-  
-  
+
     ```svelte
-<!-- #region auth-external-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider, useLinkExternalIdentity } from 'jazz-tools/svelte';
 
@@ -268,17 +240,15 @@ const externalAuthJwtClient = createJazzClient({
 </script>
 
 {#key jwtToken}
-	
+
 		{#snippet children({ db })}
 			<button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
 			<slot />
 		{/snippet}
-	
+
 {/key}
-<!-- #endregion auth-external-svelte -->
 
 ```
-  
 
 ### Non-Framework Upgrade Path
 
@@ -320,7 +290,7 @@ For `jazz-tools server`:
 
 ```bash
 # Start a local server with external auth enabled.
-# #region auth-server-cli
+
 NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
@@ -329,27 +299,22 @@ jazz-tools server "$JAZZ_APP_ID" \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"
-# #endregion auth-server-cli
 
 ```
 
 ### Offline-only mode
 
-  
     ```tsx
 const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
 
   return (
-    
-      
-    
+
   );
 }
 ```
-  
-  
+
     ```svelte
-<!-- #region auth-offline-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
@@ -360,11 +325,8 @@ const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-offline-svelte -->
-
 ```
-  
-  
+
     ```ts
 
   return createDb({ appId: "my-app" });
@@ -380,11 +342,6 @@ Jazz is a local-first relational database: your app reads and writes against a l
 You can use Jazz from React, Expo/React Native, and Svelte clients, plus backend/server contexts in TypeScript and Rust.
 
 ## Quickstarts
-
-  
-  
-  
-  
 
 ## Reference
 
@@ -402,92 +359,67 @@ If you are trying to get your first app running, you can skip this page and retu
 
 ## CLI Workflow
 
-  
     ```bash
 #!/usr/bin/env bash
 
-# #region migrations-workflow-ts
 # 1) Edit schema/current.ts.
 # 2) Generate migration stubs from the updated schema.
 npx jazz-tools@alpha build
-# #endregion migrations-workflow-ts
 
 ```
-  
-  
+
     ```bash
 #!/usr/bin/env bash
 
-# #region migrations-workflow-sql
 # 1) Edit schema/current.sql.
 # 2) Generate migration stubs from the updated schema.
 npx jazz-tools@alpha build
-# #endregion migrations-workflow-sql
 
 ```
-  
 
 For TypeScript DSL migrations, one generated file can define both forward and backward behavior in the same stub.
 For SQL migrations, keep explicit forward/backward files and edit each direction intentionally.
 
 ## Generated Stubs
 
-  
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
-    >
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
-    </include>
-  
-  
+    ```ts
+
+migrate("todos", {
+  description: col.add().string({ default: "" }),
+});
+
+```
+
     Forward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
-    </include>
+    ```sql
+ALTER TABLE todos ADD COLUMN description TEXT DEFAULT '';
+```
     Backward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
-    </include>
-  
+    ```sql
+ALTER TABLE todos DROP COLUMN description;
+```
 
 ## Edited Stubs
 
-  
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
-    >
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
-    </include>
-  
-  
+    ```ts
+
+// Example of editing a generated migration stub.
+migrate("todos", {
+  description: col.add().string({ default: "No description" }),
+});
+
+```
+
     Forward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
-    </include>
+    ```sql
+-- Example of editing a generated migration stub.
+ALTER TABLE todos ADD COLUMN description TEXT DEFAULT 'No description';
+
+```
     Backward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
-    </include>
+    ```sql
+ALTER TABLE todos DROP COLUMN description;
+```
 
 ===PAGE:permissions===
 TITLE:Permissions
@@ -497,7 +429,6 @@ DESCRIPTION:Fast RLS (ReBAC), simple policies, combinators, and inherited access
 
 Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly in SQL.
 
-  
     Assuming the following schema:
 
     ```ts
@@ -532,8 +463,6 @@ table("todoShares", {
 
 ```
 
-  
-  
     ```sql
 CREATE TABLE projects (
     name TEXT NOT NULL
@@ -553,13 +482,11 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session
 CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
 
 ```
-  
 
 Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.where({})` / `USING (TRUE)`).
 
 ## Simple Policies
 
-  
     ```ts
 definePermissions(app, ({ policy, allOf, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user_id });
@@ -570,8 +497,7 @@ definePermissions(app, ({ policy, allOf, session }) => {
   policy.todos.allowDelete.where({ owner_id: session.user_id });
 });
 ```
-  
-  
+
     ```sql
 -- #region permissions-simple-sql
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
@@ -586,11 +512,9 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((INHERITS UPDATE VI
 -- #endregion permissions-inherits-sql
 
 ```
-  
 
 ## Combining Conditions (`allOf` / `anyOf`)
 
-  
     ```ts
 definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
   policy.todos.allowRead.where(
@@ -598,8 +522,7 @@ definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
   );
 });
 ```
-  
-  
+
     ```rs
 pub fn combinator_policy() -> TablePolicies {
     TablePolicies::new().with_select(PolicyExpr::or(vec![
@@ -611,7 +534,6 @@ pub fn combinator_policy() -> TablePolicies {
     ]))
 }
 ```
-  
 
 `allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
 
@@ -619,7 +541,6 @@ pub fn combinator_policy() -> TablePolicies {
 
 TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete(...)`, which compiles to `INHERITS` policy expressions.
 
-  
     ```ts
 definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
   policy.todos.allowRead.where(anyOf([{ done: false }, allowedTo.read("project")]));
@@ -628,8 +549,7 @@ definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
     .whereNew(allowedTo.update("project"));
 });
 ```
-  
-  
+
     ```sql
 -- #region permissions-simple-sql
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
@@ -644,13 +564,11 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((INHERITS UPDATE VI
 -- #endregion permissions-inherits-sql
 
 ```
-  
 
 ## Advanced: Recursive INHERITS
 
 Use depth-bounded inherited access when foreign keys can form recursive chains.
 
-  
     ```ts
 definePermissions(app, ({ policy, allowedTo }) => {
   policy.todos.allowRead.where(allowedTo.read("parent"));
@@ -659,8 +577,7 @@ definePermissions(app, ({ policy, allowedTo }) => {
     .whereNew(allowedTo.update("parent", { maxDepth: 5 }));
 });
 ```
-  
-  
+
     ```rs
 pub fn recursive_inherits_policy() -> TablePolicies {
     TablePolicies::new().with_select(PolicyExpr::or(vec![
@@ -669,7 +586,6 @@ pub fn recursive_inherits_policy() -> TablePolicies {
     ]))
 }
 ```
-  
 
 `maxDepth` must be a positive integer.
 
@@ -679,7 +595,6 @@ Jazz permissions use relationship-based policy evaluation with requester session
 Backend endpoints should scope a client/session per request before reads and writes.
 Frontend clients are evaluated with the auth/session identity used to initialize context.
 
-  
     ```ts
 
   try {
@@ -692,8 +607,7 @@ Frontend clients are evaluated with the auth/session identity used to initialize
   }
 }
 ```
-  
-  
+
     ```rs
 pub async fn list_todos_for_request(
     headers: &HeaderMap,
@@ -708,7 +622,6 @@ pub async fn list_todos_for_request(
     Ok(rows.len())
 }
 ```
-  
 
 See [Setup](/docs/setup) for context setup details.
 
@@ -728,9 +641,21 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-client-localfirst-expo/schema/current.ts#schema-expo
-</include>
+```ts
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  description: col.string().optional(),
+  owner_id: col.string(),
+  parent: col.ref("todos").optional(),
+  project: col.ref("projects").optional(),
+});
+```
 
 ### Run codegen
 
@@ -740,9 +665,21 @@ Deep dive: [Schemas](/docs/schemas).
 
 `JazzProvider` initializes the Jazz runtime and makes the database available to descendant components via React context.
 
-<include cwd lang="tsx" title="src/setup-snippets.tsx">
-  ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
-</include>
+```tsx
+const client = createJazzClient({
+  appId: "00000000-0000-0000-0000-000000000002",
+  serverUrl: "http://10.0.2.2:1625",
+  localAuthMode: "demo",
+  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
+});
+
+  return (
+
+          Todos
+
+  );
+}
+```
 
 - `appId` identifies the app namespace for storage and sync.
 - `serverUrl` enables sync and must point to a host your device/emulator can reach (Android emulator commonly uses `10.0.2.2`).
@@ -755,17 +692,27 @@ For all other options (`dbName`, `adminSecret`, `env`, `userBranch`, `localAuthT
 
 `useAll` subscribes to a query and returns live results that update as matching rows change.
 
-<include cwd lang="tsx" title="src/TodoList.tsx">
-  ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#reading-reactive-hooks-expo
-</include>
+```tsx
+  const db = useDb();
+  const todos = useAll(todosQuery) ?? [];
+  const session = useSession();
+  const sessionUserId = session?.user_id ?? null;
+```
 
 ### Filtering, sorting, pagination
 
 Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit()`, and `.offset()` to shape queries.
 
-<include cwd lang="tsx" title="src/TodoList.tsx">
-  ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#reading-filtering-expo
-</include>
+```tsx
+  const trimmedFilterTitle = filterTitle.trim();
+  let todosQuery = app.todos;
+  if (trimmedFilterTitle) {
+    todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
+  }
+  if (showDoneOnly) {
+    todosQuery = todosQuery.where({ done: true });
+  }
+```
 
 By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
 
@@ -775,9 +722,22 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 `useDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
-<include cwd lang="tsx" title="src/TodoList.tsx">
-  ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#writing-use-db-expo
-</include>
+```tsx
+  const addTodo = async () => {
+    const trimmed = title.trim();
+    if (!trimmed || !sessionUserId) return;
+    await db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    setTitle("");
+  };
+
+  const toggleTodo = async (todo: Todo) => {
+    await db.update(app.todos, todo.id, { done: !todo.done });
+  };
+
+  const removeTodo = async (id: string) => {
+    await db.deleteFrom(app.todos, id);
+  };
+```
 
 Because writes hit the local runtime first, subscriptions update immediately with local-first UX. For tier-gated reads, the first callback still waits for the requested tier.
 
@@ -930,9 +890,7 @@ const anonymousAuthExpoClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -947,9 +905,7 @@ const anonymousAuthWithTokenExpoClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -969,9 +925,7 @@ const demoAuthExpoClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -1007,14 +961,10 @@ const externalAuthExpoJwtClient = createJazzClient({
   }
 
   return (
-    
-      
+
          void onSignedIn()}>
           Sign in
-        
-        
-      
-    
+
   );
 }
 ```
@@ -1023,7 +973,7 @@ const externalAuthExpoJwtClient = createJazzClient({
 
 ```bash
 # Start a local server with external auth enabled.
-# #region auth-server-cli
+
 NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
@@ -1032,7 +982,6 @@ jazz-tools server "$JAZZ_APP_ID" \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"
-# #endregion auth-server-cli
 
 ```
 
@@ -1044,9 +993,7 @@ Omit `serverUrl` to keep all data local:
 const offlineOnlyAuthExpoClient = createJazzClient({ appId: "my-app" });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -1057,9 +1004,19 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-client-localfirst-expo/schema/permissions.ts#permissions-basic-expo
-</include>
+```ts
+
+  // Each user only sees their own rows.
+  policy.todos.allowRead.where({ owner_id: session.user_id }),
+  // New rows must belong to the current user.
+  policy.todos.allowInsert.where({ owner_id: session.user_id }),
+  // Users can only mutate their own incomplete todos.
+  policy.todos.allowUpdate
+    .whereOld(allOf([{ owner_id: session.user_id }, { done: false }]))
+    .whereNew({ owner_id: session.user_id }),
+  policy.todos.allowDelete.where(allOf([{ owner_id: session.user_id }, { done: false }])),
+]);
+```
 
 Think about permissions in four checks:
 
@@ -1086,9 +1043,20 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-client-localfirst-react/schema/current.ts#schema-react
-</include>
+```ts
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  description: col.string().optional(),
+  parent: col.ref("todos").optional(),
+  project: col.ref("projects").optional(),
+});
+```
 
 ### Run codegen
 
@@ -1098,9 +1066,21 @@ Deep dive: [Schemas](/docs/schemas).
 
 `JazzProvider` initializes the Jazz runtime and makes the database available to descendant components via React context.
 
-<include cwd lang="tsx" title="src/setup-snippets.tsx">
-  ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
-</include>
+```tsx
+const client = createJazzClient({
+  appId: "todo-react-example",
+  serverUrl: "http://127.0.0.1:1625",
+  localAuthMode: "anonymous",
+  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
+});
+
+  return (
+
+      <h1>Todos</h1>
+
+  );
+}
+```
 
 - `appId` identifies the app namespace for storage and sync.
 - `serverUrl` enables sync; omit it for offline-only mode.
@@ -1115,17 +1095,20 @@ For all other options (`dbName`, `adminSecret`, `env`, `userBranch`, `localAuthT
 
 `useAll` subscribes to a query and returns live results that re-render your component whenever matching rows change.
 
-<include cwd lang="tsx" title="src/TodoList.tsx">
-  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
-</include>
+```tsx
+  const db = useDb();
+  const todos = useAll(app.todos) ?? [];
+```
 
 ### Filtering, sorting, pagination
 
 Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit()`, and `.offset()` to shape queries.
 
-<include cwd lang="tsx" title="src/TodoList.tsx">
-  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-filtering-react
-</include>
+```tsx
+  const _incompleteTodos = useAll(
+    app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
+  );
+```
 
 By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
 
@@ -1135,9 +1118,19 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 `useDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
-<include cwd lang="tsx" title="src/TodoList.tsx">
-  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
-</include>
+```tsx
+  async function addTodo(todoTitle: string) {
+    await db.insert(app.todos, { title: todoTitle, done: false });
+  }
+
+  async function toggleTodo(todo: { id: string; done: boolean }) {
+    await db.update(app.todos, todo.id, { done: !todo.done });
+  }
+
+  async function removeTodo(id: string) {
+    await db.deleteFrom(app.todos, id);
+  }
+```
 
 Because writes hit the local runtime first, subscriptions update immediately with local-first UX. For tier-gated reads, the first callback still waits for the requested tier.
 
@@ -1284,9 +1277,7 @@ const anonymousAuthClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -1301,9 +1292,7 @@ const anonymousAuthWithTokenClient = createJazzClient({
 });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -1324,10 +1313,7 @@ const demoAuthClient = createJazzClient({
 
   return (
     <>
-      
-      
-        
-      
+
     </>
   );
 }
@@ -1364,10 +1350,9 @@ const externalAuthJwtClient = createJazzClient({
   }
 
   return (
-    
+
       <button onClick={() => onSignedIn()}>Sign in</button>
-      
-    
+
   );
 }
 ```
@@ -1376,7 +1361,7 @@ const externalAuthJwtClient = createJazzClient({
 
 ```bash
 # Start a local server with external auth enabled.
-# #region auth-server-cli
+
 NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
@@ -1385,7 +1370,6 @@ jazz-tools server "$JAZZ_APP_ID" \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"
-# #endregion auth-server-cli
 
 ```
 
@@ -1397,9 +1381,7 @@ Omit `serverUrl` to keep all data local:
 const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
 
   return (
-    
-      
-    
+
   );
 }
 ```
@@ -1410,9 +1392,18 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-client-localfirst-react/schema/permissions.ts#permissions-basic-react
-</include>
+```ts
+
+  // Everyone can read todos.
+  policy.todos.allowRead.where({}),
+  // New todos start as incomplete.
+  policy.todos.allowInsert.where({ done: false }),
+  // Completed todos are immutable.
+  policy.todos.allowUpdate.whereOld({ done: false }).whereNew({}),
+  // Only open todos can be deleted.
+  policy.todos.allowDelete.where({ done: false }),
+]);
+```
 
 Think about permissions in four checks:
 
@@ -1439,9 +1430,20 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-client-localfirst-svelte/schema/current.ts#schema-svelte
-</include>
+```ts
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  description: col.string().optional(),
+  parent: col.ref("todos").optional(),
+  project: col.ref("projects").optional(),
+});
+```
 
 ### Run codegen
 
@@ -1451,9 +1453,29 @@ Deep dive: [Schemas](/docs/schemas).
 
 Call `createJazzClient` with your config outside the component tree, then pass the resulting client to `JazzSvelteProvider` so descendants can access `Db` from context.
 
-<include cwd lang="svelte" title="src/App.svelte">
-  ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
-</include>
+```svelte
+
+<script lang="ts">
+	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+	import TodoList from './TodoList.svelte';
+
+	const client = createJazzClient({
+		appId: 'todo-svelte-example',
+		serverUrl: 'http://127.0.0.1:1625',
+		localAuthMode: 'anonymous',
+		// jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
+	});
+</script>
+
+	{#snippet children({ db })}
+		<h1>Todos</h1>
+
+	{/snippet}
+	{#snippet fallback()}
+		<p>Loading...</p>
+	{/snippet}
+
+```
 
 - `appId` identifies the app namespace for storage and sync.
 - `serverUrl` enables sync; omit it for offline-only mode.
@@ -1468,9 +1490,10 @@ For all other options (`dbName`, `adminSecret`, `env`, `userBranch`, `localAuthT
 
 `QuerySubscription` subscribes to a query and exposes `.current`, updating as matching rows change.
 
-<include cwd lang="svelte" title="src/TodoList.svelte">
-  ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-reactive-svelte
-</include>
+```svelte
+	const db = getDb();
+	const todos = new QuerySubscription(app.todos);
+```
 
 ### Filtering, sorting, pagination
 
@@ -1490,9 +1513,74 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 `getDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
-<include cwd lang="svelte" title="src/TodoList.svelte">
-  ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#read-write-svelte
-</include>
+```svelte
+
+<script lang="ts">
+	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
+	import { app } from '../schema/app.js';
+
+	const db = getDb();
+	const todos = new QuerySubscription(app.todos);
+
+	const incompleteTodos = new QuerySubscription(
+		app.todos.where({ done: false }).orderBy('title', 'asc').limit(50),
+	);
+
+	const confirmedTodos = new QuerySubscription(app.todos, 'edge');
+
+	let title = $state('');
+
+	async function handleSubmit(e: SubmitEvent) {
+		e.preventDefault();
+		if (!title.trim()) return;
+
+		await db.insert(app.todos, { title: title.trim(), done: false });
+
+		title = '';
+	}
+
+	async function toggleTodo(todo: { id: string; done: boolean }) {
+		await db.update(app.todos, todo.id, { done: !todo.done });
+	}
+
+	async function removeTodo(id: string) {
+		await db.deleteFrom(app.todos, id);
+	}
+
+	async function addImportantTodo(todoTitle: string) {
+		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
+		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
+		await db.deleteFrom(app.todos, id, { tier: 'global' });
+	}
+
+</script>
+
+<form onsubmit={handleSubmit}>
+	<input type="text" bind:value={title} placeholder="What needs to be done?" required />
+	<button type="submit">Add</button>
+</form>
+
+<ul id="todo-list">
+	{#each todos.current ?? [] as todo (todo.id)}
+		<li class={todo.done ? 'done' : ''}>
+			<input
+				type="checkbox"
+				checked={todo.done}
+				onchange={() => toggleTodo(todo)}
+				class="toggle"
+			/>
+			<span>{todo.title}</span>
+			{#if todo.description}
+				<small>{todo.description}</small>
+			{/if}
+			<button class="delete-btn" onclick={() => removeTodo(todo.id)}>
+				&times;
+			</button>
+		</li>
+	{/each}
+</ul>
+
+```
 
 Because writes hit the local runtime first, subscriptions update immediately with local-first UX. For tier-gated reads, the first callback still waits for the requested tier.
 
@@ -1629,7 +1717,7 @@ For browser clients, `anonymous` is the default when no external JWT/local auth 
 If you provide no `jwtToken` or explicit local auth fields, Jazz auto-generates an anonymous token on first load and persists it in local storage.
 
 ```svelte
-<!-- #region auth-anon-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
@@ -1643,14 +1731,12 @@ If you provide no `jwtToken` or explicit local auth fields, Jazz auto-generates 
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-anon-svelte -->
-
 ```
 
 If needed, you can explicitly override the local token:
 
 ```svelte
-<!-- #region auth-anon-token-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
@@ -1665,8 +1751,6 @@ If needed, you can explicitly override the local token:
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-anon-token-svelte -->
-
 ```
 
 ### 2. Demo auth (local multi-user testing)
@@ -1674,7 +1758,7 @@ If needed, you can explicitly override the local token:
 Use synthetic user profiles for local multi-user testing:
 
 ```svelte
-<!-- #region auth-demo-svelte -->
+
 <script lang="ts">
 	import {
 		createJazzClient,
@@ -1698,8 +1782,6 @@ Use synthetic user profiles for local multi-user testing:
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-demo-svelte -->
-
 ```
 
 ### 3. External auth and upgrade from anonymous/demo
@@ -1707,7 +1789,7 @@ Use synthetic user profiles for local multi-user testing:
 After provider sign-in, link the current local identity so existing local data stays attached when you switch to external JWT sessions:
 
 ```svelte
-<!-- #region auth-external-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider, useLinkExternalIdentity } from 'jazz-tools/svelte';
 
@@ -1737,14 +1819,13 @@ After provider sign-in, link the current local identity so existing local data s
 </script>
 
 {#key jwtToken}
-	
+
 		{#snippet children({ db })}
 			<button onclick={() => onSignedIn('<provider-jwt>')}>Sign in</button>
 			<slot />
 		{/snippet}
-	
+
 {/key}
-<!-- #endregion auth-external-svelte -->
 
 ```
 
@@ -1752,7 +1833,7 @@ After provider sign-in, link the current local identity so existing local data s
 
 ```bash
 # Start a local server with external auth enabled.
-# #region auth-server-cli
+
 NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
@@ -1761,7 +1842,6 @@ jazz-tools server "$JAZZ_APP_ID" \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"
-# #endregion auth-server-cli
 
 ```
 
@@ -1770,7 +1850,7 @@ jazz-tools server "$JAZZ_APP_ID" \
 Omit `serverUrl` to keep all data local:
 
 ```svelte
-<!-- #region auth-offline-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
@@ -1781,8 +1861,6 @@ Omit `serverUrl` to keep all data local:
 		<slot />
 	{/snippet}
 
-<!-- #endregion auth-offline-svelte -->
-
 ```
 
 Full auth flows and server behavior: [Authentication](/docs/authentication).
@@ -1791,9 +1869,18 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-client-localfirst-svelte/schema/permissions.ts#permissions-basic-svelte
-</include>
+```ts
+
+  // Everyone can read todos.
+  policy.todos.allowRead.where({}),
+  // New todos start as incomplete.
+  policy.todos.allowInsert.where({ done: false }),
+  // Completed todos are immutable.
+  policy.todos.allowUpdate.whereOld({ done: false }).whereNew({}),
+  // Only open todos can be deleted.
+  policy.todos.allowDelete.where({ done: false }),
+]);
+```
 
 Think about permissions in four checks:
 
@@ -1820,9 +1907,22 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-server-ts/schema/current.ts
-</include>
+```ts
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  description: col.string().optional(),
+  parent: col.ref("todos").optional(),
+  project: col.ref("projects").optional(),
+  owner_id: col.string(),
+});
+
+```
 
 ### Run codegen
 
@@ -1832,9 +1932,16 @@ Deep dive: [Schemas](/docs/schemas).
 
 Initialize a Jazz context once at process startup and lazily create a shared server client:
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-context-ts
-</include>
+```ts
+const context = createJazzContext({
+  appId: "todo-server-ts",
+  app: schemaApp,
+  dataPath: "./data/jazz.db",
+  serverUrl: process.env.JAZZ_SERVER_URL,
+  backendSecret: process.env.JAZZ_BACKEND_SECRET,
+});
+const client = context.client();
+```
 
 - `appId` identifies the app namespace for storage and sync.
 - `app` is your generated schema DSL export (`app.wasmSchema` is loaded for runtime setup).
@@ -1849,15 +1956,40 @@ Use `context.forRequest(req)` so each request is scoped to the requester session
 
 ### One-shot reads
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-oneshot-ts
-</include>
+```ts
+
+  const requester = context.forRequest(req);
+  const rows = await requester.query(
+    schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
+  );
+  res.json(rows);
+}
+```
 
 ### Streaming reads (SSE + subscriptions)
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-streaming-ts
-</include>
+```ts
+
+  const requester = context.forRequest(req);
+  const query = schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100);
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const snapshot = await requester.query(query);
+  res.write(`data: ${JSON.stringify({ type: "snapshot", rows: snapshot })}\n\n`);
+
+  const subscriptionId = requester.subscribe(query, (delta) => {
+    res.write(`data: ${JSON.stringify({ type: "delta", delta })}\n\n`);
+  });
+
+  req.on("close", () => {
+    client.unsubscribe(subscriptionId);
+  });
+}
+```
 
 Deep dive: [Reading Data](/docs/reading-data).
 
@@ -1865,15 +1997,58 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context.
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
-</include>
+```ts
+
+  const userId = req.auth?.sub;
+  if (!userId) {
+    res.status(401).json({ error: "missing authenticated user" });
+    return;
+  }
+
+  const title = req.body.title?.trim();
+  if (!title) {
+    res.status(400).json({ error: "title is required" });
+    return;
+  }
+
+  const values: Value[] = [
+    { type: "Text", value: title },
+    { type: "Boolean", value: false },
+    { type: "Text", value: req.body.description?.trim() ?? "" },
+    { type: "Null" },
+    { type: "Null" },
+    { type: "Text", value: userId },
+  ];
+
+  const requester = context.forRequest(req);
+  const id = await requester.create("todos", values);
+
+  res.status(201).json({
+    id,
+    title,
+    done: false,
+    owner_id: userId,
+  });
+}
+```
 
 Route wiring example:
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-register-routes-ts
-</include>
+```ts
+
+  api.get("/api/todos", (req, res, next) => {
+    void getOpenTodos(req, res).catch(next);
+  });
+
+  api.get("/api/todos/stream", (req, res, next) => {
+    void streamOpenTodos(req, res).catch(next);
+  });
+
+  api.post("/api/todos", (req: AuthenticatedRequest, res, next) => {
+    void createTodo(req, res).catch(next);
+  });
+}
+```
 
 Mutation API details: [Writing Data](/docs/writing-data).
 
@@ -1881,7 +2056,7 @@ Mutation API details: [Writing Data](/docs/writing-data).
 
 ```bash
 # Start a local server with external auth enabled.
-# #region auth-server-cli
+
 NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
@@ -1890,7 +2065,6 @@ jazz-tools server "$JAZZ_APP_ID" \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"
-# #endregion auth-server-cli
 
 ```
 
@@ -1900,9 +2074,15 @@ Full auth flows and session resolution: [Authentication](/docs/authentication).
 
 Define row-level policies in `schema/permissions.ts`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-server-ts/schema/permissions.ts
-</include>
+```ts
+
+  policy.todos.allowRead.where({ owner_id: session.user_id });
+  policy.todos.allowInsert.where({ owner_id: session.user_id });
+  policy.todos.allowUpdate.where({ owner_id: session.user_id });
+  policy.todos.allowDelete.where({ owner_id: session.user_id });
+});
+
+```
 
 For advanced policy patterns, see [Permissions](/docs/permissions).
 
@@ -1918,14 +2098,12 @@ DESCRIPTION:Query APIs across one-shot reads, subscriptions, framework hooks, an
 
 ## One-shot Queries
 
-  
     ```ts
 
   return db.all(app.todos.where({ done: false }));
 }
 ```
-  
-  
+
     ```rs
 pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();
@@ -1933,18 +2111,15 @@ pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_tools::Result<usize
     Ok(rows.len())
 }
 ```
-  
 
 ## Subscriptions
 
-  
     ```ts
 
   return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length));
 }
 ```
-  
-  
+
     ```rs
 pub async fn subscribe_todos(
     client: &JazzClient,
@@ -1953,7 +2128,6 @@ pub async fn subscribe_todos(
     client.subscribe(query).await
 }
 ```
-  
 
 ## Framework Hooks
 
@@ -1962,26 +2136,22 @@ Use framework bindings immediately after subscription concepts:
 - React/Expo: `useAll(query)` for reactive query results.
 - Svelte: `new QuerySubscription(query)` for reactive `.current` data.
 
-  
     ```tsx
   const db = useDb();
   const todos = useAll(app.todos) ?? [];
 ```
-  
-  
+
     ```tsx
   const db = useDb();
   const todos = useAll(todosQuery) ?? [];
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
 ```
-  
-  
+
     ```svelte
 	const db = getDb();
 	const todos = new QuerySubscription(app.todos);
 ```
-  
 
 ## Filters
 
@@ -1992,7 +2162,6 @@ Use framework bindings immediately after subscription concepts:
 - **TypeScript operators:** scalar equality plus typed operator objects by column kind.
 - **Rust operators:** use explicit builder methods such as `filter_eq(...)`.
 
-  
     ```ts
 
   return db.all(app.todos.where({ done: false, title: { contains: "docs" } }));
@@ -2007,8 +2176,6 @@ Use framework bindings immediately after subscription concepts:
 }
 ```
 
-  
-  
     ```rs
 pub async fn read_todos_with_filters(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos")
@@ -2019,7 +2186,6 @@ pub async fn read_todos_with_filters(client: &JazzClient) -> jazz_tools::Result<
     Ok(rows.len())
 }
 ```
-  
 
 ## Sorting
 
@@ -2029,14 +2195,12 @@ pub async fn read_todos_with_filters(client: &JazzClient) -> jazz_tools::Result<
 - **Parameters:** `orderBy(column, direction?)` where `direction` is `"asc"` or `"desc"` in TypeScript.
 - **Recommendation:** always sort before paginating.
 
-  
     ```ts
 
   return db.all(app.todos.where({ done: false }).orderBy("title", "asc"));
 }
 ```
-  
-  
+
     ```rs
 pub async fn read_todos_sorted(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos")
@@ -2048,7 +2212,6 @@ pub async fn read_todos_sorted(client: &JazzClient) -> jazz_tools::Result<usize>
     Ok(rows.len())
 }
 ```
-  
 
 ## Pagination
 
@@ -2058,7 +2221,6 @@ pub async fn read_todos_sorted(client: &JazzClient) -> jazz_tools::Result<usize>
 - **Parameters:** choose a stable page size and compute offset from page index.
 - **Recommendation:** combine with a deterministic `orderBy(...)` so page boundaries are stable.
 
-  
     ```ts
 
   const offset = Math.max(0, (page - 1) * pageSize);
@@ -2067,8 +2229,7 @@ pub async fn read_todos_sorted(client: &JazzClient) -> jazz_tools::Result<usize>
   );
 }
 ```
-  
-  
+
     ```rs
 pub async fn read_todo_page(
     client: &JazzClient,
@@ -2087,7 +2248,6 @@ pub async fn read_todo_page(
     Ok(rows.len())
 }
 ```
-  
 
 ## Resolving References via Includes
 
@@ -2099,7 +2259,6 @@ pub async fn read_todo_page(
 
 Schema references used by the include examples:
 
-  
     ```ts
 
 table("projects", {
@@ -2115,8 +2274,7 @@ table("todos", {
 });
 
 ```
-  
-  
+
     ```sql
 CREATE TABLE projects (
     name TEXT NOT NULL
@@ -2135,9 +2293,7 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (TRUE) WITH CHECK (T
 CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
 
 ```
-  
 
-  
     ```ts
 
   return db.all(
@@ -2145,8 +2301,7 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
   );
 }
 ```
-  
-  
+
     ```rs
 pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_tools::Result<usize> {
     // Rust currently composes related data using additional queries.
@@ -2157,7 +2312,6 @@ pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_tools::Re
     Ok(rows.len())
 }
 ```
-  
 
 ## Advanced: Recursive Queries
 
@@ -2200,14 +2354,12 @@ Tradeoff summary:
 - Lower tier: lower latency, narrower confirmation scope.
 - Higher tier: higher latency, broader confirmation scope.
 
-  
     ```ts
 
   return db.all(app.todos.where({ done: false }), { tier: "edge", localUpdates: "immediate" });
 }
 ```
-  
-  
+
     ```rs
 pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();
@@ -2217,7 +2369,6 @@ pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::R
     Ok(rows.len())
 }
 ```
-  
 
 Read durability options pair naturally with write durability tiers:
 
@@ -2232,7 +2383,6 @@ DESCRIPTION:Define tables and relationships in TS DSL or SQL, then use the CLI f
 
 ## Table Definitions
 
-  
     ```ts
 
 table("projects", {
@@ -2248,8 +2398,7 @@ table("todos", {
 });
 
 ```
-  
-  
+
     ```sql
 CREATE TABLE projects (
     name TEXT NOT NULL
@@ -2268,7 +2417,6 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (TRUE) WITH CHECK (T
 CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
 
 ```
-  
 
 ## Datatypes and References
 
@@ -2285,10 +2433,8 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
 ```bash
 #!/usr/bin/env bash
 
-# #region schemas-ts-codegen-cli
 # Regenerate SQL and typed TS bindings from schema/current.ts.
 npx jazz-tools@alpha build
-# #endregion schemas-ts-codegen-cli
 
 ```
 
@@ -2299,37 +2445,25 @@ Run this from a normal app root. It regenerates `schema/current.sql` and typed c
 TypeScript migration stubs encode both forward and backward behavior in one file.
 SQL migrations are split into explicit forward and backward files.
 
-  
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
-    >
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
-    </include>
-  
-  
+    ```ts
+
+migrate("todos", {
+  description: col.add().string({ default: "" }),
+});
+
+```
+
     Forward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
-    </include>
+    ```sql
+ALTER TABLE todos ADD COLUMN description TEXT DEFAULT '';
+```
     Backward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
-    </include>
-  
+    ```sql
+ALTER TABLE todos DROP COLUMN description;
+```
 
 ### Edited stubs (example customization)
 
-  
     ```ts
 
 // Example of editing a generated migration stub.
@@ -2338,14 +2472,12 @@ migrate("todos", {
 });
 
 ```
-  
-  
+
     ```sql
 -- Example of editing a generated migration stub.
 ALTER TABLE todos ADD COLUMN description TEXT DEFAULT 'No description';
 
 ```
-  
 
 ### Backwards default examples
 
@@ -2354,32 +2486,30 @@ When new clients write rows without that field, the backward lens supplies the c
 In TypeScript, the same migration stub carries both forward and backward translation behavior.
 In SQL, the backward lens file explicitly reintroduces dropped columns with a default.
 
-  
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts"'
-    >
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts
-    </include>
-  
-  
+    ```ts
+
+// Example: dropping a column with a backwards default.
+// Clients still on v1 continue seeing legacy_priority.
+// For rows written by v2 clients, the lens supplies this default value.
+migrate("todos", {
+  legacy_priority: col.drop().int({ backwardsDefault: 0 }),
+});
+
+```
+
     Forward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql
-    </include>
+    ```sql
+-- Example: drop a column in the forward direction.
+ALTER TABLE todos DROP COLUMN legacy_priority;
+
+```
     Backward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql
-    </include>
+    ```sql
+-- Example: old-schema clients still read legacy_priority via this backward lens.
+-- Rows written by new clients are translated to legacy_priority = 0.
+ALTER TABLE todos ADD COLUMN legacy_priority INTEGER DEFAULT 0;
+
+```
 
 ===PAGE:setup===
 TITLE:Setup
@@ -2400,13 +2530,10 @@ Current onboarding is manual.
 ```bash
 #!/usr/bin/env bash
 
-# #region setup-self-host-cli
-
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
   --data-dir ./data \
   --admin-secret "$JAZZ_ADMIN_SECRET"
-# #endregion setup-self-host-cli
 
 ```
 
@@ -2434,7 +2561,6 @@ For backend examples, set `JAZZ_SERVER_URL` to your server URL and keep `JAZZ_AP
 Use `JAZZ_APP_ID` as the app ID configuration key across environments.
 For auth modes and upgrade/link flow, see [Authentication](/docs/authentication).
 
-  
     ```tsx
 const client = createJazzClient({
   appId: "todo-react-example",
@@ -2444,17 +2570,15 @@ const client = createJazzClient({
 });
 
   return (
-    
+
       <h1>Todos</h1>
-      
-    
+
   );
 }
 ```
-  
-  
+
     ```svelte
-<!-- #region provider-svelte -->
+
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 	import TodoList from './TodoList.svelte';
@@ -2469,17 +2593,14 @@ const client = createJazzClient({
 
 	{#snippet children({ db })}
 		<h1>Todos</h1>
-		
+
 	{/snippet}
 	{#snippet fallback()}
 		<p>Loading...</p>
 	{/snippet}
 
-<!-- #endregion provider-svelte -->
-
 ```
-  
-  
+
     ```ts
   const db = await createDb({
     appId: readEnvAppId() ?? "todo-client-example",
@@ -2488,7 +2609,6 @@ const client = createJazzClient({
     ...config,
   });
 ```
-  
 
 ### createJazzClient reference
 
@@ -2497,7 +2617,6 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
 
 ### Backend Context Setup
 
-  
     ```ts
   const context = createJazzContext({
     appId,
@@ -2508,8 +2627,7 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
   });
   const client = context.client();
 ```
-  
-  
+
     ```rs
     let context = AppContext {
         app_id: AppId::from_name(&app_id),
@@ -2522,7 +2640,6 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
         admin_secret: None,
     };
 ```
-  
 
 ### Backend Identity Pattern
 
@@ -2532,7 +2649,6 @@ In TypeScript backends, use `createJazzContext(...)` once at startup, then `cont
 
 #### Per-request user-scoped client
 
-  
     ```ts
 
   try {
@@ -2545,8 +2661,7 @@ In TypeScript backends, use `createJazzContext(...)` once at startup, then `cont
   }
 }
 ```
-  
-  
+
     ```rs
 pub async fn list_todos_for_request(
     headers: &HeaderMap,
@@ -2583,7 +2698,6 @@ Mutation methods return promises that resolve when the requested durability tier
 
 Use the framework context binding to access the shared `Db` instance and execute mutations.
 
-  
     ```tsx
   async function addTodo(todoTitle: string) {
     await db.insert(app.todos, { title: todoTitle, done: false });
@@ -2597,8 +2711,7 @@ Use the framework context binding to access the shared `Db` instance and execute
     await db.deleteFrom(app.todos, id);
   }
 ```
-  
-  
+
     ```tsx
   const addTodo = async () => {
     const trimmed = title.trim();
@@ -2615,13 +2728,12 @@ Use the framework context binding to access the shared `Db` instance and execute
     await db.deleteFrom(app.todos, id);
   };
 ```
-  
-  
+
     ```svelte
-	// #region reading-reactive-svelte
+
 	const db = getDb();
 	const todos = new QuerySubscription(app.todos);
-	// #endregion reading-reactive-svelte
+
 ```
 
     ```svelte
@@ -2634,11 +2746,8 @@ Use the framework context binding to access the shared `Db` instance and execute
 	}
 ```
 
-  
-
 ## Insert, Update, Delete
 
-  
     ```ts
 
   await db.insert(app.todos, {
@@ -2651,8 +2760,7 @@ Use the framework context binding to access the shared `Db` instance and execute
   await db.deleteFrom(app.todos, todoId);
 }
 ```
-  
-  
+
     ```rs
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
     let values = vec![
@@ -2674,7 +2782,6 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
     Ok(())
 }
 ```
-  
 
 ## Reset Browser Storage
 
@@ -2722,7 +2829,6 @@ In practical terms:
 - Local-first updates remain immediate for UI/subscription state.
 - Mutation promises resolve at the selected durability checkpoint.
 
-  
     ```ts
 
   const id = await db.insert(
@@ -2740,8 +2846,7 @@ In practical terms:
   await db.deleteFrom(app.todos, id, { tier: "global" });
 }
 ```
-  
-  
+
     ```rs
 pub async fn write_todo_with_default_durability(
     client: &JazzClient,
@@ -2764,7 +2869,6 @@ pub async fn write_todo_with_default_durability(
     Ok(id)
 }
 ```
-  
 
 ## Combining Write Durability with Read Durability
 

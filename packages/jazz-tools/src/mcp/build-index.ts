@@ -87,24 +87,29 @@ export function extractDescription(body: string): string {
 /**
  * Resolves `<include cwd lang="…">path[#anchor]</include>` directives in MDX
  * content, replacing each with a fenced code block.  Paths are resolved
- * relative to the MDX file's directory (the `cwd` attribute).
+ * relative to the MDX file's directory unless the `cwd` attribute is present,
+ * in which case fileCwd is used (mirrors fumadocs' file.cwd semantics).
+ * Additional attributes (e.g. meta='…') are tolerated and ignored.
  */
 export async function resolveIncludes(
   content: string,
   mdxFilePath: string,
   fileCwd?: string,
 ): Promise<string> {
-  // Match both <include cwd lang="..."> and <include lang="...">
-  const includeRe = /<include\s+(cwd\s+)?lang="([^"]+)">\s*([\s\S]*?)\s*<\/include>/g;
+  // Match <include ...attrs...>path</include> — any attribute combination.
+  const includeRe = /<include\s+([^>]*?)>\s*([\s\S]*?)\s*<\/include>/g;
 
   // Collect all replacements first, then apply (to avoid regex state issues)
   const replacements: Array<{ original: string; replacement: string }> = [];
   let m: RegExpExecArray | null;
 
   while ((m = includeRe.exec(content)) !== null) {
-    const hasCwd = !!m[1];
-    const lang = m[2];
-    const rawPath = m[3].trim();
+    const attrs = m[1];
+    const hasCwd = /\bcwd\b/.test(attrs);
+    const langMatch = attrs.match(/\blang="([^"]+)"/);
+    if (!langMatch) continue; // not a code include — leave untouched
+    const lang = langMatch[1];
+    const rawPath = m[2].trim();
     const hashIdx = rawPath.indexOf("#");
     const filePath = hashIdx === -1 ? rawPath : rawPath.slice(0, hashIdx);
     const anchor = hashIdx === -1 ? null : rawPath.slice(hashIdx + 1);
@@ -149,6 +154,12 @@ export function stripJsx(content: string): string {
   result = result.replace(/<[A-Z][a-zA-Z]*(?:\.[a-zA-Z]+)?[^>]*>/g, "");
   // Closing JSX: </Component>
   result = result.replace(/<\/[A-Z][a-zA-Z]*(?:\.[a-zA-Z]+)?>/g, "");
+  // Strip region marker lines left over from include expansion
+  // Covers: // #region, # #region, <!-- #region, /* #region */
+  result = result.replace(/^[ \t]*(?:\/\/|#|<!--|\/\*)\s*#?(?:end)?region\b.*$/gm, "");
+  // Collapse lines that contain only whitespace into empty lines
+  // (artefact of Tab/Tabs wrapper components being stripped)
+  result = result.replace(/^[ \t]+$/gm, "");
   // Collapse 3+ blank lines to 2
   result = result.replace(/\n{3,}/g, "\n\n");
   return result.trim();

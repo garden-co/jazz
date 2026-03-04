@@ -10,6 +10,9 @@ export interface SearchResult {
 }
 
 export interface DocResult {
+  title: string;
+  slug: string;
+  description: string;
   body: string;
   related: string[];
 }
@@ -48,7 +51,7 @@ export async function createSqliteBackend(dbPath: string): Promise<DocsBackend> 
     LIMIT ?
   `);
 
-  const stmtGetPage = db.prepare("SELECT body FROM pages WHERE slug = ?");
+  const stmtGetPage = db.prepare("SELECT title, slug, description, body FROM pages WHERE slug = ?");
 
   const stmtGetTopHeadings = db.prepare(`
     SELECT section_heading
@@ -117,7 +120,9 @@ export async function createSqliteBackend(dbPath: string): Promise<DocsBackend> 
   }
 
   function getDoc(slug: string): DocResult | null {
-    const row = stmtGetPage.get(slug) as { body: string } | undefined;
+    const row = stmtGetPage.get(slug) as
+      | { title: string; slug: string; description: string; body: string }
+      | undefined;
     if (!row) return null;
 
     let related: string[] = [];
@@ -141,7 +146,13 @@ export async function createSqliteBackend(dbPath: string): Promise<DocsBackend> 
       // related stays []
     }
 
-    return { body: row.body, related };
+    return {
+      title: row.title,
+      slug: row.slug,
+      description: row.description,
+      body: row.body,
+      related,
+    };
   }
 
   function listPages(): PageInfo[] {

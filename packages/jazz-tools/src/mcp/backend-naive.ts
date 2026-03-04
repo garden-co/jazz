@@ -130,7 +130,13 @@ export async function createNaiveBackend(txtPath: string): Promise<DocsBackend> 
   function getDoc(slug: string): DocResult | null {
     const page = bySlug.get(slug);
     if (!page) return null;
-    return { body: page.body, related: [] };
+    return {
+      title: page.title,
+      slug: page.slug,
+      description: page.description,
+      body: page.body,
+      related: [],
+    };
   }
 
   function listPages(): PageInfo[] {
