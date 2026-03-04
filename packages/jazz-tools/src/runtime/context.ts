@@ -35,7 +35,7 @@ export interface AppContext {
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
 
-  /** Storage driver implementation (optional — storage is in-memory by default) */
+  /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
 
   /** Environment (e.g., "dev", "prod") */

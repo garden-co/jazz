@@ -69,7 +69,10 @@ async function waitForCondition(
 }
 
 async function withDb<T>(label: string, run: (db: Db) => Promise<T>): Promise<T> {
-  const db = await createDb({ appId: uniqueDbName(label), dbName: uniqueDbName(label) });
+  const db = await createDb({
+    appId: uniqueDbName(label),
+    driver: { type: "persistent", dbName: uniqueDbName(label) },
+  });
   try {
     return await run(db);
   } finally {
@@ -550,13 +553,13 @@ describe("db.subscribeAll sorting browser integration", () => {
     const appId = uniqueDbName("restart");
     const dbName = uniqueDbName("restart");
 
-    const db1 = await createDb({ appId, dbName });
+    const db1 = await createDb({ appId, driver: { type: "persistent", dbName } });
     const idA = await db1.insert(todos, { title: "A", rank: 3, done: false });
     const idB = await db1.insert(todos, { title: "B", rank: 1, done: false });
     const idC = await db1.insert(todos, { title: "C", rank: 2, done: false });
     await db1.shutdown();
 
-    const db2 = await createDb({ appId, dbName });
+    const db2 = await createDb({ appId, driver: { type: "persistent", dbName } });
     const snapshots: Todo[][] = [];
     const unsubscribe = db2.subscribeAll(sortedByRankAscQuery, (delta) => {
       snapshots.push(delta.all);

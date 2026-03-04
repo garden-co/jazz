@@ -12,6 +12,10 @@ Operations:
 
 - **Objects**: `create_object()`, `load_object_metadata()`, `load_branch()`, `append_commit()`, `delete_commit()`, `set_branch_tails()`
 - **Indices**: `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`
+- **Lifecycle**: `flush()`, `flush_wal()`, `close()`
+
+`close()` is a trait-level hook with default no-op. Persistent backends override it to release resources
+(for example, file locks), while in-memory backends keep the default no-op behavior.
 
 > `crates/groove/src/storage/mod.rs:67-195` (trait definition)
 
@@ -96,6 +100,14 @@ Single process, no worker needed. SurrealKvStorage backed by regular files.
 ### jazz-napi (Node.js)
 
 NAPI bindings exposing RuntimeCore to Node.js via TokioRuntime.
+
+Current runtime modes:
+
+- `new NapiRuntime(..., dataPath, ...)` for persistent SurrealKV storage.
+- `NapiRuntime.inMemory(...)` for non-persistent in-memory storage.
+
+Internally, the runtime core now uses `Box<dyn Storage + Send>` so both backends are selected
+at construction time without a per-method storage enum shim in NAPI.
 
 > `crates/jazz-napi/`
 

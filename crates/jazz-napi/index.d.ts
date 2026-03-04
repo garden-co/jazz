@@ -16,6 +16,14 @@ export declare class NapiRuntime {
     dataPath: string,
     tier?: string | undefined | null,
   );
+  /** Create a new NapiRuntime with in-memory storage (no local persistence). */
+  static inMemory(
+    schemaJson: string,
+    appId: string,
+    jazzEnv: string,
+    userBranch: string,
+    tier?: string | undefined | null,
+  ): NapiRuntime;
   insert(table: string, values: any): string;
   update(objectId: string, values: any): void;
   delete(objectId: string): void;
