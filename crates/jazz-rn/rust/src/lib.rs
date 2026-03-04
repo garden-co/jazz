@@ -263,7 +263,7 @@ impl RnSyncSender {
 }
 
 impl SyncSender for RnSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
+    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
         let Ok(json) = serde_json::to_string(&message) else {
             return;
         };

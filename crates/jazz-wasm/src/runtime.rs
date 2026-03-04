@@ -18,6 +18,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Once;
 
 use js_sys::Function;
+use js_sys::Uint8Array;
 use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
@@ -262,15 +263,27 @@ impl JsSyncSender {
 }
 
 impl SyncSender for JsSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
+    fn send_sync_message(&self, message: OutboxEntry, sender_tier: &'static str) {
         if let Some(ref callback) = *self.callback.borrow() {
             let is_catalogue = message.payload.is_catalogue();
-            if let Ok(payload_json) = serde_json::to_string(&message.payload) {
-                let (destination_kind, destination_id) = match message.destination {
-                    Destination::Server(server_id) => ("server", server_id.0.to_string()),
-                    Destination::Client(client_id) => ("client", client_id.0.to_string()),
-                };
-
+            let (destination_kind, destination_id) = match message.destination {
+                Destination::Server(server_id) => ("server", server_id.0.to_string()),
+                Destination::Client(client_id) => ("client", client_id.0.to_string()),
+            };
+            let use_binary_encoding = sender_tier == "client" || destination_kind == "client";
+            if use_binary_encoding {
+                if let Ok(payload_bytes) = message.payload.to_bytes() {
+                    let payload_js = Uint8Array::from(payload_bytes.as_slice());
+                    let _ = callback.call4(
+                        &JsValue::NULL,
+                        &JsValue::from_str(destination_kind),
+                        &JsValue::from_str(&destination_id),
+                        &payload_js.into(),
+                        &JsValue::from_bool(is_catalogue),
+                    );
+                }
+            } else {
+                let payload_json = message.payload.to_json().unwrap();
                 let _ = callback.call4(
                     &JsValue::NULL,
                     &JsValue::from_str(destination_kind),
@@ -390,12 +403,12 @@ impl WasmRuntime {
     /// Called by JS when a sync message arrives from the server.
     ///
     /// # Arguments
-    /// * `message_json` - JSON-encoded SyncPayload
+    /// * `payload` - Either postcard-encoded SyncPayload bytes (`Uint8Array`)
+    ///   or JSON-encoded SyncPayload (`string`)
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(&self, message_json: &str) -> Result<(), JsError> {
+    pub fn on_sync_message_received(&self, payload: JsValue) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload: SyncPayload = serde_json::from_str(message_json)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Server(ServerId::new()),
@@ -410,12 +423,12 @@ impl WasmRuntime {
     ///
     /// # Arguments
     /// * `client_id` - UUID string of the sending client
-    /// * `message_json` - JSON-encoded SyncPayload
+    /// * `payload` - Postcard-encoded SyncPayload bytes
     #[wasm_bindgen(js_name = onSyncMessageReceivedFromClient)]
     pub fn on_sync_message_received_from_client(
         &self,
         client_id: &str,
-        message_json: &str,
+        payload: JsValue,
     ) -> Result<(), JsError> {
         let _span = debug_span!(
             "wasm::onSyncMessageReceivedFromClient",
@@ -427,8 +440,7 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
 
-        let payload: SyncPayload = serde_json::from_str(message_json)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
@@ -437,6 +449,21 @@ impl WasmRuntime {
 
         self.core.borrow_mut().park_sync_message(entry);
         Ok(())
+    }
+
+    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
+        if let Some(json) = payload.as_string() {
+            SyncPayload::from_json(&json)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+        } else if payload.is_instance_of::<Uint8Array>() {
+            let bytes = Uint8Array::new(&payload).to_vec();
+            SyncPayload::from_bytes(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+        } else {
+            Err(JsError::new(
+                "Invalid sync payload type: expected Uint8Array or JSON string",
+            ))
+        }
     }
 
     /// Register a callback for outgoing sync messages.

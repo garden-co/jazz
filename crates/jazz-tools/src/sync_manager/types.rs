@@ -236,6 +236,7 @@ pub enum SyncPayload {
     QuerySubscription {
         query_id: QueryId,
         query: Box<Query>,
+        #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
         #[serde(default)]
         propagation: QueryPropagation,
@@ -264,7 +265,82 @@ pub enum SyncPayload {
     Error(SyncError),
 }
 
+/// Sessions contain claims as a JSON object.
+/// postcard does not support the dynamic deserialization style it expects (deserialize_any)
+/// so we need a custom serializer/deserializer to serialize/deserialize the claims as a string.
+mod query_subscription_session_serde {
+    use super::Session;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct SessionWire {
+        user_id: String,
+        claims_json: String,
+    }
+
+    pub fn serialize<S>(value: &Option<Session>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+
+        let wire: Option<SessionWire> = value
+            .as_ref()
+            .map(|session| {
+                let claims_json =
+                    serde_json::to_string(&session.claims).map_err(serde::ser::Error::custom)?;
+                Ok(SessionWire {
+                    user_id: session.user_id.clone(),
+                    claims_json,
+                })
+            })
+            .transpose()?;
+
+        wire.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Session>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<Session>::deserialize(deserializer);
+        }
+
+        let wire = Option::<SessionWire>::deserialize(deserializer)?;
+        wire.map(|session_wire| {
+            let claims = serde_json::from_str(&session_wire.claims_json)
+                .map_err(serde::de::Error::custom)?;
+            Ok(Session {
+                user_id: session_wire.user_id,
+                claims,
+            })
+        })
+        .transpose()
+    }
+}
+
 impl SyncPayload {
+    /// Encode this payload using postcard.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
+        postcard::to_allocvec(self)
+    }
+
+    /// Decode a payload from postcard bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
         let metadata = match self {

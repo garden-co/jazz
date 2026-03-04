@@ -511,8 +511,8 @@ describe("sync-transport", () => {
       (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
       const router = createSyncOutboxRouter({
-        onServerPayload: (payloadJson, isCatalogue) =>
-          sendSyncPayload("http://localhost:3000", payloadJson, isCatalogue, {
+        onServerPayload: (payload, isCatalogue) =>
+          sendSyncPayload("http://localhost:3000", payload as string, isCatalogue, {
             backendSecret: "backend-secret",
           }),
       });

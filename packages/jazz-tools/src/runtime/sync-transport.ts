@@ -54,7 +54,7 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(): void;
   removeServer(): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(payload: string): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
@@ -279,14 +279,14 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
 }
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payloadJson: string, isCatalogue: boolean): void | Promise<void>;
-  onClientPayload?(payloadJson: string): void;
+  onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
 }
@@ -296,14 +296,14 @@ export type RuntimeSyncOutboxCallbackArgs =
   | [
       destinationKind: OutboxDestinationKind,
       destinationId: string,
-      payloadJson: string,
+      payload: Uint8Array | string,
       isCatalogue: boolean,
     ]
   | [
       err: unknown,
       destinationKind: OutboxDestinationKind,
       destinationId: string,
-      payloadJson: string,
+      payload: Uint8Array | string,
       isCatalogue: boolean,
     ];
 export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
@@ -312,29 +312,33 @@ function isOutboxDestinationKind(value: unknown): value is OutboxDestinationKind
   return value === "server" || value === "client";
 }
 
+function isOutboxPayload(value: unknown): value is Uint8Array | string {
+  return typeof value === "string" || value instanceof Uint8Array;
+}
+
 function normalizeOutboxCallbackArgs(args: unknown[]): {
   destinationKind: OutboxDestinationKind;
-  payloadJson: string;
+  payload: Uint8Array | string;
   isCatalogue: boolean;
 } | null {
   // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue)
   if (isOutboxDestinationKind(args[0])) {
-    const payloadJson = args[2];
-    if (typeof payloadJson !== "string") return null;
+    const payload = args[2];
+    if (!isOutboxPayload(payload)) return null;
     return {
       destinationKind: args[0],
-      payloadJson,
+      payload: payload,
       isCatalogue: Boolean(args[3]),
     };
   }
 
   // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue)
   if (isOutboxDestinationKind(args[1])) {
-    const payloadJson = args[3];
-    if (typeof payloadJson !== "string") return null;
+    const payload = args[3];
+    if (!isOutboxPayload(payload)) return null;
     return {
       destinationKind: args[1],
-      payloadJson,
+      payload: payload,
       isCatalogue: Boolean(args[4]),
     };
   }
@@ -357,13 +361,13 @@ export function createSyncOutboxRouter(
       return;
     }
 
-    const { destinationKind, payloadJson, isCatalogue } = normalized;
+    const { destinationKind, payload, isCatalogue } = normalized;
     if (destinationKind === "client") {
-      options.onClientPayload?.(payloadJson);
+      options.onClientPayload?.(payload as Uint8Array);
       return;
     }
 
-    Promise.resolve(options.onServerPayload(payloadJson, isCatalogue)).catch((error) => {
+    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
       if (options.onServerPayloadError) {
         options.onServerPayloadError(error);
         return;

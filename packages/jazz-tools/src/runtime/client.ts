@@ -64,7 +64,7 @@ export interface Runtime {
     options_json?: string | null,
   ): number;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(message_json: string): void;
+  onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
   addServer(): void;
   removeServer(): void;
@@ -73,7 +73,7 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
+  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
 }
 
 /**
@@ -859,8 +859,8 @@ export class JazzClient {
       createSyncOutboxRouter({
         logPrefix: "[client] ",
         retryServerPayloads: true,
-        onServerPayload: (payloadJson, isCatalogue) =>
-          this.sendSyncMessage(payloadJson, isCatalogue),
+        onServerPayload: (payload, isCatalogue) =>
+          this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {
