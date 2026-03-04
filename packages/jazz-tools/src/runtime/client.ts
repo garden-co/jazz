@@ -20,6 +20,7 @@ import {
   type SyncStreamController,
   type SyncAuth,
   type LinkExternalResponse,
+  type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveJwtSession } from "./client-session.js";
@@ -64,7 +65,7 @@ export interface Runtime {
   ): number;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string): void;
-  onSyncMessageToSend(callback: Function): void;
+  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
   addServer(): void;
   removeServer(): void;
   addClient(): string;
