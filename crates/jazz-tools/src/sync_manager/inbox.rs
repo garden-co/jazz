@@ -318,15 +318,13 @@ impl SyncManager {
             } => {
                 // Warn if the payload carries a session that differs from the one established
                 // during the SSE handshake — this would indicate a spoofing attempt.
-                if let (Some(payload_session), Some(client_session)) =
-                    (session, &client.session)
+                if let (Some(payload_session), Some(client_session)) = (session, &client.session)
+                    && payload_session != client_session
                 {
-                    if payload_session != client_session {
-                        tracing::warn!(
-                            %client_id,
-                            "QuerySubscription payload session does not match client session; using client session"
-                        );
-                    }
+                    tracing::warn!(
+                        %client_id,
+                        "QuerySubscription payload session does not match client session; using client session"
+                    );
                 }
                 // Prefer the server-established session (set from validated auth headers
                 // during the SSE handshake) over whatever the client claims in the payload.
