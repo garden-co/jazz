@@ -3,14 +3,14 @@ declare module "jazz-wasm" {
     | [
         destinationKind: "server" | "client",
         destinationId: string,
-        payloadJson: string,
+        payload: string | Uint8Array,
         isCatalogue: boolean,
       ]
     | [
         err: unknown,
         destinationKind: "server" | "client",
         destinationId: string,
-        payloadJson: string,
+        payload: string | Uint8Array,
         isCatalogue: boolean,
       ];
   type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
@@ -19,7 +19,14 @@ declare module "jazz-wasm" {
   export function initSync(input?: unknown): void;
 
   export class WasmRuntime {
-    constructor(schemaJson: string, appId: string, env: string, userBranch: string, tier?: string);
+    constructor(
+      schemaJson: string,
+      appId: string,
+      env: string,
+      userBranch: string,
+      tier?: string,
+      useBinaryEncoding?: boolean,
+    );
 
     insert(table: string, values: unknown): string;
     insertDurable(table: string, values: unknown, tier: string): Promise<string>;

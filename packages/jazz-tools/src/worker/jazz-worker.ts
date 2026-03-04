@@ -185,6 +185,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
       msg.userBranch,
       msg.dbName,
       "worker",
+      false,
     );
 
     // Store auth

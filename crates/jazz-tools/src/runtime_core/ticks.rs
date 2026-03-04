@@ -175,7 +175,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             debug!(count = outbox.len(), "flushing outbox");
         }
         for msg in outbox {
-            self.sync_sender.send_sync_message(msg, self.tier_label);
+            self.sync_sender.send_sync_message(msg);
         }
 
         // 2. Process parked sync messages
@@ -193,7 +193,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             debug!(count = outbox.len(), "flushing post-process outbox");
         }
         for msg in outbox {
-            self.sync_sender.send_sync_message(msg, self.tier_label);
+            self.sync_sender.send_sync_message(msg);
         }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).

@@ -203,7 +203,7 @@ impl NapiSyncSender {
 }
 
 impl SyncSender for NapiSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
+    fn send_sync_message(&self, message: OutboxEntry) {
         let cb = match self.callback.lock() {
             Ok(cb) => cb,
             Err(_) => return,
