@@ -23,6 +23,12 @@ export interface BuildIndexOptions {
   contentDir: string;
   /** Directory where docs-index.db and docs-index.txt are written. */
   outputDir: string;
+  /**
+   * Base directory used to resolve <include cwd> paths.
+   * Mirrors fumadocs' file.cwd (the app working directory).
+   * Defaults to contentDir when not specified.
+   */
+  fileCwd?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,21 +89,28 @@ export function extractDescription(body: string): string {
  * content, replacing each with a fenced code block.  Paths are resolved
  * relative to the MDX file's directory (the `cwd` attribute).
  */
-export async function resolveIncludes(content: string, mdxFilePath: string): Promise<string> {
-  const includeRe = /<include\s+cwd\s+lang="([^"]+)">\s*([\s\S]*?)\s*<\/include>/g;
+export async function resolveIncludes(
+  content: string,
+  mdxFilePath: string,
+  fileCwd?: string,
+): Promise<string> {
+  // Match both <include cwd lang="..."> and <include lang="...">
+  const includeRe = /<include\s+(cwd\s+)?lang="([^"]+)">\s*([\s\S]*?)\s*<\/include>/g;
 
   // Collect all replacements first, then apply (to avoid regex state issues)
   const replacements: Array<{ original: string; replacement: string }> = [];
   let m: RegExpExecArray | null;
 
   while ((m = includeRe.exec(content)) !== null) {
-    const lang = m[1];
-    const rawPath = m[2].trim();
+    const hasCwd = !!m[1];
+    const lang = m[2];
+    const rawPath = m[3].trim();
     const hashIdx = rawPath.indexOf("#");
     const filePath = hashIdx === -1 ? rawPath : rawPath.slice(0, hashIdx);
     const anchor = hashIdx === -1 ? null : rawPath.slice(hashIdx + 1);
 
-    const resolvedPath = resolve(dirname(mdxFilePath), filePath.trim());
+    const base = hasCwd && fileCwd ? fileCwd : dirname(mdxFilePath);
+    const resolvedPath = resolve(base, filePath.trim());
     let fileContent = await readFile(resolvedPath, "utf8");
 
     if (anchor) {
@@ -186,17 +199,26 @@ async function findMdxFiles(dir: string): Promise<string[]> {
 // Main build function
 // ---------------------------------------------------------------------------
 
-export async function buildIndex({ contentDir, outputDir }: BuildIndexOptions): Promise<void> {
+export async function buildIndex({
+  contentDir,
+  outputDir,
+  fileCwd,
+}: BuildIndexOptions): Promise<void> {
   await mkdir(outputDir, { recursive: true });
 
   const mdxFiles = await findMdxFiles(contentDir);
+
+  // fileCwd: base for <include cwd> resolution.
+  // Defaults to contentDir (works for tests). Production callers pass the
+  // docs app working directory (docs/) where ../examples/... resolves correctly.
+  const resolvedFileCwd = fileCwd ?? contentDir;
 
   const pages = await Promise.all(
     mdxFiles.map(async (filePath) => {
       const raw = await readFile(filePath, "utf8");
       const { title, description, body: rawBody } = parseFrontmatter(raw);
 
-      const withIncludes = await resolveIncludes(rawBody, filePath);
+      const withIncludes = await resolveIncludes(rawBody, filePath, resolvedFileCwd);
       const body = stripJsx(withIncludes);
 
       // Slug: path relative to contentDir, no extension, forward slashes
@@ -277,10 +299,13 @@ const isMain = typeof process !== "undefined" && process.argv[1] === fileURLToPa
 
 if (isMain) {
   const here = dirname(fileURLToPath(import.meta.url));
-  const contentDir = resolve(here, "../../../docs/content/docs");
+  const contentDir = resolve(here, "../../../../docs/content/docs");
   const outDir = resolve(here, "../../bin");
+  // docs/ is the Next.js app working directory; <include cwd> paths in MDX
+  // are relative to it (e.g. ../examples/... resolves to the repo examples/).
+  const fileCwd = resolve(here, "../../../../docs");
 
-  buildIndex({ contentDir, outputDir: outDir })
+  buildIndex({ contentDir, outputDir: outDir, fileCwd })
     .then(() => console.log("docs index built →", outDir))
     .catch((err: unknown) => {
       console.error("build-index failed:", err);
