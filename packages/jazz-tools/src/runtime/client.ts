@@ -44,7 +44,6 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  schedule?: (task: () => void) => void;
   insert(table: string, values: any): string;
   insertDurable(table: string, values: any, tier: string): Promise<string>;
   update(object_id: string, values: any): void;
@@ -64,6 +63,13 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): number;
+  createSubscription(
+    query_json: string,
+    session_json?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
+  ): number;
+  executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
@@ -118,22 +124,6 @@ export interface LinkExternalIdentityOptions {
 
 export type LinkExternalIdentityResult = LinkExternalResponse;
 
-type PendingSubscriptionState = {
-  queryJson: string;
-  sessionJson?: string;
-  tier?: string;
-  optionsJson?: string;
-  callback: SubscriptionCallback;
-  canceled: boolean;
-};
-
-type BrowserScheduler = {
-  postTask?: (
-    task: () => void,
-    options?: { priority?: "user-blocking" | "user-visible" | "background" },
-  ) => Promise<unknown>;
-};
-
 /**
  * QueryBuilder-compatible input accepted by query and subscribe APIs.
  */
@@ -179,7 +169,7 @@ function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
 }
 
-function defaultRuntimeScheduler(): (task: () => void) => void {
+function getScheduler(): (task: () => void) => void {
   if ("scheduler" in globalThis) {
     return (task: () => void) => {
       // See: https://developer.mozilla.org/en-US/docs/Web/API/Scheduler/postTask
@@ -416,11 +406,7 @@ export class JazzClient {
   private runtime: Runtime;
   private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private subscriptions = new Map<number, SubscriptionCallback>();
-  private pendingSubscriptions = new Map<number, PendingSubscriptionState>();
-  private boundSubscriptions = new Map<number, number>();
-  private nextProvisionalSubscriptionId = 1;
-  private isShuttingDown = false;
+  private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
@@ -432,7 +418,7 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
   ) {
     this.runtime = runtime;
-    this.runtime.schedule ??= defaultRuntimeScheduler();
+    this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
@@ -705,6 +691,12 @@ export class JazzClient {
 
   /**
    * Internal subscribe with optional session and read durability options.
+   *
+   * Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
+   * a handle synchronously (zero work), then `executeSubscription` is deferred
+   * via the scheduler so compilation + first tick run outside the caller's
+   * synchronous stack (e.g. outside a React render).
+   *
    * @internal
    */
   subscribeInternal(
@@ -717,61 +709,23 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const provisionalId = this.nextProvisionalSubscriptionId++;
 
-    this.subscriptions.set(provisionalId, callback);
-    this.pendingSubscriptions.set(provisionalId, {
+    const handle = this.runtime.createSubscription(
       queryJson,
       sessionJson,
-      tier: normalizedOptions.tier,
+      normalizedOptions.tier,
       optionsJson,
-      callback,
-      canceled: false,
+    );
+
+    this.scheduler(() => {
+      this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
+        const delta: RowDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+        callback(delta);
+      });
     });
 
-    const schedule = this.runtime.schedule ?? ((task: () => void) => queueMicrotask(task));
-    schedule(() => {
-      this.bindPendingSubscription(provisionalId);
-    });
-
-    return provisionalId;
-  }
-
-  private bindPendingSubscription(provisionalId: number): void {
-    if (this.isShuttingDown) {
-      this.pendingSubscriptions.delete(provisionalId);
-      this.subscriptions.delete(provisionalId);
-      return;
-    }
-
-    const pending = this.pendingSubscriptions.get(provisionalId);
-    if (!pending || pending.canceled) {
-      this.pendingSubscriptions.delete(provisionalId);
-      this.subscriptions.delete(provisionalId);
-      return;
-    }
-
-    try {
-      const runtimeSubId = this.runtime.subscribe(
-        pending.queryJson,
-        (deltaJsonOrObject: RowDelta | string) => {
-          // WASM runtime passes delta as JSON string, need to parse it
-          const delta: RowDelta =
-            typeof deltaJsonOrObject === "string"
-              ? JSON.parse(deltaJsonOrObject)
-              : deltaJsonOrObject;
-          pending.callback(delta);
-        },
-        pending.sessionJson,
-        pending.tier,
-        pending.optionsJson,
-      );
-      this.boundSubscriptions.set(provisionalId, runtimeSubId);
-    } catch {
-      this.subscriptions.delete(provisionalId);
-    } finally {
-      this.pendingSubscriptions.delete(provisionalId);
-    }
+    return handle;
   }
 
   /**
@@ -780,28 +734,7 @@ export class JazzClient {
    * @param subscriptionId ID returned from subscribe()
    */
   unsubscribe(subscriptionId: number): void {
-    const pending = this.pendingSubscriptions.get(subscriptionId);
-    if (pending) {
-      pending.canceled = true;
-      this.pendingSubscriptions.delete(subscriptionId);
-      this.subscriptions.delete(subscriptionId);
-      return;
-    }
-
-    const runtimeSubId = this.boundSubscriptions.get(subscriptionId);
-    if (runtimeSubId === undefined) {
-      return;
-    }
-
-    this.boundSubscriptions.delete(subscriptionId);
-    this.subscriptions.delete(subscriptionId);
-    this.runtime.unsubscribe(runtimeSubId);
-  }
-
-  private clearSubscriptionState(): void {
-    this.pendingSubscriptions.clear();
-    this.boundSubscriptions.clear();
-    this.subscriptions.clear();
+    this.runtime.unsubscribe(subscriptionId);
   }
 
   /**
@@ -936,8 +869,6 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.isShuttingDown = true;
-    this.clearSubscriptionState();
     this.streamController.stop();
 
     // Close driver if it supports it
