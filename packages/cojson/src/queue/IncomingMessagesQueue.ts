@@ -48,18 +48,27 @@ export class IncomingMessagesQueue {
      * This is to avoid edge cases where one series reset is delayed, which would cause spikes or dips
      * when queried - and it also more correctly represents the actual state of the queue after a restart.
      */
-    this.pullCounter.add(0, {
-      peerRole: "client",
-    });
-    this.pushCounter.add(0, {
-      peerRole: "client",
-    });
-    this.pullCounter.add(0, {
-      peerRole: "server",
-    });
-    this.pushCounter.add(0, {
-      peerRole: "server",
-    });
+    const peerRoles: PeerState["role"][] = ["client", "server"];
+    const messageTypes: SyncMessage["action"][] = [
+      "load",
+      "known",
+      "content",
+      "done",
+      "reconcile",
+      "reconcile-ack",
+    ];
+
+    for (const peerRole of peerRoles) {
+      this.pullCounter.add(0, { peerRole });
+      this.pushCounter.add(0, { peerRole });
+
+      for (const messageType of messageTypes) {
+        this.pushByTypeCounter.add(0, {
+          peerRole,
+          messageType,
+        });
+      }
+    }
 
     this.queues = [];
     this.peerToQueue = new WeakMap();
