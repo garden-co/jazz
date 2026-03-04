@@ -148,7 +148,7 @@ export async function createJazzContextFromExistingCredentials<
     syncWhen,
     crypto,
     storage,
-    enableFullStorageReconciliation: !!storage,
+    enableFullStorageReconciliation: false,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
       if (asActiveAccount) {
@@ -217,7 +217,7 @@ export async function createJazzContextForNewAccount<
     crypto,
     initialAgentSecret,
     storage,
-    enableFullStorageReconciliation: !!storage,
+    enableFullStorageReconciliation: false,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
       activeAccountContext.set(account);
