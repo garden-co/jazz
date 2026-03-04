@@ -2592,4 +2592,66 @@ mod tests {
         );
         assert!(!col.nullable);
     }
+
+    #[test]
+    fn parse_policy_exists_subquery() {
+        // EXISTS (SELECT FROM <table> WHERE <condition>) in a USING clause
+        let sql = r#"
+            CREATE TABLE messages (
+                id UUID NOT NULL,
+                room_id UUID NOT NULL
+            );
+            CREATE POLICY messages_select_policy ON messages FOR SELECT
+                USING (EXISTS (SELECT FROM members WHERE member_id = session.user_id));
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("messages")).unwrap();
+        let using = table.policies.select.using.as_ref().unwrap();
+
+        assert!(
+            matches!(
+                using,
+                PolicyExpr::Exists { table, .. } if table == "members"
+            ),
+            "expected PolicyExpr::Exists, got {:?}",
+            using
+        );
+    }
+
+    #[test]
+    fn policy_exists_round_trip() {
+        // policy_expr_to_sql(parse(EXISTS expr)) should reproduce the original SQL
+        let sql = r#"
+            CREATE TABLE messages (
+                id UUID NOT NULL,
+                room_id UUID NOT NULL
+            );
+            CREATE POLICY messages_select_policy ON messages FOR SELECT
+                USING (EXISTS (SELECT FROM members WHERE member_id = session.user_id));
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let original_using = schema
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+        let reparsed_using = reparsed
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(original_using, reparsed_using);
+    }
 }
