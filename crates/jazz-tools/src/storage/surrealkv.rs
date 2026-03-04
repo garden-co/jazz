@@ -470,11 +470,12 @@ impl Storage for SurrealKvStorage {
         branch: &str,
         offset: usize,
         limit: usize,
+        reverse: bool,
     ) -> Vec<ObjectId> {
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
-        index_scan_ordered_core(table, column, branch, offset, limit, |prefix| {
+        index_scan_ordered_core(table, column, branch, offset, limit, reverse, |prefix| {
             Self::scan_prefix_keys(&txn, prefix)
         })
     }

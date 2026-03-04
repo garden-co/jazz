@@ -231,3 +231,198 @@ describe("db.subscribeAll limit+offset browser integration", () => {
     });
   });
 });
+
+// ============================================================================
+// Windowed index scan: limit+offset sorted by id
+//
+// When ORDER BY id (ASC or DESC) with limit, the query engine pushes
+// pagination down to the storage index scan. These tests exercise that
+// code path (and the non-windowed path for comparison).
+// ============================================================================
+
+describe("db.subscribeAll limit+offset sorted by id (windowed index scan)", () => {
+  const idAscQuery = makeTodosQuery({ orderBy: [["id", "asc"]], offset: 1, limit: 2 });
+
+  it("returns the correct page of rows sorted by id ASC", async () => {
+    await withDb("id-asc-page", async (db) => {
+      const deltas: Array<SubscriptionDelta<Todo>> = [];
+      const unsubscribe = db.subscribeAll(idAscQuery, (delta) => {
+        deltas.push(delta);
+      });
+
+      try {
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
+
+        const sorted = [idA, idB, idC, idD].sort();
+
+        await waitForCondition(
+          () => latestRows(deltas).length === 2,
+          10_000,
+          "expected windowed page with 2 rows",
+        );
+        expect(latestIds(deltas)).toEqual([sorted[1], sorted[2]]);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  it("shifts window when deleting a row before the offset", async () => {
+    await withDb("id-asc-delete-before", async (db) => {
+      const deltas: Array<SubscriptionDelta<Todo>> = [];
+      const unsubscribe = db.subscribeAll(idAscQuery, (delta) => {
+        deltas.push(delta);
+      });
+
+      try {
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
+
+        const sorted = [idA, idB, idC, idD].sort();
+
+        await waitForCondition(
+          () => latestRows(deltas).length === 2,
+          10_000,
+          "expected initial windowed page",
+        );
+        expect(latestIds(deltas)).toEqual([sorted[1], sorted[2]]);
+
+        // Delete the first row in id order (before the window)
+        await db.deleteFrom(todos, sorted[0]);
+
+        await waitForCondition(
+          () => {
+            const ids = latestIds(deltas);
+            return ids.length === 2 && ids[0] === sorted[2] && ids[1] === sorted[3];
+          },
+          10_000,
+          "expected window to shift after deleting row before offset",
+        );
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  it("shifts window when inserting a row that sorts into the window", async () => {
+    await withDb("id-asc-insert", async (db) => {
+      const deltas: Array<SubscriptionDelta<Todo>> = [];
+      const unsubscribe = db.subscribeAll(idAscQuery, (delta) => {
+        deltas.push(delta);
+      });
+
+      try {
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+
+        const sorted = [idA, idB, idC].sort();
+
+        await waitForCondition(
+          () => latestRows(deltas).length === 2,
+          10_000,
+          "expected initial windowed page",
+        );
+        expect(latestIds(deltas)).toEqual([sorted[1], sorted[2]]);
+
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
+
+        const newSorted = [idA, idB, idC, idD].sort();
+
+        await waitForCondition(
+          () => {
+            const ids = latestIds(deltas);
+            return ids.length === 2 && ids[0] === newSorted[1] && ids[1] === newSorted[2];
+          },
+          10_000,
+          "expected window to reflect new sort order after insert",
+        );
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  it("returns the correct page of rows sorted by id DESC", async () => {
+    const idDescQuery = makeTodosQuery({ orderBy: [["id", "desc"]], offset: 1, limit: 2 });
+
+    await withDb("id-desc-page", async (db) => {
+      const deltas: Array<SubscriptionDelta<Todo>> = [];
+      const unsubscribe = db.subscribeAll(idDescQuery, (delta) => {
+        deltas.push(delta);
+      });
+
+      try {
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
+
+        // DESC: reversed id order, offset 1, limit 2 → 2nd and 3rd from the end
+        const reversed = [idA, idB, idC, idD].sort().reverse();
+
+        await waitForCondition(
+          () => latestRows(deltas).length === 2,
+          10_000,
+          "expected windowed page with 2 rows (DESC)",
+        );
+        expect(latestIds(deltas)).toEqual([reversed[1], reversed[2]]);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  it("shifts DESC window when deleting a row within the window", async () => {
+    const idDescQuery = makeTodosQuery({ orderBy: [["id", "desc"]], offset: 1, limit: 2 });
+
+    await withDb("id-desc-delete-in-window", async (db) => {
+      const deltas: Array<SubscriptionDelta<Todo>> = [];
+      const unsubscribe = db.subscribeAll(idDescQuery, (delta) => {
+        deltas.push(delta);
+      });
+
+      try {
+        const idA = await db.insert(todos, { title: "A", rank: 1, done: false });
+        const idB = await db.insert(todos, { title: "B", rank: 2, done: false });
+        const idC = await db.insert(todos, { title: "C", rank: 3, done: false });
+        const idD = await db.insert(todos, { title: "D", rank: 4, done: false });
+        const idE = await db.insert(todos, { title: "E", rank: 5, done: false });
+
+        // DESC reversed: [highest..lowest], offset 1, limit 2
+        const reversed = [idA, idB, idC, idD, idE].sort().reverse();
+
+        await waitForCondition(
+          () => latestRows(deltas).length === 2,
+          10_000,
+          "expected initial windowed page (DESC)",
+        );
+        expect(latestIds(deltas)).toEqual([reversed[1], reversed[2]]);
+
+        // Delete the first row in the window
+        await db.deleteFrom(todos, reversed[1]);
+
+        const remaining = [idA, idB, idC, idD, idE]
+          .filter((id) => id !== reversed[1])
+          .sort()
+          .reverse();
+
+        await waitForCondition(
+          () => {
+            const ids = latestIds(deltas);
+            return ids.length === 2 && ids[0] === remaining[1] && ids[1] === remaining[2];
+          },
+          10_000,
+          "expected DESC window to shift after deleting row in window",
+        );
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+});

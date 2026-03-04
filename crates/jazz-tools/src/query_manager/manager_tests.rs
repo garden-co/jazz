@@ -8544,3 +8544,161 @@ fn windowed_scan_with_filter_falls_back_to_full_scan() {
     // In id order, offset 1 limit 2 gives 2nd and 3rd of those 5.
     assert_eq!(results.len(), 2);
 }
+
+#[test]
+fn windowed_scan_desc_returns_correct_page() {
+    // Insert 6 rows, query ORDER BY id DESC with offset=1 limit=2.
+    // Expect the 2nd and 3rd rows counting from the end of id order.
+    //
+    //   id order:  [A  B  C  D  E  F]
+    //   reversed:  [F  E  D  C  B  A]
+    //   offset=1:     [E  D  C  B  A]
+    //   limit=2:      [E  D]
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        ids.push(h.row_id);
+    }
+    ids.sort();
+
+    let query = qm
+        .query("users")
+        .order_by_desc("id")
+        .offset(1)
+        .limit(2)
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 2);
+    let result_ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    // reversed: [5,4,3,2,1,0], offset 1 limit 2 → [4,3]
+    assert_eq!(result_ids, &[ids[4], ids[3]]);
+}
+
+#[test]
+fn windowed_scan_desc_insert_shifts_window() {
+    // ORDER BY id DESC, offset=1, limit=2 on 5 rows.
+    // Insert a new row and verify the window updates correctly.
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        handles.push(h);
+    }
+    handles.sort_by_key(|h| h.row_id);
+
+    let query = qm
+        .query("users")
+        .order_by_desc("id")
+        .offset(1)
+        .limit(2)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    // reversed [4,3,2,1,0], offset 1 limit 2 → [3,2]
+    let initial = qm.get_subscription_results(sub_id);
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[0].0, handles[3].row_id);
+    assert_eq!(initial[1].0, handles[2].row_id);
+
+    // Insert a row. Verify window is correct after insert.
+    let new_h = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("NewUser".into()), Value::Integer(99)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let mut all_ids: Vec<_> = handles.iter().map(|h| h.row_id).collect();
+    all_ids.push(new_h.row_id);
+    all_ids.sort();
+
+    // reversed all_ids, offset 1, limit 2
+    let mut reversed = all_ids.clone();
+    reversed.reverse();
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    let result_ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    assert_eq!(result_ids, &reversed[1..3]);
+
+    qm.unsubscribe_with_sync(sub_id);
+}
+
+#[test]
+fn windowed_scan_desc_delete_shifts_window() {
+    // ORDER BY id DESC, offset=1, limit=2 on 5 rows.
+    // Delete a row within the window and verify shift.
+    //
+    //   before (desc): [4  3  2  1  0]
+    //                      ^--^         window(1,2) = [3, 2]
+    //   delete 3:
+    //   after (desc):  [4  2  1  0]
+    //                      ^--^         window(1,2) = [2, 1]
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let h = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text(format!("User{i}")), Value::Integer(i)],
+            )
+            .unwrap();
+        handles.push(h);
+    }
+    handles.sort_by_key(|h| h.row_id);
+
+    let query = qm
+        .query("users")
+        .order_by_desc("id")
+        .offset(1)
+        .limit(2)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let initial = qm.get_subscription_results(sub_id);
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[0].0, handles[3].row_id);
+    assert_eq!(initial[1].0, handles[2].row_id);
+
+    // Delete handles[3] (2nd-highest id, first in our window)
+    qm.delete(&mut storage, handles[3].row_id).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    // After deletion: reversed remaining [4,2,1,0], offset 1, limit 2 → [2,1]
+    assert_eq!(results[0].0, handles[2].row_id);
+    assert_eq!(results[1].0, handles[1].row_id);
+
+    qm.unsubscribe_with_sync(sub_id);
+}

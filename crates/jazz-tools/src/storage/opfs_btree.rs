@@ -413,8 +413,9 @@ impl Storage for OpfsBTreeStorage {
         branch: &str,
         offset: usize,
         limit: usize,
+        reverse: bool,
     ) -> Vec<ObjectId> {
-        index_scan_ordered_core(table, column, branch, offset, limit, |prefix| {
+        index_scan_ordered_core(table, column, branch, offset, limit, reverse, |prefix| {
             self.tree_scan_keys(prefix)
         })
     }

@@ -23,8 +23,8 @@ pub struct IndexScanNode {
     /// Output tuple descriptor (single element, unmaterialized).
     output_descriptor: TupleDescriptor,
 
-    /// Optional (offset, limit) window for ordered index scans.
-    window: Option<(usize, usize)>,
+    /// Optional (offset, limit, reverse) window for ordered index scans.
+    window: Option<(usize, usize, bool)>,
 
     /// Current set of tuples (length-1) matching the condition.
     current_tuples: AHashSet<Tuple>,
@@ -73,16 +73,16 @@ impl IndexScanNode {
         &self.output_descriptor
     }
 
-    /// Set the window for ordered index scans (offset, limit).
-    pub fn set_window(&mut self, offset: usize, limit: usize) {
-        self.window = Some((offset, limit));
+    /// Set the window for ordered index scans (offset, limit, reverse).
+    pub fn set_window(&mut self, offset: usize, limit: usize, reverse: bool) {
+        self.window = Some((offset, limit, reverse));
     }
 }
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
         let new_ids: AHashSet<ObjectId> = match (&self.condition, self.window) {
-            (ScanCondition::All, Some((offset, limit))) => ctx
+            (ScanCondition::All, Some((offset, limit, reverse))) => ctx
                 .storage
                 .index_scan_ordered(
                     self.table.as_str(),
@@ -90,6 +90,7 @@ impl SourceNode for IndexScanNode {
                     &self.branch,
                     offset,
                     limit,
+                    reverse,
                 )
                 .into_iter()
                 .collect(),

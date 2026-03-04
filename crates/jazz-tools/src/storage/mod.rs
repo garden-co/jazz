@@ -263,8 +263,9 @@ pub trait Storage {
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
 
-    /// Ordered scan with offset/limit — returns row IDs in index key order,
-    /// skipping `offset` entries and returning at most `limit`.
+    /// Ordered scan with offset/limit — returns row IDs in index key order
+    /// (or reverse order when `reverse` is true), skipping `offset` entries
+    /// and returning at most `limit`.
     ///
     /// For the `_id` column the key order matches `ObjectId` byte order, so
     /// callers sorting by id can push pagination down to storage.
@@ -275,12 +276,14 @@ pub trait Storage {
         branch: &str,
         offset: usize,
         limit: usize,
+        reverse: bool,
     ) -> Vec<ObjectId> {
-        self.index_scan_all(table, column, branch)
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect()
+        let all = self.index_scan_all(table, column, branch);
+        if reverse {
+            all.into_iter().rev().skip(offset).take(limit).collect()
+        } else {
+            all.into_iter().skip(offset).take(limit).collect()
+        }
     }
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
@@ -427,8 +430,9 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         branch: &str,
         offset: usize,
         limit: usize,
+        reverse: bool,
     ) -> Vec<ObjectId> {
-        (**self).index_scan_ordered(table, column, branch, offset, limit)
+        (**self).index_scan_ordered(table, column, branch, offset, limit, reverse)
     }
 
     fn flush(&self) {
@@ -895,17 +899,28 @@ impl Storage for MemoryStorage {
         branch: &str,
         offset: usize,
         limit: usize,
+        reverse: bool,
     ) -> Vec<ObjectId> {
         let key = (table.to_string(), column.to_string(), branch.to_string());
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
-        index
-            .values()
-            .flat_map(|ids| ids.iter().copied())
-            .skip(offset)
-            .take(limit)
-            .collect()
+        if reverse {
+            index
+                .values()
+                .rev()
+                .flat_map(|ids| ids.iter().copied())
+                .skip(offset)
+                .take(limit)
+                .collect()
+        } else {
+            index
+                .values()
+                .flat_map(|ids| ids.iter().copied())
+                .skip(offset)
+                .take(limit)
+                .collect()
+        }
     }
 }
 

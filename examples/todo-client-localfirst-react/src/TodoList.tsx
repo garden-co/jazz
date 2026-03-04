@@ -18,7 +18,12 @@ export function TodoList() {
 
   // #region reading-reactive-hooks-react
   const db = useDb();
-  const todos = useAll(todosQuery.limit(50).offset(page * 50));
+  const todos = useAll(
+    todosQuery
+      .orderBy("id", "desc")
+      .limit(50)
+      .offset(page * 50),
+  );
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;

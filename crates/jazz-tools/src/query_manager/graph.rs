@@ -582,25 +582,26 @@ impl QueryGraph {
         // Sort node (default: id ASC when order_by is omitted)
         let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
 
-        // Windowed index scan: when sorting by id ASC with limit, and no
-        // post-scan filtering, push offset+limit down to the index scan so
-        // storage only returns the needed key range.
+        // Windowed index scan: when sorting by id (ASC or DESC) with limit,
+        // and no post-scan filtering, push offset+limit down to the index scan
+        // so storage only returns the needed key range.
         let use_windowed_scan = plan.limit.is_some()
             && plan.recursive.is_none()
             && !plan.include_deleted
             && branches.len() == 1
             && phase1_outputs.len() == 1
             && phase2_input == materialize_id
-            && is_id_asc_only_sort(&sort_keys)
+            && is_id_only_sort(&sort_keys)
             && matches!(
                 graph.get_node(phase1_outputs[0]),
                 Some(GraphNode::IndexScan(n)) if matches!(n.condition, ScanCondition::All)
             );
 
         if use_windowed_scan {
+            let reverse = matches!(sort_keys[0].direction, SortDirection::Descending);
             let scan_id = phase1_outputs[0];
             if let Some(GraphNode::IndexScan(scan_node)) = graph.get_node_mut(scan_id) {
-                scan_node.set_window(plan.offset, plan.limit.unwrap());
+                scan_node.set_window(plan.offset, plan.limit.unwrap(), reverse);
             }
         }
 
@@ -2325,10 +2326,8 @@ fn sort_keys_from_order_by(
         .collect()
 }
 
-fn is_id_asc_only_sort(sort_keys: &[SortKey]) -> bool {
-    sort_keys.len() == 1
-        && matches!(sort_keys[0].target, SortTarget::RowId)
-        && matches!(sort_keys[0].direction, SortDirection::Ascending)
+fn is_id_only_sort(sort_keys: &[SortKey]) -> bool {
+    sort_keys.len() == 1 && matches!(sort_keys[0].target, SortTarget::RowId)
 }
 
 fn build_remaining_predicate_from_disjuncts(

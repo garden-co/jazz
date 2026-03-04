@@ -305,16 +305,26 @@ pub(super) fn index_scan_ordered_core(
     branch: &str,
     offset: usize,
     limit: usize,
+    reverse: bool,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Vec<ObjectId> {
     let prefix = index_prefix(table, column, branch);
     scan_prefix_keys(&prefix)
         .map(|keys| {
-            keys.iter()
-                .filter_map(|key| parse_uuid_from_index_key(key))
-                .skip(offset)
-                .take(limit)
-                .collect()
+            if reverse {
+                keys.iter()
+                    .rev()
+                    .filter_map(|key| parse_uuid_from_index_key(key))
+                    .skip(offset)
+                    .take(limit)
+                    .collect()
+            } else {
+                keys.iter()
+                    .filter_map(|key| parse_uuid_from_index_key(key))
+                    .skip(offset)
+                    .take(limit)
+                    .collect()
+            }
         })
         .unwrap_or_default()
 }
