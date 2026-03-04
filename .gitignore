@@ -34,6 +34,9 @@ examples/wequencer/walkthrough/*.html
 # Local data
 data/
 
+# Sync server data
+data-multi/
+
 # Environment
 .env
 .env.local
