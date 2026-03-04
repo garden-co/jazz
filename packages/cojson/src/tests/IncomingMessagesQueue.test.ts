@@ -279,6 +279,38 @@ describe("IncomingMessagesQueue", () => {
       expect(pushValue).toBe(1);
     });
 
+    test("should track pushed message count by incoming message type", async () => {
+      const { queue, peer1, metricReader } = setup();
+
+      queue.push(createMockSyncMessage("load-1", "load"), peer1);
+      queue.push(createMockSyncMessage("known-1", "known"), peer1);
+      queue.push(createMockSyncMessage("known-2", "known"), peer1);
+      queue.push(createMockSyncMessage("content-1", "content"), peer1);
+      queue.push(createMockSyncMessage("done-1", "done"), peer1);
+
+      const loadValue = await metricReader.getMetricValue(
+        "jazz.messagequeue.incoming.pushed.by_type",
+        { peerRole: "client", messageType: "load" },
+      );
+      const knownValue = await metricReader.getMetricValue(
+        "jazz.messagequeue.incoming.pushed.by_type",
+        { peerRole: "client", messageType: "known" },
+      );
+      const contentValue = await metricReader.getMetricValue(
+        "jazz.messagequeue.incoming.pushed.by_type",
+        { peerRole: "client", messageType: "content" },
+      );
+      const doneValue = await metricReader.getMetricValue(
+        "jazz.messagequeue.incoming.pushed.by_type",
+        { peerRole: "client", messageType: "done" },
+      );
+
+      expect(loadValue).toBe(1);
+      expect(knownValue).toBe(2);
+      expect(contentValue).toBe(1);
+      expect(doneValue).toBe(1);
+    });
+
     test("should increment pull counter when pulling messages", async () => {
       const { queue, peer1, metricReader } = setup();
       const msg = createMockSyncMessage("test");
