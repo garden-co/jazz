@@ -99,12 +99,13 @@ impl ArraySubqueryNode {
         let outer_row_descriptor = outer_descriptor.combined_descriptor();
         let mut output_columns = outer_row_descriptor.columns.clone();
 
-        // Array column type: Array<Row> where Row has the subgraph's output descriptor.
-        // Each row from the subgraph is encoded using row encoding with that descriptor.
-        let row_descriptor = subgraph_template.output_descriptor().clone();
+        // Array column type: Array<Row> with the subgraph's output columns.
+        // The row id is carried in Value::Row { id: Some(...), .. } rather than
+        // prepended as a column.
+        let row_columns = subgraph_template.output_descriptor().columns.clone();
         let element_type = ColumnType::Array {
             element: Box::new(ColumnType::Row {
-                columns: Box::new(row_descriptor),
+                columns: Box::new(RowDescriptor::new(row_columns)),
             }),
         };
 
@@ -300,7 +301,10 @@ impl ArraySubqueryNode {
             .filter_map(|row| {
                 let output_desc = self.subgraph_template.output_descriptor();
                 let values = decode_row(output_desc, &row.data).ok()?;
-                Some(Value::Row(values))
+                Some(Value::Row {
+                    id: Some(row.id),
+                    values,
+                })
             })
             .collect();
         Value::Array(array_elements)

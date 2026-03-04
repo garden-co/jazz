@@ -25,7 +25,12 @@ pub enum Value {
     Array(Vec<Value>),
     /// Heterogeneous row/tuple of values (for nested rows in arrays).
     /// The schema is external (from ColumnType::Row).
-    Row(Vec<Value>),
+    /// `id` carries the originating object's id when this Row came from an
+    /// included relation so the TS layer can surface it.
+    Row {
+        id: Option<ObjectId>,
+        values: Vec<Value>,
+    },
     Null,
 }
 
@@ -172,7 +177,16 @@ impl PartialEq for Value {
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
-            (Value::Row(a), Value::Row(b)) => a == b,
+            (
+                Value::Row {
+                    id: id_a,
+                    values: a,
+                },
+                Value::Row {
+                    id: id_b,
+                    values: b,
+                },
+            ) => id_a == id_b && a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -204,7 +218,7 @@ impl Value {
                     })
             }
             // Row type requires external schema, can't be inferred
-            Value::Row(_) => None,
+            Value::Row { .. } => None,
             Value::Null => None,
         }
     }
@@ -221,7 +235,7 @@ impl Value {
 
     /// Returns true if this is a Row value.
     pub fn is_row(&self) -> bool {
-        matches!(self, Value::Row(_))
+        matches!(self, Value::Row { .. })
     }
 
     /// Returns the array elements if this is an Array, None otherwise.
@@ -235,7 +249,15 @@ impl Value {
     /// Returns the row values if this is a Row, None otherwise.
     pub fn as_row(&self) -> Option<&[Value]> {
         match self {
-            Value::Row(values) => Some(values),
+            Value::Row { values, .. } => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Returns the row id if this is a Row with an id, None otherwise.
+    pub fn row_id(&self) -> Option<ObjectId> {
+        match self {
+            Value::Row { id, .. } => *id,
             _ => None,
         }
     }
