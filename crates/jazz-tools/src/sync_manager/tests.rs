@@ -2454,7 +2454,10 @@ fn query_subscription_ignores_spoofed_payload_session() {
         .session
         .as_ref()
         .expect("session should be present");
-    assert_eq!(session.user_id, "alice", "spoofed payload session must be ignored");
+    assert_eq!(
+        session.user_id, "alice",
+        "spoofed payload session must be ignored"
+    );
 }
 
 #[test]

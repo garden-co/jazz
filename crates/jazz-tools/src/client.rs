@@ -34,8 +34,6 @@ pub struct JazzClient {
     server_connection: Option<Arc<ServerConnection>>,
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
-    /// Subscription delta senders (for routing deltas from callbacks to streams).
-    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
     /// Handle for the stream listener task.
@@ -185,11 +183,6 @@ impl JazzClient {
             tracing::warn!("Failed to register server with sync manager: {}", e);
         }
 
-        // Create shared subscription senders map
-        let subscription_senders: Arc<
-            RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>,
-        > = Arc::new(RwLock::new(HashMap::new()));
-
         // Spawn binary stream listener if connected to server
         let stream_listener_task = if let Some(ref conn) = server_connection {
             let conn_for_stream = conn.clone();
@@ -291,7 +284,6 @@ impl JazzClient {
             runtime,
             server_connection,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            subscription_senders,
             next_handle: std::sync::atomic::AtomicU64::new(1),
             stream_listener_task,
         })
@@ -315,11 +307,11 @@ impl JazzClient {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         );
 
-        // Create channel for this subscription's deltas
+        // Create channel for this subscription's deltas.
+        // tx is moved directly into the callback so the delta is never dropped due
+        // to the race where immediate_tick fires the callback before we can insert
+        // tx into a shared map.
         let (tx, rx) = mpsc::channel::<OrderedRowDelta>(64);
-
-        // Store sender before subscribing so callback can find it
-        let senders = self.subscription_senders.clone();
 
         // Register with runtime using callback pattern
         // The callback bridges runtime updates to the channel
@@ -328,23 +320,13 @@ impl JazzClient {
             .subscribe(
                 query.clone(),
                 move |delta| {
-                    // Route delta to the subscription's channel
-                    // Note: We need to use try_send since we're in a sync callback
-                    if let Ok(senders_guard) = senders.try_read()
-                        && let Some(sender) = senders_guard.get(&delta.handle)
-                    {
-                        let _ = sender.try_send(delta.ordered_delta);
-                    }
+                    // Route delta to the subscription's channel.
+                    // Note: We use try_send since we're in a sync callback.
+                    let _ = tx.try_send(delta.ordered_delta);
                 },
                 session,
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
-
-        // Register sender for this subscription
-        {
-            let mut senders = self.subscription_senders.write().await;
-            senders.insert(runtime_handle, tx);
-        }
 
         // Track subscription metadata
         {
@@ -404,10 +386,6 @@ impl JazzClient {
     pub async fn unsubscribe(&self, handle: SubscriptionHandle) -> Result<()> {
         let mut subs = self.subscriptions.write().await;
         if let Some(state) = subs.remove(&handle) {
-            // Remove sender
-            let mut senders = self.subscription_senders.write().await;
-            senders.remove(&state.runtime_handle);
-            // Unsubscribe from runtime
             let _ = self.runtime.unsubscribe(state.runtime_handle);
         }
         Ok(())
