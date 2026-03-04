@@ -106,9 +106,6 @@ Current runtime modes:
 - `new NapiRuntime(..., dataPath, ...)` for persistent SurrealKV storage.
 - `NapiRuntime.inMemory(...)` for non-persistent in-memory storage.
 
-Internally, the runtime core now uses `Box<dyn Storage + Send>` so both backends are selected
-at construction time without a per-method storage enum shim in NAPI.
-
 > `crates/jazz-napi/`
 
 ### jazz-wasm (Browser)

@@ -323,7 +323,7 @@ describe("React Todo App E2E", () => {
   // 8. Server sync between two app instances with memory driver
   // -------------------------------------------------------------------------
 
-  it("syncs a todo between two app instances through the server", async () => {
+  it("syncs a todo between two app instances through the server without local persistence", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
     // Mount two independent app instances connected to the same server

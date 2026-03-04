@@ -476,7 +476,6 @@ export class Db {
     const key = serializeRuntimeSchema(schema);
 
     if (!this.clients.has(key)) {
-      const useMemoryDriver = isMemoryDriver(this.config.driver);
       // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(this.wasmModule, {
         appId: this.config.appId,
@@ -491,8 +490,8 @@ export class Db {
         localAuthMode: this.config.localAuthMode,
         localAuthToken: this.config.localAuthToken,
         adminSecret: this.config.adminSecret,
-        tier: this.worker || useMemoryDriver ? undefined : "worker",
-        defaultDurabilityTier: useMemoryDriver && this.config.serverUrl ? "edge" : undefined,
+        tier: this.worker ? undefined : "worker",
+        defaultDurabilityTier: this.config.serverUrl ? "edge" : undefined,
       });
 
       // In worker mode, set up the bridge for this client
