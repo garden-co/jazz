@@ -67,8 +67,12 @@ function createRuntimeMock(): {
     insertDurable: async () => "id",
     updateDurable: async () => undefined,
     deleteDurable: async () => undefined,
-    onSyncMessageReceived: (payload: Uint8Array) => {
-      receivedFromWorker.push(payload);
+    createSubscription: () => 1,
+    executeSubscription: () => undefined,
+    onSyncMessageReceived: (payload: Uint8Array | string) => {
+      receivedFromWorker.push(
+        typeof payload === "string" ? new TextEncoder().encode(payload) : payload,
+      );
     },
     onSyncMessageToSend: (callback: SendSyncPayloadCallback) => {
       onSyncToSend = callback;
