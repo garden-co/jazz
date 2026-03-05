@@ -1790,4 +1790,97 @@ mod tests {
             Err(CatalogueEncodingError::TruncatedData { .. })
         ));
     }
+
+    // Regression tests: schema encoding must preserve column definition order.
+    //
+    // Before the fix, `encode_row_descriptor` sorted columns alphabetically
+    // "for determinism". This caused the server's decoded schema to have
+    // columns in a different order than the client used when encoding row data.
+    //
+    // Concretely, for a table defined as [chat, userId, joinCode]:
+    //   - client encodes rows in definition order: [chat, userId, joinCode]
+    //   - server decodes schema in alphabetical order: [chat, joinCode, userId]
+    //   - server reads userId bytes using joinCode's offset → gets null marker
+    //   - EXISTS policy check (userId = @session.user_id) always fails
+    //   - invited users can never see messages
+
+    #[test]
+    fn schema_encode_decode_preserves_column_order() {
+        // Columns in non-alphabetical order: chat(0), userId(1), joinCode(2).
+        // After encode+decode the order must match definition, not alphabet.
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("members")
+                    .column("chat", ColumnType::Uuid)
+                    .column("userId", ColumnType::Text)
+                    .nullable_column("joinCode", ColumnType::Text),
+            )
+            .build();
+
+        let decoded = decode_schema(&encode_schema(&schema)).unwrap();
+        let table = decoded.get(&TableName::new("members")).unwrap();
+        let col_names: Vec<&str> = table
+            .columns
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+
+        assert_eq!(
+            col_names,
+            vec!["chat", "userId", "joinCode"],
+            "column order was scrambled to {col_names:?} — encode_row_descriptor must \
+             not sort columns"
+        );
+    }
+
+    #[test]
+    fn schema_encode_decode_row_column_lookup_consistent() {
+        // Regression: a row encoded with the original schema descriptor must be
+        // readable with the *decoded* schema descriptor (what the server uses).
+        // Before the fix these descriptors had different column orderings, so
+        // `column_bytes` would return bytes from the wrong variable-length slot.
+        use crate::object::ObjectId;
+        use crate::query_manager::encoding::{column_bytes, encode_row};
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("members")
+                    .column("chat", ColumnType::Uuid)
+                    .column("userId", ColumnType::Text)
+                    .nullable_column("joinCode", ColumnType::Text),
+            )
+            .build();
+
+        // Client encodes a row using the original descriptor.
+        let original_descriptor = &schema.get(&TableName::new("members")).unwrap().columns;
+        let chat_id = ObjectId::new();
+        let expected_user_id = "local:alice_session_id";
+        let row_bytes = encode_row(
+            original_descriptor,
+            &[
+                Value::Uuid(chat_id),
+                Value::Text(expected_user_id.to_string()),
+                Value::Null, // joinCode is optional
+            ],
+        )
+        .unwrap();
+
+        // Server decodes the schema from the catalogue and uses that descriptor.
+        let decoded = decode_schema(&encode_schema(&schema)).unwrap();
+        let server_descriptor = &decoded.get(&TableName::new("members")).unwrap().columns;
+
+        // The server must be able to find userId in the row data.
+        let user_id_col_index = server_descriptor.column_index("userId").unwrap();
+        let found_bytes = column_bytes(server_descriptor, &row_bytes, user_id_col_index)
+            .expect("column_bytes failed")
+            .expect("userId should not be null");
+
+        assert_eq!(
+            found_bytes,
+            expected_user_id.as_bytes(),
+            "column_bytes returned wrong bytes for userId — server schema descriptor \
+             had columns in a different order than the client used when encoding the row"
+        );
+    }
 }
