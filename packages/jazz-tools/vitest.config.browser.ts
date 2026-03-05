@@ -6,6 +6,9 @@ import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
+  optimizeDeps: {
+    include: ["react/jsx-dev-runtime", "react/jsx-runtime"],
+  },
   resolve: {
     alias: {
       // Needed because jazz-tools browser tests import from source (../../src/),
