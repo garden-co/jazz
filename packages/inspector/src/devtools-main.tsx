@@ -26,7 +26,7 @@ function App() {
 
   return (
     <JazzProvider client={client}>
-      <DevtoolsProvider wasmSchema={wasmSchema}>
+      <DevtoolsProvider wasmSchema={wasmSchema} runtime="extension">
         <MemoryRouter>
           <InspectorRoutes />
         </MemoryRouter>

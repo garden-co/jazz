@@ -7,7 +7,7 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { allRowsInTableQuery, type DynamicTableRow } from "jazz-tools";
-import { useAll } from "jazz-tools/react";
+import { useDb } from "jazz-tools/react";
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
@@ -30,17 +30,31 @@ export function TableDataGrid() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const schema = useDevtoolsContext().wasmSchema;
+  const { wasmSchema: schema, queryPropagation } = useDevtoolsContext();
+  const db = useDb();
   const queryBuilder = useMemo(
     () => allRowsInTableQuery<DynamicTableRow>(table, schema),
     [table, schema],
   );
-  const rows = useAll(queryBuilder) ?? [];
+  const [rows, setRows] = useState<DynamicTableRow[]>([]);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
-
   const schemaColumns = schema[table]?.columns ?? [];
+
+  useEffect(() => {
+    const unsubscribe = db.subscribeAll(
+      queryBuilder,
+      (delta) => {
+        setRows(delta.all);
+      },
+      { propagation: queryPropagation },
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [db, queryBuilder, queryPropagation]);
 
   const columnDefs = useMemo<ColumnDef<DynamicTableRow>[]>(
     () => [

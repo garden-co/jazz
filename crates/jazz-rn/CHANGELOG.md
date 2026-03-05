@@ -1,5 +1,9 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.13
+
+## 2.0.0-alpha.12
+
 ## 2.0.0-alpha.11
 
 ## 2.0.0-alpha.10

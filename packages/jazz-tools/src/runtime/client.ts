@@ -20,6 +20,7 @@ import {
   type SyncStreamController,
   type SyncAuth,
   type LinkExternalResponse,
+  type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveJwtSession } from "./client-session.js";
@@ -62,9 +63,16 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): number;
+  createSubscription(
+    query_json: string,
+    session_json?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
+  ): number;
+  executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(message_json: string): void;
-  onSyncMessageToSend(callback: Function): void;
+  onSyncMessageReceived(payload: Uint8Array | string): void;
+  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
   addServer(): void;
   removeServer(): void;
   addClient(): string;
@@ -72,7 +80,7 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
+  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
 }
 
 /**
@@ -159,6 +167,18 @@ function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function getScheduler(): (task: () => void) => void {
+  if ("scheduler" in globalThis) {
+    return (task: () => void) => {
+      // See: https://developer.mozilla.org/en-US/docs/Web/API/Scheduler/postTask
+      // @ts-ignore Scheduler is not yet provided by the dom library
+      void globalThis.scheduler.postTask(task, { priority: "user-visible" });
+    };
+  }
+
+  return queueMicrotask;
 }
 
 function resolveDefaultDurabilityTier(context: AppContext): DurabilityTier {
@@ -386,7 +406,7 @@ export class JazzClient {
   private runtime: Runtime;
   private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private subscriptions = new Map<number, SubscriptionCallback>();
+  private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
@@ -398,6 +418,7 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
   ) {
     this.runtime = runtime;
+    this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
@@ -670,6 +691,12 @@ export class JazzClient {
 
   /**
    * Internal subscribe with optional session and read durability options.
+   *
+   * Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
+   * a handle synchronously (zero work), then `executeSubscription` is deferred
+   * via the scheduler so compilation + first tick run outside the caller's
+   * synchronous stack (e.g. outside a React render).
+   *
    * @internal
    */
   subscribeInternal(
@@ -682,20 +709,23 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const subId = this.runtime.subscribe(
+
+    const handle = this.runtime.createSubscription(
       queryJson,
-      (deltaJsonOrObject: RowDelta | string) => {
-        // WASM runtime passes delta as JSON string, need to parse it
-        const delta: RowDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
-      },
       sessionJson,
       normalizedOptions.tier,
       optionsJson,
     );
-    this.subscriptions.set(subId, callback);
-    return subId;
+
+    this.scheduler(() => {
+      this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
+        const delta: RowDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+        callback(delta);
+      });
+    });
+
+    return handle;
   }
 
   /**
@@ -705,7 +735,6 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
-    this.subscriptions.delete(subscriptionId);
   }
 
   /**
@@ -858,8 +887,8 @@ export class JazzClient {
       createSyncOutboxRouter({
         logPrefix: "[client] ",
         retryServerPayloads: true,
-        onServerPayload: (payloadJson, isCatalogue) =>
-          this.sendSyncMessage(payloadJson, isCatalogue),
+        onServerPayload: (payload, isCatalogue) =>
+          this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {

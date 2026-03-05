@@ -3974,6 +3974,7 @@ fn scalar_fk_schema() -> Schema {
 }
 
 fn files_with_parts_descriptor() -> RowDescriptor {
+    // Sub-row has schema columns only; id is in Value::Row { id, .. }
     let part_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]);
     RowDescriptor::new(vec![
@@ -4147,6 +4148,7 @@ fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
         .iter()
         .map(|row| {
             let values = row.as_row().expect("part row");
+            assert!(row.row_id().is_some(), "row should have an id");
             match &values[0] {
                 Value::Text(label) => label.clone(),
                 other => panic!("expected text label, got {other:?}"),
@@ -4406,6 +4408,7 @@ fn users_posts_schema() -> Schema {
 /// Output descriptor for users with posts array subquery.
 fn users_with_posts_descriptor() -> RowDescriptor {
     // Posts row descriptor: [id, title, author_id]
+    // The row's ObjectId is in Value::Row { id, .. }, not prepended as a column.
     let posts_row_desc = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Integer),
         ColumnDescriptor::new("title", ColumnType::Text),
@@ -4499,11 +4502,16 @@ fn array_subquery_single_user_with_posts() {
     let posts = values[2].as_array().expect("Third column should be array");
     assert_eq!(posts.len(), 2, "Alice should have 2 posts");
 
-    // Each post is a Row of [id, title, author_id]
+    // Each post is a Row of [id, title, author_id] with id in the Row struct
     for post in posts {
         let post_values = post.as_row().expect("Each post should be a Row");
-        assert_eq!(post_values.len(), 3, "Post should have 3 fields");
-        // Verify author_id matches Alice
+        assert_eq!(
+            post_values.len(),
+            3,
+            "Post should have 3 fields (schema cols)"
+        );
+        assert!(post.row_id().is_some(), "Post Row should have an id");
+        // Verify author_id matches Alice (index 2)
         assert_eq!(
             post_values[2],
             Value::Integer(1),
@@ -4581,6 +4589,7 @@ fn array_subquery_update_descriptor_includes_array_column() {
         .expect("third column should be the posts array");
     assert_eq!(posts.len(), 1, "Alice should have 1 post");
     let post_row = posts[0].as_row().expect("post element should be a Row");
+    assert!(posts[0].row_id().is_some(), "post Row should have an id");
     assert_eq!(post_row[0], Value::Integer(100), "post id");
     assert_eq!(post_row[1], Value::Text("Hello world".into()), "post title");
     assert_eq!(post_row[2], Value::Integer(1), "post author_id");
@@ -5062,6 +5071,10 @@ fn array_subquery_delta_on_outer_insert() {
     assert_eq!(bob_posts.len(), 1, "Bob should have 1 post");
 
     let post_row = bob_posts[0].as_row().expect("post should be Row");
+    assert!(
+        bob_posts[0].row_id().is_some(),
+        "post Row should have an id"
+    );
     assert_eq!(
         post_row[0],
         Value::Integer(200),
@@ -5270,6 +5283,7 @@ fn array_subquery_with_select_columns() {
         .expect("Should have update");
 
     // Build descriptor for selected columns only
+    // Row id is in Value::Row { id, .. }, not as a column
     let posts_row_desc = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Integer),
         ColumnDescriptor::new("title", ColumnType::Text),
@@ -5294,6 +5308,7 @@ fn array_subquery_with_select_columns() {
 
     let post_row = posts[0].as_row().expect("post Row");
     assert_eq!(post_row.len(), 2, "Post should have 2 columns (id, title)");
+    assert!(posts[0].row_id().is_some(), "post Row should have an id");
     assert_eq!(post_row[0], Value::Integer(100));
     assert_eq!(post_row[1], Value::Text("Post Title".into()));
 }
@@ -5418,14 +5433,14 @@ fn array_subquery_with_join() {
         .expect("Should have update");
 
     // Build descriptor for joined output:
-    // posts columns + comments columns
+    // posts columns + comments columns (row id in Value::Row { id, .. })
     let joined_row_desc = RowDescriptor::new(vec![
         // posts columns
-        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("post_id", ColumnType::Integer),
         ColumnDescriptor::new("title", ColumnType::Text),
         ColumnDescriptor::new("author_id", ColumnType::Integer),
         // comments columns
-        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("comment_id", ColumnType::Integer),
         ColumnDescriptor::new("text", ColumnType::Text),
         ColumnDescriptor::new("post_id", ColumnType::Integer),
     ]);
@@ -5455,6 +5470,7 @@ fn array_subquery_with_join() {
     for pc in post_comments {
         let row = pc.as_row().expect("joined row");
         assert_eq!(row.len(), 6, "Joined row should have 6 columns");
+        assert!(pc.row_id().is_some(), "joined Row should have an id");
         // Post id should be either 100 or 101
         let post_id = match &row[0] {
             Value::Integer(id) => id,
@@ -5585,16 +5601,16 @@ fn array_subquery_nested() {
         .map(|u| &u.delta)
         .expect("Should have update");
 
-    // Build nested descriptor:
-    // comments row: [id, text, post_id]
+    // Build nested descriptor matching runtime output:
+    // comments row: [id, text, post_id] (row id in Value::Row { id, .. })
     let comments_row_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("comment_id", ColumnType::Integer),
         ColumnDescriptor::new("text", ColumnType::Text),
         ColumnDescriptor::new("post_id", ColumnType::Integer),
     ]);
     // posts row with comments array: [id, title, author_id, comments[]]
     let posts_row_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("post_id", ColumnType::Integer),
         ColumnDescriptor::new("title", ColumnType::Text),
         ColumnDescriptor::new("author_id", ColumnType::Integer),
         ColumnDescriptor::new(
@@ -5636,6 +5652,7 @@ fn array_subquery_nested() {
             4,
             "Post should have 4 columns (id, title, author_id, comments)"
         );
+        assert!(post.row_id().is_some(), "post Row should have an id");
 
         let post_id = match &post_row[0] {
             Value::Integer(id) => id,
@@ -5649,12 +5666,15 @@ fn array_subquery_nested() {
             assert_eq!(comments.len(), 2, "Post A should have 2 comments");
             for comment in comments {
                 let comment_row = comment.as_row().expect("comment row");
+                // comment_row: [id:Int, text:Text, post_id:Int]
+                assert!(comment.row_id().is_some(), "comment should have an id");
                 assert_eq!(comment_row[2], Value::Integer(100)); // post_id
             }
         } else if *post_id == 101 {
             // Post B has 1 comment
             assert_eq!(comments.len(), 1, "Post B should have 1 comment");
             let comment_row = comments[0].as_row().expect("comment row");
+            assert!(comments[0].row_id().is_some(), "comment should have an id");
             assert_eq!(comment_row[2], Value::Integer(101)); // post_id
         } else {
             panic!("Unexpected post id: {}", post_id);
@@ -5797,13 +5817,14 @@ fn array_subquery_multiple_columns() {
         .expect("Should have update");
 
     // Build descriptor: users + posts[] + comments[]
+    // Row ids are in Value::Row { id, .. }, not as columns
     let posts_row_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("post_id", ColumnType::Integer),
         ColumnDescriptor::new("title", ColumnType::Text),
         ColumnDescriptor::new("author_id", ColumnType::Integer),
     ]);
     let comments_row_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("comment_id", ColumnType::Integer),
         ColumnDescriptor::new("text", ColumnType::Text),
         ColumnDescriptor::new("user_id", ColumnType::Integer),
     ]);

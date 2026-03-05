@@ -255,7 +255,7 @@ struct NitroSyncSender {
 }
 
 impl SyncSender for NitroSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
+    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
         let json = serde_json::to_string(&message).unwrap();
         self.callback.call(json);
     }

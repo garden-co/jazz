@@ -1,5 +1,19 @@
 # jazz-tools
 
+## 2.0.0-alpha.13
+
+### Patch Changes
+
+- ff4ccb3: Support quoted SQL identifiers in `jazz-tools` schema parsing/generation, including reserved keyword column names like `"table"`.
+  - jazz-wasm@2.0.0-alpha.13
+
+## 2.0.0-alpha.12
+
+### Patch Changes
+
+- 8bcde79: Harden runtime sync outbox handling across WASM/RN and NAPI callback contracts by typing both callback shapes, routing both through a shared normalizer, and adding conformance tests that assert identical `/sync` behavior.
+  - jazz-wasm@2.0.0-alpha.12
+
 ## 2.0.0-alpha.11
 
 ### Patch Changes

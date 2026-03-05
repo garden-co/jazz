@@ -54,7 +54,7 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(): void;
   removeServer(): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(payload: string): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
@@ -279,45 +279,95 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
 }
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payloadJson: string, isCatalogue: boolean): void | Promise<void>;
-  onClientPayload?(payloadJson: string): void;
+  onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
 }
 
 export type OutboxDestinationKind = "server" | "client";
+export type RuntimeSyncOutboxCallbackArgs =
+  | [
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payload: Uint8Array | string,
+      isCatalogue: boolean,
+    ]
+  | [
+      err: unknown,
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payload: Uint8Array | string,
+      isCatalogue: boolean,
+    ];
+export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
+
+function isOutboxDestinationKind(value: unknown): value is OutboxDestinationKind {
+  return value === "server" || value === "client";
+}
+
+function isOutboxPayload(value: unknown): value is Uint8Array | string {
+  return typeof value === "string" || value instanceof Uint8Array;
+}
+
+function normalizeOutboxCallbackArgs(args: unknown[]): {
+  destinationKind: OutboxDestinationKind;
+  payload: Uint8Array | string;
+  isCatalogue: boolean;
+} | null {
+  // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[0])) {
+    const payload = args[2];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[0],
+      payload: payload,
+      isCatalogue: Boolean(args[3]),
+    };
+  }
+
+  // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[1])) {
+    const payload = args[3];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[1],
+      payload: payload,
+      isCatalogue: Boolean(args[4]),
+    };
+  }
+
+  return null;
+}
 
 /**
  * Create a shared runtime outbox router for server/client destinations.
  */
 export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
-): (
-  destinationKind: OutboxDestinationKind,
-  destinationId: string,
-  payloadJson: string,
-  isCatalogue: boolean,
-) => void {
+): RuntimeSyncOutboxCallback {
   const logPrefix = options.logPrefix ?? "";
 
-  return (
-    destinationKind: OutboxDestinationKind,
-    _destinationId: string,
-    payloadJson: string,
-    isCatalogue: boolean,
-  ) => {
-    if (destinationKind === "client") {
-      options.onClientPayload?.(payloadJson);
+  return (...args: RuntimeSyncOutboxCallbackArgs) => {
+    const normalized = normalizeOutboxCallbackArgs(args);
+    if (!normalized) {
+      console.error(`${logPrefix}Invalid sync outbox callback arguments`, args);
       return;
     }
 
-    Promise.resolve(options.onServerPayload(payloadJson, isCatalogue)).catch((error) => {
+    const { destinationKind, payload, isCatalogue } = normalized;
+    if (destinationKind === "client") {
+      options.onClientPayload?.(payload as Uint8Array);
+      return;
+    }
+
+    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
       if (options.onServerPayloadError) {
         options.onServerPayloadError(error);
         return;

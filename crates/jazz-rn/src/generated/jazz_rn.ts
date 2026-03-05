@@ -683,6 +683,15 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : string;
   removeServer() /*throws*/ : void;
   setClientRole(clientId: string, role: string) /*throws*/ : void;
+  createSubscription(
+    queryJson: string,
+    sessionJson: string | undefined,
+    settledTier: string | undefined
+  ) /*throws*/ : /*u64*/ bigint;
+  executeSubscription(
+    handle: /*u64*/ bigint,
+    callback: SubscriptionCallback
+  ) /*throws*/ : void;
   subscribe(
     queryJson: string,
     callback: SubscriptionCallback,
@@ -997,6 +1006,50 @@ export class RnRuntime
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterString.lower(clientId),
           FfiConverterString.lower(role),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  public createSubscription(
+    queryJson: string,
+    sessionJson: string | undefined,
+    settledTier: string | undefined
+  ): /*u64*/ bigint /*throws*/ {
+    return FfiConverterUInt64.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(queryJson),
+            FfiConverterOptionalString.lower(sessionJson),
+            FfiConverterOptionalString.lower(settledTier),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  public executeSubscription(
+    handle: /*u64*/ bigint,
+    callback: SubscriptionCallback
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterUInt64.lower(handle),
+          FfiConverterTypeSubscriptionCallback.lower(callback),
           callStatus
         );
       },

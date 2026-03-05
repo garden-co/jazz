@@ -1862,6 +1862,7 @@ struct ServerState {
     meta_store: Arc<MetaStore>,
     jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
     http_client: reqwest::Client,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl ServerState {
@@ -2038,6 +2039,8 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+
     let state = Arc::new(ServerState {
         apps: tokio::sync::RwLock::new(app_map),
         data_root,
@@ -2046,6 +2049,7 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         meta_store,
         jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
         http_client,
+        shutdown_tx: shutdown_tx.clone(),
     });
 
     info!(
@@ -2068,12 +2072,12 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_tx))
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -2095,6 +2099,7 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
+    let _ = shutdown_tx.send(true);
     info!("shutdown signal received");
 }
 
@@ -3116,6 +3121,7 @@ async fn events_handler(
     );
 
     let mut sync_rx = app.sync_broadcast.subscribe();
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
     let app_cleanup = app.clone();
     let client_id_str = client_id.to_string();
     let next_sync_seq = 1u64;
@@ -3153,6 +3159,11 @@ async fn events_handler(
                 }
                 _ = heartbeat_interval.tick() => {
                     yield Ok(encode_frame(&ServerEvent::Heartbeat));
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
             }
         }

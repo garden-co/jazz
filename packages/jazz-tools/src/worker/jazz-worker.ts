@@ -21,7 +21,7 @@ import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
 declare const self: {
-  postMessage(msg: unknown): void;
+  postMessage(msg: unknown, transfer?: Transferable[]): void;
   onmessage: ((event: MessageEvent) => void) | null;
   close(): void;
   location?: { origin?: string };
@@ -43,9 +43,9 @@ let streamConnecting = false;
 let streamAttached = false;
 const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
-let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
-let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
-let pendingSyncPayloadsForMain: string[] = [];
+let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
+let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
+let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
 let bootstrapCatalogueForwarding = false;
@@ -91,7 +91,7 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
   }
 }
 
-function enqueueSyncMessageForMain(payload: string): void {
+function enqueueSyncMessageForMain(payload: Uint8Array | string): void {
   pendingSyncPayloadsForMain.push(payload);
   if (syncBatchFlushQueued) return;
 
@@ -106,7 +106,21 @@ function enqueueSyncMessageForMain(payload: string): void {
 }
 
 function post(msg: WorkerToMainMessage): void {
-  self.postMessage(msg);
+  const transfer =
+    msg.type === "sync" || msg.type === "peer-sync"
+      ? collectPayloadTransferables(msg.payload)
+      : undefined;
+  self.postMessage(msg, transfer);
+}
+
+function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
+  const transferables = [];
+  for (const payload of payloads) {
+    if (payload instanceof Uint8Array) {
+      transferables.push(payload.buffer);
+    }
+  }
+  return transferables;
 }
 
 // ============================================================================
@@ -188,14 +202,14 @@ async function handleInit(msg: InitMessage): Promise<void> {
       (
         destinationKind: OutboxDestinationKind,
         destinationId: string,
-        payloadJson: string,
+        payload: Uint8Array | string,
         isCatalogue: boolean,
       ) => {
         if (destinationKind === "client") {
           const destinationClientId = destinationId;
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
-            enqueueSyncMessageForMain(payloadJson);
+            enqueueSyncMessageForMain(payload);
             return;
           }
 
@@ -209,19 +223,19 @@ async function handleInit(msg: InitMessage): Promise<void> {
             type: "peer-sync",
             peerId,
             term,
-            payload: [payloadJson],
+            payload: [payload as Uint8Array],
           });
         } else if (destinationKind === "server") {
           if (bootstrapCatalogueForwarding) {
             if (isCatalogue) {
-              enqueueSyncMessageForMain(payloadJson);
+              enqueueSyncMessageForMain(payload);
             }
             return;
           }
 
           // Server-bound → HTTP POST to upstream
           if (activeServerUrl) {
-            void sendToServer(activeServerUrl, payloadJson, isCatalogue).catch((error) => {
+            void sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
               if (!isExpectedFetchAbortError(error)) {
                 console.error("[worker] Sync POST error:", error);
               }
@@ -389,7 +403,7 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
         onConnected: (clientId) => {
           console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;
