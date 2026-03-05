@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { PlayerInit, FuelDeposit } from "../../schema/app.js";
 import type { FuelType } from "../../src/game/constants.js";
-import { SyncManager, DEPOSITS_PER_TYPE, type SyncInputs } from "../../src/sync/SyncManager.js";
+import { SyncManager, DEPOSITS_PER_TYPE, type SyncInputs } from "../../src/jazz/SyncManager.js";
 import { DB_SYNC_INTERVAL_MS, FUEL_TYPES } from "../../src/game/constants.js";
 
 // ---------------------------------------------------------------------------

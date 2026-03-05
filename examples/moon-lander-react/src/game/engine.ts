@@ -222,6 +222,14 @@ export class GameEngine {
     const { w, h } = this.size;
     const world = this.world;
 
+    // --- Prune stale remote-player smoothing entries ---
+    if (this.smoothedRemotes.size > 0) {
+      const activeIds = new Set(this.props.remotePlayers.map((p) => p.playerId));
+      for (const id of this.smoothedRemotes.keys()) {
+        if (!activeIds.has(id)) this.smoothedRemotes.delete(id);
+      }
+    }
+
     // --- Inventory merge (idempotent, runs each frame) ---
     this.mergeExternalInventory();
 

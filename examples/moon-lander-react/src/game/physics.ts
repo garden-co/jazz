@@ -226,7 +226,7 @@ export function updatePhysics(
         }
 
         // Burst: eject all non-required fuel types into space
-        for (const ft of [...inventory]) {
+        for (const ft of inventory) {
           if (ft === requiredFuelType) continue;
           inventory.delete(ft);
           sharedOut.add(ft);
