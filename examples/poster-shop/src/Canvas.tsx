@@ -1,6 +1,7 @@
-import * as React from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app, Canvas as CanvasModel } from "../schema/app.js";
+import { getRandomName } from "./profileName.js";
 
 type Point = { x: number; y: number };
 const CANVAS_WIDTH = 900;
@@ -73,20 +74,34 @@ function drawStroke(
   ctx.stroke();
 }
 
-export function Canvas() {
-  const db = useDb();
-  const session = useSession();
-  const canvases = useAll(app.canvases.orderBy("created_at", "asc")) ?? [];
-  const strokes = useAll(app.strokes.orderBy("created_at", "asc")) ?? [];
-  const activeCanvas = canvases[0];
-  const userId = session?.user_id ?? null;
-  const userColor = userId ? colorForUser(userId) : "#333";
-  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  const [draftPoints, setDraftPoints] = React.useState<Point[]>([]);
-  const creatingCanvasRef = React.useRef(false);
+function CollaboratorBadge({ userId, isMe }: { userId: string; isMe: boolean }) {
+  const user = useAll(app.users.where({ user_id: { eq: userId } }))?.[0];
+  if (!user) return null;
+  const color = colorForUser(userId);
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <span
+        style={{
+          display: "inline-block",
+          width: 12,
+          height: 12,
+          borderRadius: "9999px",
+          border: "1px solid #e7e5e4",
+          backgroundColor: color,
+        }}
+      />
+      <span style={{ fontWeight: isMe ? 700 : 400 }}>{user.name}</span>
+    </span>
+  );
+}
 
-  React.useEffect(() => {
-    if (activeCanvas || !userId || creatingCanvasRef.current) return;
+function useGetOrCreateCanvas(): CanvasModel | undefined {
+  const db = useDb();
+  const canvases = useAll(app.canvases.orderBy("created_at", "asc"));
+  const activeCanvas = canvases?.[0];
+  const creatingCanvasRef = useRef(false);
+  useEffect(() => {
+    if (!canvases || activeCanvas) return;
     creatingCanvasRef.current = true;
     void db
       .insert(app.canvases, {
@@ -96,9 +111,51 @@ export function Canvas() {
       .finally(() => {
         creatingCanvasRef.current = false;
       });
-  }, [activeCanvas, db, userId]);
+  }, [db, canvases]);
+  return activeCanvas;
+}
 
-  React.useEffect(() => {
+function useGetOrCreateUser(): string | null {
+  const db = useDb();
+  const session = useSession();
+  const userId = session?.user_id ?? null;
+  // TODO avoid fetching all users! -> add filter + `enabled`
+  const users = useAll(app.users);
+  const creatingUsersRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!userId || !users) return;
+    const userExists = users.some((user) => user.user_id === userId);
+    if (userExists) {
+      creatingUsersRef.current.delete(userId);
+      return;
+    }
+    if (creatingUsersRef.current.has(userId)) return;
+
+    creatingUsersRef.current.add(userId);
+    void db
+      .insert(app.users, {
+        user_id: userId,
+        name: getRandomName(),
+        created_at: new Date().toISOString(),
+      })
+      .catch(() => {
+        creatingUsersRef.current.delete(userId);
+      });
+  }, [db, userId, users]);
+  return userId;
+}
+
+export function Canvas() {
+  const db = useDb();
+  const strokes = useAll(app.strokes.orderBy("created_at", "asc")) ?? [];
+  const activeCanvas = useGetOrCreateCanvas();
+  const userId = useGetOrCreateUser();
+  const userColor = userId ? colorForUser(userId) : "#333";
+  const collaboratorIds = [...new Set(strokes.map((stroke) => stroke.user_id))];
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [draftPoints, setDraftPoints] = useState<Point[]>([]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -182,9 +239,22 @@ export function Canvas() {
           display: "block",
         }}
       />
-      <p>
-        You are: <code>{userId ?? "not signed in"}</code> ({userColor})
-      </p>
+      {collaboratorIds.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 12,
+            marginTop: 12,
+            fontSize: 14,
+            color: "#57534e",
+          }}
+        >
+          {collaboratorIds.map((id) => (
+            <CollaboratorBadge key={id} userId={id} isMe={id === userId} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }

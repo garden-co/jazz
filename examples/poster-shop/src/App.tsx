@@ -1,4 +1,4 @@
-import * as React from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/react";
 import { Canvas } from "./Canvas.js";
 
@@ -42,13 +42,11 @@ function defaultConfig(
 }
 
 export function App() {
-  const resolvedConfig = React.useMemo(() => defaultConfig(), []);
-  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
-    null,
-  );
-  const [error, setError] = React.useState<unknown>(null);
+  const resolvedConfig = useMemo(() => defaultConfig(), []);
+  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
     let active = true;
     const pending = createJazzClient(resolvedConfig);
 
