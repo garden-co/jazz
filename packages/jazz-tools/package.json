@@ -267,10 +267,14 @@
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "^0.26.4",
     "react-native-passkey": "^3.0.0",
+    "cojson-storage-sqlite-wasm": "workspace:*",
     "sharp": "^0.33.5",
     "svelte": "^5.0.0"
   },
   "peerDependenciesMeta": {
+    "cojson-storage-sqlite-wasm": {
+      "optional": true
+    },
     "@bam.tech/react-native-image-resizer": {
       "optional": true
     },
