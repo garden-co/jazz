@@ -2,76 +2,9 @@ import { useEffect, useState } from "react";
 import type { DbConfig } from "jazz-tools";
 import { createJazzClient, JazzProvider } from "jazz-tools/react";
 import type { JazzClient } from "jazz-tools/react";
-import { DebugPanel } from "./DebugPanel";
 import type { PlayerMode } from "./game/constants";
 import { Game } from "./Game";
-import { useGameSync } from "./sync/useGameSync";
-
-// ---------------------------------------------------------------------------
-// GameWithSync — bridges Game ↔ Jazz DB
-// ---------------------------------------------------------------------------
-
-function GameWithSync({
-  physicsSpeed,
-  initialMode,
-  playerId,
-  spawnX,
-}: {
-  physicsSpeed?: number;
-  initialMode?: PlayerMode;
-  playerId: string;
-  spawnX?: number;
-}) {
-  const {
-    deposits,
-    inventory,
-    remotePlayers,
-    chatMessages,
-    collectDeposit,
-    refuel,
-    shareFuel,
-    burstDeposit,
-    sendMessage,
-    updateState,
-    syncInputs,
-    remotePlayerCount,
-    chatMessageCount,
-    gameState,
-  } = useGameSync(playerId);
-
-  return (
-    <div
-      data-testid="sync-debug"
-      data-sync-settled={String(syncInputs.settled)}
-      data-sync-local-rows={syncInputs.localPlayerRows.length}
-      data-sync-total-deposits={syncInputs.debugTotalDeposits}
-      data-sync-uncollected={syncInputs.uncollectedDeposits.length}
-    >
-      <Game
-        playerId={playerId}
-        physicsSpeed={physicsSpeed}
-        initialMode={initialMode}
-        spawnX={spawnX}
-        remotePlayers={remotePlayers}
-        deposits={deposits}
-        inventory={inventory}
-        chatMessages={chatMessages}
-        onCollectDeposit={collectDeposit}
-        onRefuel={refuel}
-        onShareFuel={shareFuel}
-        onBurstDeposit={burstDeposit}
-        onSendMessage={sendMessage}
-        onStateChange={updateState}
-      />
-      <DebugPanel
-        syncInputs={syncInputs}
-        remotePlayerCount={remotePlayerCount}
-        chatMessageCount={chatMessageCount}
-        gameState={gameState}
-      />
-    </div>
-  );
-}
+import { GameWithSync } from "./jazz/GameWithSync";
 
 // ---------------------------------------------------------------------------
 // App — wraps Game in JazzProvider when config is provided
@@ -91,14 +24,15 @@ export function App({ config, playerId, physicsSpeed, initialMode, spawnX }: App
     if (!config) return;
 
     let active = true;
-    const pending = createJazzClient(config);
+    let jazzClient: JazzClient | null = null;
 
-    void pending.then(
+    createJazzClient(config).then(
       (resolved) => {
         if (!active) {
-          void resolved.shutdown();
+          resolved.shutdown();
           return;
         }
+        jazzClient = resolved;
         setClient(resolved);
       },
       (err) => {
@@ -109,7 +43,7 @@ export function App({ config, playerId, physicsSpeed, initialMode, spawnX }: App
 
     return () => {
       active = false;
-      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
+      jazzClient?.shutdown();
     };
   }, [config?.appId, config?.serverUrl, config?.dbName]);
 

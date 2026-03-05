@@ -1,3 +1,20 @@
+/**
+ * useSync — all Jazz reads for the game, in one place.
+ *
+ * Jazz pattern used here:
+ *   - useDb()     — access the Jazz DB client for writes (passed to SyncManager)
+ *   - useAll(query) — live subscription to a query; re-renders on any change;
+ *                    results stream from the server, enabling real-time cross-client updates.
+ *
+ * Three tables are subscribed:
+ *   app.players          — all other players' positions, modes, fuel levels
+ *   app.fuel_deposits    — which deposits are on the surface and who collected them
+ *   app.chat_messages    — recent chat messages
+ *
+ * Writes go through SyncManager (see SyncManager.ts), which batches them on a
+ * 200ms interval to avoid write storms on every physics frame.
+ */
+
 import { useAll, useDb } from "jazz-tools/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FuelDeposit, Player, PlayerInit, ChatMessage } from "../../schema/app";
@@ -21,18 +38,14 @@ function useStaleCutoff(): number {
   return cutoff;
 }
 
-// ---------------------------------------------------------------------------
-// useGameSync — all Jazz reads, derivations, and writes for the game
-// ---------------------------------------------------------------------------
-
-export interface GameSyncResult {
-  // Game props
+export interface SyncResult {
+  // Game props derived from Jazz subscriptions
   deposits: Deposit[];
   inventory: FuelType[];
   remotePlayers: Player[];
   chatMessages: ChatMessage[];
 
-  // SyncManager callbacks
+  // Write callbacks (forwarded to SyncManager)
   collectDeposit: (id: string) => void;
   refuel: (fuelType: FuelType) => void;
   shareFuel: (fuelType: string, receiverPlayerId: string) => void;
@@ -47,25 +60,32 @@ export interface GameSyncResult {
   gameState: PlayerInit | null;
 }
 
-export function useGameSync(playerId: string): GameSyncResult {
+export function useSync(playerId: string): SyncResult {
   const db = useDb();
   const staleCutoff = useStaleCutoff();
 
-  // --- Subscriptions ---
-  const allRemotePlayers = useAll(app.players.where({ playerId: { ne: playerId } }), "edge") ?? [];
+  // ---------------------------------------------------------------------------
+  // Subscriptions — useAll streams live results from the server.
+  // undefined = not yet settled (subscription hasn't received its first result).
+  // ---------------------------------------------------------------------------
 
-  // Filter stale players in JS — the cutoff changes every 30s, so doing this
-  // client-side avoids constant query re-subscriptions.
+  // Other players (exclude self)
+  const allRemotePlayers = useAll(app.players.where({ playerId: { ne: playerId } })) ?? [];
   const remotePlayers = useMemo(
     () => allRemotePlayers.filter((p) => p.lastSeen > staleCutoff),
     [allRemotePlayers, staleCutoff],
   );
-  const allChatMessages = useAll(app.chat_messages.orderBy("createdAt", "asc"), "edge") ?? [];
 
+  // Chat messages (ordered oldest-first for rendering)
+  const allChatMessages = useAll(app.chat_messages.orderBy("createdAt", "asc")) ?? [];
+
+  // Local player row — used to detect first join (no row yet) vs reconnect
   const localPlayerRowsRaw = useAll(app.players.where({ playerId }));
   const localPlayerRows = localPlayerRowsRaw ?? [];
   const localFuelType = localPlayerRows[0]?.requiredFuelType ?? FUEL_TYPES[0];
 
+  // Per-type deposit limits: base + 1 extra for each player whose required type
+  // matches (ensures every player has a deposit of their required fuel available)
   const perTypeLimits = useMemo(() => {
     const counts = new Map<string, number>();
     for (const ft of FUEL_TYPES) counts.set(ft, DEPOSITS_PER_TYPE);
@@ -78,34 +98,26 @@ export function useGameSync(playerId: string): GameSyncResult {
     return FUEL_TYPES.map((ft) => counts.get(ft) ?? DEPOSITS_PER_TYPE);
   }, [remotePlayers, localFuelType]);
 
-  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), "edge");
+  // Uncollected deposits — what the game renders on the surface
+  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }));
 
-  // Compound WHERE: only this player's collected deposits.
-  // Fires WHERE ENTRY immediately for local writes (both fields match the write
-  // {collected:true, collectedBy:playerId}) without interference from the broader
-  // all-collected subscription.  Used as the source of truth for burst/release.
+  // This player's collected deposits (compound WHERE = precise local tracking).
+  // WHERE ENTRY fires immediately when this player collects (both fields match).
   const localCollectedDeposits = useAll(
     app.fuel_deposits.where({ collected: true, collectedBy: playerId }),
-    "edge",
   );
 
-  // Broad subscription: all collected deposits.
-  // WHERE ENTRY fires for cross-client boolean writes (A collects → false→true,
-  // B sees it here). When A then shares (collectedBy: A→B), B already has the
-  // row in this subscription and receives it as a plain row update.
-  const allCollectedDeposits = useAll(app.fuel_deposits.where({ collected: true }), "edge");
-  // settled: edge subscription has returned its initial result.
+  // All collected deposits — broader subscription used to receive shares from
+  // other players. When Player A shares with B, B already has the row here
+  // (it entered when A collected it), so collectedBy updating to B propagates
+  // as a plain row update without needing WHERE re-evaluation.
+  const allCollectedDeposits = useAll(app.fuel_deposits.where({ collected: true }));
+
   const settled = allUncollected !== undefined;
-
   const uncollectedDeposits = allUncollected ?? [];
-
-  // myCollectedDeposits: reliable local tracking via compound WHERE.
-  // Used for allDepositsRaw so burst/release can always find this player's
-  // collected deposits quickly.
   const myCollectedDeposits = localCollectedDeposits ?? [];
 
-  // effectiveMyCollected: merges local + broad subscriptions so that received
-  // shares (which enter via allCollectedDeposits) appear in the inventory.
+  // Merge local + broad collected subscriptions so received shares show in inventory
   const effectiveMyCollected = useMemo(() => {
     const map = new Map<string, FuelDeposit>();
     for (const d of myCollectedDeposits) map.set(d.id, d);
@@ -129,7 +141,11 @@ export function useGameSync(playerId: string): GameSyncResult {
     return counts;
   }, [uncollectedDeposits]);
 
-  // Track when each deposit ID was first seen (monotonic seconds) for fade-in
+  // ---------------------------------------------------------------------------
+  // Derived game props
+  // ---------------------------------------------------------------------------
+
+  // Track when each deposit ID was first seen for fade-in animation
   const depositSpawnTimesRef = useRef<Map<string, number>>(new Map());
 
   const deposits = useMemo(() => {
@@ -151,11 +167,21 @@ export function useGameSync(playerId: string): GameSyncResult {
     }));
   }, [uncollectedDeposits]);
 
-  const inventory = useMemo(() => {
-    return effectiveMyCollected.map((d) => d.fuelType as FuelType);
-  }, [effectiveMyCollected]);
+  const inventory = useMemo(
+    () => effectiveMyCollected.map((d) => d.fuelType as FuelType),
+    [effectiveMyCollected],
+  );
 
-  // --- SyncManager ---
+  const chatMessages = useMemo(() => {
+    if (!allChatMessages) return [];
+    const nowS = Math.floor(Date.now() / 1000);
+    return allChatMessages.filter((m) => nowS - m.createdAt < 60);
+  }, [allChatMessages]);
+
+  // ---------------------------------------------------------------------------
+  // SyncManager — owns all DB writes, batched on a 200ms interval
+  // ---------------------------------------------------------------------------
+
   const syncRef = useRef<SyncManager | null>(null);
   if (!syncRef.current) syncRef.current = new SyncManager(db, playerId);
   const sync = syncRef.current;
@@ -173,13 +199,6 @@ export function useGameSync(playerId: string): GameSyncResult {
     myCollectedCount: effectiveMyCollected.length,
     debugTotalDeposits: allDepositsRaw.length,
   });
-
-  // --- View derivations ---
-  const chatMessages = useMemo(() => {
-    if (!allChatMessages) return [];
-    const nowS = Math.floor(Date.now() / 1000);
-    return allChatMessages.filter((m) => nowS - m.createdAt < 60);
-  }, [allChatMessages]);
 
   return {
     deposits,

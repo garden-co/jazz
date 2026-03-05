@@ -15,7 +15,7 @@ import {
   playerStateChanged,
   reconcileDeposits,
   DEPOSITS_PER_TYPE,
-} from "../../src/sync/SyncManager.js";
+} from "../../src/jazz/SyncManager.js";
 import { FUEL_TYPES, MOON_SURFACE_WIDTH } from "../../src/game/constants.js";
 
 // ---------------------------------------------------------------------------

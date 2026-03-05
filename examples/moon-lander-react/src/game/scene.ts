@@ -443,7 +443,7 @@ function renderSpeechBubbles(scene: SceneContext): void {
 }
 
 function renderOverlays(scene: SceneContext): void {
-  const { ctx, w, h, world, now } = scene;
+  const { ctx, w, h, world } = scene;
 
   if (world.mode === "launched" && world.launchElapsed > 3.5) {
     const splashT = world.launchElapsed - 3.5;

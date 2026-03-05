@@ -1,36 +1,45 @@
 /**
- * E2E browser tests for Moon Lander — Phase 4: Automatic Fuel Sharing.
+ * E2E browser tests for Moon Lander — Fuel Sharing.
  *
  * Tests the proximity-based fuel sharing mechanic: when two walking players
  * are near each other, fuel the giver doesn't need is automatically
  * transferred to the receiver who does need it.
  *
+ * Also tests the inventory burst on lander entry: when re-entering the lander,
+ * non-required fuel types are ejected back onto the surface.
+ *
  * Most tests mount <Game> directly with connected-mode props (deposits=[],
  * inventory=[...]) and a mock onShareFuel callback to verify the sharing
  * decision logic without Jazz.
  *
- * Phase 4 data attribute contract (new additions):
- *   (existing) data-player-mode, data-required-fuel, data-inventory
+ * Data attribute contract:
+ *   data-player-mode, data-required-fuel, data-inventory, data-share-hint
  *
- * New callback: onShareFuel(fuelType, receiverPlayerId)
- *   Fired by the engine when a nearby walking remote player needs a fuel
- *   type the local player has but doesn't need.
+ * Callbacks tested:
+ *   onShareFuel(fuelType, receiverPlayerId)
+ *   onBurstDeposit(fuelType)
+ *   onRefuel(fuelType)
  */
 
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { Game } from "../../src/Game";
 import { FUEL_TYPES, GROUND_LEVEL, SHARE_PROXIMITY_RADIUS } from "../../src/game/constants";
-
-const SPAWN_X = 480; // fixed spawn position for tests
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import {
+  type MountEntry,
+  pressKey,
+  readStr,
+  releaseKey,
+  unmountAll,
+  waitFor,
+  waitForAttr,
+} from "./test-helpers";
 
 const SPEED = 10;
-const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
+const SPAWN_X = 480;
+
+const mounts: MountEntry[] = [];
 
 /**
  * Mount Game with explicit props (connected-mode style).
@@ -63,54 +72,8 @@ async function mountGameWith(props: Record<string, unknown>): Promise<HTMLDivEle
 }
 
 afterEach(async () => {
-  for (const { root, container } of mounts) {
-    try {
-      await act(async () => root.unmount());
-    } catch {
-      /* best effort */
-    }
-    container.remove();
-  }
-  mounts.length = 0;
+  await unmountAll(mounts);
 });
-
-async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (check()) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(`Timeout: ${message}`);
-}
-
-function readStr(el: HTMLDivElement, attr: string): string {
-  const container = el.querySelector('[data-testid="game-container"]')!;
-  const raw = container.getAttribute(`data-${attr}`);
-  if (raw === null) throw new Error(`Missing data attribute: data-${attr}`);
-  return raw;
-}
-
-async function waitForAttr(
-  el: HTMLDivElement,
-  attr: string,
-  expected: string,
-  timeoutMs = 5000,
-): Promise<void> {
-  const container = el.querySelector('[data-testid="game-container"]')!;
-  await waitFor(
-    () => container.getAttribute(`data-${attr}`) === expected,
-    timeoutMs,
-    `data-${attr} should become "${expected}" (got "${container.getAttribute(`data-${attr}`)}")`,
-  );
-}
-
-function pressKey(key: string, code?: string) {
-  document.dispatchEvent(new KeyboardEvent("keydown", { key, code: code ?? key, bubbles: true }));
-}
-
-function releaseKey(key: string, code?: string) {
-  document.dispatchEvent(new KeyboardEvent("keyup", { key, code: code ?? key, bubbles: true }));
-}
 
 /** Build a remote player object at the given position. */
 function remotePlayer(overrides: {
@@ -139,49 +102,37 @@ function remotePlayer(overrides: {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4a: Proximity fuel sharing
+// Proximity fuel sharing
 // ---------------------------------------------------------------------------
 
-describe("Moon Lander — Phase 4: Fuel Sharing", () => {
-  // =========================================================================
-  // 1. Basic sharing mechanic
-  //
-  //   Local player (has ⬡)     Remote player (needs ⬡)
-  //        ▼                         ▼
-  //   ════╤═════════════════════════╤════
-  //        └───── within range ─────┘
-  //              ⬡ transfers! →
-  //
-  //   onShareFuel("hexagon", "remote-uuid") fires
-  // =========================================================================
-
+describe("Moon Lander — Fuel Sharing", () => {
   it("shares fuel with a nearby walking player who needs it", async () => {
+    /**
+     *   Local (has ⬡)     Remote (needs ⬡)
+     *        ▼                   ▼
+     *   ════╤═══════════════════╤════
+     *        └─── within range ─┘
+     *              ⬡ transfers! →
+     *
+     *   onShareFuel("hexagon", "receiver-uuid") fires
+     */
     const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
 
     const el = await mountGameWith({
       deposits: [],
       inventory: ["hexagon", "circle", "triangle"],
-      remotePlayers: [
-        remotePlayer({
-          requiredFuelType: "hexagon",
-          playerId: "receiver-uuid",
-        }),
-      ],
+      remotePlayers: [remotePlayer({ requiredFuelType: "hexagon", playerId: "receiver-uuid" })],
       onShareFuel: (fuelType: string, receiverPlayerId: string) => {
         shares.push({ fuelType, receiverPlayerId });
       },
     });
 
-    // Exit lander — local player starts at SPAWN_X,
-    // same position as the remote player
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
     const localRequired = readStr(el, "required-fuel");
 
-    // Both walking, same position → proximity met immediately.
-    // Wait for the engine's game loop to detect and fire.
     await waitFor(
       () => shares.length > 0 || localRequired === "hexagon",
       2000,
@@ -189,32 +140,24 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     );
 
     if (localRequired !== "hexagon") {
-      // Local has hexagon, doesn't need it → shared with remote
       const hexShare = shares.find((s) => s.fuelType === "hexagon");
       expect(hexShare).toBeTruthy();
       expect(hexShare!.receiverPlayerId).toBe("receiver-uuid");
     } else {
-      // Guard: local also needs hexagon → no share
       expect(shares.find((s) => s.fuelType === "hexagon")).toBeUndefined();
     }
   });
 
-  // =========================================================================
-  // 2. Guard: never give away fuel the giver needs
-  //
-  //   Local (needs ⬡, has all 7)    7 remotes (each needs 1 type)
-  //        ▼                               ▼
-  //   ════╤═══════════════════════════════╤════
-  //        shares 6 types ──────────────→
-  //        keeps ⬡ (own required type)
-  // =========================================================================
-
   it("does not share fuel the local player needs", async () => {
+    /**
+     *   Local (needs ⬡, has all 7)    7 remotes (each needs 1 type)
+     *        ▼                               ▼
+     *   ════╤═══════════════════════════════╤════
+     *        shares 6 types ──────────────→
+     *        keeps ⬡ (own required type)
+     */
     const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
 
-    // Local player has ALL 7 fuel types. 7 remote players at the same
-    // position, each needing exactly one type. The local player should
-    // share 6 types and keep their own required type.
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
@@ -237,7 +180,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
 
     const localRequired = readStr(el, "required-fuel");
 
-    // Wait for all 6 shareable types to be shared
     await waitFor(
       () => shares.length >= 6,
       3000,
@@ -245,24 +187,17 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     );
 
     const sharedTypes = new Set(shares.map((s) => s.fuelType));
-
-    // The local player's required type must NOT be shared
     expect(sharedTypes.has(localRequired)).toBe(false);
-
-    // All other types should have been shared
     expect(sharedTypes.size).toBe(6);
   });
 
-  // =========================================================================
-  // 3. No sharing when remote player is not walking
-  //
-  //   Local (walking, has ⬡)     Remote (landed, needs ⬡)
-  //        ▼                           ▼
-  //   ════╤═══════════════════════════╤════
-  //        no transfer (remote not walking)
-  // =========================================================================
-
   it("does not share when remote player is not walking", async () => {
+    /**
+     *   Local (walking, has ⬡)     Remote (landed, needs ⬡)
+     *        ▼                           ▼
+     *   ════╤═══════════════════════════╤════
+     *        no transfer (remote not walking)
+     */
     const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
 
     const el = await mountGameWith({
@@ -278,33 +213,24 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Give plenty of time — sharing should NOT fire
     await new Promise((r) => setTimeout(r, 1000));
 
     expect(shares).toHaveLength(0);
   });
 
-  // =========================================================================
-  // 4. No sharing when players are far apart
-  //
-  //   Local (walking)                          Remote (walking, 1000px away)
-  //        ▼                                         ▼
-  //   ════╤═════════════════════════════════════════╤════
-  //        too far → no transfer
-  // =========================================================================
-
   it("does not share when players are far apart", async () => {
+    /**
+     *   Local (walking)                   Remote (walking, 1000px away)
+     *        ▼                                   ▼
+     *   ════╤═══════════════════════════════════╤════
+     *        too far → no transfer
+     */
     const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
 
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
-      remotePlayers: [
-        remotePlayer({
-          positionX: SPAWN_X + 1000,
-          requiredFuelType: "hexagon",
-        }),
-      ],
+      remotePlayers: [remotePlayer({ positionX: SPAWN_X + 1000, requiredFuelType: "hexagon" })],
       onShareFuel: (fuelType: string, receiverPlayerId: string) => {
         shares.push({ fuelType, receiverPlayerId });
       },
@@ -319,19 +245,16 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     expect(shares).toHaveLength(0);
   });
 
-  // =========================================================================
-  // 5. No sharing when local player is not walking
-  //
-  //   Local (in_lander)           Remote (walking, nearby)
-  //        ▼                           ▼
-  //   ════╤═══════════════════════════╤════
-  //        no transfer (local not walking)
-  // =========================================================================
-
   it("does not share when local player is not walking", async () => {
+    /**
+     *   Local (in_lander)           Remote (walking, nearby)
+     *        ▼                           ▼
+     *   ════╤═══════════════════════════╤════
+     *        no transfer (local not walking)
+     */
     const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
 
-    const el = await mountGameWith({
+    const _el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
       remotePlayers: [remotePlayer({ requiredFuelType: "hexagon" })],
@@ -346,20 +269,15 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     expect(shares).toHaveLength(0);
   });
 
-  // =========================================================================
-  // 6. Proximity hint shows when sharing would be possible at 2x radius
-  //
-  //   Local (walking, has ⬡)     Remote (walking, needs ⬡, 120px away)
-  //        ▼                           ▼
-  //   ════╤═══════════════════════════╤════
-  //        hint zone (80–160px)
-  //        data-share-hint="true"
-  // =========================================================================
-
   it("shows share hint when a receiver is nearby but not close enough", async () => {
-    // Place remote player at 120px — between SHARE_PROXIMITY_RADIUS (80)
-    // and 2x SHARE_PROXIMITY_RADIUS (160)
-    const hintDistance = SHARE_PROXIMITY_RADIUS + 40; // 120px
+    /**
+     *   Local (walking, has ⬡)     Remote (walking, needs ⬡, 120px away)
+     *        ▼                           ▼
+     *   ════╤═══════════════════════════╤════
+     *        hint zone (SHARE_PROXIMITY_RADIUS to 2× SHARE_PROXIMITY_RADIUS)
+     *        data-share-hint="true"
+     */
+    const hintDistance = SHARE_PROXIMITY_RADIUS + 40;
 
     const el = await mountGameWith({
       deposits: [],
@@ -380,31 +298,22 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
 
     const localRequired = readStr(el, "required-fuel");
 
-    // Only expect the hint if local doesn't also need hexagon
     if (localRequired !== "hexagon") {
       await waitForAttr(el, "share-hint", "true", 3000);
     }
   });
 
-  // =========================================================================
-  // 7. No hint when remote is beyond 2x radius
-  //
-  //   Local (walking, has ⬡)     Remote (walking, needs ⬡, 500px away)
-  //        ▼                                    ▼
-  //   ════╤═════════════════════════════════════╤════
-  //        too far for hint → data-share-hint="false"
-  // =========================================================================
-
   it("does not show share hint when receiver is too far away", async () => {
+    /**
+     *   Local (walking, has ⬡)     Remote (walking, needs ⬡, 500px away)
+     *        ▼                                    ▼
+     *   ════╤═════════════════════════════════════╤════
+     *        too far → data-share-hint="false"
+     */
     const el = await mountGameWith({
       deposits: [],
       inventory: [...FUEL_TYPES],
-      remotePlayers: [
-        remotePlayer({
-          positionX: SPAWN_X + 500,
-          requiredFuelType: "hexagon",
-        }),
-      ],
+      remotePlayers: [remotePlayer({ positionX: SPAWN_X + 500, requiredFuelType: "hexagon" })],
       onShareFuel: () => {},
     });
 
@@ -412,22 +321,18 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Give time for the engine loop to evaluate
     await new Promise((r) => setTimeout(r, 500));
 
     expect(readStr(el, "share-hint")).toBe("false");
   });
 
-  // =========================================================================
-  // 8. No sharing when receiver already has their required fuel
-  //
-  //   Local (has ⬡)     Remote (needs ⬡, already has ⬡)
-  //        ▼                     ▼
-  //   ════╤═════════════════════╤════
-  //        no transfer (receiver satisfied)
-  // =========================================================================
-
   it("does not share when receiver already has their required fuel", async () => {
+    /**
+     *   Local (has ⬡)     Remote (needs ⬡, already has ⬡ — landerFuelLevel=100)
+     *        ▼                     ▼
+     *   ════╤═════════════════════╤════
+     *        no transfer (receiver satisfied)
+     */
     const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
 
     const el = await mountGameWith({
@@ -448,7 +353,6 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Give plenty of time — sharing should NOT fire
     await new Promise((r) => setTimeout(r, 1000));
 
     expect(shares).toHaveLength(0);
@@ -456,21 +360,18 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 4b: Inventory burst on lander entry
+// Inventory burst on lander entry
 // ---------------------------------------------------------------------------
 
-describe("Moon Lander — Phase 4b: Inventory Burst", () => {
-  // =========================================================================
-  // 1. Entering lander ejects non-required fuel types
-  //
-  //   Player (walking, has ⬡ ● ▲ ■)   requiredFuel = ???
-  //        ▼  presses E near lander
-  //   ════╤════════════════════════════
-  //        keeps required type → refuels
-  //        ejects others → onBurstDeposit fires for each
-  // =========================================================================
-
+describe("Moon Lander — Inventory Burst", () => {
   it("ejects non-required fuel types on lander entry", async () => {
+    /**
+     *   Player (walking, has all 7)   requiredFuel = ???
+     *        ▼  presses E near lander
+     *   ════╤════════════════════════
+     *        keeps required type → refuels
+     *        ejects others → onBurstDeposit fires for each
+     */
     const bursts: string[] = [];
     const refuels: string[] = [];
 
@@ -485,19 +386,16 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
       },
     });
 
-    // Land and walk out
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
     const localRequired = readStr(el, "required-fuel");
 
-    // Walk back to lander and enter
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "in_lander", 3000);
     releaseKey("e", "KeyE");
 
-    // Wait for bursts to fire
     await waitFor(
       () => bursts.length >= FUEL_TYPES.length - 1,
       2000,
@@ -505,22 +403,10 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
     );
 
     const ejectedTypes = new Set(bursts);
-
-    // Required type NOT ejected
     expect(ejectedTypes.has(localRequired)).toBe(false);
-
-    // All other types ejected
     expect(ejectedTypes.size).toBe(FUEL_TYPES.length - 1);
-
-    // Required type was consumed for refuelling
     expect(refuels).toContain(localRequired);
   });
-
-  // =========================================================================
-  // 2. Inventory is empty after entering lander
-  //
-  //   All fuel consumed or ejected — nothing lingers
-  // =========================================================================
 
   it("non-required inventory is cleared after entering lander", async () => {
     const el = await mountGameWith({
@@ -535,16 +421,10 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
 
     const localRequired = readStr(el, "required-fuel");
 
-    // Re-enter lander
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "in_lander", 3000);
     releaseKey("e", "KeyE");
 
-    // After entering the lander, all non-required types are ejected
-    // and the required type is consumed for refuelling.
-    // With a static inventory prop, the merge re-adds the required type
-    // each frame (in a real game, the DB would have removed it).
-    // So we check that at most the required type remains.
     await waitFor(
       () => {
         const inv = readStr(el, "inventory");
@@ -555,14 +435,11 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
     );
   });
 
-  // =========================================================================
-  // 3. Re-entering lander after burst produces no additional bursts
-  //
-  //   First entry: 6 types ejected, required consumed
-  //   Walk out, re-enter: inventory empty → 0 new bursts
-  // =========================================================================
-
   it("re-entering lander produces no additional bursts", async () => {
+    /**
+     *   First entry: 6 types ejected, required consumed
+     *   Walk out, re-enter: inventory empty → 0 new bursts
+     */
     const bursts: string[] = [];
 
     const el = await mountGameWith({
@@ -573,7 +450,6 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
       },
     });
 
-    // Land, walk out, re-enter → first burst
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
@@ -589,24 +465,17 @@ describe("Moon Lander — Phase 4b: Inventory Burst", () => {
     );
     const firstBurstCount = bursts.length;
 
-    // Walk out again
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Re-enter lander
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "in_lander", 3000);
     releaseKey("e", "KeyE");
 
-    // No additional bursts
     await new Promise((r) => setTimeout(r, 500));
     expect(bursts.length).toBe(firstBurstCount);
   });
-
-  // =========================================================================
-  // 4. No burst when inventory is empty
-  // =========================================================================
 
   it("does not burst when inventory is empty", async () => {
     const bursts: string[] = [];
