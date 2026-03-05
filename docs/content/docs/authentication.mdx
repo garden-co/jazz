@@ -14,10 +14,15 @@ Jazz 2 supports three auth methods:
 Browser clients default to anonymous local auth when no JWT/backend auth is configured.
 On first load, Jazz auto-generates a device token and persists it in `localStorage`.
 
-<Tabs items={["React", "Svelte", "TypeScript"]}>
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthAnonymous.vue
     </include>
   </Tab>
   <Tab value="Svelte">
@@ -34,10 +39,15 @@ On first load, Jazz auto-generates a device token and persists it in `localStora
 
 If you want to force a specific device token, pass `localAuthToken` as an explicit override:
 
-<Tabs items={["React", "Svelte", "TypeScript"]}>
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-token-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthAnonymousToken.vue
     </include>
   </Tab>
   <Tab value="Svelte">
@@ -56,10 +66,15 @@ If you want to force a specific device token, pass `localAuthToken` as an explic
 
 When you want to test multi-user flows locally, switch to `demo` profiles and expose the switcher UI.
 
-<Tabs items={["React", "Svelte", "TypeScript"]}>
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-demo-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthDemo.vue
     </include>
   </Tab>
   <Tab value="Svelte">
@@ -84,10 +99,15 @@ Once your auth provider is in place, send provider JWTs and link the current loc
 
 Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created data:
 
-<Tabs items={["React", "Svelte"]}>
+<Tabs items={["React", "Vue", "Svelte"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-external-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthExternal.vue
     </include>
   </Tab>
   <Tab value="Svelte">
@@ -132,10 +152,15 @@ For `jazz-tools server`:
 
 ### Offline-only mode
 
-<Tabs items={["React", "Svelte", "TypeScript"]}>
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-offline-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthOffline.vue
     </include>
   </Tab>
   <Tab value="Svelte">
