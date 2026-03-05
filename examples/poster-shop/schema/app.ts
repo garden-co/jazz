@@ -1,5 +1,5 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
-import type { WasmSchema, QueryBuilder } from "jazz-tools";
+import type { WasmSchema, QueryBuilder, JsonSchemaToTs } from "jazz-tools";
 export type JsonValue =
   | string
   | number
@@ -7,6 +7,24 @@ export type JsonValue =
   | null
   | { [key: string]: JsonValue }
   | JsonValue[];
+
+const __jsonSchema1 = {
+  $schema: "http://json-schema.org/draft-07/schema#",
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      x: {
+        type: "number",
+      },
+      y: {
+        type: "number",
+      },
+    },
+    required: ["x", "y"],
+  },
+} as const;
+type __JsonType1 = JsonSchemaToTs<typeof __jsonSchema1>;
 
 export interface User {
   id: string;
@@ -25,7 +43,7 @@ export interface Stroke {
   id: string;
   canvas_id: string;
   user_id: string;
-  points: JsonValue;
+  points: __JsonType1;
   created_at: string;
 }
 
@@ -43,7 +61,7 @@ export interface CanvasInit {
 export interface StrokeInit {
   canvas_id: string;
   user_id: string;
-  points: JsonValue;
+  points: __JsonType1;
   created_at: string;
 }
 
@@ -64,7 +82,7 @@ export interface StrokeWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   canvas_id?: string | { eq?: string; ne?: string };
   user_id?: string | { eq?: string; ne?: string; contains?: string };
-  points?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  points?: __JsonType1 | { eq?: __JsonType1; ne?: __JsonType1; in?: __JsonType1[] };
   created_at?: string | { eq?: string; ne?: string; contains?: string };
 }
 
@@ -201,6 +219,22 @@ export const wasmSchema: WasmSchema = {
         name: "points",
         column_type: {
           type: "Json",
+          schema: {
+            $schema: "http://json-schema.org/draft-07/schema#",
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                x: {
+                  type: "number",
+                },
+                y: {
+                  type: "number",
+                },
+              },
+              required: ["x", "y"],
+            },
+          },
         },
         nullable: false,
       },

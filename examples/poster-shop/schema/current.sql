@@ -16,7 +16,7 @@ CREATE POLICY canvases_insert_policy ON canvases FOR INSERT WITH CHECK (TRUE);
 CREATE TABLE strokes (
     canvas_id UUID REFERENCES canvases NOT NULL,
     user_id TEXT NOT NULL,
-    points JSON NOT NULL,
+    points JSON('{"$schema":"http://json-schema.org/draft-07/schema#","type":"array","items":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"]}}') NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE POLICY strokes_select_policy ON strokes FOR SELECT USING (TRUE);
