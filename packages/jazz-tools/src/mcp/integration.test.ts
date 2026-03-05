@@ -148,8 +148,7 @@ describe("MCP integration: full lifecycle", () => {
     expect(content.type).toBe("text");
     // Should find real results — "CoValue" appears throughout the docs
     expect(content.text).not.toBe("No results found.");
-    // eslint-disable-next-line no-control-regex
-    expect(content.text).toMatch(/\u001b\[1m\u001b\[36m/); // bold cyan heading present
+    expect(content.text).not.toMatch(/\u001b\[/);
   });
 
   it("get_doc → markdown with title heading and body content", async () => {
@@ -166,11 +165,10 @@ describe("MCP integration: full lifecycle", () => {
         text: string;
       }>
     )[0]!.text;
-    // Slug appears dim-wrapped: \u001b[2m{slug}\u001b[0m
-    // eslint-disable-next-line no-control-regex
-    const slugMatch = listText.match(/\u001b\[2m([^\u001b\n]+)\u001b\[0m/);
-    expect(slugMatch).not.toBeNull();
-    const slug = slugMatch![1]!.trim();
+    const firstLine = listText
+      .split("\n")
+      .find((line) => line.trim().length > 0)!;
+    const slug = firstLine.trim().split(/\s+/).pop()!;
 
     server.send({
       jsonrpc: "2.0",
@@ -182,9 +180,7 @@ describe("MCP integration: full lifecycle", () => {
     const text = (
       (res.result as Record<string, unknown>).content as Array<{ text: string }>
     )[0]!.text;
-    // Title appears bold-wrapped at the start
-    // eslint-disable-next-line no-control-regex
-    expect(text).toMatch(/\u001b\[1m\S/);
+    expect(text).not.toMatch(/\u001b\[/);
     expect(text.length).toBeGreaterThan(0);
   });
 

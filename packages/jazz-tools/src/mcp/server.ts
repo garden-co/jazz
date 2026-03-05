@@ -125,14 +125,27 @@ export async function runServer(opts: RunServerOptions = {}): Promise<void> {
           });
         } catch (err: unknown) {
           const e = err as { code?: number; message?: string };
-          write({
-            jsonrpc: "2.0",
-            id,
-            error: {
-              code: e.code ?? -32603,
-              message: e.message ?? "Internal error",
-            },
-          });
+          if (typeof e.code === "number") {
+            write({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                content: [
+                  { type: "text", text: e.message ?? "Tool execution failed" },
+                ],
+                isError: true,
+              },
+            });
+          } else {
+            write({
+              jsonrpc: "2.0",
+              id,
+              error: {
+                code: -32603,
+                message: e.message ?? "Internal error",
+              },
+            });
+          }
         }
         break;
       }

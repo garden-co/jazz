@@ -60,15 +60,7 @@ function rpcError(code: number, message: string): RpcError {
   return Object.assign(new Error(message), { code });
 }
 
-// ---------------------------------------------------------------------------
-// ANSI helpers (no dependencies)
-// ---------------------------------------------------------------------------
-
-const B = "\x1b[1m"; // bold
-const D = "\x1b[2m"; // dim
-const R = "\x1b[0m"; // reset
-const CYAN = "\x1b[36m";
-const HR = `${D}${"─".repeat(60)}${R}`;
+const HR = "-".repeat(60);
 const fenceRe = /^[ \t]*```([^\n]*)\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
 
 // ---------------------------------------------------------------------------
@@ -87,15 +79,13 @@ function formatSearchResults(
   return results
     .map(({ title, slug, section, snippet }) => {
       const heading = section ? `${title} › ${section}` : title;
-      return `${B}${CYAN}${heading}${R}\n${D}${slug}${R}\n\n${renderInline(snippet)}`;
+      return `${heading}\n${slug}\n\n${renderInline(snippet)}`;
     })
     .join(`\n\n${HR}\n\n`);
 }
 
 function renderInline(text: string): string {
-  return text
-    .replace(/\*\*([^*\n]+)\*\*/g, `${B}$1${R}`)
-    .replace(/`([^`\n]+)`/g, `${CYAN}$1${R}`);
+  return text;
 }
 
 function dedent(text: string): string {
@@ -112,15 +102,7 @@ function dedent(text: string): string {
 }
 
 function renderProse(text: string): string {
-  const withHeadings = text.replace(
-    /^(#{1,6}) (.+)$/gm,
-    (_, hashes: string, heading: string) => {
-      if (hashes.length === 1) return `${B}${CYAN}${heading}${R}`;
-      if (hashes.length === 2) return `${B}${heading}${R}`;
-      return `${D}${heading}${R}`;
-    },
-  );
-  return renderInline(withHeadings);
+  return renderInline(text);
 }
 
 function renderBody(body: string): string {
@@ -151,11 +133,11 @@ function formatDoc(doc: {
   body: string;
   related: string[];
 }): string {
-  const parts: string[] = [`${B}${doc.title}${R}`];
-  if (doc.description) parts.push(`${D}${renderInline(doc.description)}${R}`);
+  const parts: string[] = [doc.title];
+  if (doc.description) parts.push(renderInline(doc.description));
   parts.push(renderBody(doc.body));
   if (doc.related.length > 0) {
-    parts.push(`${HR}\n${D}Related:${R} ${doc.related.join("  ")}`);
+    parts.push(`${HR}\nRelated: ${doc.related.join("  ")}`);
   }
   return parts.join("\n\n");
 }
@@ -166,7 +148,7 @@ function formatPageList(
   return pages
     .map(
       ({ title, slug, description }) =>
-        `${B}${title}${R}  ${D}${slug}${R}\n  ${renderInline(description)}`,
+        `${title}  ${slug}\n  ${renderInline(description)}`,
     )
     .join("\n\n");
 }

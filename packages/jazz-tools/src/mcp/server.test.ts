@@ -222,7 +222,7 @@ describe("tools/list", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/call search_docs", () => {
-  it("returns content array with text type and ANSI-formatted output", async () => {
+  it("returns content array with text output", async () => {
     const res = (
       await exchange([
         {
@@ -238,7 +238,7 @@ describe("tools/call search_docs", () => {
       text: string;
     }>;
     expect(content[0]!.type).toBe("text");
-    // Title and slug appear in output (may be wrapped in ANSI codes)
+    // Title and slug appear in output
     expect(content[0]!.text).toContain("Quickstart");
     expect(content[0]!.text).toContain("quickstart");
   });
@@ -265,7 +265,7 @@ describe("tools/call search_docs", () => {
 });
 
 describe("tools/call get_doc", () => {
-  it("returns ANSI-formatted output with title, description, and body", async () => {
+  it("returns output with title, description, and body", async () => {
     const res = (
       await exchange([
         {
@@ -284,7 +284,7 @@ describe("tools/call get_doc", () => {
     expect(text).toContain("npm install jazz-tools");
   });
 
-  it("returns error when slug param is missing", async () => {
+  it("returns a tool error when slug param is missing", async () => {
     const res = (
       await exchange([
         {
@@ -295,12 +295,15 @@ describe("tools/call get_doc", () => {
         },
       ])
     )[0]!;
-    expect((res.error as any).code).toBe(-32602);
+    expect((res.result as any).isError).toBe(true);
+    expect((res.result as any).content[0].text).toContain(
+      "get_doc: slug (string) is required",
+    );
   });
 });
 
 describe("tools/call list_pages", () => {
-  it("returns ANSI-formatted output with title, slug, and description per page", async () => {
+  it("returns output with title, slug, and description per page", async () => {
     const res = (
       await exchange([
         {
@@ -321,7 +324,7 @@ describe("tools/call list_pages", () => {
 });
 
 describe("tools/call — error cases", () => {
-  it("unknown tool name returns JSON-RPC error", async () => {
+  it("unknown tool name returns a tool error", async () => {
     const res = (
       await exchange([
         {
@@ -332,7 +335,8 @@ describe("tools/call — error cases", () => {
         },
       ])
     )[0]!;
-    expect(res.error).toBeDefined();
+    expect((res.result as any).isError).toBe(true);
+    expect((res.result as any).content[0].text).toContain("Unknown tool");
   });
 });
 
