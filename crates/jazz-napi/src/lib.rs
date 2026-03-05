@@ -15,10 +15,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use napi::Env;
-use napi::threadsafe_function::{
-    ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
-};
+use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
 use jazz_tools::object::ObjectId;
@@ -127,6 +125,90 @@ fn parse_query(json: &str) -> napi::Result<Query> {
     parse_query_json(json).map_err(napi::Error::from_reason)
 }
 
+fn parse_session_json(session_json: Option<String>) -> napi::Result<Option<Session>> {
+    if let Some(json) = session_json {
+        Ok(Some(serde_json::from_str::<Session>(&json).map_err(
+            |e| napi::Error::from_reason(format!("Invalid session JSON: {}", e)),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_subscription_inputs(
+    query_json: &str,
+    session_json: Option<String>,
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> napi::Result<(
+    Query,
+    Option<Session>,
+    ReadDurabilityOptions,
+    QueryPropagation,
+)> {
+    let query = parse_query(query_json)?;
+    let session = parse_session_json(session_json)?;
+    let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
+    Ok((query, session, durability, propagation))
+}
+
+fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
+    let row_to_json = |row: &jazz_tools::query_manager::types::Row,
+                       descriptor: &jazz_tools::query_manager::types::RowDescriptor|
+     -> serde_json::Value {
+        let values = decode_row(descriptor, &row.data)
+            .map(|vals| vals.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        serde_json::json!({
+            "id": row.id.uuid().to_string(),
+            "values": values
+        })
+    };
+
+    let descriptor = &delta.descriptor;
+    let delta_obj = delta
+        .ordered_delta
+        .removed
+        .iter()
+        .map(|change| {
+            serde_json::json!({
+                "kind": 1,
+                "id": change.id.uuid().to_string(),
+                "index": change.index
+            })
+        })
+        .chain(delta.ordered_delta.updated.iter().map(|change| {
+            serde_json::json!({
+                "kind": 2,
+                "id": change.id.uuid().to_string(),
+                "index": change.new_index,
+                "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
+            })
+        }))
+        .chain(delta.ordered_delta.added.iter().map(|change| {
+            serde_json::json!({
+                "kind": 0,
+                "id": change.id.uuid().to_string(),
+                "index": change.index,
+                "row": row_to_json(&change.row, descriptor)
+            })
+        }))
+        .collect::<Vec<_>>();
+
+    serde_json::Value::Array(delta_obj)
+}
+
+fn make_subscription_callback(
+    tsfn: ThreadsafeFunction<serde_json::Value>,
+) -> impl Fn(SubscriptionDelta) + Send + 'static {
+    move |delta: SubscriptionDelta| {
+        tsfn.call(
+            Ok(subscription_delta_to_json(&delta)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
+}
+
 // ============================================================================
 // NapiScheduler
 // ============================================================================
@@ -136,10 +218,14 @@ type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSync
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
 /// does the actual work. Debounced: only one tick is pending at a time.
+/// The TSFN type produced by `build_threadsafe_function().weak().build()`:
+/// CalleeHandled = false, Weak = true (won't keep event loop alive).
+type SchedulerTsfn = ThreadsafeFunction<(), (), (), napi::Status, false, true, 0>;
+
 pub struct NapiScheduler {
     scheduled: Arc<AtomicBool>,
     core_ref: Weak<Mutex<NapiCoreType>>,
-    tsfn: Option<ThreadsafeFunction<(), ErrorStrategy::CalleeHandled>>,
+    tsfn: Option<SchedulerTsfn>,
 }
 
 impl NapiScheduler {
@@ -155,7 +241,7 @@ impl NapiScheduler {
         self.core_ref = core_ref;
     }
 
-    fn set_tsfn(&mut self, tsfn: ThreadsafeFunction<(), ErrorStrategy::CalleeHandled>) {
+    fn set_tsfn(&mut self, tsfn: SchedulerTsfn) {
         self.tsfn = Some(tsfn);
     }
 }
@@ -164,7 +250,8 @@ impl Scheduler for NapiScheduler {
     fn schedule_batched_tick(&self) {
         if !self.scheduled.swap(true, Ordering::SeqCst) {
             if let Some(ref tsfn) = self.tsfn {
-                tsfn.call(Ok(()), ThreadsafeFunctionCallMode::NonBlocking);
+                // CalleeHandled = false: pass value directly, not wrapped in Result
+                tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
             } else {
                 self.scheduled.store(false, Ordering::SeqCst);
             }
@@ -181,8 +268,7 @@ impl Scheduler for NapiScheduler {
 type SyncCallbackParams = (String, String, String, bool);
 
 pub struct NapiSyncSender {
-    callback:
-        Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams, ErrorStrategy::CalleeHandled>>>>,
+    callback: Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams>>>>,
 }
 
 impl NapiSyncSender {
@@ -192,10 +278,7 @@ impl NapiSyncSender {
         }
     }
 
-    fn set_callback(
-        &self,
-        tsfn: ThreadsafeFunction<SyncCallbackParams, ErrorStrategy::CalleeHandled>,
-    ) {
+    fn set_callback(&self, tsfn: ThreadsafeFunction<SyncCallbackParams>) {
         if let Ok(mut cb) = self.callback.lock() {
             *cb = Some(tsfn);
         }
@@ -279,34 +362,21 @@ fn build_napi_runtime(
             core_guard.scheduler().scheduled.clone()
         };
 
-        // Create a noop JS function to wrap in a TSFN.
-        // The TSFN callback closure does the real work (batched_tick).
-        // The noop function receives the return value but ignores it.
-        let noop_fn = env.create_function_from_closure("__groove_tick", |_ctx| Ok(()))?;
-
         let core_ref_for_tsfn = core_weak.clone();
         let flag_for_tsfn = scheduled_flag;
 
-        let mut tsfn = env.create_threadsafe_function(
-            &noop_fn,
-            0, // max_queue_size: 0 = unlimited
-            move |_ctx: napi::threadsafe_function::ThreadSafeCallContext<()>| {
-                // Reset flag first so new ticks can be scheduled
-                flag_for_tsfn.store(false, Ordering::SeqCst);
-                let Some(core_arc) = core_ref_for_tsfn.upgrade() else {
-                    // Return empty vec — noop function doesn't use args
-                    return Ok(Vec::<napi::JsUnknown>::new());
-                };
-                if let Ok(mut core) = core_arc.lock() {
-                    core.batched_tick();
-                }
-                // Return empty vec — noop function doesn't use args
-                Ok(Vec::<napi::JsUnknown>::new())
-            },
-        )?;
+        let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
+            // Reset flag first so new ticks can be scheduled
+            flag_for_tsfn.store(false, Ordering::SeqCst);
+            if let Some(core_arc) = core_ref_for_tsfn.upgrade()
+                && let Ok(mut core) = core_arc.lock()
+            {
+                core.batched_tick();
+            }
+            Ok(())
+        })?;
 
-        // Don't keep the Node.js event loop alive for the scheduler
-        tsfn.unref(&env)?;
+        let tsfn = tick_fn.build_threadsafe_function().weak::<true>().build()?;
 
         // Set on scheduler
         let mut core_guard = core_arc
@@ -455,24 +525,15 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi(ts_return_type = "Promise<any>")]
-    pub fn query(
+    pub async fn query(
         &self,
-        env: Env,
         query_json: String,
         session_json: Option<String>,
         tier: Option<String>,
         options_json: Option<String>,
-    ) -> napi::Result<napi::JsObject> {
+    ) -> napi::Result<serde_json::Value> {
         let query = parse_query(&query_json)?;
-
-        let session =
-            if let Some(json) = session_json {
-                Some(serde_json::from_str::<Session>(&json).map_err(|e| {
-                    napi::Error::from_reason(format!("Invalid session JSON: {}", e))
-                })?)
-            } else {
-                None
-            };
+        let session = parse_session_json(session_json)?;
 
         let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
@@ -484,34 +545,21 @@ impl NapiRuntime {
             core.query_with_propagation(query, session, durability, propagation)
         };
 
-        // Create a deferred/promise pair
-        let (deferred, promise) = env.create_deferred()?;
+        let rows = future
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("Query failed: {:?}", e)))?;
 
-        // Spawn a thread to block on the oneshot receiver
-        std::thread::spawn(move || {
-            let result = futures::executor::block_on(future);
+        let json_rows: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(id, values)| {
+                serde_json::json!({
+                    "id": id.uuid().to_string(),
+                    "values": values
+                })
+            })
+            .collect();
 
-            match result {
-                Ok(rows) => {
-                    let json_rows: Vec<serde_json::Value> = rows
-                        .into_iter()
-                        .map(|(id, values)| {
-                            serde_json::json!({
-                                "id": id.uuid().to_string(),
-                                "values": values
-                            })
-                        })
-                        .collect();
-
-                    deferred.resolve(move |env| env.to_js_value(&json_rows));
-                }
-                Err(e) => {
-                    deferred.reject(napi::Error::from_reason(format!("Query failed: {:?}", e)));
-                }
-            }
-        });
-
-        Ok(promise)
+        Ok(serde_json::Value::Array(json_rows))
     }
 
     // =========================================================================
@@ -522,80 +570,17 @@ impl NapiRuntime {
     pub fn subscribe(
         &self,
         query_json: String,
-        #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: napi::JsFunction,
+        #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: ThreadsafeFunction<
+            serde_json::Value,
+        >,
         session_json: Option<String>,
         tier: Option<String>,
         options_json: Option<String>,
     ) -> napi::Result<f64> {
-        let query = parse_query(&query_json)?;
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
 
-        let session =
-            if let Some(json) = session_json {
-                Some(serde_json::from_str::<Session>(&json).map_err(|e| {
-                    napi::Error::from_reason(format!("Invalid session JSON: {}", e))
-                })?)
-            } else {
-                None
-            };
-
-        let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
-
-        // Create a ThreadsafeFunction for the JS callback.
-        // The closure converts our serde_json::Value into a JsUnknown to pass to JS.
-        let tsfn: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled> =
-            on_update.create_threadsafe_function(0, |ctx| {
-                let val = ctx.env.to_js_value(&ctx.value)?;
-                Ok(vec![val])
-            })?;
-
-        let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &jazz_tools::query_manager::types::Row,
-                               descriptor: &jazz_tools::query_manager::types::RowDescriptor|
-             -> serde_json::Value {
-                let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                serde_json::json!({
-                    "id": row.id.uuid().to_string(),
-                    "values": values
-                })
-            };
-
-            let descriptor = &delta.descriptor;
-            let delta_obj = delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    serde_json::json!({
-                        "kind": 1,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index
-                    })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    serde_json::json!({
-                        "kind": 2,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.new_index,
-                        "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    serde_json::json!({
-                        "kind": 0,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index,
-                        "row": row_to_json(&change.row, descriptor)
-                    })
-                }))
-                .collect::<Vec<_>>();
-
-            tsfn.call(
-                Ok(serde_json::Value::Array(delta_obj)),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        };
+        let callback = make_subscription_callback(on_update);
 
         let mut core = self
             .core
@@ -624,18 +609,63 @@ impl NapiRuntime {
         Ok(())
     }
 
+    /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
+    #[napi(js_name = "createSubscription")]
+    pub fn create_subscription(
+        &self,
+        query_json: String,
+        session_json: Option<String>,
+        tier: Option<String>,
+        options_json: Option<String>,
+    ) -> napi::Result<f64> {
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let handle = core.create_subscription(query, session, durability, propagation);
+
+        Ok(handle.0 as f64)
+    }
+
+    /// Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
+    #[napi(js_name = "executeSubscription")]
+    pub fn execute_subscription(
+        &self,
+        handle: f64,
+        #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: ThreadsafeFunction<
+            serde_json::Value,
+        >,
+    ) -> napi::Result<()> {
+        let sub_handle = SubscriptionHandle(handle as u64);
+
+        let callback = make_subscription_callback(on_update);
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.execute_subscription(sub_handle, callback)
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Execute subscription failed: {:?}", e))
+            })?;
+
+        Ok(())
+    }
+
     // =========================================================================
     // Persisted CRUD Operations
     // =========================================================================
 
     #[napi(js_name = "insertDurable", ts_return_type = "Promise<string>")]
-    pub fn insert_durable(
+    pub async fn insert_durable(
         &self,
-        env: Env,
         table: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
         tier: String,
-    ) -> napi::Result<napi::JsObject> {
+    ) -> napi::Result<String> {
         let persistence_tier = parse_tier(&tier)?;
 
         let js_values: Vec<Value> = serde_json::from_value(values)
@@ -651,24 +681,17 @@ impl NapiRuntime {
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?
         };
 
-        let id_str = object_id.uuid().to_string();
-        let (deferred, promise) = env.create_deferred()?;
-        std::thread::spawn(move || {
-            let _ = futures::executor::block_on(receiver);
-            deferred.resolve(move |env| env.create_string(&id_str));
-        });
-
-        Ok(promise)
+        let _ = receiver.await;
+        Ok(object_id.uuid().to_string())
     }
 
     #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
-    pub fn update_durable(
+    pub async fn update_durable(
         &self,
-        env: Env,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
         tier: String,
-    ) -> napi::Result<napi::JsObject> {
+    ) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
 
         let uuid = uuid::Uuid::parse_str(&object_id)
@@ -688,22 +711,12 @@ impl NapiRuntime {
                 .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
         };
 
-        let (deferred, promise) = env.create_deferred()?;
-        std::thread::spawn(move || {
-            let _ = futures::executor::block_on(receiver);
-            deferred.resolve(move |env| env.get_undefined());
-        });
-
-        Ok(promise)
+        let _ = receiver.await;
+        Ok(())
     }
 
     #[napi(js_name = "deleteDurable", ts_return_type = "Promise<void>")]
-    pub fn delete_durable(
-        &self,
-        env: Env,
-        object_id: String,
-        tier: String,
-    ) -> napi::Result<napi::JsObject> {
+    pub async fn delete_durable(&self, object_id: String, tier: String) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
 
         let uuid = uuid::Uuid::parse_str(&object_id)
@@ -719,13 +732,8 @@ impl NapiRuntime {
                 .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
         };
 
-        let (deferred, promise) = env.create_deferred()?;
-        std::thread::spawn(move || {
-            let _ = futures::executor::block_on(receiver);
-            deferred.resolve(move |env| env.get_undefined());
-        });
-
-        Ok(promise)
+        let _ = receiver.await;
+        Ok(())
     }
 
     // =========================================================================
@@ -780,30 +788,15 @@ impl NapiRuntime {
     #[napi(js_name = "onSyncMessageToSend")]
     pub fn on_sync_message_to_send(
         &self,
-        #[napi(ts_arg_type = "(...args: any[]) => any")] callback: napi::JsFunction,
+        #[napi(ts_arg_type = "(...args: any[]) => any")] callback: ThreadsafeFunction<
+            SyncCallbackParams,
+        >,
     ) -> napi::Result<()> {
-        let tsfn: ThreadsafeFunction<SyncCallbackParams, ErrorStrategy::CalleeHandled> = callback
-            .create_threadsafe_function(
-            0,
-            |ctx: ThreadSafeCallContext<SyncCallbackParams>| {
-                let destination_kind = ctx.env.create_string_from_std(ctx.value.0)?;
-                let destination_id = ctx.env.create_string_from_std(ctx.value.1)?;
-                let payload_json = ctx.env.create_string_from_std(ctx.value.2)?;
-                let is_catalogue = ctx.env.get_boolean(ctx.value.3)?;
-                Ok(vec![
-                    destination_kind.into_unknown(),
-                    destination_id.into_unknown(),
-                    payload_json.into_unknown(),
-                    is_catalogue.into_unknown(),
-                ])
-            },
-        )?;
-
         let core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.sync_sender().set_callback(tsfn);
+        core.sync_sender().set_callback(callback);
         Ok(())
     }
 
@@ -896,13 +889,14 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi(js_name = "getSchema", ts_return_type = "any")]
-    pub fn get_schema(&self, env: Env) -> napi::Result<napi::JsUnknown> {
+    pub fn get_schema(&self) -> napi::Result<serde_json::Value> {
         let core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let schema = core.current_schema();
-        env.to_js_value(schema)
+        serde_json::to_value(schema)
+            .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
     }
 
     #[napi(js_name = "getSchemaHash")]
@@ -959,10 +953,11 @@ pub fn current_timestamp() -> i64 {
 }
 
 #[napi(js_name = "parseSchema", ts_return_type = "any")]
-pub fn parse_schema_fn(env: Env, json: String) -> napi::Result<napi::JsUnknown> {
+pub fn parse_schema_fn(json: String) -> napi::Result<serde_json::Value> {
     let schema: Schema = serde_json::from_str(&json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-    env.to_js_value(&schema)
+    serde_json::to_value(&schema)
+        .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
 }
 
 #[cfg(test)]

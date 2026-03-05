@@ -27,6 +27,7 @@ declare module "jazz-wasm" {
       tier?: string,
       useBinaryEncoding?: boolean,
     );
+    schedule?: (task: () => void) => void;
 
     insert(table: string, values: unknown): string;
     insertDurable(table: string, values: unknown, tier: string): Promise<string>;
@@ -40,6 +41,13 @@ declare module "jazz-wasm" {
       tier?: string | null,
       optionsJson?: string | null,
     ): Promise<unknown>;
+    createSubscription(
+      queryJson: string,
+      sessionJson?: string | null,
+      tier?: string | null,
+      optionsJson?: string | null,
+    ): number;
+    executeSubscription(handle: number, onUpdate: Function): void;
     subscribe(
       queryJson: string,
       onUpdate: Function,

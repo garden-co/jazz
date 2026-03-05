@@ -75,7 +75,10 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
     if (entry.type !== "Row") {
       return unwrapValue(entry);
     }
-    return transformRowValues(entry.value, schema, plan.relation.toTable, plan.nested);
+    // Row id is carried in the struct's `id` field
+    const rowId = entry.value.id;
+    const columnValues = entry.value.values;
+    return transformRowValues(columnValues, schema, plan.relation.toTable, plan.nested, rowId);
   });
 
   return plan.relation.isArray ? rows : rows[0];
@@ -150,11 +153,11 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType): unknown {
       return v.value.map((entry) => unwrapValue(entry));
     case "Row":
       if (columnType?.type === "Row") {
-        return v.value.map((entry, index) =>
+        return v.value.values.map((entry, index) =>
           unwrapValue(entry, columnType.columns[index]?.column_type),
         );
       }
-      return v.value.map((entry) => unwrapValue(entry));
+      return v.value.values.map((entry) => unwrapValue(entry));
   }
 }
 

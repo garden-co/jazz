@@ -24,13 +24,19 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url(header)}.${toBase64Url(payload)}.signature`;
 }
 
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+}
+
 function makeClient() {
   const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
     [];
-  const subscribeCalls: Array<
+  const createSubscriptionCalls: Array<
     [string, string | undefined, string | undefined, string | undefined]
   > = [];
-  const subscribeCallbacks: Array<Function> = [];
+  const executeSubscriptionCalls: Array<[number, Function]> = [];
+  const unsubscribeCalls: number[] = [];
+  let nextHandle = 0;
 
   const runtime: Runtime = {
     insert: () => "00000000-0000-0000-0000-000000000001",
@@ -50,23 +56,27 @@ function makeClient() {
       ]);
       return [];
     },
-    subscribe: (
+    subscribe: () => nextHandle++,
+    createSubscription: (
       queryJson: string,
-      onUpdate: Function,
       sessionJson?: string | null,
       tier?: string | null,
       optionsJson?: string | null,
     ) => {
-      subscribeCalls.push([
+      createSubscriptionCalls.push([
         queryJson,
         sessionJson ?? undefined,
         tier ?? undefined,
         optionsJson ?? undefined,
       ]);
-      subscribeCallbacks.push(onUpdate);
-      return 1;
+      return nextHandle++;
     },
-    unsubscribe: () => {},
+    executeSubscription: (handle: number, onUpdate: Function) => {
+      executeSubscriptionCalls.push([handle, onUpdate]);
+    },
+    unsubscribe: (handle: number) => {
+      unsubscribeCalls.push(handle);
+    },
     insertDurable: async () => "00000000-0000-0000-0000-000000000001",
     updateDurable: async () => {},
     deleteDurable: async () => {},
@@ -96,18 +106,22 @@ function makeClient() {
   return {
     client: new JazzClientCtor(runtime, context, "edge"),
     queryCalls,
-    subscribeCalls,
-    subscribeCallbacks,
+    createSubscriptionCalls,
+    executeSubscriptionCalls,
+    unsubscribeCalls,
   };
 }
 
 function makeClientWithContext(context: AppContext): JazzClient {
+  let nextHandle = 0;
   const runtime: Runtime = {
     insert: () => "00000000-0000-0000-0000-000000000001",
     update: () => {},
     delete: () => {},
     query: async () => [],
-    subscribe: () => 1,
+    subscribe: () => nextHandle++,
+    createSubscription: () => nextHandle++,
+    executeSubscription: () => {},
     unsubscribe: () => {},
     insertDurable: async () => "00000000-0000-0000-0000-000000000001",
     updateDurable: async () => {},
@@ -270,8 +284,8 @@ describe("JazzClient.forRequest", () => {
     expect(parsed).toHaveProperty("relation_ir");
   });
 
-  it("accepts query builders for subscribe calls", () => {
-    const { client, subscribeCalls } = makeClient();
+  it("accepts query builders for subscribe calls", async () => {
+    const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
 
     const builder = {
       _build() {
@@ -279,14 +293,17 @@ describe("JazzClient.forRequest", () => {
       },
     };
 
-    const subId = client.subscribe(builder, () => {});
+    client.subscribe(builder, () => {});
 
-    expect(subId).toBe(1);
-    expect(subscribeCalls[0][0]).toBe(builder._build());
+    expect(createSubscriptionCalls).toHaveLength(1);
+    expect(createSubscriptionCalls[0][0]).toBe(builder._build());
+    expect(executeSubscriptionCalls).toHaveLength(0);
+    await flushMicrotasks();
+    expect(executeSubscriptionCalls).toHaveLength(1);
   });
 
-  it("translates schema-aware query builders for subscribe calls", () => {
-    const { client, subscribeCalls } = makeClient();
+  it("translates schema-aware query builders for subscribe calls", async () => {
+    const { client, createSubscriptionCalls } = makeClient();
 
     const builder = {
       _schema: schemaWithTodos,
@@ -300,20 +317,22 @@ describe("JazzClient.forRequest", () => {
       },
     };
 
-    const subId = client.subscribe(builder, () => {});
+    client.subscribe(builder, () => {});
 
-    expect(subId).toBe(1);
-    const parsed = JSON.parse(subscribeCalls[0][0]) as Record<string, unknown>;
+    expect(createSubscriptionCalls).toHaveLength(1);
+    const parsed = JSON.parse(createSubscriptionCalls[0][0]) as Record<string, unknown>;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
 
-  it("forwards structured RN delta payloads to subscription callbacks", () => {
-    const { client, subscribeCallbacks } = makeClient();
+  it("forwards structured RN delta payloads to subscription callbacks", async () => {
+    const { client, executeSubscriptionCalls } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
+    await flushMicrotasks();
 
-    subscribeCallbacks[0](
+    const onUpdate = executeSubscriptionCalls[0][1];
+    onUpdate(
       JSON.stringify({
         added: [{ row: { id: "row-a", values: [] }, index: 0 }],
         removed: [{ row: { id: "row-r", values: [] }, index: 1 }],
@@ -345,13 +364,15 @@ describe("JazzClient.forRequest", () => {
     });
   });
 
-  it("forwards partial structured deltas without throwing", () => {
-    const { client, subscribeCallbacks } = makeClient();
+  it("forwards partial structured deltas without throwing", async () => {
+    const { client, executeSubscriptionCalls } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
+    await flushMicrotasks();
 
+    const onUpdate = executeSubscriptionCalls[0][1];
     expect(() =>
-      subscribeCallbacks[0](
+      onUpdate(
         JSON.stringify({
           pending: true,
         }),
@@ -369,9 +390,57 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
-  it("passes query propagation options to runtime subscribe", () => {
-    const { client, subscribeCalls } = makeClient();
+  it("passes query propagation options to runtime createSubscription", () => {
+    const { client, createSubscriptionCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
-    expect(subscribeCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(createSubscriptionCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  // =========================================================================
+  // 2-phase subscribe lifecycle
+  // =========================================================================
+
+  it("createSubscription is called synchronously, executeSubscription is deferred", async () => {
+    const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {});
+
+    expect(createSubscriptionCalls).toHaveLength(1);
+    expect(executeSubscriptionCalls).toHaveLength(0);
+
+    await flushMicrotasks();
+    expect(executeSubscriptionCalls).toHaveLength(1);
+  });
+
+  it("returns the handle from runtime.createSubscription", () => {
+    const { client } = makeClient();
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    expect(subId).toBe(0);
+    const subId2 = client.subscribe('{"table":"todos"}', () => {});
+    expect(subId2).toBe(1);
+  });
+
+  it("unsubscribe before execute calls runtime.unsubscribe with the handle", async () => {
+    const { client, executeSubscriptionCalls, unsubscribeCalls } = makeClient();
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    client.unsubscribe(subId);
+
+    expect(unsubscribeCalls).toEqual([0]);
+
+    await flushMicrotasks();
+    // executeSubscription still fires (the runtime no-ops since handle was already unsubscribed)
+    expect(executeSubscriptionCalls).toHaveLength(1);
+  });
+
+  it("unsubscribe after execute calls runtime.unsubscribe", async () => {
+    const { client, unsubscribeCalls } = makeClient();
+    const subId = client.subscribe('{"table":"todos"}', () => {});
+    await flushMicrotasks();
+    client.unsubscribe(subId);
+    expect(unsubscribeCalls).toEqual([0]);
+  });
+
+  it("unsubscribe unknown handle is a no-op", () => {
+    const { client } = makeClient();
+    expect(() => client.unsubscribe(123_456)).not.toThrow();
   });
 });

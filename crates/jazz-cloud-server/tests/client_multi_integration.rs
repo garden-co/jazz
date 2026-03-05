@@ -746,3 +746,106 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
     client.shutdown().await.expect("shutdown client");
     drop(restarted);
 }
+
+#[tokio::test]
+async fn jazz_tools_where_subscription_drops_row_when_remote_client_updates_it_out_of_filter() {
+    // client-a subscribes WHERE completed = false
+    // client-b updates the row to completed = true
+    // client-a's subscription should emit a Removed delta for the row
+    //
+    //  client-a ──► subscribe(WHERE completed = false) ──► [row-1 added]
+    //  client-b ──► update(row-1, completed = true)
+    //  client-a ◄── subscription delta: removed = [row-1]
+
+    let jwks_server = JwksServer::start().await;
+    let server_data = TempDir::new().expect("temp server dir");
+    let server = ServerProcess::start(server_data.path()).await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+    let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+
+    let client_a_dir = TempDir::new().expect("client a dir");
+    let client_a = JazzClient::connect(make_context(
+        app_id,
+        server.base_url(),
+        client_a_dir.path().to_path_buf(),
+        make_jwt("where-exit-client-a"),
+    ))
+    .await
+    .expect("connect client a");
+
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
+
+    let client_b_dir = TempDir::new().expect("client b dir");
+    let client_b = JazzClient::connect(make_context(
+        app_id,
+        server.base_url(),
+        client_b_dir.path().to_path_buf(),
+        make_jwt("where-exit-client-b"),
+    ))
+    .await
+    .expect("connect client b");
+
+    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+
+    // Insert via client-a so it's visible in its own subscription immediately.
+    let row_id = client_a
+        .create(
+            "todos",
+            vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("client a create todo");
+
+    // client-a subscribes with WHERE completed = false.
+    let where_query = QueryBuilder::new("todos")
+        .filter_eq("completed", Value::Boolean(false))
+        .build();
+    let mut stream = client_a
+        .subscribe(where_query)
+        .await
+        .expect("client a subscribe");
+
+    // Wait for the row to appear in client-a's subscription.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for row to appear in WHERE subscription"
+        );
+        let delta = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("stream closed before row appeared")
+            .expect("stream ended before row appeared");
+        if delta.added.iter().any(|a| a.id == row_id) {
+            break;
+        }
+    }
+
+    // Wait for client-b to have the row before updating it.
+    wait_for_todos_count(&client_b, 1, Duration::from_secs(30), None).await;
+
+    // client-b updates the row to completed = true, taking it outside the WHERE filter.
+    client_b
+        .update(
+            row_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .await
+        .expect("client b update todo");
+
+    // client-a's subscription must emit a Removed delta for the row.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out: WHERE subscription never dropped row after remote update to completed=true"
+        );
+        let delta = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("stream closed before row was removed")
+            .expect("stream ended before row was removed");
+        if delta.removed.iter().any(|r| r.id == row_id) {
+            return; // pass
+        }
+    }
+}
