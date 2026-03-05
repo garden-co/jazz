@@ -9,6 +9,7 @@
     "reading-data",
     "writing-data",
     "permissions",
-    "migrations"
+    "migrations",
+    "mcp"
   ]
 }
