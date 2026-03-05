@@ -165,4 +165,14 @@ export default defineConfig([
     },
     outDir: "dist/better-auth/database-adapter",
   },
+  {
+    ...cfg,
+    splitting: false,
+    entry: {
+      server: "src/mcp/server.ts",
+      "build-index": "src/mcp/build-index.ts",
+    },
+    outDir: "dist/mcp",
+    platform: "node",
+  },
 ]);
