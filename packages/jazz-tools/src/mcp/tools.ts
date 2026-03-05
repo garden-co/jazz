@@ -60,6 +60,15 @@ function rpcError(code: number, message: string): RpcError {
   return Object.assign(new Error(message), { code });
 }
 
+/** Thrown for tool-execution failures (e.g. page not found, unknown tool).
+ *  These are surfaced to the model as isError:true rather than JSON-RPC errors. */
+export class ToolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ToolError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ANSI helpers (no dependencies)
 // ---------------------------------------------------------------------------
@@ -198,7 +207,7 @@ export function callTool(
       }
       const result = backend.getDoc(slug);
       if (!result) {
-        throw rpcError(-32001, `get_doc: page not found: ${slug}`);
+        throw new ToolError(`get_doc: page not found: ${slug}`);
       }
       return formatDoc(result);
     }
@@ -207,6 +216,6 @@ export function callTool(
       return formatPageList(backend.listPages());
 
     default:
-      throw rpcError(-32601, `Unknown tool: ${name}`);
+      throw new ToolError(`Unknown tool: ${name}`);
   }
 }
