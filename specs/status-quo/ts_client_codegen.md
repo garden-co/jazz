@@ -105,6 +105,13 @@ Generates fluent, immutable query builders per table:
 
 `createDb(config)` is the main entry point for application code. It's async because it pre-loads the WASM module. Once initialized, mutations apply local-first immediately and return promises that resolve at the configured durability tier. The Db lazily creates and memoizes `JazzClient` instances per schema hash, so multiple schemas can coexist in one app.
 
+Runtime driver mode is explicit in `DbConfig`:
+
+- `driver: { type: "persistent", dbName? }` (default when omitted)
+- `driver: { type: "memory" }` (requires `serverUrl`, disables browser worker/OPFS path)
+
+In memory mode with `serverUrl`, default durability tier is `edge`.
+
 > `packages/jazz-tools/src/runtime/db.ts:93-450` (Db class)
 > `packages/jazz-tools/src/runtime/db.ts:479-484` (createDb factory)
 

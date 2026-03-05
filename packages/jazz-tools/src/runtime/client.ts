@@ -124,6 +124,10 @@ export interface LinkExternalIdentityOptions {
 
 export type LinkExternalIdentityResult = LinkExternalResponse;
 
+export interface ConnectSyncRuntimeOptions {
+  useBinaryEncoding?: boolean;
+}
+
 /**
  * QueryBuilder-compatible input accepted by query and subscribe APIs.
  */
@@ -478,7 +482,11 @@ export class JazzClient {
    * @param context Application context with driver and schema
    * @returns Connected JazzClient instance (created synchronously)
    */
-  static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+  static connectSync(
+    wasmModule: WasmModule,
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Create WASM runtime (storage is now synchronous in-memory)
@@ -489,6 +497,7 @@ export class JazzClient {
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
       resolveNodeTier(resolvedContext.tier),
+      runtimeOptions?.useBinaryEncoding ?? false,
     );
 
     const client = new JazzClient(
@@ -870,11 +879,6 @@ export class JazzClient {
    */
   async shutdown(): Promise<void> {
     this.streamController.stop();
-
-    // Close driver if it supports it
-    if (this.context.driver?.close) {
-      await this.context.driver.close();
-    }
 
     // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
     if (this.runtime.close) {

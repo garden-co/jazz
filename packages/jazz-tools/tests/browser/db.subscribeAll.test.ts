@@ -342,7 +342,7 @@ describe("db.subscribeAll browser integration", () => {
   beforeAll(async () => {
     conditionsDb = await createDb({
       appId: "db-subscribe-test",
-      dbName: uniqueDbName("filters"),
+      driver: { type: "persistent", dbName: uniqueDbName("filters") },
     });
   });
 
@@ -351,7 +351,12 @@ describe("db.subscribeAll browser integration", () => {
   });
 
   it("emits add, update, remove changes and all", async () => {
-    const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("delta") }));
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("delta") },
+      }),
+    );
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -423,7 +428,12 @@ describe("db.subscribeAll browser integration", () => {
   }
 
   it("emits BYTEA columns as Uint8Array", async () => {
-    const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("bytea") }));
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("bytea") },
+      }),
+    );
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -458,7 +468,12 @@ describe("db.subscribeAll browser integration", () => {
   });
 
   it("supports orderBy + limit + offset", async () => {
-    const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("order") }));
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("order") },
+      }),
+    );
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -505,7 +520,10 @@ describe("db.subscribeAll browser integration", () => {
 
   it("does not emit add for non-matching text contains", async () => {
     const db = track(
-      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("contains-text-miss") }),
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("contains-text-miss") },
+      }),
     );
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
@@ -534,7 +552,10 @@ describe("db.subscribeAll browser integration", () => {
 
   it("supports include query execution path", async () => {
     const db = track(
-      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("include") }),
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include") },
+      }),
     );
 
     const deltas: Array<SubscriptionDelta<User>> = [];
@@ -559,7 +580,12 @@ describe("db.subscribeAll browser integration", () => {
   });
 
   it("supports hop queries", async () => {
-    const db = track(await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("hops") }));
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("hops") },
+      }),
+    );
 
     const deltas: Array<SubscriptionDelta<Org>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -591,7 +617,10 @@ describe("db.subscribeAll browser integration", () => {
 
   it("reacts to scalar FK updates in hop subscriptions", async () => {
     const db = track(
-      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("scalar-fk-update") }),
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("scalar-fk-update") },
+      }),
     );
 
     const orgAId = await db.insert(orgs, { name: "Org A" });
@@ -647,7 +676,10 @@ describe("db.subscribeAll browser integration", () => {
 
   it("reacts to UUID[] FK updates in hop subscriptions", async () => {
     const db = track(
-      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("array-fk-update") }),
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("array-fk-update") },
+      }),
     );
 
     const partAId = await db.insert(fileParts, { label: "A" });
@@ -693,7 +725,10 @@ describe("db.subscribeAll browser integration", () => {
 
   it("supports gather queries", async () => {
     const db = track(
-      await createDb({ appId: "db-subscribe-test", dbName: uniqueDbName("gather") }),
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("gather") },
+      }),
     );
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
