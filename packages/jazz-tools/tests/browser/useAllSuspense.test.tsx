@@ -318,7 +318,7 @@ describe("useAllSuspense browser integration", () => {
   beforeAll(async () => {
     conditionsClient = await createJazzClient({
       appId: uniqueId("operators"),
-      dbName: uniqueId("operators"),
+      driver: { type: "persistent", dbName: uniqueId("operators") },
     });
   });
 
@@ -368,7 +368,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("order"),
-        dbName: uniqueId("order"),
+        driver: { type: "persistent", dbName: uniqueId("order") },
       }),
     );
 
@@ -417,7 +417,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("contains-text-miss"),
-        dbName: uniqueId("contains-text-miss"),
+        driver: { type: "persistent", dbName: uniqueId("contains-text-miss") },
       }),
     );
 
@@ -448,7 +448,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("include"),
-        dbName: uniqueId("include"),
+        driver: { type: "persistent", dbName: uniqueId("include") },
       }),
     );
 
@@ -482,7 +482,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("hops"),
-        dbName: uniqueId("hops"),
+        driver: { type: "persistent", dbName: uniqueId("hops") },
       }),
     );
 
@@ -515,7 +515,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("gather"),
-        dbName: uniqueId("gather"),
+        driver: { type: "persistent", dbName: uniqueId("gather") },
       }),
     );
 
@@ -562,7 +562,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("query-change"),
-        dbName: uniqueId("query-change"),
+        driver: { type: "persistent", dbName: uniqueId("query-change") },
       }),
     );
 

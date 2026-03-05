@@ -330,12 +330,14 @@ impl Scheduler for WasmScheduler {
 /// The callback is set lazily via `on_sync_message_to_send()`.
 pub struct JsSyncSender {
     callback: RefCell<Option<Function>>,
+    use_binary_encoding: bool,
 }
 
 impl JsSyncSender {
-    fn new() -> Self {
+    fn new(use_binary_encoding: bool) -> Self {
         Self {
             callback: RefCell::new(None),
+            use_binary_encoding,
         }
     }
 
@@ -345,15 +347,14 @@ impl JsSyncSender {
 }
 
 impl SyncSender for JsSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry, sender_tier: &'static str) {
+    fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
             let is_catalogue = message.payload.is_catalogue();
             let (destination_kind, destination_id) = match message.destination {
                 Destination::Server(server_id) => ("server", server_id.0.to_string()),
                 Destination::Client(client_id) => ("client", client_id.0.to_string()),
             };
-            let use_binary_encoding = sender_tier == "client" || destination_kind == "client";
-            if use_binary_encoding {
+            if self.use_binary_encoding || destination_kind == "client" {
                 if let Ok(payload_bytes) = message.payload.to_bytes() {
                     let payload_js = Uint8Array::from(payload_bytes.as_slice());
                     let _ = callback.call4(
@@ -408,6 +409,8 @@ impl WasmRuntime {
     /// * `user_branch` - User's branch name (e.g., "main")
     /// * `tier` - Optional node durability tier ("worker", "edge", "global").
     ///            Set for server nodes to enable ack emission.
+    /// * `use_binary_encoding` - Optional outgoing sync payload encoding mode.
+    ///   `Some(true)` emits postcard bytes (`Uint8Array`), otherwise JSON strings.
     #[wasm_bindgen(constructor)]
     pub fn new(
         schema_json: &str,
@@ -415,6 +418,7 @@ impl WasmRuntime {
         env: &str,
         user_branch: &str,
         tier: Option<String>,
+        use_binary_encoding: Option<bool>,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
@@ -455,7 +459,7 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new();
+        let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
@@ -1065,6 +1069,7 @@ impl WasmRuntime {
         user_branch: &str,
         db_name: &str,
         tier: Option<String>,
+        use_binary_encoding: bool,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
@@ -1121,7 +1126,7 @@ impl WasmRuntime {
         schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new();
+        let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);

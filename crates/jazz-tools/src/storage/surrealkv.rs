@@ -477,6 +477,10 @@ impl Storage for SurrealKvStorage {
         let _span = tracing::debug_span!("SurrealKvStorage::flush_wal").entered();
         self.flush();
     }
+
+    fn close(&self) -> Result<(), StorageError> {
+        SurrealKvStorage::close(self)
+    }
 }
 
 #[cfg(test)]

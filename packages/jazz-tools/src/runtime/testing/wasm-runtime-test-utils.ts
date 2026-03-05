@@ -87,7 +87,13 @@ function loadWasmModule(): Promise<any> {
 
 export async function createWasmRuntime(
   schema: WasmSchema,
-  opts?: { appId?: string; env?: string; userBranch?: string; tier?: string },
+  opts?: {
+    appId?: string;
+    env?: string;
+    userBranch?: string;
+    tier?: string;
+    useBinaryEncoding?: boolean;
+  },
 ): Promise<TestRuntime> {
   const wasmModule = await loadWasmModule();
   const runtime = new wasmModule.WasmRuntime(
@@ -96,6 +102,7 @@ export async function createWasmRuntime(
     opts?.env ?? "test",
     opts?.userBranch ?? "main",
     opts?.tier,
+    opts?.useBinaryEncoding,
   );
 
   onTestFinished(async () => {

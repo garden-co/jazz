@@ -31,7 +31,7 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::{Storage, SurrealKvStorage};
+use jazz_tools::storage::{MemoryStorage, Storage, SurrealKvStorage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
@@ -213,7 +213,7 @@ fn make_subscription_callback(
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<SurrealKvStorage, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
@@ -286,7 +286,7 @@ impl NapiSyncSender {
 }
 
 impl SyncSender for NapiSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
+    fn send_sync_message(&self, message: OutboxEntry) {
         let cb = match self.callback.lock() {
             Ok(cb) => cb,
             Err(_) => return,
@@ -312,6 +312,89 @@ impl SyncSender for NapiSyncSender {
     }
 }
 
+fn build_napi_runtime(
+    env: Env,
+    schema_json: String,
+    app_id: String,
+    jazz_env: String,
+    user_branch: String,
+    storage: Box<dyn Storage + Send>,
+    tier: Option<String>,
+) -> napi::Result<NapiRuntime> {
+    // Parse schema
+    let schema: Schema = serde_json::from_str(&schema_json)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
+
+    // Parse optional tier
+    let node_tiers = parse_node_durability_tier(tier)?;
+
+    // Create sync manager
+    let mut sync_manager = SyncManager::new();
+    if !node_tiers.is_empty() {
+        sync_manager = sync_manager.with_durability_tiers(node_tiers);
+    }
+
+    // Create schema manager
+    let schema_manager = SchemaManager::new(
+        sync_manager,
+        schema,
+        AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
+        &jazz_env,
+        &user_branch,
+    )
+    .map_err(|e| napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e)))?;
+
+    // Create components
+    let scheduler = NapiScheduler::new();
+    let sync_sender = NapiSyncSender::new();
+
+    // Create RuntimeCore and wrap
+    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let core_arc = Arc::new(Mutex::new(core));
+
+    // Set up the scheduler's TSFN
+    {
+        let core_weak = Arc::downgrade(&core_arc);
+        let scheduled_flag = {
+            let core_guard = core_arc
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core_guard.scheduler().scheduled.clone()
+        };
+
+        let core_ref_for_tsfn = core_weak.clone();
+        let flag_for_tsfn = scheduled_flag;
+
+        let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
+            // Reset flag first so new ticks can be scheduled
+            flag_for_tsfn.store(false, Ordering::SeqCst);
+            if let Some(core_arc) = core_ref_for_tsfn.upgrade()
+                && let Ok(mut core) = core_arc.lock()
+            {
+                core.batched_tick();
+            }
+            Ok(())
+        })?;
+
+        let tsfn = tick_fn.build_threadsafe_function().weak::<true>().build()?;
+
+        // Set on scheduler
+        let mut core_guard = core_arc
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core_guard.scheduler_mut().set_core_ref(core_weak);
+        core_guard.scheduler_mut().set_tsfn(tsfn);
+
+        // Persist schema to catalogue for server sync
+        core_guard.persist_schema();
+    }
+
+    Ok(NapiRuntime {
+        core: core_arc,
+        upstream_server_id: Mutex::new(None),
+    })
+}
+
 // ============================================================================
 // NapiRuntime
 // ============================================================================
@@ -335,87 +418,41 @@ impl NapiRuntime {
         data_path: String,
         tier: Option<String>,
     ) -> napi::Result<Self> {
-        // Parse schema
-        let schema: Schema = serde_json::from_str(&schema_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-
-        // Parse optional tier
-        let node_tiers = parse_node_durability_tier(tier)?;
-
-        // Create sync manager
-        let mut sync_manager = SyncManager::new();
-        if !node_tiers.is_empty() {
-            sync_manager = sync_manager.with_durability_tiers(node_tiers);
-        }
-
-        // Create schema manager
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
-            &jazz_env,
-            &user_branch,
-        )
-        .map_err(|e| {
-            napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e))
-        })?;
-
         // Create SurrealKvStorage
         let cache_size = 64 * 1024 * 1024; // 64MB default
         let storage = SurrealKvStorage::open(&data_path, cache_size)
             .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))?;
 
-        // Create components
-        let scheduler = NapiScheduler::new();
-        let sync_sender = NapiSyncSender::new();
+        build_napi_runtime(
+            env,
+            schema_json,
+            app_id,
+            jazz_env,
+            user_branch,
+            Box::new(storage),
+            tier,
+        )
+    }
 
-        // Create RuntimeCore and wrap
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
-        let core_arc = Arc::new(Mutex::new(core));
-
-        // Set up the scheduler's TSFN
-        {
-            let core_weak = Arc::downgrade(&core_arc);
-            let scheduled_flag = {
-                let core_guard = core_arc
-                    .lock()
-                    .map_err(|_| napi::Error::from_reason("lock"))?;
-                core_guard.scheduler().scheduled.clone()
-            };
-
-            // Create a JS function whose closure does the real work (batched_tick).
-            // The TSFN just schedules this function on the Node.js event loop.
-            let core_ref_for_tsfn = core_weak.clone();
-            let flag_for_tsfn = scheduled_flag;
-
-            let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
-                // Reset flag first so new ticks can be scheduled
-                flag_for_tsfn.store(false, Ordering::SeqCst);
-                if let Some(core_arc) = core_ref_for_tsfn.upgrade()
-                    && let Ok(mut core) = core_arc.lock()
-                {
-                    core.batched_tick();
-                }
-                Ok(())
-            })?;
-
-            let tsfn = tick_fn.build_threadsafe_function().weak::<true>().build()?;
-
-            // Set on scheduler
-            let mut core_guard = core_arc
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core_guard.scheduler_mut().set_core_ref(core_weak);
-            core_guard.scheduler_mut().set_tsfn(tsfn);
-
-            // Persist schema to catalogue for server sync
-            core_guard.persist_schema();
-        }
-
-        Ok(NapiRuntime {
-            core: core_arc,
-            upstream_server_id: Mutex::new(None),
-        })
+    /// Create a new NapiRuntime with in-memory storage (no local persistence).
+    #[napi(js_name = "inMemory")]
+    pub fn in_memory(
+        env: Env,
+        schema_json: String,
+        app_id: String,
+        jazz_env: String,
+        user_branch: String,
+        tier: Option<String>,
+    ) -> napi::Result<Self> {
+        build_napi_runtime(
+            env,
+            schema_json,
+            app_id,
+            jazz_env,
+            user_branch,
+            Box::new(MemoryStorage::new()),
+            tier,
+        )
     }
 
     // =========================================================================
