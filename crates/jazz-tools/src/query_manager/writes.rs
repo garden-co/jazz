@@ -362,7 +362,12 @@ impl QueryManager {
                 }
                 Ok(())
             }
-            (ColumnType::Row { columns: desc }, Value::Row(row_values)) => {
+            (
+                ColumnType::Row { columns: desc },
+                Value::Row {
+                    values: row_values, ..
+                },
+            ) => {
                 for (idx, row_col) in desc.columns.iter().enumerate() {
                     let Some(row_value) = row_values.get(idx) else {
                         break;

@@ -1092,7 +1092,7 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
                 encode_value(buf, elem);
             }
         }
-        Value::Row(values) => {
+        Value::Row { values, .. } => {
             buf.push(VALUE_ROW);
             write_u32(buf, values.len() as u32);
             for v in values {
@@ -1161,7 +1161,7 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
             for _ in 0..count {
                 values.push(decode_value(data, offset)?);
             }
-            Ok(Value::Row(values))
+            Ok(Value::Row { id: None, values })
         }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
@@ -1739,7 +1739,10 @@ mod tests {
             Value::Uuid(ObjectId::from_uuid(uuid::Uuid::from_u128(0xDEADBEEF))),
             Value::Bytea(vec![0, 1, 2, 3, 0, 255]),
             Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
-            Value::Row(vec![Value::Text("a".to_string()), Value::Boolean(false)]),
+            Value::Row {
+                id: None,
+                values: vec![Value::Text("a".to_string()), Value::Boolean(false)],
+            },
         ];
 
         for original in values {

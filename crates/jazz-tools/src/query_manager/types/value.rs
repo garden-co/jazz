@@ -25,7 +25,12 @@ pub enum Value {
     Array(Vec<Value>),
     /// Heterogeneous row/tuple of values (for nested rows in arrays).
     /// The schema is external (from ColumnType::Row).
-    Row(Vec<Value>),
+    /// `id` carries the originating object's id when this Row came from an
+    /// included relation so the TS layer can surface it.
+    Row {
+        id: Option<ObjectId>,
+        values: Vec<Value>,
+    },
     Null,
 }
 
@@ -42,8 +47,15 @@ enum ValueHuman {
     Uuid(ObjectId),
     Bytea(Vec<u8>),
     Array(Vec<ValueHuman>),
-    Row(Vec<ValueHuman>),
+    Row(RowHuman),
     Null,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RowHuman {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<ObjectId>,
+    values: Vec<ValueHuman>,
 }
 
 /// Use externally-tagged enum for binary serialization (postcard does not support internally-tagged enums).
@@ -74,7 +86,10 @@ impl From<&Value> for ValueHuman {
             Value::Uuid(v) => ValueHuman::Uuid(*v),
             Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
             Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
-            Value::Row(v) => ValueHuman::Row(v.iter().map(ValueHuman::from).collect()),
+            Value::Row { id, values } => ValueHuman::Row(RowHuman {
+                id: *id,
+                values: values.iter().map(ValueHuman::from).collect(),
+            }),
             Value::Null => ValueHuman::Null,
         }
     }
@@ -92,7 +107,10 @@ impl From<ValueHuman> for Value {
             ValueHuman::Uuid(v) => Value::Uuid(v),
             ValueHuman::Bytea(v) => Value::Bytea(v),
             ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueHuman::Row(v) => Value::Row(v.into_iter().map(Value::from).collect()),
+            ValueHuman::Row(r) => Value::Row {
+                id: r.id,
+                values: r.values.into_iter().map(Value::from).collect(),
+            },
             ValueHuman::Null => Value::Null,
         }
     }
@@ -110,7 +128,9 @@ impl From<&Value> for ValueBinary {
             Value::Uuid(v) => ValueBinary::Uuid(*v),
             Value::Bytea(v) => ValueBinary::Bytea(v.clone()),
             Value::Array(v) => ValueBinary::Array(v.iter().map(ValueBinary::from).collect()),
-            Value::Row(v) => ValueBinary::Row(v.iter().map(ValueBinary::from).collect()),
+            Value::Row { values, .. } => {
+                ValueBinary::Row(values.iter().map(ValueBinary::from).collect())
+            }
             Value::Null => ValueBinary::Null,
         }
     }
@@ -128,7 +148,10 @@ impl From<ValueBinary> for Value {
             ValueBinary::Uuid(v) => Value::Uuid(v),
             ValueBinary::Bytea(v) => Value::Bytea(v),
             ValueBinary::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueBinary::Row(v) => Value::Row(v.into_iter().map(Value::from).collect()),
+            ValueBinary::Row(v) => Value::Row {
+                id: None,
+                values: v.into_iter().map(Value::from).collect(),
+            },
             ValueBinary::Null => Value::Null,
         }
     }
@@ -172,7 +195,16 @@ impl PartialEq for Value {
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
-            (Value::Row(a), Value::Row(b)) => a == b,
+            (
+                Value::Row {
+                    id: id_a,
+                    values: a,
+                },
+                Value::Row {
+                    id: id_b,
+                    values: b,
+                },
+            ) => id_a == id_b && a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -204,7 +236,7 @@ impl Value {
                     })
             }
             // Row type requires external schema, can't be inferred
-            Value::Row(_) => None,
+            Value::Row { .. } => None,
             Value::Null => None,
         }
     }
@@ -221,7 +253,7 @@ impl Value {
 
     /// Returns true if this is a Row value.
     pub fn is_row(&self) -> bool {
-        matches!(self, Value::Row(_))
+        matches!(self, Value::Row { .. })
     }
 
     /// Returns the array elements if this is an Array, None otherwise.
@@ -235,7 +267,15 @@ impl Value {
     /// Returns the row values if this is a Row, None otherwise.
     pub fn as_row(&self) -> Option<&[Value]> {
         match self {
-            Value::Row(values) => Some(values),
+            Value::Row { values, .. } => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Returns the row id if this is a Row with an id, None otherwise.
+    pub fn row_id(&self) -> Option<ObjectId> {
+        match self {
+            Value::Row { id, .. } => *id,
             _ => None,
         }
     }
