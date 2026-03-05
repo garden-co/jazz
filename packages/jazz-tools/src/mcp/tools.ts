@@ -59,6 +59,19 @@ function rpcError(code: number, message: string): RpcError {
   return Object.assign(new Error(message), { code });
 }
 
+/**
+ * Thrown for tool-execution failures (e.g. page not found).
+ * The server returns these as a successful JSON-RPC result with isError: true
+ * so the model can read the message and recover (e.g. retry with a corrected slug).
+ */
+export class ToolError extends Error {
+  readonly isToolError = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "ToolError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ANSI helpers (no dependencies)
 // ---------------------------------------------------------------------------
@@ -182,7 +195,9 @@ export function callTool(
       }
       const result = backend.getDoc(slug);
       if (!result) {
-        throw rpcError(-32001, `get_doc: page not found: ${slug}`);
+        throw new ToolError(
+          `get_doc: page not found: "${slug}". Use list_pages to find valid slugs.`,
+        );
       }
       return formatDoc(result);
     }
@@ -191,6 +206,6 @@ export function callTool(
       return formatPageList(backend.listPages());
 
     default:
-      throw rpcError(-32601, `Unknown tool: ${name}`);
+      throw new ToolError(`Unknown tool: "${name}". Use tools/list to see available tools.`);
   }
 }

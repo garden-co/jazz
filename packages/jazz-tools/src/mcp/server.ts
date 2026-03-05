@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DocsBackend } from "./backend-sqlite.js";
-import { callTool, toolDefinitions } from "./tools.js";
+import { callTool, toolDefinitions, ToolError } from "./tools.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -117,15 +117,29 @@ export async function runServer(opts: RunServerOptions = {}): Promise<void> {
             },
           });
         } catch (err: unknown) {
-          const e = err as { code?: number; message?: string };
-          write({
-            jsonrpc: "2.0",
-            id,
-            error: {
-              code: e.code ?? -32603,
-              message: e.message ?? "Internal error",
-            },
-          });
+          if (err instanceof ToolError) {
+            // Tool-execution failure: surface as a successful result so the
+            // model can read the message and recover (MCP spec §tool-errors).
+            write({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                content: [{ type: "text", text: err.message }],
+                isError: true,
+              },
+            });
+          } else {
+            // Protocol-level failure (e.g. malformed params).
+            const e = err as { code?: number; message?: string };
+            write({
+              jsonrpc: "2.0",
+              id,
+              error: {
+                code: e.code ?? -32603,
+                message: e.message ?? "Internal error",
+              },
+            });
+          }
         }
         break;
       }

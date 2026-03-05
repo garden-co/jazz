@@ -187,6 +187,35 @@ describe("MCP integration: full lifecycle", () => {
     expect(text).toContain("Authentication");
   });
 
+  it("get_doc with unknown slug → isError result so the model can recover", async () => {
+    server.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "get_doc", arguments: { slug: "no-such-page" } },
+    });
+    const res = await server.recv();
+    // Must be a successful JSON-RPC result (not a JSON-RPC error) so the
+    // model can read the message and retry with a corrected slug.
+    expect(res.error).toBeUndefined();
+    const result = res.result as Record<string, unknown>;
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("no-such-page");
+  });
+
+  it("unknown tool name → isError result so the model can recover", async () => {
+    server.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: { name: "nonexistent_tool", arguments: {} },
+    });
+    const res = await server.recv();
+    expect(res.error).toBeUndefined();
+    expect((res.result as Record<string, unknown>).isError).toBe(true);
+  });
+
   it("stdin EOF → process exits cleanly with code 0", async () => {
     const exitCode = await server.close();
     expect(exitCode).toBe(0);
