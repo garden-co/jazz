@@ -122,7 +122,7 @@ describe("search()", () => {
     expect(typeof result.snippet).toBe("string");
   });
 
-  it("section field maps to the ## heading of the matching section", async () => {
+  it("section maps to the ## heading of the matching section", async () => {
     const backend = await createNaiveBackend(txtPath);
     const [result] = backend.search("installation", 1);
     expect(result.section).toBe("Installation");

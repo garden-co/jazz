@@ -161,7 +161,7 @@ describe("search()", () => {
     expect(typeof result.snippet).toBe("string");
   });
 
-  it("section maps to the section_heading of the matching row", async () => {
+  it("section maps to the ## heading of the matching section", async () => {
     const backend = await createSqliteBackend(dbPath);
     const [result] = backend.search("installation", 1);
     expect(result.section).toBe("Installation");
@@ -173,10 +173,15 @@ describe("search()", () => {
     expect(results.length).toBeLessThanOrEqual(2);
   });
 
-  it("returns empty array when no matches", async () => {
+  it("returns empty array when no section matches", async () => {
     const backend = await createSqliteBackend(dbPath);
-    const results = backend.search("xyzzy_no_match_at_all", 10);
-    expect(results).toEqual([]);
+    expect(backend.search("xyzzy_no_match_at_all", 10)).toEqual([]);
+  });
+
+  it("snippet is a non-empty string", async () => {
+    const backend = await createSqliteBackend(dbPath);
+    const [result] = backend.search("installation", 1);
+    expect(result.snippet.length).toBeGreaterThan(0);
   });
 
   it("orders results by relevance (most relevant first)", async () => {
@@ -239,8 +244,7 @@ describe("getDoc()", () => {
 describe("listPages()", () => {
   it("returns all pages", async () => {
     const backend = await createSqliteBackend(dbPath);
-    const pages = backend.listPages();
-    expect(pages.length).toBe(3);
+    expect(backend.listPages()).toHaveLength(3);
   });
 
   it("each entry has title, slug, description", async () => {
@@ -249,6 +253,14 @@ describe("listPages()", () => {
     expect(typeof page.title).toBe("string");
     expect(typeof page.slug).toBe("string");
     expect(typeof page.description).toBe("string");
+  });
+
+  it("all three fixture slugs are present", async () => {
+    const backend = await createSqliteBackend(dbPath);
+    const slugs = backend.listPages().map((p) => p.slug);
+    expect(slugs).toContain("getting-started");
+    expect(slugs).toContain("reading-data");
+    expect(slugs).toContain("writing-data");
   });
 
   it("description comes from the pages table (not derived)", async () => {

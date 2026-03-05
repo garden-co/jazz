@@ -247,7 +247,7 @@ describe("tools/call get_doc", () => {
     expect(text).toContain("npm install jazz-tools");
   });
 
-  it("returns error when slug param is missing", async () => {
+  it("returns JSON-RPC error when slug param is missing", async () => {
     const [res] = await exchange([
       {
         jsonrpc: "2.0",
@@ -257,6 +257,23 @@ describe("tools/call get_doc", () => {
       },
     ]);
     expect((res.error as any).code).toBe(-32602);
+  });
+
+  it("returns isError result when slug does not exist", async () => {
+    const [res] = await exchange([
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "get_doc", arguments: { slug: "no-such-page" } },
+      },
+    ]);
+    // Must be a successful JSON-RPC result (not a JSON-RPC error)
+    // so the model can read the message and recover.
+    expect(res.error).toBeUndefined();
+    expect((res.result as any).isError).toBe(true);
+    const text = (res.result as any).content[0].text as string;
+    expect(text).toContain("no-such-page");
   });
 });
 
@@ -277,8 +294,8 @@ describe("tools/call list_pages", () => {
   });
 });
 
-describe("tools/call — error cases", () => {
-  it("unknown tool name returns JSON-RPC error", async () => {
+describe("tools/call error cases", () => {
+  it("unknown tool name returns isError result so the model can recover", async () => {
     const [res] = await exchange([
       {
         jsonrpc: "2.0",
@@ -287,7 +304,8 @@ describe("tools/call — error cases", () => {
         params: { name: "nonexistent_tool", arguments: {} },
       },
     ]);
-    expect(res.error).toBeDefined();
+    expect(res.error).toBeUndefined();
+    expect((res.result as any).isError).toBe(true);
   });
 });
 
