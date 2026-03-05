@@ -4,9 +4,9 @@
  * Connects QueryBuilder to JazzClient for actual query execution.
  * Handles query translation, execution, and result transformation.
  *
- * Key design: Mutations are SYNC after WASM pre-loading.
+ * Key design:
  * - createDb() is async (pre-loads WASM module)
- * - insert/update/deleteFrom are sync (operate on in-memory WASM runtime)
+ * - insert/update/deleteFrom are async (await WASM bridge readiness, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
@@ -320,10 +320,10 @@ function isLeaderDebugEnabled(): boolean {
  * ```typescript
  * const db = await createDb({ appId: "my-app", driver });
  *
- * // Sync mutations (after WASM is pre-loaded)
- * const id = db.insert(app.todos, { title: "Buy milk", done: false });
- * db.update(app.todos, id, { done: true });
- * db.deleteFrom(app.todos, id);
+ * // Async mutations
+ * const id = await db.insert(app.todos, { title: "Buy milk", done: false });
+ * await db.update(app.todos, id, { done: true });
+ * await db.deleteFrom(app.todos, id);
  *
  * // Async queries (need storage I/O)
  * const todos = await db.all(app.todos.where({ done: false }));
@@ -1176,7 +1176,7 @@ function isBrowser(): boolean {
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the WASM module.
- * After creation, mutations (insert/update/deleteFrom) are synchronous.
+ * After creation, mutations (insert/update/deleteFrom) are async and return Promises.
  *
  * In browser environments, automatically uses a dedicated worker for
  * OPFS persistence. In Node.js, uses in-memory storage.
