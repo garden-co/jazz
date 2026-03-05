@@ -47,8 +47,15 @@ enum ValueHuman {
     Uuid(ObjectId),
     Bytea(Vec<u8>),
     Array(Vec<ValueHuman>),
-    Row(Vec<ValueHuman>),
+    Row(RowHuman),
     Null,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RowHuman {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<ObjectId>,
+    values: Vec<ValueHuman>,
 }
 
 /// Use externally-tagged enum for binary serialization (postcard does not support internally-tagged enums).
@@ -79,9 +86,10 @@ impl From<&Value> for ValueHuman {
             Value::Uuid(v) => ValueHuman::Uuid(*v),
             Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
             Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
-            Value::Row { values, .. } => {
-                ValueHuman::Row(values.iter().map(ValueHuman::from).collect())
-            }
+            Value::Row { id, values } => ValueHuman::Row(RowHuman {
+                id: *id,
+                values: values.iter().map(ValueHuman::from).collect(),
+            }),
             Value::Null => ValueHuman::Null,
         }
     }
@@ -99,9 +107,9 @@ impl From<ValueHuman> for Value {
             ValueHuman::Uuid(v) => Value::Uuid(v),
             ValueHuman::Bytea(v) => Value::Bytea(v),
             ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueHuman::Row(v) => Value::Row {
-                id: None,
-                values: v.into_iter().map(Value::from).collect(),
+            ValueHuman::Row(r) => Value::Row {
+                id: r.id,
+                values: r.values.into_iter().map(Value::from).collect(),
             },
             ValueHuman::Null => Value::Null,
         }
