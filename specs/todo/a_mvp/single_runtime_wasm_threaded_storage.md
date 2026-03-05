@@ -58,7 +58,7 @@ The `Storage` trait is synchronous today — `index_range()` returns rows immedi
 
 The solution has two parts:
 
-1. **Cache in main-thread memory, persist on the worker thread.** The main-thread storage adapter holds an in-memory B-tree (or simpler structure) that serves all reads synchronously. Writes go to both the in-memory cache and (asynchronously) to the OPFS worker.
+1. **Cache in main-thread memory, persist on the worker thread.** The main-thread storage adapter holds a `BTreeMap<Vec<u8>, Vec<u8>>` that serves all reads synchronously. No page layout, no superblock, no file abstraction — just a plain sorted map. `BTreeMap` over `HashMap` because `index_range` needs prefix-based range scans. Writes go to both the in-memory map and (asynchronously) to the OPFS worker.
 
 2. **On startup, rehydrate from OPFS.** The worker thread reads the full persistent state and sends it to the main thread before the runtime becomes ready. After that, the in-memory cache is the source of truth for reads; the OPFS worker is a durable write-behind replica.
 
@@ -71,6 +71,7 @@ WASM threads via `SharedArrayBuffer` + `Atomics` require COOP/COEP headers and h
 **Spawn a Dedicated Worker from Rust** using `web_sys::Worker`. Communication uses `postMessage` — but this is a **private internal channel** between Rust on the main thread and Rust on the worker thread, not a JS-level protocol.
 
 The worker thread:
+
 - Loads the same WASM module
 - Opens `FileSystemSyncAccessHandle` (available because it's a Dedicated Worker)
 - Listens for storage commands (put, checkpoint, etc.)
@@ -104,36 +105,49 @@ These are serialized with postcard (already a dependency) over `postMessage` usi
 
 ```rust
 pub struct ThreadedOpfsStorage {
-    /// In-memory B-tree serving all synchronous reads.
-    cache: OpfsBTree<MemoryFile>,
+    /// Plain sorted map serving all synchronous reads. BTreeMap because
+    /// index_range needs prefix-based range scans. No page layout, no
+    /// superblock — the OPFS B-tree complexity lives only on the worker.
+    cache: BTreeMap<Vec<u8>, Vec<u8>>,
     /// Handle to the worker thread for write-behind.
     worker: WorkerHandle,
-    /// Pending writes not yet checkpointed to OPFS.
-    dirty: bool,
+    /// True if any StoragePut/StorageDelete has been sent since the last
+    /// Checkpoint command. Used only to skip no-op checkpoint triggers —
+    /// the worker's OpfsBTree tracks per-page dirtiness internally.
+    has_pending_writes: bool,
 }
 
 impl Storage for ThreadedOpfsStorage {
     fn append_commit(...) -> Result<...> {
-        // 1. Write to in-memory cache (synchronous, immediate)
-        self.cache.insert(key, value)?;
+        // 1. Write to in-memory map (synchronous, immediate)
+        self.cache.insert(key.clone(), value.clone());
         // 2. Queue write to OPFS worker (fire-and-forget postMessage)
         self.worker.send(StoragePut { key, value });
-        self.dirty = true;
+        self.has_pending_writes = true;
         Ok(...)
     }
 
     fn index_range(...) -> Result<Vec<...>> {
-        // Pure in-memory read — instant
-        self.cache.range(prefix)
+        // BTreeMap::range with prefix bounds — instant
+        self.cache.range(prefix_start..prefix_end)
     }
     // ... etc
 }
 ```
 
+**Dirty tracking is split across two layers:**
+
+1. `has_pending_writes` (main thread, `ThreadedOpfsStorage`) — coarse boolean. "Have I sent any `StoragePut`/`StorageDelete` since the last `Checkpoint`?" Used solely to avoid sending pointless `Checkpoint` commands when nothing changed. Reset to `false` after sending `Checkpoint`.
+
+2. Per-page dirty bits (worker thread, `OpfsBTree<OpfsFile>`) — fine-grained. The worker's B-tree internally tracks which pages were modified. When it receives a `Checkpoint` command, it flushes only dirty pages to OPFS via the double-superblock-slot mechanism. This is the existing `OpfsBTree::checkpoint()` logic, unchanged.
+
+The main thread doesn't need to know _which_ pages are dirty — that's the worker's concern. It only needs to know _whether_ a checkpoint is worth requesting.
+
 Key properties:
-- **Reads are synchronous and fast** — they hit the in-memory cache only.
+
+- **Reads are synchronous and fast** — they hit the in-memory `BTreeMap` only. No page indirection, no file abstraction overhead.
 - **Writes are synchronous from the caller's perspective** — the in-memory cache is updated immediately, the OPFS write is fire-and-forget.
-- **Checkpoints are periodic** — driven by the scheduler (same as today's WAL flush on lifecycle hints).
+- **Checkpoints are periodic** — driven by the scheduler (same as today's WAL flush on lifecycle hints). Skipped when `has_pending_writes` is false.
 - **Startup is async** — rehydration must complete before the runtime is ready.
 
 ### Startup sequence
@@ -144,7 +158,7 @@ Key properties:
 3. Worker: load WASM, open OPFS FileSystemSyncAccessHandle
 4. Worker: read all B-tree entries, send RehydrationBatch messages
 5. Worker: send RehydrationComplete
-6. Main thread: populate in-memory cache from rehydration data
+6. Main thread: populate in-memory BTreeMap from rehydration key-value entries
 7. Main thread: RuntimeCore is now ready (schema rehydrated, storage populated)
 8. Main thread: connect to upstream server, accept queries
 ```
@@ -159,12 +173,12 @@ The `openPersistent()` API stays async — it already is. The difference is it n
 
 ### What gets deleted
 
-| File | LOC | Purpose | Replacement |
-|------|-----|---------|-------------|
-| `worker/jazz-worker.ts` | 655 | Worker-side runtime, server sync, peer routing | Removed — RuntimeCore on main thread handles all of this |
-| `runtime/worker-bridge.ts` | 408 | Main↔worker postMessage bridge | Removed — no bridge needed |
-| `worker/worker-protocol.ts` | ~100 | Message type definitions | Removed |
-| Main-thread MemoryStorage instance | — | RAM cache of worker state | Replaced by `ThreadedOpfsStorage` in-memory cache |
+| File                               | LOC  | Purpose                                        | Replacement                                              |
+| ---------------------------------- | ---- | ---------------------------------------------- | -------------------------------------------------------- |
+| `worker/jazz-worker.ts`            | 655  | Worker-side runtime, server sync, peer routing | Removed — RuntimeCore on main thread handles all of this |
+| `runtime/worker-bridge.ts`         | 408  | Main↔worker postMessage bridge                 | Removed — no bridge needed                               |
+| `worker/worker-protocol.ts`        | ~100 | Message type definitions                       | Removed                                                  |
+| Main-thread MemoryStorage instance | —    | RAM cache of worker state                      | Replaced by `ThreadedOpfsStorage` in-memory cache        |
 
 The server sync connection (`connectStream`, `sendToServer`, reconnect logic) moves into the main-thread runtime's sync transport — which already exists for non-worker deployments.
 
@@ -209,9 +223,10 @@ The WASM module needs to be loadable in both the main thread and the worker. Thi
 ### Rehydration cost
 
 Full rehydration on startup reads the entire OPFS B-tree and sends it to the main thread. For a 10MB database with 50k entries, this is:
+
 - Worker: sequential B-tree scan (fast — synchronous OPFS reads)
 - Transfer: `postMessage` with `Uint8Array` transfer (zero-copy for the buffer)
-- Main thread: insert into in-memory B-tree
+- Main thread: insert into `BTreeMap`
 
 This is comparable to today's startup cost (the worker's `openPersistent` already reads the full B-tree to rehydrate the schema manager). The difference is the data also gets sent to the main thread — but this replaces the sync-protocol bootstrap that currently sends catalogue data across anyway.
 
