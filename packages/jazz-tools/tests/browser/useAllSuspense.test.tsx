@@ -384,6 +384,12 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for orderBy + limit + offset",
+    );
+
     await client.db.insert(todos, {
       title: "p1",
       done: false,
@@ -496,6 +502,12 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for hop query",
+    );
+
     const orgId = await client.db.insert(orgs, { name: "Hop Org" });
     const teamId = await client.db.insert(teams, {
       name: "Hop Team",
@@ -534,6 +546,12 @@ describe("useAllSuspense browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe query={query} pick={(row) => row.name} />
       </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for gather query",
     );
 
     const rootId = await client.db.insert(teams, {
