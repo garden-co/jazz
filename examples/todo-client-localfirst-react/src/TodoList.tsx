@@ -1,23 +1,29 @@
-import { useState } from "react";
-import { useDb, useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { Suspense, useDeferredValue, useState, useTransition } from "react";
+import { useDb, useAllSuspense, useSession } from "jazz-tools/react";
+import { app, type TodoQueryBuilder } from "../schema/app.js";
 
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
-  const trimmedFilterTitle = filterTitle.trim();
+  const [page, setPage] = useState(0);
+
+  const [isPending, startTransition] = useTransition();
+
+  const deferredFilterTitle = useDeferredValue(filterTitle);
+
   let todosQuery = app.todos;
-  if (trimmedFilterTitle) {
-    todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
+  if (deferredFilterTitle) {
+    todosQuery = todosQuery.where({ title: { contains: deferredFilterTitle.trim() } });
   }
   if (showDoneOnly) {
     todosQuery = todosQuery.where({ done: true });
   }
+  const query = todosQuery
+    .orderBy("id", "desc")
+    .limit(50)
+    .offset(page * 50);
 
-  // #region reading-reactive-hooks-react
   const db = useDb();
-  const todos = useAll(todosQuery) ?? [];
-  // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
   const [title, setTitle] = useState("");
@@ -25,9 +31,23 @@ export function TodoList() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !sessionUserId) return;
+
     db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
     setTitle("");
   };
+
+  const handlePageChange = (p: number) => {
+    startTransition(() => {
+      setPage(p);
+    });
+  };
+
+  const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFilterTitle(e.target.value);
+    setPage(0);
+  };
+
+  const isLoading = isPending || deferredFilterTitle !== filterTitle;
 
   return (
     <>
@@ -47,7 +67,7 @@ export function TodoList() {
         <input
           type="text"
           value={filterTitle}
-          onChange={(e) => setFilterTitle(e.target.value)}
+          onChange={handleFilterChange}
           placeholder="Filter by title (contains)"
           aria-label="Filter by title"
         />
@@ -60,6 +80,32 @@ export function TodoList() {
           Done only
         </label>
       </div>
+      <Suspense fallback={<p>Loading todos…</p>}>
+        <div style={{ opacity: isLoading ? 0.5 : 1, transition: "opacity 0.2s" }}>
+          <TodoResults query={query} page={page} setPage={handlePageChange} />
+        </div>
+      </Suspense>
+    </>
+  );
+}
+
+function TodoResults({
+  query,
+  page,
+  setPage,
+}: {
+  query: TodoQueryBuilder;
+  page: number;
+  setPage: (p: number) => void;
+}) {
+  const db = useDb();
+
+  // #region reading-reactive-hooks-react
+  const todos = useAllSuspense(query);
+  // #endregion reading-reactive-hooks-react
+
+  return (
+    <>
       <ul id="todo-list">
         {todos.map((todo) => (
           <li key={todo.id} className={todo.done ? "done" : ""}>
@@ -77,6 +123,8 @@ export function TodoList() {
           </li>
         ))}
       </ul>
+      Page {page + 1} {page > 0 && <button onClick={() => setPage(page - 1)}>Previous</button>}{" "}
+      <button onClick={() => setPage(page + 1)}>Next</button>
     </>
   );
 }
