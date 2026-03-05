@@ -243,6 +243,10 @@ export class SubscriptionsOrchestrator {
           callbacks.onError?.(entry.state.error);
         }
 
+        if (entry.state.status === "fulfilled") {
+          callbacks.onfulfilled?.(entry.state.data);
+        }
+
         return () => {
           if (!entry.listeners.delete(callbacks)) {
             return;
