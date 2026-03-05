@@ -136,7 +136,7 @@ function makeDeposit(overrides: Partial<FuelDeposit> & { fuelType: string }): Fu
 }
 
 /**
- * Minimal db mock that captures insertPersisted and updatePersisted calls.
+ * Minimal db mock that captures insert and update calls.
  *
  * reconcileDeposits only uses these two methods, both returning a promise.
  */
@@ -151,16 +151,21 @@ function mockDb() {
 
   return {
     db: {
-      insertPersisted: vi.fn(
-        async (table: unknown, data: Record<string, unknown>, tier: string) => {
+      insert: vi.fn(
+        async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
           const id = `new-${inserts.length}`;
-          inserts.push({ table, data, tier });
+          inserts.push({ table, data, tier: options?.tier ?? "edge" });
           return id;
         },
       ),
-      updatePersisted: vi.fn(
-        async (table: unknown, id: string, data: Record<string, unknown>, tier: string) => {
-          updates.push({ table, id, data, tier });
+      update: vi.fn(
+        async (
+          table: unknown,
+          id: string,
+          data: Record<string, unknown>,
+          options?: { tier?: string },
+        ) => {
+          updates.push({ table, id, data, tier: options?.tier ?? "edge" });
         },
       ),
     } as any,

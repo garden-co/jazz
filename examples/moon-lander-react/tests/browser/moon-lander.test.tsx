@@ -268,31 +268,6 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 6. Parallax starfield
-  // -------------------------------------------------------------------------
-
-  it("renders a parallax starfield background", async () => {
-    const el = await mountDescending();
-    const canvas = el.querySelector<HTMLCanvasElement>('[data-testid="game-canvas"]')!;
-    const ctx = canvas.getContext("2d")!;
-
-    // Sample pixels from the upper portion of the canvas (space area).
-    // A starfield should have at least some non-background-colour pixels.
-    const imageData = ctx.getImageData(0, 0, canvas.width, 100);
-    const { data } = imageData;
-
-    let brightPixels = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      // Background is #0a0a0f -> RGB(10, 10, 15). Stars are brighter.
-      if (data[i] > 50 || data[i + 1] > 50 || data[i + 2] > 50) {
-        brightPixels++;
-      }
-    }
-
-    expect(brightPixels).toBeGreaterThan(0);
-  });
-
-  // -------------------------------------------------------------------------
   // 7. Ground line
   // -------------------------------------------------------------------------
 

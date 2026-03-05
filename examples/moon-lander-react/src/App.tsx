@@ -15,10 +15,12 @@ function GameWithSync({
   physicsSpeed,
   initialMode,
   playerId,
+  spawnX,
 }: {
   physicsSpeed?: number;
   initialMode?: PlayerMode;
   playerId: string;
+  spawnX?: number;
 }) {
   const {
     deposits,
@@ -43,11 +45,13 @@ function GameWithSync({
       data-sync-settled={String(syncInputs.settled)}
       data-sync-local-rows={syncInputs.localPlayerRows.length}
       data-sync-total-deposits={syncInputs.debugTotalDeposits}
+      data-sync-uncollected={syncInputs.uncollectedDeposits.length}
     >
       <Game
         playerId={playerId}
         physicsSpeed={physicsSpeed}
         initialMode={initialMode}
+        spawnX={spawnX}
         remotePlayers={remotePlayers}
         deposits={deposits}
         inventory={inventory}
@@ -78,11 +82,11 @@ interface AppProps {
   playerId?: string;
   physicsSpeed?: number;
   initialMode?: PlayerMode;
+  spawnX?: number;
 }
 
-export function App({ config, playerId, physicsSpeed, initialMode }: AppProps) {
+export function App({ config, playerId, physicsSpeed, initialMode, spawnX }: AppProps) {
   const [client, setClient] = useState<JazzClient | null>(null);
-
   useEffect(() => {
     if (!config) return;
 
@@ -110,7 +114,7 @@ export function App({ config, playerId, physicsSpeed, initialMode }: AppProps) {
   }, [config?.appId, config?.serverUrl, config?.dbName]);
 
   if (!config) {
-    return <Game physicsSpeed={physicsSpeed} initialMode={initialMode} />;
+    return <Game physicsSpeed={physicsSpeed} initialMode={initialMode} spawnX={spawnX} />;
   }
 
   if (!client) {
@@ -123,6 +127,7 @@ export function App({ config, playerId, physicsSpeed, initialMode }: AppProps) {
         physicsSpeed={physicsSpeed}
         initialMode={initialMode}
         playerId={playerId ?? crypto.randomUUID()}
+        spawnX={spawnX}
       />
     </JazzProvider>
   );

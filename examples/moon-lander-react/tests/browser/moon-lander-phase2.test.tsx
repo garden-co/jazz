@@ -22,20 +22,32 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { commands } from "vitest/browser";
 import { App } from "../../src/App";
 import { Game } from "../../src/Game";
-import { FUEL_TYPES, INITIAL_FUEL, WALK_SPEED } from "../../src/game/constants";
-import { APP_ID, TEST_PORT } from "./test-constants";
+import { FUEL_TYPES, INITIAL_FUEL } from "../../src/game/constants";
+import { ADMIN_SECRET, APP_ID, APP_ID_MULTI, TEST_PORT } from "./test-constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /** Timeout for cross-client Jazz sync waits. Generous because earlier test
- *  files accumulate data in the shared server, slowing edge subscriptions. */
-const SYNC_TIMEOUT = 10_000;
+ *  files accumulate data in the shared server, slowing edge subscriptions.
+ *  Isolated BrowserContexts need extra time: fresh OPFS, new Jazz client
+ *  init, full sync handshake. */
+const SYNC_TIMEOUT = 20_000;
 
 const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
+const openedIsolatedLabels: string[] = [];
+
+/** Wrapper around openIsolatedApp that registers the label for afterEach cleanup. */
+async function openIsolated(
+  opts: Parameters<(typeof commands)["openIsolatedApp"]>[0],
+): Promise<void> {
+  openedIsolatedLabels.push(opts.label);
+  await commands.openIsolatedApp(opts);
+}
 
 /** Mount the Game component directly (no Jazz sync). */
 async function mountGame(opts: { physicsSpeed?: number } = {}): Promise<HTMLDivElement> {
@@ -71,8 +83,13 @@ async function mountApp(opts: {
   serverUrl?: string;
   playerId?: string;
   physicsSpeed?: number;
+  spawnX?: number;
+  localAuthToken?: string;
+  localAuthMode?: string;
+  adminSecret?: string;
 }): Promise<HTMLDivElement> {
-  const { physicsSpeed, playerId, ...config } = opts;
+  const { physicsSpeed, spawnX, playerId, localAuthToken, localAuthMode, adminSecret, ...config } =
+    opts;
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -82,10 +99,18 @@ async function mountApp(opts: {
     root.render(
       <App
         {...({
-          config: { appId: config.appId ?? APP_ID, ...config },
+          config: {
+            appId: config.appId ?? APP_ID,
+            ...config,
+            ...(localAuthToken
+              ? { localAuthMode: localAuthMode ?? "anonymous", localAuthToken }
+              : {}),
+            ...(adminSecret ? { adminSecret } : {}),
+          },
           playerId: playerId ?? crypto.randomUUID(),
           physicsSpeed,
           initialMode: "landed",
+          ...(spawnX !== undefined ? { spawnX } : {}),
         } as any)}
       />,
     );
@@ -105,6 +130,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  for (const label of openedIsolatedLabels.splice(0)) {
+    await commands.closeIsolatedApp(label).catch(() => {});
+  }
+
   for (const { root, container } of mounts) {
     try {
       await act(async () => root.unmount());
@@ -117,10 +146,14 @@ afterEach(async () => {
 });
 
 /** Poll until a condition is true, or throw after timeout. */
-async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`Timeout: ${message}`);
@@ -280,30 +313,35 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
 
   it("syncs a descending player to a second instance", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const sharedToken = `sync-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Mount Instance A — starts descending
-    const elA = await mountApp({
+    const _elA = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("sync-a"),
       serverUrl,
-
+      localAuthToken: sharedToken,
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
     });
 
-    // Mount Instance B — should eventually see Instance A as remote
-    const elB = await mountApp({
+    // Mount Instance B in an isolated BrowserContext
+    await openIsolated({
+      label: "b",
       appId: APP_ID,
       dbName: uniqueDbName("sync-b"),
       serverUrl,
-
+      localAuthToken: sharedToken,
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
     });
 
     // Wait for Instance B to see at least one remote player
     await waitFor(
-      () => {
+      async () => {
         try {
-          return readNum(elB, "remote-player-count") >= 1;
+          const raw = await commands.readIsolatedAttr("b", "remote-player-count");
+          return raw !== null && parseFloat(raw) >= 1;
         } catch {
           return false;
         }
@@ -315,28 +353,34 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
 
   it("syncs landed state between two instances", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const sharedToken = `landed-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    const elA = await mountApp({
+    const _elA = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("landed-a"),
       serverUrl,
-
+      localAuthToken: sharedToken,
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
     });
 
-    const elB = await mountApp({
+    // Mount Instance B in an isolated BrowserContext
+    await openIsolated({
+      label: "b",
       appId: APP_ID,
       dbName: uniqueDbName("landed-b"),
       serverUrl,
-
+      localAuthToken: sharedToken,
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
     });
 
     // Instance B should see the landed player
     await waitFor(
-      () => {
+      async () => {
         try {
-          return readNum(elB, "remote-player-count") >= 1;
+          const raw = await commands.readIsolatedAttr("b", "remote-player-count");
+          return raw !== null && parseFloat(raw) >= 1;
         } catch {
           return false;
         }
@@ -348,12 +392,14 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
 
   it("syncs walking mode between two instances", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const sharedToken = `walk-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     const elA = await mountApp({
       appId: APP_ID,
       dbName: uniqueDbName("walk-a"),
       serverUrl,
-
+      localAuthToken: sharedToken,
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
     });
 
@@ -362,19 +408,23 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
     await waitForAttr(elA, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    const elB = await mountApp({
+    // Mount Instance B in an isolated BrowserContext
+    await openIsolated({
+      label: "b",
       appId: APP_ID,
       dbName: uniqueDbName("walk-b"),
       serverUrl,
-
+      localAuthToken: sharedToken,
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
     });
 
     // Instance B should see Instance A as a remote player
     await waitFor(
-      () => {
+      async () => {
         try {
-          return readNum(elB, "remote-player-count") >= 1;
+          const raw = await commands.readIsolatedAttr("b", "remote-player-count");
+          return raw !== null && parseFloat(raw) >= 1;
         } catch {
           return false;
         }
@@ -460,76 +510,233 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
     }
   });
 
-  it("deposit collected by Player A disappears for Player B", async () => {
-    /**
-     * Two players share the same Jazz state. When A collects a deposit,
-     * Jazz updates collectedBy → B's subscription filters it out.
-     *
-     *   Player A          Jazz DB             Player B
-     *   ────────          ───────             ────────
-     *   walk over dep ──→ collected=true ───→ deposit disappears
-     *                     collectedBy=A       deposit-count decreases
-     */
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+  // =========================================================================
+  // 6b. Cross-client deposit collection visibility
+  //
+  //   Player A (own identity)   Jazz DB          Player B (own identity)
+  //   ────────────────────────  ───────          ──────────────────────
+  //   settle → deposits seeded  ──────────────→  sees N deposits
+  //   walk → collect ──────────→ collected=true  deposit-count drops for B
+  //
+  //   Verifies that WHERE filter re-evaluation works cross-client when a row
+  //   transitions from collected:false to collected:true.
+  // =========================================================================
 
+  it("deposit collected by Player A disappears for Player B", { timeout: 60_000 }, async () => {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const spawnX = 4800;
+
+    // Mount Player A (in-process, own identity)
     const elA = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("coll-a"),
+      dbName: uniqueDbName("cross-coll-a"),
       serverUrl,
-
+      adminSecret: ADMIN_SECRET,
       physicsSpeed: 10,
+      spawnX,
     });
 
-    const elB = await mountApp({
-      appId: APP_ID,
-      dbName: uniqueDbName("coll-b"),
-      serverUrl,
-
-      physicsSpeed: 10,
-    });
-
-    // Wait for deposits to be seeded and visible to both
-    await waitFor(
-      () => {
-        try {
-          return readNum(elA, "deposit-count") > 0 && readNum(elB, "deposit-count") > 0;
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      "Both instances should see seeded deposits",
-    );
-
-    const countBefore = readNum(elB, "deposit-count");
-
-    // Player A exits lander and walks to collect deposits
+    // A exits lander to walking mode
     pressKey("e", "KeyE");
     await waitForAttr(elA, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Walk right 4s then left 4s at 10x speed ~ 9600px total (full surface)
-    pressKey("d", "KeyD");
-    await new Promise((r) => setTimeout(r, 4000));
-    releaseKey("d", "KeyD");
-    pressKey("a", "KeyA");
-    await new Promise((r) => setTimeout(r, 4000));
-    releaseKey("a", "KeyA");
-    await waitFrames(10);
+    // Mount Player B in an isolated BrowserContext (completely separate identity)
+    await openIsolated({
+      label: "cross-coll-b",
+      appId: APP_ID,
+      dbName: uniqueDbName("cross-coll-b"),
+      serverUrl,
+      adminSecret: ADMIN_SECRET,
+      physicsSpeed: 10,
+      spawnX,
+    });
 
-    // Wait for Player B to see fewer deposits (Jazz propagation can be slow)
+    // Wait for B to see at least one uncollected deposit
     await waitFor(
-      () => {
+      async () => {
         try {
-          return readNum(elB, "deposit-count") < countBefore;
+          const raw = await commands.readIsolatedAttr("cross-coll-b", "deposit-count");
+          return raw !== null && parseFloat(raw) > 0;
         } catch {
           return false;
         }
       },
       SYNC_TIMEOUT,
-      "Player B should see fewer deposits after Player A collects some",
+      "Player B should see uncollected deposits",
+    );
+
+    // Allow reconcile to complete — both A and B insert deposits asynchronously.
+    // Reading countBefore too early (before reconcile finishes) gives a low value,
+    // making `count < countBefore` never fire once reconcile adds the full set.
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const countBefore = parseFloat(
+      (await commands.readIsolatedAttr("cross-coll-b", "deposit-count")) ?? "0",
+    );
+
+    // A walks right to collect deposits (4s at 10x = ~4800px coverage)
+    pressKey("d", "KeyD");
+    await new Promise((r) => setTimeout(r, 4000));
+    releaseKey("d", "KeyD");
+    await waitFrames(10);
+
+    // Confirm A collected something
+    await waitFor(
+      () => {
+        try {
+          return readStr(elA, "inventory") !== "";
+        } catch {
+          return false;
+        }
+      },
+      SYNC_TIMEOUT,
+      "Player A inventory should be non-empty after walking",
+    );
+
+    // B should see fewer uncollected deposits
+    await waitFor(
+      async () => {
+        try {
+          const raw = await commands.readIsolatedAttr("cross-coll-b", "deposit-count");
+          return raw !== null && parseFloat(raw) < countBefore;
+        } catch {
+          return false;
+        }
+      },
+      SYNC_TIMEOUT,
+      `Player B deposit-count should drop below ${countBefore}`,
     );
   });
+
+  // =========================================================================
+  // 6c. Cross-client deposit sharing
+  //
+  //   Player A (own identity)   Jazz DB          Player B (own identity)
+  //   ────────────────────────  ───────          ──────────────────────
+  //   collect deposit ─────────→ collectedBy=A   B sees 0 inventory
+  //   walk back near B ─────→
+  //   share mechanic fires ────→ collectedBy=B → B's inventory updates
+  //
+  //   Verifies the collectedBy update propagates cross-client. The fix:
+  //   subscribing to where({ collected:true }) means the row is already in
+  //   B's subscription when sharing happens — only the JS filter changes.
+  // =========================================================================
+
+  it(
+    "shared deposit appears in receiver's inventory cross-client",
+    { timeout: 90_000 },
+    async () => {
+      /**
+       * Player A and B are independent players at the same spawn position.
+       *
+       *   Player A              Jazz DB              Player B
+       *   ────────              ───────              ────────
+       *   exit lander ──────────────────────────→   exit lander
+       *   (wait for B visible as remote player)
+       *   walk right 8s ──→ collect all types
+       *   walk left 8s ──→ back near B
+       *   proximity share ──→ collectedBy=B ──────→ B inventory updates
+       *
+       * Walking for ~8s at physicsSpeed=10 covers the full MOON_SURFACE_WIDTH
+       * (~9600px), ensuring A collects all 7 fuel types. Whatever B needs, A
+       * will have it (and A's own required type won't be all 7, so at least one
+       * shareable type exists). After walking back, both players are near each
+       * other and the auto-share fires.
+       *
+       * The key Jazz invariant: when A shares (collectedBy A→B), B already has
+       * the row in its where({ collected:true }) subscription (picked up when A
+       * collected). The collectedBy field update then propagates as a normal row
+       * update — no additional WHERE re-evaluation needed.
+       */
+      const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+      const spawnX = 4800;
+
+      // Mount Player A (in-process, own identity)
+      const elA = await mountApp({
+        appId: APP_ID,
+        dbName: uniqueDbName("share-a"),
+        serverUrl,
+        adminSecret: ADMIN_SECRET,
+        physicsSpeed: 10,
+        spawnX,
+      });
+
+      pressKey("e", "KeyE");
+      await waitForAttr(elA, "player-mode", "walking", 3000);
+      releaseKey("e", "KeyE");
+
+      // Mount Player B (isolated, completely independent identity) at same spawn
+      await openIsolated({
+        label: "share-b",
+        appId: APP_ID,
+        dbName: uniqueDbName("share-b"),
+        serverUrl,
+        adminSecret: ADMIN_SECRET,
+        physicsSpeed: 10,
+        spawnX,
+      });
+
+      // B exits lander to walking mode
+      await commands.pressIsolatedKey("share-b", "e");
+      await commands.waitForIsolatedAttr("share-b", "player-mode", "walking", 5000);
+      await commands.releaseIsolatedKey("share-b", "e");
+
+      // Wait for A to see B as a remote player before collecting — this ensures
+      // the share can fire when A returns to B's position.
+      await waitFor(
+        () => {
+          try {
+            return parseFloat(readStr(elA, "remote-player-count")) >= 1;
+          } catch {
+            return false;
+          }
+        },
+        SYNC_TIMEOUT,
+        "Player A should see Player B as a remote player",
+      );
+
+      // A walks right to cover the full world (~9600px at 1200px/real-sec).
+      // 8s guarantees A collects all 7 fuel types.
+      pressKey("d", "KeyD");
+      await new Promise((r) => setTimeout(r, 8000));
+      releaseKey("d", "KeyD");
+      await waitFrames(10);
+
+      await waitFor(
+        () => {
+          try {
+            return readStr(elA, "inventory") !== "";
+          } catch {
+            return false;
+          }
+        },
+        SYNC_TIMEOUT,
+        "Player A inventory should be non-empty after collecting",
+      );
+
+      // A walks left 8s back to spawnX (B is still there, walking in place)
+      pressKey("a", "KeyA");
+      await new Promise((r) => setTimeout(r, 8000));
+      releaseKey("a", "KeyA");
+      await waitFrames(10);
+
+      // A and B are now near each other. The proximity sharing mechanic fires
+      // continuously each game tick. B's inventory should update via Jazz.
+      await waitFor(
+        async () => {
+          try {
+            const raw = await commands.readIsolatedAttr("share-b", "inventory");
+            return raw !== null && raw !== "";
+          } catch {
+            return false;
+          }
+        },
+        SYNC_TIMEOUT,
+        "Player B inventory should be non-empty after receiving a shared deposit",
+      );
+    },
+  );
 
   // =========================================================================
   // 7. Burst deposits reappear after entering lander (collected:false reset)
@@ -543,85 +750,93 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
   //   This verifies the collected:false reset on burst/refuel release.
   // =========================================================================
 
-  it("burst deposits reappear as uncollected after entering lander", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const playerId = crypto.randomUUID();
+  it(
+    "burst deposits reappear as uncollected after entering lander",
+    { timeout: 60_000 },
+    async () => {
+      const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+      const playerId = crypto.randomUUID();
 
-    const el = await mountApp({
-      appId: APP_ID,
-      dbName: uniqueDbName("burst-release"),
-      serverUrl,
+      const el = await mountApp({
+        appId: APP_ID,
+        dbName: uniqueDbName("burst-release"),
+        serverUrl,
 
-      playerId,
-      physicsSpeed: 10,
-    });
+        playerId,
+        physicsSpeed: 10,
+      });
 
-    // Exit lander
-    pressKey("e", "KeyE");
-    await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
+      // Exit lander
+      pressKey("e", "KeyE");
+      await waitForAttr(el, "player-mode", "walking", 3000);
+      releaseKey("e", "KeyE");
 
-    // Wait for deposits to appear
-    await waitFor(
-      () => {
-        try {
-          return readNum(el, "deposit-count") > 0;
-        } catch {
-          return false;
-        }
-      },
-      10000,
-      "deposits should be visible",
-    );
+      // Wait for deposits to appear
+      await waitFor(
+        () => {
+          try {
+            return readNum(el, "deposit-count") > 0;
+          } catch {
+            return false;
+          }
+        },
+        10000,
+        "deposits should be visible",
+      );
 
-    const countBefore = readNum(el, "deposit-count");
+      const countBefore = readNum(el, "deposit-count");
 
-    // Walk right to collect deposits (4s at 10x ~ 4800px coverage)
-    pressKey("d", "KeyD");
-    await new Promise((r) => setTimeout(r, 4000));
-    releaseKey("d", "KeyD");
-    await waitFrames(10);
+      // Walk right to collect deposits (4s at 10x ~ 4800px coverage)
+      pressKey("d", "KeyD");
+      await new Promise((r) => setTimeout(r, 4000));
+      releaseKey("d", "KeyD");
+      await waitFrames(10);
 
-    // Check we collected something
-    const inventory = readStr(el, "inventory");
-    if (inventory === "") {
-      // Didn't collect anything; can't test release. Skip gracefully.
-      return;
-    }
+      // Check we collected something
+      const inventory = readStr(el, "inventory");
+      if (inventory === "") {
+        // Didn't collect anything; can't test release. Skip gracefully.
+        return;
+      }
 
-    const countAfterCollect = readNum(el, "deposit-count");
-    const collected = countBefore - countAfterCollect;
+      const countAfterCollect = readNum(el, "deposit-count");
+      const collected = countBefore - countAfterCollect;
 
-    // Walk back to lander (same duration to get back)
-    pressKey("a", "KeyA");
-    await new Promise((r) => setTimeout(r, 4000));
-    releaseKey("a", "KeyA");
-    await waitFrames(5);
+      // Walk back to lander (same duration to get back)
+      pressKey("a", "KeyA");
+      await new Promise((r) => setTimeout(r, 4000));
+      releaseKey("a", "KeyA");
+      await waitFrames(5);
 
-    // Enter lander (triggers burst + refuel release)
-    pressKey("e", "KeyE");
-    await waitForAttr(el, "player-mode", "in_lander", 5000);
-    releaseKey("e", "KeyE");
+      // Enter lander (triggers burst + refuel release)
+      pressKey("e", "KeyE");
+      await waitForAttr(el, "player-mode", "in_lander", 5000);
+      releaseKey("e", "KeyE");
 
-    // Exit lander again to see the updated deposit count
-    pressKey("e", "KeyE");
-    await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
+      // Exit lander again to see the updated deposit count
+      pressKey("e", "KeyE");
+      await waitForAttr(el, "player-mode", "walking", 3000);
+      releaseKey("e", "KeyE");
 
-    // Deposits should recover as the burst/refuel release sets collected:false.
-    // The sync interval is 200ms, so give Jazz time to propagate.
-    await waitFor(
-      () => {
-        try {
-          return readNum(el, "deposit-count") > countAfterCollect;
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      `deposit-count should recover after burst release (was ${countAfterCollect}, collected ${collected})`,
-    );
-  });
+      // Deposits should recover as the burst/refuel release sets collected:false.
+      // Use data-sync-uncollected (pure DB count from the edge subscription, not
+      // filtered by local collectedIds) so the assertion is reliable regardless
+      // of engine-side re-collection artefacts.
+      await waitFor(
+        () => {
+          try {
+            const syncEl = el.querySelector('[data-testid="sync-debug"]')!;
+            const raw = syncEl.getAttribute("data-sync-uncollected");
+            return parseInt(raw ?? "0", 10) > countAfterCollect;
+          } catch {
+            return false;
+          }
+        },
+        SYNC_TIMEOUT,
+        `uncollected-count should recover after burst release (was ${countAfterCollect}, collected ${collected})`,
+      );
+    },
+  );
 
   /**
    * Full Phase 2 integration: two players descend, land, and see each other.
@@ -633,83 +848,75 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
    *   see remote(B) ←────  read all players ←── see remote(A)
    *   exit lander ──────→  write walking ─────→  see A walking
    */
-  it("full Phase 2: two players descend, land, and see each other", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const t0 = Date.now();
-    const log = (msg: string) => console.log(`[phase2-diag +${Date.now() - t0}ms] ${msg}`);
+  it(
+    "full Phase 2: two players descend, land, and see each other",
+    { timeout: 60_000 },
+    async () => {
+      // Use a dedicated fresh Jazz server with an empty event log so reconcile
+      // deposits insert quickly and player rows are visible within SYNC_TIMEOUT,
+      // regardless of how many operations prior tests have accumulated.
+      const serverUrl = await commands.startFreshTestServer("full-phase2");
+      const sharedToken = `full-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    log("mounting A...");
-    const elA = await mountApp({
-      appId: APP_ID,
-      dbName: uniqueDbName("full-a"),
-      serverUrl,
+      try {
+        const elA = await mountApp({
+          appId: APP_ID_MULTI,
+          dbName: uniqueDbName("full-a"),
+          serverUrl,
+          localAuthToken: sharedToken,
+          adminSecret: ADMIN_SECRET,
+          physicsSpeed: 10,
+        });
 
-      physicsSpeed: 10,
-    });
-    log("A mounted");
+        const elB = await mountApp({
+          appId: APP_ID_MULTI,
+          dbName: uniqueDbName("full-b"),
+          serverUrl,
+          localAuthToken: sharedToken,
+          adminSecret: ADMIN_SECRET,
+          physicsSpeed: 10,
+        });
 
-    log("mounting B...");
-    const elB = await mountApp({
-      appId: APP_ID,
-      dbName: uniqueDbName("full-b"),
-      serverUrl,
+        // Both start in landed mode
+        expect(readStr(elA, "player-mode")).toBe("landed");
+        expect(readStr(elB, "player-mode")).toBe("landed");
 
-      physicsSpeed: 10,
-    });
-    log("B mounted");
+        // Both should see the other as a remote player
+        await waitFor(
+          () => {
+            try {
+              const aCount = readNum(elA, "remote-player-count");
+              const bCount = readNum(elB, "remote-player-count");
+              return aCount >= 1 && bCount >= 1;
+            } catch {
+              return false;
+            }
+          },
+          SYNC_TIMEOUT,
+          "Both instances should see each other as remote players",
+        );
 
-    // Both start in landed mode
-    expect(readStr(elA, "player-mode")).toBe("landed");
-    expect(readStr(elB, "player-mode")).toBe("landed");
-    log("both in landed mode");
+        // Instance A exits lander — keyboard events are page-wide so both engines
+        // receive the press; the test only asserts on A's mode change.
+        pressKey("e", "KeyE");
+        await waitForAttr(elA, "player-mode", "walking", 3000);
+        releaseKey("e", "KeyE");
 
-    // Both should see the other as a remote player
-    let lastLogTime = Date.now();
-    await waitFor(
-      () => {
-        try {
-          const aCount = readNum(elA, "remote-player-count");
-          const bCount = readNum(elB, "remote-player-count");
-          if (Date.now() - lastLogTime > 1000) {
-            const syncA = elA.querySelector('[data-testid="sync-debug"]');
-            const syncB = elB.querySelector('[data-testid="sync-debug"]');
-            const aSettled = syncA?.getAttribute("data-sync-settled") ?? "?";
-            const bSettled = syncB?.getAttribute("data-sync-settled") ?? "?";
-            const aRows = syncA?.getAttribute("data-sync-local-rows") ?? "?";
-            const bRows = syncB?.getAttribute("data-sync-local-rows") ?? "?";
-            const aDeps = syncA?.getAttribute("data-sync-total-deposits") ?? "?";
-            const bDeps = syncB?.getAttribute("data-sync-total-deposits") ?? "?";
-            log(
-              `A: remote=${aCount} settled=${aSettled} localRows=${aRows} deps=${aDeps} | B: remote=${bCount} settled=${bSettled} localRows=${bRows} deps=${bDeps}`,
-            );
-            lastLogTime = Date.now();
-          }
-          return aCount >= 1 && bCount >= 1;
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      "Both instances should see each other as remote players",
-    );
-    log("mutual visibility achieved");
-
-    // Instance A exits lander
-    pressKey("e", "KeyE");
-    await waitForAttr(elA, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
-
-    // Instance B should still see the remote player
-    await waitFor(
-      () => {
-        try {
-          return readNum(elB, "remote-player-count") >= 1;
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      "Instance B should still see Instance A after mode change",
-    );
-  });
+        // Instance B should still see the remote player
+        await waitFor(
+          () => {
+            try {
+              return readNum(elB, "remote-player-count") >= 1;
+            } catch {
+              return false;
+            }
+          },
+          SYNC_TIMEOUT,
+          "Instance B should still see Instance A after mode change",
+        );
+      } finally {
+        await commands.stopFreshTestServer("full-phase2");
+      }
+    },
+  );
 });

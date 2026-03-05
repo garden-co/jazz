@@ -25,32 +25,46 @@ function mockDb() {
   const inserts: Array<{
     table: unknown;
     data: Record<string, unknown>;
-    tier: string;
+    options: { tier?: string } | undefined;
   }> = [];
   const updates: Array<{
     table: unknown;
     id: string;
     data: Record<string, unknown>;
-    tier: string;
+    options: { tier?: string } | undefined;
+  }> = [];
+  const deletes: Array<{
+    table: unknown;
+    id: string;
+    options: { tier?: string } | undefined;
   }> = [];
 
   return {
     db: {
-      insertPersisted: vi.fn(
-        async (table: unknown, data: Record<string, unknown>, tier: string) => {
+      insert: vi.fn(
+        async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
           const id = `new-${inserts.length}`;
-          inserts.push({ table, data, tier });
+          inserts.push({ table, data, options });
           return id;
         },
       ),
-      updatePersisted: vi.fn(
-        async (table: unknown, id: string, data: Record<string, unknown>, tier: string) => {
-          updates.push({ table, id, data, tier });
+      update: vi.fn(
+        async (
+          table: unknown,
+          id: string,
+          data: Record<string, unknown>,
+          options?: { tier?: string },
+        ) => {
+          updates.push({ table, id, data, options });
         },
       ),
+      deleteFrom: vi.fn(async (table: unknown, id: string, options?: { tier?: string }) => {
+        deletes.push({ table, id, options });
+      }),
     } as any,
     inserts,
     updates,
+    deletes,
   };
 }
 
@@ -88,6 +102,7 @@ function makeDeposit(overrides: Partial<FuelDeposit> & { fuelType: string }): Fu
 function emptyInputs(): SyncInputs {
   return {
     settled: false,
+    localPlayerSettled: false,
     uncollectedDeposits: [],
     myCollectedDeposits: [],
     allDepositsRaw: [],
@@ -176,12 +191,13 @@ describe("SyncManager", () => {
     });
 
     it("flushes refuels by releasing a collected deposit", async () => {
-      const { db, updates } = mockDb();
+      const { db, inserts, deletes } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const collectedDep = makeDeposit({
         fuelType: "circle",
         id: "dep-circle-1",
+        positionX: 300,
         collected: true,
         collectedBy: "alice",
       });
@@ -196,22 +212,28 @@ describe("SyncManager", () => {
 
       await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
 
-      // Should release the deposit (set collected: false)
-      const releaseUpdate = updates.find((u) => u.id === "dep-circle-1");
-      expect(releaseUpdate).toBeTruthy();
-      expect(releaseUpdate!.data.collected).toBe(false);
-      expect(releaseUpdate!.data.collectedBy).toBe("");
+      // Should delete the old deposit and insert a new uncollected one
+      const deleteCall = deletes.find((d) => d.id === "dep-circle-1");
+      expect(deleteCall).toBeTruthy();
+
+      const releaseInsert = inserts.find(
+        (i) =>
+          i.data.fuelType === "circle" && i.data.positionX === 300 && i.data.collected === false,
+      );
+      expect(releaseInsert).toBeTruthy();
+      expect(releaseInsert!.data.collectedBy).toBe("");
 
       sync.destroy();
     });
 
     it("flushes bursts by releasing a collected deposit", async () => {
-      const { db, updates } = mockDb();
+      const { db, inserts, deletes } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const collectedDep = makeDeposit({
         fuelType: "triangle",
         id: "dep-tri-1",
+        positionX: 400,
         collected: true,
         collectedBy: "alice",
       });
@@ -226,9 +248,15 @@ describe("SyncManager", () => {
 
       await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
 
-      const releaseUpdate = updates.find((u) => u.id === "dep-tri-1");
-      expect(releaseUpdate).toBeTruthy();
-      expect(releaseUpdate!.data.collected).toBe(false);
+      // Should delete the old deposit and insert a new uncollected one
+      const deleteCall = deletes.find((d) => d.id === "dep-tri-1");
+      expect(deleteCall).toBeTruthy();
+
+      const releaseInsert = inserts.find(
+        (i) =>
+          i.data.fuelType === "triangle" && i.data.positionX === 400 && i.data.collected === false,
+      );
+      expect(releaseInsert).toBeTruthy();
 
       sync.destroy();
     });
@@ -331,7 +359,7 @@ describe("SyncManager", () => {
     });
 
     it("updates an existing player row when state changes", async () => {
-      const { db, inserts, updates } = mockDb();
+      const { db, updates } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const state = makePlayer();
@@ -375,7 +403,7 @@ describe("SyncManager", () => {
     });
 
     it("does not insert before settled", async () => {
-      const { db, inserts, updates } = mockDb();
+      const { db, inserts } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const state = makePlayer();
