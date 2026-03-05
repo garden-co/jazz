@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/react";
-import { CollaborativeCounter } from "./CollaborativeCounter.js";
+import { Canvas } from "./Canvas.js";
 
 type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 
@@ -79,12 +79,7 @@ export function App() {
     <JazzProvider client={client}>
       <main>
         <h1>Poster Shop</h1>
-        <CollaborativeCounter />
-        <p>
-          Active config: <code>{resolvedConfig.appId}</code> at{" "}
-          <code>{resolvedConfig.serverUrl}</code> prefix{" "}
-          <code>{resolvedConfig.serverPathPrefix ?? "(none)"}</code>
-        </p>
+        <Canvas />
       </main>
     </JazzProvider>
   );
