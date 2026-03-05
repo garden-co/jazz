@@ -76,6 +76,19 @@ impl LimitOffsetNode {
     pub fn windowed_tuples(&self) -> &[Tuple] {
         &self.windowed_tuples
     }
+
+    /// Tuples that must be present locally to reproduce this paginated window.
+    ///
+    /// For offset-based pagination, the client must have the ordered prefix up to
+    /// `offset + limit` so it can reapply the same windowing logic locally.
+    /// When no limit is present, that means the full ordered input.
+    pub fn sync_input_tuples(&self) -> &[Tuple] {
+        let end = match self.limit {
+            Some(limit) => self.offset.saturating_add(limit).min(self.all_tuples.len()),
+            None => self.all_tuples.len(),
+        };
+        &self.all_tuples[..end]
+    }
 }
 
 impl RowNode for LimitOffsetNode {

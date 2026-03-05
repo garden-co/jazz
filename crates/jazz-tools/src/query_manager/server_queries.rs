@@ -201,8 +201,9 @@ impl QueryManager {
 
             let _delta = graph.settle(storage_ref, row_loader);
 
-            // Query result-set scope is always synced.
-            let result_scope = graph.contributing_object_ids();
+            // Sync the rows needed for the client to reproduce the current result
+            // locally, including any ordered prefix required by pagination.
+            let result_scope = graph.sync_scope_object_ids();
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
                 Self::scope_with_policy_context_rows_from_object_manager(
@@ -360,7 +361,7 @@ impl QueryManager {
                 }
 
                 // Check if scope changed
-                let result_scope = sub.graph.contributing_object_ids();
+                let result_scope = sub.graph.sync_scope_object_ids();
                 if trusted_clients.contains(client_id) {
                     Self::scope_with_policy_context_rows_from_object_manager(
                         &result_scope,

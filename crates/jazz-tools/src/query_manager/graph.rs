@@ -100,6 +100,8 @@ pub struct QueryGraph {
     dirty_bitmap: BitVec,
     /// The output node ID.
     pub output_node: NodeId,
+    /// The pagination node, when the query applies limit/offset.
+    pagination_node: Option<NodeId>,
     /// Table this query operates on.
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
@@ -129,6 +131,7 @@ impl QueryGraph {
             nodes: Vec::new(),
             dirty_bitmap: BitVec::new(),
             output_node: NodeId(0),
+            pagination_node: None,
             table,
             index_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
@@ -235,6 +238,57 @@ impl QueryGraph {
             })
             .unwrap_or_default();
 
+        self.object_ids_with_branches(&output_ids)
+    }
+
+    /// Returns ObjectIds that must be synced for the client to reproduce the
+    /// current query result locally.
+    pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        let sync_ids: AHashSet<ObjectId> = self
+            .pagination_node
+            .and_then(|node_id| self.get_node(node_id))
+            .and_then(|node| {
+                if let GraphNode::LimitOffset(limit_offset) = node {
+                    Some(
+                        limit_offset
+                            .sync_input_tuples()
+                            .iter()
+                            .flat_map(|tuple| tuple.ids())
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                self.get_node(self.output_node)
+                    .and_then(|node| {
+                        if let GraphNode::Output(output) = node {
+                            Some(
+                                output
+                                    .current_tuples()
+                                    .iter()
+                                    .flat_map(|tuple| tuple.ids())
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default()
+            });
+
+        self.object_ids_with_branches(&sync_ids)
+    }
+
+    fn object_ids_with_branches(
+        &self,
+        scoped_ids: &AHashSet<ObjectId>,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        if scoped_ids.is_empty() {
+            return HashSet::new();
+        }
+
         // For each IndexScanNode, find which of its ObjectIds are in the output
         // and pair them with the scan's branch
         let mut result = HashSet::new();
@@ -244,7 +298,7 @@ impl QueryGraph {
                 let branch = BranchName::new(&scan.branch);
                 for tuple in scan.current_tuples() {
                     for id in tuple.ids() {
-                        if output_ids.contains(&id) {
+                        if scoped_ids.contains(&id) {
                             result.insert((id, branch));
                         }
                     }
@@ -595,6 +649,7 @@ impl QueryGraph {
                 LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
+            graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 
@@ -1274,6 +1329,7 @@ impl QueryGraph {
             );
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
+            graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 

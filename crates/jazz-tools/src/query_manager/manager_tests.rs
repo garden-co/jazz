@@ -7748,6 +7748,66 @@ fn e2e_client_receives_server_data_via_subscription() {
     assert!(!names.contains(&"Bob"), "Should NOT contain Bob");
 }
 
+/// E2E: Client can cold-load a paginated remote query with a non-zero offset.
+#[test]
+fn e2e_client_receives_paginated_server_data_on_cold_offset_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+
+    for (name, score) in [("A", 1), ("B", 2), ("C", 3), ("D", 4)] {
+        server
+            .insert(
+                &mut server_io,
+                "users",
+                &[Value::Text(name.into()), Value::Integer(score)],
+            )
+            .unwrap();
+    }
+    server.process(&mut server_io);
+
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client
+        .query("users")
+        .order_by("score")
+        .offset(2)
+        .limit(1)
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "Cold paginated subscription should materialize the requested page"
+    );
+    assert_eq!(results[0].1[0], Value::Text("C".into()));
+    assert_eq!(results[0].1[1], Value::Integer(3));
+}
+
 /// E2E: Client receives new matching rows as server inserts them.
 #[test]
 fn e2e_client_receives_new_matching_row() {
