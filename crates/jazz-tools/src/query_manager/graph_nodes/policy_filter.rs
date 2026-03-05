@@ -610,10 +610,11 @@ impl PolicyFilterNode {
             return false;
         }
 
-        let bound_condition = match bind_outer_row_refs(condition, &row.data, descriptor) {
-            Some(expr) => expr,
-            None => return false,
-        };
+        let bound_condition =
+            match bind_outer_row_refs(condition, &row.data, descriptor, Some(row.id)) {
+                Some(expr) => expr,
+                None => return false,
+            };
 
         let table_name = TableName::new(table);
         let mut graph = match PolicyGraph::for_exists(

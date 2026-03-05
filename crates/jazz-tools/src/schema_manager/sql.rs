@@ -105,6 +105,9 @@ enum Token {
     True,
     False,
     References,
+    Exists,
+    From,
+    Where,
     // Punctuation
     LParen,
     RParen,
@@ -331,6 +334,9 @@ impl<'a> Tokenizer<'a> {
                     "TRUE" => Token::True,
                     "FALSE" => Token::False,
                     "REFERENCES" => Token::References,
+                    "EXISTS" => Token::Exists,
+                    "FROM" => Token::From,
+                    "WHERE" => Token::Where,
                     _ => Token::Ident(ident),
                 }
             }
@@ -640,6 +646,20 @@ impl Parser {
                         max_depth: None,
                     })
                 }
+            }
+            Some(Token::Exists) => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::Select)?;
+                self.expect(&Token::From)?;
+                let table = self.expect_ident()?;
+                self.expect(&Token::Where)?;
+                let condition = self.parse_policy_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(PolicyExpr::Exists {
+                    table,
+                    condition: Box::new(condition),
+                })
             }
             Some(Token::Ident(_)) => {
                 let column = self.expect_ident()?;
@@ -2730,5 +2750,60 @@ mod tests {
             }
         );
         assert!(!col.nullable);
+    }
+
+    const EXISTS_POLICY_SQL: &str = r#"
+        CREATE TABLE messages (
+            id UUID NOT NULL,
+            room_id UUID NOT NULL
+        );
+        CREATE POLICY messages_select_policy ON messages FOR SELECT
+            USING (EXISTS (SELECT FROM members WHERE member_id = @session.user_id));
+    "#;
+
+    #[test]
+    fn parse_policy_exists_subquery() {
+        // EXISTS (SELECT FROM <table> WHERE <condition>) in a USING clause
+        let schema = parse_schema(EXISTS_POLICY_SQL).unwrap();
+        let table = schema.get(&TableName::new("messages")).unwrap();
+        let using = table.policies.select.using.as_ref().unwrap();
+
+        assert!(
+            matches!(
+                using,
+                PolicyExpr::Exists { table, .. } if table == "members"
+            ),
+            "expected PolicyExpr::Exists, got {:?}",
+            using
+        );
+    }
+
+    #[test]
+    fn policy_exists_round_trip() {
+        // policy_expr_to_sql(parse(EXISTS expr)) should reproduce the original SQL
+        let sql = EXISTS_POLICY_SQL;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let original_using = schema
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+        let reparsed_using = reparsed
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(original_using, reparsed_using);
     }
 }
