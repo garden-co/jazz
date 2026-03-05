@@ -21,12 +21,18 @@ function toCanvasPoint(canvas: HTMLCanvasElement, event: React.PointerEvent): Po
 }
 
 function colorForUser(userId: string): string {
-  let hash = 0;
-  for (let i = 0; i < userId.length; i++) {
-    hash = (hash * 31 + userId.charCodeAt(i)) | 0;
+  let hash = 2166136261;
+  for (let index = 0; index < userId.length; index += 1) {
+    hash ^= userId.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue} 80% 45%)`;
+  hash >>>= 0;
+
+  const hue = hash % 360;
+  const saturation = 60 + ((hash >>> 8) % 40); // 60% - 100%
+  const lightness = (hash >>> 16) % 80; // 0% - 80%
+
+  return `hsl(${hue} ${saturation}% ${lightness}%)`;
 }
 
 function parsePoints(input: unknown): Point[] {
