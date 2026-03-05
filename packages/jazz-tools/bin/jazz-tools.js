@@ -77,62 +77,71 @@ function exitWithSpawnResult(result, name) {
   process.exit(1);
 }
 
-const key = `${process.platform}-${process.arch}`;
-const binaryName = BINARIES[key];
 const here = dirname(fileURLToPath(import.meta.url));
-const localBinaryName = process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools";
-const fallbackCandidates = [
-  join(here, "..", "..", "..", "target", "debug", localBinaryName),
-  join(here, "..", "..", "..", "target", "release", localBinaryName),
-];
-
-const bundledBinaryPath = binaryName ? join(here, "native", binaryName) : undefined;
-const binaryPath =
-  (bundledBinaryPath && existsSync(bundledBinaryPath) ? bundledBinaryPath : undefined) ??
-  fallbackCandidates.find((candidate) => existsSync(candidate));
-
-if (!binaryPath) {
-  const lines = [];
-  if (!binaryName) {
-    lines.push(
-      `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
-    );
-  } else {
-    lines.push(`Bundled binary missing: ${binaryName}`);
-    lines.push("This package may be corrupted or published without target artifacts.");
-  }
-  lines.push("No local Cargo build was found in target/debug or target/release.");
-  lines.push("Run `cargo build -p jazz-tools --bin jazz-tools --features cli` to build locally.");
-  fail(lines.join("\n"));
-}
-
-ensureExecutable(binaryPath, binaryName ?? localBinaryName);
 
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (command === "build") {
-  const schemaDirArg = parseSchemaDir(args.slice(1));
-  const schemaDir = resolve(process.cwd(), schemaDirArg);
-  const currentSqlPath = join(schemaDir, "current.sql");
-  const currentTsPath = join(schemaDir, "current.ts");
-  const tsCliPath = join(here, "..", "dist", "cli.js");
+// Handle the MCP server before any Rust binary resolution.
+if (command === "mcp") {
+  const mcpPath = join(here, "..", "dist", "mcp", "server.js");
+  const { runServer } = await import(mcpPath);
+  await runServer();
+  // runServer resolves when stdin closes; process exits naturally.
+} else {
+  const key = `${process.platform}-${process.arch}`;
+  const binaryName = BINARIES[key];
+  const localBinaryName = process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools";
+  const fallbackCandidates = [
+    join(here, "..", "..", "..", "target", "debug", localBinaryName),
+    join(here, "..", "..", "..", "target", "release", localBinaryName),
+  ];
 
-  if (!existsSync(currentSqlPath) && existsSync(currentTsPath) && existsSync(tsCliPath)) {
-    console.log(
-      `Detected ${schemaDirArg}/current.ts without current.sql. Running TypeScript schema build bootstrap.`,
-    );
-    const tsBuildResult = spawnSync(
-      process.execPath,
-      [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],
-      {
-        stdio: "inherit",
-        env: process.env,
-      },
-    );
-    exitWithSpawnResult(tsBuildResult, "TypeScript schema build");
+  const bundledBinaryPath = binaryName ? join(here, "native", binaryName) : undefined;
+  const binaryPath =
+    (bundledBinaryPath && existsSync(bundledBinaryPath) ? bundledBinaryPath : undefined) ??
+    fallbackCandidates.find((candidate) => existsSync(candidate));
+
+  if (!binaryPath) {
+    const lines = [];
+    if (!binaryName) {
+      lines.push(
+        `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
+      );
+    } else {
+      lines.push(`Bundled binary missing: ${binaryName}`);
+      lines.push("This package may be corrupted or published without target artifacts.");
+    }
+    lines.push("No local Cargo build was found in target/debug or target/release.");
+    lines.push("Run `cargo build -p jazz-tools --bin jazz-tools --features cli` to build locally.");
+    fail(lines.join("\n"));
   }
-}
 
-const result = spawnSync(binaryPath, args, { stdio: "inherit", env: process.env });
-exitWithSpawnResult(result, binaryName ?? binaryPath);
+  ensureExecutable(binaryPath, binaryName ?? localBinaryName);
+
+  if (command === "build") {
+    const schemaDirArg = parseSchemaDir(args.slice(1));
+    const schemaDir = resolve(process.cwd(), schemaDirArg);
+    const currentSqlPath = join(schemaDir, "current.sql");
+    const currentTsPath = join(schemaDir, "current.ts");
+    const tsCliPath = join(here, "..", "dist", "cli.js");
+
+    if (!existsSync(currentSqlPath) && existsSync(currentTsPath) && existsSync(tsCliPath)) {
+      console.log(
+        `Detected ${schemaDirArg}/current.ts without current.sql. Running TypeScript schema build bootstrap.`,
+      );
+      const tsBuildResult = spawnSync(
+        process.execPath,
+        [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],
+        {
+          stdio: "inherit",
+          env: process.env,
+        },
+      );
+      exitWithSpawnResult(tsBuildResult, "TypeScript schema build");
+    }
+  }
+
+  const result = spawnSync(binaryPath, args, { stdio: "inherit", env: process.env });
+  exitWithSpawnResult(result, binaryName ?? binaryPath);
+}
