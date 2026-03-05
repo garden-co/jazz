@@ -11,17 +11,17 @@ export function TodoList() {
 
   const deferredFilterTitle = useDeferredValue(filterTitle);
 
-  let todosQuery = app.todos;
+  let todosQuery = app.todos
+    .orderBy("id", "desc")
+    .limit(50)
+    .offset(page * 50);
+
   if (deferredFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: deferredFilterTitle.trim() } });
   }
   if (showDoneOnly) {
     todosQuery = todosQuery.where({ done: true });
   }
-  const query = todosQuery
-    .orderBy("id", "desc")
-    .limit(50)
-    .offset(page * 50);
 
   const db = useDb();
   const session = useSession();
@@ -80,9 +80,9 @@ export function TodoList() {
           Done only
         </label>
       </div>
-      <Suspense fallback={<p>Loading todos…</p>}>
+      <Suspense fallback={null}>
         <div style={{ opacity: isLoading ? 0.5 : 1, transition: "opacity 0.2s" }}>
-          <TodoResults query={query} page={page} setPage={handlePageChange} />
+          <TodoResults query={todosQuery} page={page} setPage={handlePageChange} />
         </div>
       </Suspense>
     </>
