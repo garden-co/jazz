@@ -113,6 +113,19 @@ interface NativeModuleInterface {
     role: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
+    ptr: bigint,
+    queryJson: Uint8Array,
+    sessionJson: Uint8Array,
+    settledTier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
+    ptr: bigint,
+    handle: bigint,
+    callback: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_subscribe(
     ptr: bigint,
     queryJson: Uint8Array,

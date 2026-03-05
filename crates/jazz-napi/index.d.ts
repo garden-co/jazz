@@ -33,6 +33,15 @@ export declare class NapiRuntime {
     optionsJson?: string | undefined | null,
   ): number;
   unsubscribe(handle: number): void;
+  /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
+  createSubscription(
+    queryJson: string,
+    sessionJson?: string | undefined | null,
+    tier?: string | undefined | null,
+    optionsJson?: string | undefined | null,
+  ): number;
+  /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
+  executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void;
   insertDurable(table: string, values: any, tier: string): Promise<string>;
   updateDurable(objectId: string, values: any, tier: string): Promise<void>;
   deleteDurable(objectId: string, tier: string): Promise<void>;

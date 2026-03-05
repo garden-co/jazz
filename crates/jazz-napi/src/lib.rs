@@ -127,6 +127,90 @@ fn parse_query(json: &str) -> napi::Result<Query> {
     parse_query_json(json).map_err(napi::Error::from_reason)
 }
 
+fn parse_session_json(session_json: Option<String>) -> napi::Result<Option<Session>> {
+    if let Some(json) = session_json {
+        Ok(Some(serde_json::from_str::<Session>(&json).map_err(
+            |e| napi::Error::from_reason(format!("Invalid session JSON: {}", e)),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_subscription_inputs(
+    query_json: &str,
+    session_json: Option<String>,
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> napi::Result<(
+    Query,
+    Option<Session>,
+    ReadDurabilityOptions,
+    QueryPropagation,
+)> {
+    let query = parse_query(query_json)?;
+    let session = parse_session_json(session_json)?;
+    let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
+    Ok((query, session, durability, propagation))
+}
+
+fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
+    let row_to_json = |row: &jazz_tools::query_manager::types::Row,
+                       descriptor: &jazz_tools::query_manager::types::RowDescriptor|
+     -> serde_json::Value {
+        let values = decode_row(descriptor, &row.data)
+            .map(|vals| vals.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        serde_json::json!({
+            "id": row.id.uuid().to_string(),
+            "values": values
+        })
+    };
+
+    let descriptor = &delta.descriptor;
+    let delta_obj = delta
+        .ordered_delta
+        .removed
+        .iter()
+        .map(|change| {
+            serde_json::json!({
+                "kind": 1,
+                "id": change.id.uuid().to_string(),
+                "index": change.index
+            })
+        })
+        .chain(delta.ordered_delta.updated.iter().map(|change| {
+            serde_json::json!({
+                "kind": 2,
+                "id": change.id.uuid().to_string(),
+                "index": change.new_index,
+                "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
+            })
+        }))
+        .chain(delta.ordered_delta.added.iter().map(|change| {
+            serde_json::json!({
+                "kind": 0,
+                "id": change.id.uuid().to_string(),
+                "index": change.index,
+                "row": row_to_json(&change.row, descriptor)
+            })
+        }))
+        .collect::<Vec<_>>();
+
+    serde_json::Value::Array(delta_obj)
+}
+
+fn make_subscription_callback(
+    tsfn: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled>,
+) -> impl Fn(SubscriptionDelta) + Send + 'static {
+    move |delta: SubscriptionDelta| {
+        tsfn.call(
+            Ok(subscription_delta_to_json(&delta)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
+}
+
 // ============================================================================
 // NapiScheduler
 // ============================================================================
@@ -425,15 +509,7 @@ impl NapiRuntime {
         options_json: Option<String>,
     ) -> napi::Result<napi::JsObject> {
         let query = parse_query(&query_json)?;
-
-        let session =
-            if let Some(json) = session_json {
-                Some(serde_json::from_str::<Session>(&json).map_err(|e| {
-                    napi::Error::from_reason(format!("Invalid session JSON: {}", e))
-                })?)
-            } else {
-                None
-            };
+        let session = parse_session_json(session_json)?;
 
         let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
@@ -488,18 +564,8 @@ impl NapiRuntime {
         tier: Option<String>,
         options_json: Option<String>,
     ) -> napi::Result<f64> {
-        let query = parse_query(&query_json)?;
-
-        let session =
-            if let Some(json) = session_json {
-                Some(serde_json::from_str::<Session>(&json).map_err(|e| {
-                    napi::Error::from_reason(format!("Invalid session JSON: {}", e))
-                })?)
-            } else {
-                None
-            };
-
-        let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
 
         // Create a ThreadsafeFunction for the JS callback.
         // The closure converts our serde_json::Value into a JsUnknown to pass to JS.
@@ -508,55 +574,7 @@ impl NapiRuntime {
                 let val = ctx.env.to_js_value(&ctx.value)?;
                 Ok(vec![val])
             })?;
-
-        let callback = move |delta: SubscriptionDelta| {
-            let row_to_json = |row: &jazz_tools::query_manager::types::Row,
-                               descriptor: &jazz_tools::query_manager::types::RowDescriptor|
-             -> serde_json::Value {
-                let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                serde_json::json!({
-                    "id": row.id.uuid().to_string(),
-                    "values": values
-                })
-            };
-
-            let descriptor = &delta.descriptor;
-            let delta_obj = delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    serde_json::json!({
-                        "kind": 1,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index
-                    })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    serde_json::json!({
-                        "kind": 2,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.new_index,
-                        "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    serde_json::json!({
-                        "kind": 0,
-                        "id": change.id.uuid().to_string(),
-                        "index": change.index,
-                        "row": row_to_json(&change.row, descriptor)
-                    })
-                }))
-                .collect::<Vec<_>>();
-
-            tsfn.call(
-                Ok(serde_json::Value::Array(delta_obj)),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        };
+        let callback = make_subscription_callback(tsfn);
 
         let mut core = self
             .core
@@ -582,6 +600,55 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.unsubscribe(SubscriptionHandle(handle as u64));
+        Ok(())
+    }
+
+    /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
+    #[napi(js_name = "createSubscription")]
+    pub fn create_subscription(
+        &self,
+        query_json: String,
+        session_json: Option<String>,
+        tier: Option<String>,
+        options_json: Option<String>,
+    ) -> napi::Result<f64> {
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let handle = core.create_subscription(query, session, durability, propagation);
+
+        Ok(handle.0 as f64)
+    }
+
+    /// Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
+    #[napi(js_name = "executeSubscription")]
+    pub fn execute_subscription(
+        &self,
+        handle: f64,
+        #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: napi::JsFunction,
+    ) -> napi::Result<()> {
+        let sub_handle = SubscriptionHandle(handle as u64);
+
+        let tsfn: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled> =
+            on_update.create_threadsafe_function(0, |ctx| {
+                let val = ctx.env.to_js_value(&ctx.value)?;
+                Ok(vec![val])
+            })?;
+        let callback = make_subscription_callback(tsfn);
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.execute_subscription(sub_handle, callback)
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Execute subscription failed: {:?}", e))
+            })?;
+
         Ok(())
     }
 

@@ -125,6 +125,24 @@ fn parse_tier(tier: &str) -> Result<DurabilityTier, JazzRnError> {
     }
 }
 
+fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
+    ReadDurabilityOptions {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+    }
+}
+
+fn parse_subscription_inputs(
+    query_json: &str,
+    session_json: Option<String>,
+    tier: Option<String>,
+) -> Result<(Query, Option<Session>, ReadDurabilityOptions), JazzRnError> {
+    let query = parse_query(query_json)?;
+    let session = parse_session(session_json)?;
+    let tier = tier.as_deref().map(parse_tier).transpose()?;
+    Ok((query, session, default_read_durability_options(tier)))
+}
+
 fn build_rn_delta_json<F>(delta: &SubscriptionDelta, mut row_to_json: F) -> serde_json::Value
 where
     F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
@@ -178,6 +196,33 @@ where
         .collect::<Vec<_>>();
 
     serde_json::Value::Array(changes)
+}
+
+fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
+    let descriptor = &delta.descriptor;
+    let row_to_json = |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
+        let values = decode_row(descriptor, &row.data)
+            .map(|vals| vals.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        serde_json::json!({
+            "id": row.id.uuid().to_string(),
+            "values": values,
+        })
+    };
+    build_rn_delta_json(delta, row_to_json)
+}
+
+fn make_subscription_callback(
+    callback: Box<dyn SubscriptionCallback>,
+) -> impl Fn(SubscriptionDelta) + Send + 'static {
+    move |delta: SubscriptionDelta| {
+        let payload = subscription_delta_to_json(&delta);
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                callback.on_update(json);
+            }));
+        }
+    }
 }
 
 // ============================================================================
@@ -501,9 +546,9 @@ impl RnRuntime {
         tier: Option<String>,
     ) -> Result<u64, JazzRnError> {
         with_panic_boundary("subscribe", || {
-            let query = parse_query(&query_json)?;
-            let session = parse_session(session_json)?;
-            let tier = tier.as_deref().map(parse_tier).transpose()?;
+            let (query, session, durability) =
+                parse_subscription_inputs(&query_json, session_json, tier)?;
+            let callback = make_subscription_callback(callback);
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
@@ -512,35 +557,9 @@ impl RnRuntime {
             let handle = core
                 .subscribe_with_durability_and_propagation(
                     query,
-                    {
-                        move |delta: SubscriptionDelta| {
-                            let descriptor = &delta.descriptor;
-                            let row_to_json =
-                                |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
-                                    let values = decode_row(descriptor, &row.data)
-                                        .map(|vals| vals.into_iter().collect::<Vec<_>>())
-                                        .unwrap_or_default();
-                                    serde_json::json!({
-                                        "id": row.id.uuid().to_string(),
-                                        "values": values,
-                                    })
-                                };
-
-                            let payload = build_rn_delta_json(&delta, row_to_json);
-
-                            if let Ok(json) = serde_json::to_string(&payload) {
-                                let _ =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        callback.on_update(json);
-                                    }));
-                            }
-                        }
-                    },
+                    callback,
                     session,
-                    ReadDurabilityOptions {
-                        tier,
-                        local_updates: LocalUpdates::Immediate,
-                    },
+                    durability,
                     QueryPropagation::Full,
                 )
                 .map_err(runtime_err)?;
@@ -555,6 +574,47 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
             core.unsubscribe(SubscriptionHandle(handle));
+            Ok(())
+        })
+    }
+
+    /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
+    pub fn create_subscription(
+        &self,
+        query_json: String,
+        session_json: Option<String>,
+        tier: Option<String>,
+    ) -> Result<u64, JazzRnError> {
+        with_panic_boundary("create_subscription", || {
+            let (query, session, durability) =
+                parse_subscription_inputs(&query_json, session_json, tier)?;
+
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+
+            let handle =
+                core.create_subscription(query, session, durability, QueryPropagation::Full);
+
+            Ok(handle.0)
+        })
+    }
+
+    /// Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
+    pub fn execute_subscription(
+        &self,
+        handle: u64,
+        callback: Box<dyn SubscriptionCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("execute_subscription", || {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let callback = make_subscription_callback(callback);
+
+            core.execute_subscription(SubscriptionHandle(handle), callback)
+                .map_err(runtime_err)?;
+
             Ok(())
         })
     }
