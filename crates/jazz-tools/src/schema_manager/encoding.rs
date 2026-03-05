@@ -17,7 +17,8 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 3;
+/// v4: columns stored in definition order (no longer sorted alphabetically).
+const SCHEMA_VERSION: u8 = 4;
 const LENS_VERSION: u8 = 1;
 
 /// Encoding errors.
@@ -104,6 +105,9 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         // v2 schemas include policies, but no legacy inherit-policy byte.
         2 => decode_schema_v2(data),
         // v3 schemas include policies and a legacy inherit-policy byte.
+        // Columns were encoded in alphabetical order (now superseded by v4).
+        3 => decode_schema_v3(data),
+        // v4: columns stored in definition order (same binary structure as v3).
         SCHEMA_VERSION => decode_schema_v3(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
@@ -208,12 +212,8 @@ fn decode_schema_v3(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
 }
 
 fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
-    // Sort columns by name for deterministic encoding
-    let mut columns: Vec<_> = desc.columns.iter().collect();
-    columns.sort_by_key(|c| c.name.as_str());
-
-    write_u32(buf, columns.len() as u32);
-    for col in columns {
+    write_u32(buf, desc.columns.len() as u32);
+    for col in &desc.columns {
         encode_column_descriptor(buf, col);
     }
 }
