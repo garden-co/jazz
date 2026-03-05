@@ -79,7 +79,9 @@ impl From<&Value> for ValueHuman {
             Value::Uuid(v) => ValueHuman::Uuid(*v),
             Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
             Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
-            Value::Row(v) => ValueHuman::Row(v.iter().map(ValueHuman::from).collect()),
+            Value::Row { values, .. } => {
+                ValueHuman::Row(values.iter().map(ValueHuman::from).collect())
+            }
             Value::Null => ValueHuman::Null,
         }
     }
@@ -97,7 +99,10 @@ impl From<ValueHuman> for Value {
             ValueHuman::Uuid(v) => Value::Uuid(v),
             ValueHuman::Bytea(v) => Value::Bytea(v),
             ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueHuman::Row(v) => Value::Row(v.into_iter().map(Value::from).collect()),
+            ValueHuman::Row(v) => Value::Row {
+                id: None,
+                values: v.into_iter().map(Value::from).collect(),
+            },
             ValueHuman::Null => Value::Null,
         }
     }
@@ -115,7 +120,9 @@ impl From<&Value> for ValueBinary {
             Value::Uuid(v) => ValueBinary::Uuid(*v),
             Value::Bytea(v) => ValueBinary::Bytea(v.clone()),
             Value::Array(v) => ValueBinary::Array(v.iter().map(ValueBinary::from).collect()),
-            Value::Row(v) => ValueBinary::Row(v.iter().map(ValueBinary::from).collect()),
+            Value::Row { values, .. } => {
+                ValueBinary::Row(values.iter().map(ValueBinary::from).collect())
+            }
             Value::Null => ValueBinary::Null,
         }
     }
@@ -133,7 +140,10 @@ impl From<ValueBinary> for Value {
             ValueBinary::Uuid(v) => Value::Uuid(v),
             ValueBinary::Bytea(v) => Value::Bytea(v),
             ValueBinary::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueBinary::Row(v) => Value::Row(v.into_iter().map(Value::from).collect()),
+            ValueBinary::Row(v) => Value::Row {
+                id: None,
+                values: v.into_iter().map(Value::from).collect(),
+            },
             ValueBinary::Null => Value::Null,
         }
     }
