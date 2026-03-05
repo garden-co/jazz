@@ -1,9 +1,26 @@
 declare module "jazz-wasm" {
+  type SyncOutboxCallbackArgs =
+    | [
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ]
+    | [
+        err: unknown,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ];
+  type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
+
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
 
   export class WasmRuntime {
     constructor(schemaJson: string, appId: string, env: string, userBranch: string, tier?: string);
+    schedule?: (task: () => void) => void;
 
     insert(table: string, values: unknown): string;
     insertDurable(table: string, values: unknown, tier: string): Promise<string>;
@@ -17,6 +34,13 @@ declare module "jazz-wasm" {
       tier?: string | null,
       optionsJson?: string | null,
     ): Promise<unknown>;
+    createSubscription(
+      queryJson: string,
+      sessionJson?: string | null,
+      tier?: string | null,
+      optionsJson?: string | null,
+    ): number;
+    executeSubscription(handle: number, onUpdate: Function): void;
     subscribe(
       queryJson: string,
       onUpdate: Function,
@@ -26,7 +50,7 @@ declare module "jazz-wasm" {
     ): number;
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string): void;
-    onSyncMessageToSend(callback: Function): void;
+    onSyncMessageToSend(callback: SyncOutboxCallback): void;
     addServer(): void;
     removeServer(): void;
     addClient(): string;

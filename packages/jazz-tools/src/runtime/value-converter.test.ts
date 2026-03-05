@@ -133,10 +133,12 @@ describe("toValue", () => {
     };
     expect(toValue({ x: 10, y: 20 }, colType)).toEqual({
       type: "Row",
-      value: [
-        { type: "Integer", value: 10 },
-        { type: "Integer", value: 20 },
-      ],
+      value: {
+        values: [
+          { type: "Integer", value: 10 },
+          { type: "Integer", value: 20 },
+        ],
+      },
     });
   });
 

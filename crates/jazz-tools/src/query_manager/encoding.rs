@@ -194,7 +194,7 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Row {
             columns: row_descriptor,
         } => match value {
-            Value::Row(values) if values.len() == row_descriptor.columns.len() => values
+            Value::Row { values, .. } if values.len() == row_descriptor.columns.len() => values
                 .iter()
                 .zip(row_descriptor.columns.iter())
                 .all(|(inner_value, inner_column)| {
@@ -239,7 +239,7 @@ fn validate_value_size(
             Ok(())
         }
         (
-            Value::Row(values),
+            Value::Row { values, .. },
             ColumnType::Row {
                 columns: row_descriptor,
             },
@@ -286,7 +286,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::Text(_) => unreachable!("Text is not fixed-size"),
         Value::Bytea(_) => unreachable!("Bytea is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
-        Value::Row(_) => unreachable!("Row is not fixed-size"),
+        Value::Row { .. } => unreachable!("Row is not fixed-size"),
     }
 }
 
@@ -305,9 +305,17 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
         Value::Array(elements) => buf.extend(encode_array(elements, &col.column_type)),
-        Value::Row(values) => {
+        Value::Row { id, values } => {
             // Encode row using its descriptor from the column type
             if let ColumnType::Row { columns: desc } = &col.column_type {
+                // Encode optional row id: 1-byte flag + 16-byte UUID if present
+                match id {
+                    Some(obj_id) => {
+                        buf.push(1);
+                        buf.extend_from_slice(obj_id.uuid().as_bytes());
+                    }
+                    None => buf.push(0),
+                }
                 let row_bytes = encode_row(desc, values).unwrap_or_default();
                 buf.extend(row_bytes);
             }
@@ -435,8 +443,29 @@ fn decode_non_null_value(
             Ok(Value::Array(elements))
         }
         ColumnType::Row { columns: row_desc } => {
-            let values = decode_row(row_desc, data)?;
-            Ok(Value::Row(values))
+            // Decode optional row id: 1-byte flag + 16-byte UUID if present
+            if data.is_empty() {
+                return Err(EncodingError::MalformedData {
+                    message: "row id flag missing".to_string(),
+                });
+            }
+            let (id, row_data) = if data[0] == 1 {
+                if data.len() < 17 {
+                    return Err(EncodingError::MalformedData {
+                        message: "row id too short".to_string(),
+                    });
+                }
+                let uuid = uuid::Uuid::from_slice(&data[1..17]).map_err(|e| {
+                    EncodingError::MalformedData {
+                        message: format!("invalid row id uuid: {e}"),
+                    }
+                })?;
+                (Some(ObjectId::from_uuid(uuid)), &data[17..])
+            } else {
+                (None, &data[1..])
+            };
+            let values = decode_row(row_desc, row_data)?;
+            Ok(Value::Row { id, values })
         }
     }
 }
@@ -821,7 +850,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
-        Value::Row(_) => panic!("Row values require a descriptor - use encode_value_with_type"),
+        Value::Row { .. } => panic!("Row values require a descriptor - use encode_value_with_type"),
         Value::Null => vec![],
     }
 }
@@ -829,8 +858,18 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
 /// Encode a Value to binary bytes with type information (needed for Row values).
 pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
     match (value, col_type) {
-        (Value::Row(values), ColumnType::Row { columns: desc }) => {
-            encode_row(desc, values).unwrap_or_default()
+        (Value::Row { id, values }, ColumnType::Row { columns: desc }) => {
+            let mut buf = Vec::new();
+            // Encode optional row id: 1-byte flag + 16-byte UUID if present
+            match id {
+                Some(obj_id) => {
+                    buf.push(1);
+                    buf.extend_from_slice(obj_id.uuid().as_bytes());
+                }
+                None => buf.push(0),
+            }
+            buf.extend(encode_row(desc, values).unwrap_or_default());
+            buf
         }
         (Value::Array(elements), ColumnType::Array { element: _ }) => {
             encode_array(elements, col_type)
@@ -1622,8 +1661,14 @@ mod tests {
         };
 
         let elements = vec![
-            Value::Row(vec![Value::Integer(1), Value::Text("Alice".into())]),
-            Value::Row(vec![Value::Integer(2), Value::Text("Bob".into())]),
+            Value::Row {
+                id: None,
+                values: vec![Value::Integer(1), Value::Text("Alice".into())],
+            },
+            Value::Row {
+                id: None,
+                values: vec![Value::Integer(2), Value::Text("Bob".into())],
+            },
         ];
 
         let encoded = encode_array(&elements, &array_type);

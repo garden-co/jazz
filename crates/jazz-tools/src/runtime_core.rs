@@ -58,7 +58,7 @@ pub trait Scheduler {
 /// No `Send` bound — WASM types are `!Send`. Send is enforced
 /// by the concrete wrapping type where needed.
 pub trait SyncSender {
-    fn send_sync_message(&self, message: OutboxEntry);
+    fn send_sync_message(&self, message: OutboxEntry, sender_tier: &'static str);
 }
 
 // ============================================================================
@@ -97,7 +97,7 @@ impl VecSyncSender {
 }
 
 impl SyncSender for VecSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
+    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
         self.messages.lock().unwrap().push(message);
     }
 }
@@ -233,6 +233,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Reverse map for routing updates.
     subscription_reverse: HashMap<QuerySubscriptionId, SubscriptionHandle>,
     next_subscription_handle: u64,
+    /// Created-but-not-yet-executed subscriptions (2-phase subscribe).
+    pending_subscriptions: HashMap<SubscriptionHandle, subscriptions::PendingSubscription>,
 
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
@@ -259,6 +261,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             subscriptions: HashMap::new(),
             subscription_reverse: HashMap::new(),
             next_subscription_handle: 0,
+            pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
             tier_label: "unknown",
