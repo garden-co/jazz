@@ -351,7 +351,7 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
-        Value::Row(values) => {
+        Value::Row { values, .. } => {
             hasher.update(&[8]);
             hasher.update(&(values.len() as u64).to_le_bytes());
             for inner in values {

@@ -1529,7 +1529,7 @@ fn value_to_sql(val: &Value) -> String {
         Value::Uuid(id) => format!("'{:?}'", id),
         Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
         Value::Array(_) => "'[]'".to_string(),
-        Value::Row(_) => "'{}'".to_string(),
+        Value::Row { .. } => "'{}'".to_string(),
     }
 }
 
