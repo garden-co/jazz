@@ -20,6 +20,7 @@ declare module "jazz-wasm" {
 
   export class WasmRuntime {
     constructor(schemaJson: string, appId: string, env: string, userBranch: string, tier?: string);
+    schedule?: (task: () => void) => void;
 
     insert(table: string, values: unknown): string;
     insertDurable(table: string, values: unknown, tier: string): Promise<string>;
@@ -33,6 +34,13 @@ declare module "jazz-wasm" {
       tier?: string | null,
       optionsJson?: string | null,
     ): Promise<unknown>;
+    createSubscription(
+      queryJson: string,
+      sessionJson?: string | null,
+      tier?: string | null,
+      optionsJson?: string | null,
+    ): number;
+    executeSubscription(handle: number, onUpdate: Function): void;
     subscribe(
       queryJson: string,
       onUpdate: Function,

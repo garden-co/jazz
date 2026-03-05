@@ -63,6 +63,13 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): number;
+  createSubscription(
+    query_json: string,
+    session_json?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
+  ): number;
+  executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
@@ -160,6 +167,18 @@ function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function getScheduler(): (task: () => void) => void {
+  if ("scheduler" in globalThis) {
+    return (task: () => void) => {
+      // See: https://developer.mozilla.org/en-US/docs/Web/API/Scheduler/postTask
+      // @ts-ignore Scheduler is not yet provided by the dom library
+      void globalThis.scheduler.postTask(task, { priority: "user-visible" });
+    };
+  }
+
+  return queueMicrotask;
 }
 
 function resolveDefaultDurabilityTier(context: AppContext): DurabilityTier {
@@ -387,7 +406,7 @@ export class JazzClient {
   private runtime: Runtime;
   private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private subscriptions = new Map<number, SubscriptionCallback>();
+  private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
@@ -399,6 +418,7 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
   ) {
     this.runtime = runtime;
+    this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
@@ -671,6 +691,12 @@ export class JazzClient {
 
   /**
    * Internal subscribe with optional session and read durability options.
+   *
+   * Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
+   * a handle synchronously (zero work), then `executeSubscription` is deferred
+   * via the scheduler so compilation + first tick run outside the caller's
+   * synchronous stack (e.g. outside a React render).
+   *
    * @internal
    */
   subscribeInternal(
@@ -683,20 +709,23 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const subId = this.runtime.subscribe(
+
+    const handle = this.runtime.createSubscription(
       queryJson,
-      (deltaJsonOrObject: RowDelta | string) => {
-        // WASM runtime passes delta as JSON string, need to parse it
-        const delta: RowDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
-      },
       sessionJson,
       normalizedOptions.tier,
       optionsJson,
     );
-    this.subscriptions.set(subId, callback);
-    return subId;
+
+    this.scheduler(() => {
+      this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
+        const delta: RowDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+        callback(delta);
+      });
+    });
+
+    return handle;
   }
 
   /**
@@ -706,7 +735,6 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
-    this.subscriptions.delete(subscriptionId);
   }
 
   /**
