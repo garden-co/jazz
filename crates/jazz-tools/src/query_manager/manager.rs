@@ -988,11 +988,23 @@ impl QueryManager {
                         self.branch_schema_map.insert(branch.to_string(), full_hash);
                         full_hash
                     } else {
+                        let schema_short = composed.schema_hash.short();
+                        tracing::error!(
+                            object_id = %update.object_id,
+                            branch = %branch,
+                            schema_hash = %schema_short,
+                            "buffering row update for unknown schema hash; schema not yet known"
+                        );
                         // Schema not known yet - buffer for retry
                         self.pending_row_updates.push(update);
                         return;
                     }
                 } else {
+                    tracing::error!(
+                        object_id = %update.object_id,
+                        branch = %branch,
+                        "buffering row update for unknown branch; cannot parse schema hash"
+                    );
                     // Can't parse branch - buffer for retry
                     self.pending_row_updates.push(update);
                     return;
@@ -1020,6 +1032,12 @@ impl QueryManager {
                 None => return,
             }
         } else {
+            tracing::error!(
+                object_id = %update.object_id,
+                branch = %branch,
+                schema_hash = %schema_hash.short(),
+                "buffering row update because schema for branch is not available yet"
+            );
             // Schema not available - buffer for retry
             self.pending_row_updates.push(update);
             return;
