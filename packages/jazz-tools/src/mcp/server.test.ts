@@ -72,7 +72,7 @@ afterEach(async () => {
 
 async function exchange(
   messages: object[],
-): Promise<Array<Record<string, unknown>>> {
+): Promise<[Record<string, unknown>, ...Record<string, unknown>[]]> {
   const input = new PassThrough();
   const output = new PassThrough();
 
@@ -90,7 +90,10 @@ async function exchange(
   return text
     .split("\n")
     .filter((l) => l.trim())
-    .map((l) => JSON.parse(l));
+    .map((l) => JSON.parse(l)) as [
+    Record<string, unknown>,
+    ...Record<string, unknown>[],
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +158,10 @@ describe("malformed JSON", () => {
       .toString("utf8")
       .split("\n")
       .filter(Boolean)
-      .map((l) => JSON.parse(l));
+      .map((l) => JSON.parse(l)) as [
+      Record<string, unknown>,
+      ...Record<string, unknown>[],
+    ];
     expect((res.error as any).code).toBe(-32700);
   });
 });
@@ -227,10 +233,10 @@ describe("tools/call search_docs", () => {
         params: { name: "search_docs", arguments: { query: "install" } },
       },
     ]);
-    const content = (res.result as any).content as Array<{
-      type: string;
-      text: string;
-    }>;
+    const content = (res.result as any).content as [
+      { type: string; text: string },
+      ...{ type: string; text: string }[],
+    ];
     expect(content[0].type).toBe("text");
     // Title and slug appear in output (may be wrapped in ANSI codes)
     expect(content[0].text).toContain("Quickstart");
