@@ -9,6 +9,7 @@ import { serverDefaults } from "./config.js";
 import { startWorker } from "jazz-tools/worker";
 import { RegistryState, WebhookRegistry } from "jazz-webhook";
 import { co } from "jazz-tools";
+import { runServer } from "jazz-tools/mcp";
 
 const jazzTools = Command.make("jazz-tools");
 
@@ -313,11 +314,16 @@ const webhookCommand = Command.make("webhook").pipe(
   ]),
 );
 
+const mcpCommand = Command.make("mcp", {}, () => {
+  return Effect.promise(() => runServer());
+});
+
 const command = jazzTools.pipe(
   Command.withSubcommands([
     accountCommand,
     startSyncServerCommand,
     webhookCommand,
+    mcpCommand,
   ]),
 );
 
