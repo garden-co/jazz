@@ -40,6 +40,8 @@ use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::manager::LocalUpdates;
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
@@ -146,6 +148,86 @@ fn parse_read_durability_options(
         },
         propagation,
     ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_subscription_inputs(
+    query_json: &str,
+    session_json: Option<String>,
+    settled_tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<
+    (
+        Query,
+        Option<Session>,
+        ReadDurabilityOptions,
+        QueryPropagation,
+    ),
+    JsError,
+> {
+    let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
+    let session = if let Some(json) = session_json {
+        Some(
+            serde_json::from_str::<Session>(&json)
+                .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
+        )
+    } else {
+        None
+    };
+    let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
+    Ok((query, session, durability, propagation))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn make_subscription_callback(on_update: Function) -> impl Fn(SubscriptionDelta) + 'static {
+    move |delta: SubscriptionDelta| {
+        let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
+            let values = decode_row(descriptor, &row.data)
+                .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
+                .unwrap_or_default();
+            SubscriptionRow {
+                id: row.id.uuid().to_string(),
+                values,
+            }
+        };
+
+        let descriptor = &delta.descriptor;
+        let wasm_delta = SubscriptionRowDelta(
+            delta
+                .ordered_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    SubscriptionRowChange::Removed(SubscriptionRowRemoved {
+                        kind: 1,
+                        id: change.id.uuid().to_string(),
+                        index: change.index,
+                    })
+                })
+                .chain(delta.ordered_delta.updated.iter().map(|change| {
+                    SubscriptionRowChange::Updated(SubscriptionRowUpdated {
+                        kind: 2,
+                        id: change.id.uuid().to_string(),
+                        index: change.new_index,
+                        row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
+                    })
+                }))
+                .chain(delta.ordered_delta.added.iter().map(|change| {
+                    SubscriptionRowChange::Added(SubscriptionRowAdded {
+                        kind: 0,
+                        id: change.id.uuid().to_string(),
+                        index: change.index,
+                        row: row_to_wasm(&change.row, descriptor),
+                    })
+                }))
+                .collect::<Vec<_>>(),
+        );
+
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+            let _ = on_update.call1(&JsValue::NULL, &delta_value);
+        }
+    }
 }
 
 fn parse_node_durability_tiers(tier: Option<&str>) -> Result<Vec<DurabilityTier>, JsError> {
@@ -703,67 +785,9 @@ impl WasmRuntime {
         options_json: Option<String>,
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
-        let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
-
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json)
-                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
-            )
-        } else {
-            None
-        };
-
-        let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
-
-        let callback = move |delta: SubscriptionDelta| {
-            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
-                let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
-                    .unwrap_or_default();
-                SubscriptionRow {
-                    id: row.id.uuid().to_string(),
-                    values,
-                }
-            };
-
-            let descriptor = &delta.descriptor;
-            let wasm_delta = SubscriptionRowDelta(
-                delta
-                    .ordered_delta
-                    .removed
-                    .iter()
-                    .map(|change| {
-                        SubscriptionRowChange::Removed(SubscriptionRowRemoved {
-                            kind: 1,
-                            id: change.id.uuid().to_string(),
-                            index: change.index,
-                        })
-                    })
-                    .chain(delta.ordered_delta.updated.iter().map(|change| {
-                        SubscriptionRowChange::Updated(SubscriptionRowUpdated {
-                            kind: 2,
-                            id: change.id.uuid().to_string(),
-                            index: change.new_index,
-                            row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
-                        })
-                    }))
-                    .chain(delta.ordered_delta.added.iter().map(|change| {
-                        SubscriptionRowChange::Added(SubscriptionRowAdded {
-                            kind: 0,
-                            id: change.id.uuid().to_string(),
-                            index: change.index,
-                            row: row_to_wasm(&change.row, descriptor),
-                        })
-                    }))
-                    .collect::<Vec<_>>(),
-            );
-
-            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-            if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
-                let _ = on_update.call1(&JsValue::NULL, &delta_value);
-            }
-        };
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
+        let callback = make_subscription_callback(on_update);
 
         let handle = self
             .core
@@ -791,6 +815,54 @@ impl WasmRuntime {
         self.core
             .borrow_mut()
             .unsubscribe(SubscriptionHandle(sub_id));
+    }
+
+    /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
+    /// No compilation, no sync, no tick — just bookkeeping.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = createSubscription)]
+    pub fn create_subscription(
+        &self,
+        query_json: &str,
+        session_json: Option<String>,
+        settled_tier: Option<String>,
+        options_json: Option<String>,
+    ) -> Result<f64, JsError> {
+        let _span = debug_span!("wasm::createSubscription", tier = self.tier_label).entered();
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
+
+        let handle =
+            self.core
+                .borrow_mut()
+                .create_subscription(query, session, durability, propagation);
+
+        tracing::debug!(handle = handle.0, "subscription created (pending)");
+        Ok(handle.0 as f64)
+    }
+
+    /// Phase 2 of 2-phase subscribe: compile graph, register subscription,
+    /// sync to servers, attach callback, and deliver the first delta.
+    ///
+    /// No-ops silently if the handle was already unsubscribed.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = executeSubscription)]
+    pub fn execute_subscription(&self, handle: f64, on_update: Function) -> Result<(), JsError> {
+        let sub_handle = SubscriptionHandle(handle as u64);
+        let _span = debug_span!(
+            "wasm::executeSubscription",
+            handle = sub_handle.0,
+            tier = self.tier_label
+        )
+        .entered();
+        let callback = make_subscription_callback(on_update);
+
+        self.core
+            .borrow_mut()
+            .execute_subscription(sub_handle, callback)
+            .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
+
+        Ok(())
     }
 
     // =========================================================================

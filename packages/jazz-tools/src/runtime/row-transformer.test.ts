@@ -82,10 +82,12 @@ describe("unwrapValue", () => {
   it("unwraps Row recursively", () => {
     const v: WasmValue = {
       type: "Row",
-      value: [
-        { type: "Text", value: "cell1" },
-        { type: "Boolean", value: true },
-      ],
+      value: {
+        values: [
+          { type: "Text", value: "cell1" },
+          { type: "Boolean", value: true },
+        ],
+      },
     };
     expect(unwrapValue(v)).toEqual(["cell1", true]);
   });
@@ -309,7 +311,7 @@ describe("transformRows", () => {
     });
   });
 
-  it("maps forward include arrays to relation names", () => {
+  it("maps forward include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {
         id: "todo-1",
@@ -321,7 +323,10 @@ describe("transformRows", () => {
             value: [
               {
                 type: "Row",
-                value: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+                value: {
+                  id: "user-1",
+                  values: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+                },
               },
             ],
           },
@@ -337,6 +342,7 @@ describe("transformRows", () => {
         title: "Buy milk",
         owner_id: "user-1",
         owner: {
+          id: "user-1",
           name: "Alice",
           manager_id: undefined,
         },
@@ -344,7 +350,7 @@ describe("transformRows", () => {
     ]);
   });
 
-  it("maps reverse include arrays to relation names", () => {
+  it("maps reverse include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {
         id: "user-1",
@@ -356,17 +362,23 @@ describe("transformRows", () => {
             value: [
               {
                 type: "Row",
-                value: [
-                  { type: "Text", value: "Buy milk" },
-                  { type: "Uuid", value: "user-1" },
-                ],
+                value: {
+                  id: "todo-1",
+                  values: [
+                    { type: "Text", value: "Buy milk" },
+                    { type: "Uuid", value: "user-1" },
+                  ],
+                },
               },
               {
                 type: "Row",
-                value: [
-                  { type: "Text", value: "Write tests" },
-                  { type: "Uuid", value: "user-1" },
-                ],
+                value: {
+                  id: "todo-2",
+                  values: [
+                    { type: "Text", value: "Write tests" },
+                    { type: "Uuid", value: "user-1" },
+                  ],
+                },
               },
             ],
           },
@@ -382,14 +394,14 @@ describe("transformRows", () => {
         name: "Alice",
         manager_id: undefined,
         todosViaOwner: [
-          { title: "Buy milk", owner_id: "user-1" },
-          { title: "Write tests", owner_id: "user-1" },
+          { id: "todo-1", title: "Buy milk", owner_id: "user-1" },
+          { id: "todo-2", title: "Write tests", owner_id: "user-1" },
         ],
       },
     ]);
   });
 
-  it("maps nested includes recursively", () => {
+  it("maps nested includes recursively with id", () => {
     const rows: WasmRow[] = [
       {
         id: "todo-1",
@@ -401,19 +413,25 @@ describe("transformRows", () => {
             value: [
               {
                 type: "Row",
-                value: [
-                  { type: "Text", value: "Alice" },
-                  { type: "Uuid", value: "user-2" },
-                  {
-                    type: "Array",
-                    value: [
-                      {
-                        type: "Row",
-                        value: [{ type: "Text", value: "Manager" }, { type: "Null" }],
-                      },
-                    ],
-                  },
-                ],
+                value: {
+                  id: "user-1",
+                  values: [
+                    { type: "Text", value: "Alice" },
+                    { type: "Uuid", value: "user-2" },
+                    {
+                      type: "Array",
+                      value: [
+                        {
+                          type: "Row",
+                          value: {
+                            id: "user-2",
+                            values: [{ type: "Text", value: "Manager" }, { type: "Null" }],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
               },
             ],
           },
@@ -431,9 +449,11 @@ describe("transformRows", () => {
         title: "Buy milk",
         owner_id: "user-1",
         owner: {
+          id: "user-1",
           name: "Alice",
           manager_id: "user-2",
           manager: {
+            id: "user-2",
             name: "Manager",
             manager_id: undefined,
           },

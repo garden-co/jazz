@@ -560,7 +560,7 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             bytes
         }
 
-        Value::Row(_) => {
+        Value::Row { .. } => {
             // Rows not typically indexed; use hash for equality only
             let mut bytes = vec![0x08];
             let json = serde_json::to_string(value).unwrap_or_default();
@@ -1189,7 +1189,10 @@ mod tests {
     #[test]
     fn real_cross_type_ordering() {
         // Double should sort after all existing types (tag 0x09 > 0x08)
-        let row = encode_value(&Value::Row(vec![]));
+        let row = encode_value(&Value::Row {
+            id: None,
+            values: vec![],
+        });
         let double = encode_value(&Value::Double(0.0));
 
         assert!(row < double);
