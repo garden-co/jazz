@@ -19,7 +19,7 @@ use crate::sync_manager::{
 };
 use bytes::BytesMut;
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::transport::{AuthConfig, ServerConnection};
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
@@ -191,12 +191,20 @@ impl JazzClient {
         > = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn binary stream listener if connected to server
+        let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let stream_listener_task = if let Some(ref conn) = server_connection {
             let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
             let stream_headers = conn.build_stream_headers();
             let server_id_for_stream = server_id;
+            let mut initial_stream_ready_tx = initial_stream_ready_tx;
 
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
@@ -243,6 +251,14 @@ impl JazzClient {
 
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
+                                                    if matches!(
+                                                        event,
+                                                        ServerEvent::Connected { .. }
+                                                    ) && let Some(tx) =
+                                                        initial_stream_ready_tx.take()
+                                                    {
+                                                        let _ = tx.send(());
+                                                    }
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
@@ -286,6 +302,21 @@ impl JazzClient {
         } else {
             None
         };
+
+        if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
+            tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
+                .await
+                .map_err(|_| {
+                    JazzError::Connection(
+                        "timed out waiting for server event stream to connect".to_string(),
+                    )
+                })?
+                .map_err(|_| {
+                    JazzError::Connection(
+                        "server event stream ended before sending Connected".to_string(),
+                    )
+                })?;
+        }
 
         Ok(Self {
             runtime,
