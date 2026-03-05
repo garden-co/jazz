@@ -62,7 +62,8 @@ export function useGameSync(playerId: string): GameSyncResult {
   );
   const allChatMessages = useAll(app.chat_messages.orderBy("createdAt", "asc"), "edge") ?? [];
 
-  const localPlayerRows = useAll(app.players.where({ playerId }));
+  const localPlayerRowsRaw = useAll(app.players.where({ playerId }));
+  const localPlayerRows = localPlayerRowsRaw ?? [];
   const localFuelType = localPlayerRows[0]?.requiredFuelType ?? FUEL_TYPES[0];
 
   const perTypeLimits = useMemo(() => {
@@ -78,19 +79,49 @@ export function useGameSync(playerId: string): GameSyncResult {
   }, [remotePlayers, localFuelType]);
 
   const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), "edge");
-  const myCollectedDeposits = useAll(app.fuel_deposits.where({ collectedBy: playerId }), "edge");
 
-  const settled = allUncollected !== undefined && myCollectedDeposits !== undefined;
+  // Compound WHERE: only this player's collected deposits.
+  // Fires WHERE ENTRY immediately for local writes (both fields match the write
+  // {collected:true, collectedBy:playerId}) without interference from the broader
+  // all-collected subscription.  Used as the source of truth for burst/release.
+  const localCollectedDeposits = useAll(
+    app.fuel_deposits.where({ collected: true, collectedBy: playerId }),
+    "edge",
+  );
+
+  // Broad subscription: all collected deposits.
+  // WHERE ENTRY fires for cross-client boolean writes (A collects → false→true,
+  // B sees it here). When A then shares (collectedBy: A→B), B already has the
+  // row in this subscription and receives it as a plain row update.
+  const allCollectedDeposits = useAll(app.fuel_deposits.where({ collected: true }), "edge");
+  // settled: edge subscription has returned its initial result.
+  const settled = allUncollected !== undefined;
 
   const uncollectedDeposits = allUncollected ?? [];
 
+  // myCollectedDeposits: reliable local tracking via compound WHERE.
+  // Used for allDepositsRaw so burst/release can always find this player's
+  // collected deposits quickly.
+  const myCollectedDeposits = localCollectedDeposits ?? [];
+
+  // effectiveMyCollected: merges local + broad subscriptions so that received
+  // shares (which enter via allCollectedDeposits) appear in the inventory.
+  const effectiveMyCollected = useMemo(() => {
+    const map = new Map<string, FuelDeposit>();
+    for (const d of myCollectedDeposits) map.set(d.id, d);
+    for (const d of (allCollectedDeposits ?? []).filter((d) => d.collectedBy === playerId)) {
+      map.set(d.id, d);
+    }
+    return [...map.values()] as FuelDeposit[];
+  }, [myCollectedDeposits, allCollectedDeposits, playerId]);
+
   const allDepositsRaw = useMemo(
-    () => [...uncollectedDeposits, ...(myCollectedDeposits ?? [])] as FuelDeposit[],
+    () => [...uncollectedDeposits, ...myCollectedDeposits] as FuelDeposit[],
     [uncollectedDeposits, myCollectedDeposits],
   );
 
   const perTypeCounts = useMemo(() => {
-    const counts = new Array(FUEL_TYPES.length).fill(0);
+    const counts = Array.from({ length: FUEL_TYPES.length }, () => 0);
     for (const d of uncollectedDeposits) {
       const idx = FUEL_TYPES.indexOf(d.fuelType as FuelType);
       if (idx >= 0) counts[idx]++;
@@ -121,8 +152,8 @@ export function useGameSync(playerId: string): GameSyncResult {
   }, [uncollectedDeposits]);
 
   const inventory = useMemo(() => {
-    return (myCollectedDeposits ?? []).map((d) => d.fuelType as FuelType);
-  }, [myCollectedDeposits]);
+    return effectiveMyCollected.map((d) => d.fuelType as FuelType);
+  }, [effectiveMyCollected]);
 
   // --- SyncManager ---
   const syncRef = useRef<SyncManager | null>(null);
@@ -132,13 +163,14 @@ export function useGameSync(playerId: string): GameSyncResult {
 
   sync.setInputs({
     settled,
+    localPlayerSettled: localPlayerRowsRaw !== undefined,
     uncollectedDeposits,
-    myCollectedDeposits: myCollectedDeposits ?? [],
+    myCollectedDeposits: effectiveMyCollected,
     allDepositsRaw,
     localPlayerRows,
     perTypeLimits,
     perTypeCounts,
-    myCollectedCount: myCollectedDeposits?.length ?? 0,
+    myCollectedCount: effectiveMyCollected.length,
     debugTotalDeposits: allDepositsRaw.length,
   });
 

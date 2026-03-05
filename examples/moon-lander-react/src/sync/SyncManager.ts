@@ -3,6 +3,7 @@ import type { FuelDeposit, PlayerInit } from "../../schema/app";
 import { app } from "../../schema/app";
 import type { FuelType } from "../game/constants";
 import { DB_SYNC_INTERVAL_MS, FUEL_TYPES, MOON_SURFACE_WIDTH } from "../game/constants";
+import { seededRand } from "../game/world.js";
 
 /** Base number of uncollected deposits per fuel type. */
 export const DEPOSITS_PER_TYPE = 3;
@@ -13,6 +14,8 @@ export const DEPOSITS_PER_TYPE = 3;
 
 export interface SyncInputs {
   settled: boolean;
+  /** True once the local player-row subscription has returned (may be before edge deposits settle). */
+  localPlayerSettled: boolean;
   uncollectedDeposits: FuelDeposit[];
   myCollectedDeposits: FuelDeposit[];
   allDepositsRaw: FuelDeposit[];
@@ -35,6 +38,15 @@ export class SyncManager {
   private pendingShares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
   private pendingBursts: string[] = [];
   private pendingMessages: string[] = [];
+  // Retry queue: burst/refuel releases where the deposit wasn't yet in
+  // allDepositsRaw (OPFS WHERE ENTRY race). Retried on the next flush cycle.
+  private pendingRetryReleases: string[] = [];
+
+  // Local map: deposit id → fuelType for deposits collected by this player that
+  // may not yet appear in allDepositsRaw (WHERE ENTRY for local boolean writes
+  // can lag).  Populated eagerly in collectDeposit() while the row is still in
+  // uncollectedDeposits; used as fallback in releaseDeposit() and shareFuel().
+  private collectedByThis = new Map<string, { fuelType: string; positionX: number }>(); // id → {fuelType, positionX}
 
   // Player sync state
   private dbRowId: string | null = null;
@@ -44,9 +56,16 @@ export class SyncManager {
   // Reconciliation
   private hasReconciled = false;
 
+  // Teardown flag — set by destroy() to suppress flush errors after cleanup
+  private destroyed = false;
+
+  // Prevent concurrent flush calls from racing on dbRowId / inserts
+  private flushing = false;
+
   // Latest subscription data (pushed from React each render)
   inputs: SyncInputs = {
     settled: false,
+    localPlayerSettled: false,
     uncollectedDeposits: [],
     myCollectedDeposits: [],
     allDepositsRaw: [],
@@ -63,13 +82,31 @@ export class SyncManager {
     private db: ReturnType<typeof useDb>,
     private playerId: string,
   ) {
-    this.intervalId = setInterval(() => this.flush(), DB_SYNC_INTERVAL_MS);
+    this.intervalId = setInterval(() => {
+      this.flush().catch((e) => {
+        if (!this.destroyed) console.error("SyncManager flush error:", e);
+      });
+    }, DB_SYNC_INTERVAL_MS);
   }
 
   // --- Public API (called from game callbacks) ---
 
   collectDeposit(id: string): void {
     this.pendingCollections.push(id);
+    // Record fuelType+positionX now while the deposit is still in allDepositsRaw (uncollected).
+    // Provides a fallback for releaseDeposit (DELETE+INSERT) if WHERE ENTRY hasn't fired yet.
+    const dep = this.inputs.allDepositsRaw.find((d) => d.id === id);
+    if (dep) {
+      this.collectedByThis.set(id, { fuelType: dep.fuelType, positionX: dep.positionX });
+      console.log("[SyncManager] collectDeposit: tracked", id, dep.fuelType);
+    } else {
+      console.warn(
+        "[SyncManager] collectDeposit: deposit NOT in allDepositsRaw",
+        id,
+        "allDepositsRaw.length=",
+        this.inputs.allDepositsRaw.length,
+      );
+    }
   }
 
   refuel(fuelType: FuelType): void {
@@ -97,12 +134,23 @@ export class SyncManager {
   }
 
   destroy(): void {
+    this.destroyed = true;
     clearInterval(this.intervalId);
   }
 
   // --- Private ---
 
   private async flush(): Promise<void> {
+    if (this.flushing) return;
+    this.flushing = true;
+    try {
+      await this.doFlush();
+    } finally {
+      this.flushing = false;
+    }
+  }
+
+  private async doFlush(): Promise<void> {
     const ds = this.inputs;
 
     // Reconcile deposits once after edge subscriptions settle
@@ -111,94 +159,213 @@ export class SyncManager {
       await reconcileDeposits(this.db, ds.uncollectedDeposits, ds.perTypeLimits);
     }
 
-    // Sync player state (insert or update)
-    const state = this.latestState;
-    if (state) {
-      if (!this.dbRowId && ds.localPlayerRows.length > 0) {
-        this.dbRowId = ds.localPlayerRows[0].id;
-      }
-      if (this.dbRowId) {
-        if (!this.lastSynced || playerStateChanged(this.lastSynced, state)) {
-          await this.db.updatePersisted(app.players, this.dbRowId, state, "edge");
-          this.lastSynced = { ...state };
-        }
-      } else if (ds.settled) {
-        this.dbRowId = await this.db.insertPersisted(app.players, state, "edge");
-        this.lastSynced = { ...state };
-      }
-    }
-
-    // Flush deposit collections
+    // Flush deposit collections (edge tier — broadcasts to remote clients'
+    // edge subscriptions, enabling cross-client sharing).  Worker-tier writes
+    // only update local OPFS and do not trigger WHERE ENTRY on other clients'
+    // where({ collected: true }) subscriptions.
     for (const depId of this.pendingCollections.splice(0)) {
-      await this.db.updatePersisted(
+      await this.db.update(
         app.fuel_deposits,
         depId,
         { collected: true, collectedBy: this.playerId },
-        "edge",
+        { tier: "edge" },
       );
     }
 
-    // Flush deposit releases (refuel + burst) — same operation, merged
-    for (const fuelType of this.pendingRefuels.splice(0)) {
-      await this.releaseDeposit(fuelType);
+    // Flush deposit releases (refuel + burst) — reset so the deposit can be collected again.
+    // Includes any retries from the previous flush cycle where the deposit wasn't yet
+    // visible in allDepositsRaw (OPFS WHERE ENTRY can lag behind WHERE EXIT).
+    const releasedIds = new Set<string>();
+    const retryReleases: string[] = [];
+    const toRelease = [
+      ...this.pendingRetryReleases.splice(0),
+      ...this.pendingRefuels.splice(0),
+      ...this.pendingBursts.splice(0),
+    ];
+    if (toRelease.length > 0) {
+      console.log(
+        "[SyncManager] doFlush: releasing",
+        toRelease,
+        "allDepositsRaw.length=",
+        this.inputs.allDepositsRaw.length,
+        "collectedByThis=",
+        [...this.collectedByThis.entries()].map(([id, v]) => `${id.slice(0, 8)}:${v.fuelType}`),
+      );
     }
-    for (const fuelType of this.pendingBursts.splice(0)) {
-      await this.releaseDeposit(fuelType);
+    for (const fuelType of toRelease) {
+      const released = await this.releaseDeposit(fuelType, releasedIds);
+      if (!released) retryReleases.push(fuelType);
     }
+    if (retryReleases.length > 0) {
+      console.warn("[SyncManager] doFlush: retry releases", retryReleases);
+    }
+    this.pendingRetryReleases.push(...retryReleases);
 
-    // Flush fuel shares
+    // Flush fuel shares — reassign the deposit to the receiver.
+    // The receiver already has the row in their where({ collected: true })
+    // subscription (it entered when this player collected it). Updating
+    // collectedBy propagates as a normal row update — no WHERE re-evaluation.
     for (const share of this.pendingShares.splice(0)) {
-      const dep = ds.allDepositsRaw.find(
-        (d) => d.collected && d.collectedBy === this.playerId && d.fuelType === share.fuelType,
-      );
-      if (dep) {
-        await this.db.updatePersisted(
+      // Primary: find via subscription data.
+      let shareId: string | undefined = ds.allDepositsRaw.find(
+        (d) =>
+          d.collected &&
+          d.collectedBy === this.playerId &&
+          d.fuelType === share.fuelType &&
+          !releasedIds.has(d.id),
+      )?.id;
+      // Fallback: use locally-tracked id if WHERE ENTRY hasn't fired yet.
+      if (!shareId) {
+        for (const [id, info] of this.collectedByThis) {
+          if (info.fuelType === share.fuelType && !releasedIds.has(id)) {
+            shareId = id;
+            break;
+          }
+        }
+      }
+      if (shareId) {
+        releasedIds.add(shareId);
+        this.collectedByThis.delete(shareId);
+        await this.db.update(
           app.fuel_deposits,
-          dep.id,
+          shareId,
           { collectedBy: share.receiverPlayerId },
-          "edge",
+          { tier: "edge" },
         );
       }
     }
 
     // Flush chat messages
     for (const text of this.pendingMessages.splice(0)) {
-      await this.db.insertPersisted(
+      await this.db.insert(
         app.chat_messages,
         { playerId: this.playerId, message: text, createdAt: Math.floor(Date.now() / 1000) },
-        "edge",
+        { tier: "edge" },
       );
     }
 
-    // Release stale collected deposits when the game is restarting
+    // Release stale collected deposits when the game is restarting.
+    const state = this.latestState;
     const mode = state?.mode;
     if (mode === "start" || mode === "descending") {
       for (const d of ds.allDepositsRaw) {
-        if (d.collected && d.collectedBy === this.playerId) {
-          await this.db.updatePersisted(
+        if (d.collected && d.collectedBy === this.playerId && !releasedIds.has(d.id)) {
+          releasedIds.add(d.id);
+          this.collectedByThis.delete(d.id);
+          await this.db.update(app.fuel_deposits, d.id, { collected: false, collectedBy: "" });
+        }
+      }
+      // Fallback: also release locally-tracked deposits not yet in allDepositsRaw.
+      for (const [id] of this.collectedByThis.entries()) {
+        if (!releasedIds.has(id)) {
+          releasedIds.add(id);
+          this.collectedByThis.delete(id);
+          await this.db.update(
             app.fuel_deposits,
-            d.id,
+            id,
             { collected: false, collectedBy: "" },
-            "edge",
+            { tier: "edge" },
           );
         }
       }
     }
+
+    // Sync player state (insert or update) — kept last so slow edge round-trips
+    // do not block deposit operations earlier in the flush.
+    if (state) {
+      if (!this.dbRowId && ds.localPlayerRows.length > 0) {
+        this.dbRowId = ds.localPlayerRows[0].id;
+      }
+      if (this.dbRowId) {
+        if (!this.lastSynced || playerStateChanged(this.lastSynced, state)) {
+          await this.db.update(app.players, this.dbRowId, state, { tier: "edge" });
+          this.lastSynced = { ...state };
+        }
+      } else if (ds.settled) {
+        this.dbRowId = await this.db.insert(app.players, state, { tier: "edge" });
+        this.lastSynced = { ...state };
+      }
+    }
   }
 
-  /** Find a collected deposit of the given fuel type owned by this player and release it. */
-  private async releaseDeposit(fuelType: string): Promise<void> {
+  /**
+   * Reset a collected deposit of the given fuel type (owned by this player) so
+   * it can be collected again.  releasedIds guards against double-processing
+   * within the same flush cycle.
+   *
+   * Uses DELETE+INSERT rather than UPDATE collected:true→false.  Worker-tier
+   * INSERT fires WHERE ENTRY reliably for the where({collected:false}) worker
+   * subscription.  UPDATE-based WHERE ENTRY (re-entry) does not fire because
+   * useAll subscriptions default to worker tier regardless of the "edge" hint.
+   *
+   * Primary: look up via subscription data (allDepositsRaw).
+   * Fallback: use collectedByThis map if WHERE ENTRY hasn't fired yet.
+   */
+  private async releaseDeposit(fuelType: string, releasedIds: Set<string>): Promise<boolean> {
+    // Primary: subscription-based lookup.
     const dep = this.inputs.allDepositsRaw.find(
-      (d) => d.collected && d.collectedBy === this.playerId && d.fuelType === fuelType,
+      (d) =>
+        d.collected &&
+        d.collectedBy === this.playerId &&
+        d.fuelType === fuelType &&
+        !releasedIds.has(d.id),
     );
+
+    let depId: string | undefined;
+    let positionX: number | undefined;
+
     if (dep) {
-      await this.db.updatePersisted(
-        app.fuel_deposits,
-        dep.id,
-        { collected: false, collectedBy: "" },
-        "edge",
-      );
+      depId = dep.id;
+      positionX = dep.positionX;
+    } else {
+      // Fallback: eagerly-tracked map (safe with worker-tier collect writes).
+      for (const [id, info] of this.collectedByThis) {
+        if (info.fuelType === fuelType && !releasedIds.has(id)) {
+          depId = id;
+          positionX = info.positionX;
+          break;
+        }
+      }
     }
+
+    if (!depId || positionX === undefined) {
+      console.warn(
+        "[SyncManager] releaseDeposit: no deposit found for",
+        fuelType,
+        "allDepositsRaw.length=",
+        this.inputs.allDepositsRaw.length,
+        "collectedByThis.size=",
+        this.collectedByThis.size,
+      );
+      return false;
+    }
+    releasedIds.add(depId);
+    this.collectedByThis.delete(depId);
+    // DELETE+INSERT: edge-tier INSERT fires WHERE ENTRY on the edge-subscribed
+    // where({collected:false}) subscription.  Worker-tier INSERT does not
+    // trigger WHERE ENTRY on edge subscriptions.  UPDATE-based WHERE ENTRY
+    // (re-entry: collected:true → false) also does not fire reliably.
+    console.log(
+      "[SyncManager] releaseDeposit: DELETE+INSERT for",
+      fuelType,
+      depId,
+      "positionX=",
+      positionX,
+    );
+    await this.db.deleteFrom(app.fuel_deposits, depId);
+    const newId = await this.db.insert(
+      app.fuel_deposits,
+      {
+        fuelType,
+        positionX,
+        createdAt: Math.floor(Date.now() / 1000),
+        collected: false,
+        collectedBy: "",
+      },
+      { tier: "edge" },
+    );
+    console.log("[SyncManager] releaseDeposit: INSERT done, newId=", newId);
+    return true;
   }
 }
 
@@ -237,27 +404,31 @@ export async function reconcileDeposits(
     if (diff > 0) {
       // Insert missing deposits
       for (let j = 0; j < diff; j++) {
-        await db.insertPersisted(
+        // Use a deterministic seed so all players generate the same positions.
+        // Seed: fuelTypeIndex * 1000 + slotIndex, where slotIndex = deposits.length + j
+        // (the j-th missing slot starting from how many already exist).
+        const slotSeed = i * 1000 + deposits.length + j;
+        await db.insert(
           app.fuel_deposits,
           {
             fuelType: ft,
-            positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
+            positionX: Math.floor(seededRand(slotSeed) * MOON_SURFACE_WIDTH),
             createdAt: nowS,
             collected: false,
             collectedBy: "",
           },
-          "edge",
+          { tier: "edge" },
         );
       }
     } else if (diff < 0) {
       // Trim excess: remove the newest deposits first (highest createdAt)
       const sorted = [...deposits].sort((a, b) => b.createdAt - a.createdAt);
       for (let j = 0; j < -diff; j++) {
-        await db.updatePersisted(
+        await db.update(
           app.fuel_deposits,
           sorted[j].id,
           { collected: true, collectedBy: "__trimmed__" },
-          "edge",
+          { tier: "edge" },
         );
       }
     }

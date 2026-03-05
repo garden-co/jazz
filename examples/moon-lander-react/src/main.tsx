@@ -10,25 +10,42 @@ const DEV_SERVER_PORT = 4200;
 const DEV_APP_ID = "00000000-0000-0000-0000-000000000005";
 
 function main() {
-  const serverUrl = `http://127.0.0.1:${DEV_SERVER_PORT}`;
+  const params = new URLSearchParams(window.location.search);
 
-  console.info("[moon-lander] Connecting to Jazz server at %s", serverUrl);
-
-  // Stable identity from localStorage. Each browser context (or Firefox
-  // container) is a separate player, consistent across refreshes.
-  const playerId = getOrCreatePlayerId();
+  // URL search params override dev defaults (used by isolated browser test
+  // contexts that navigate to index.html with config params).
+  const appId = params.get("appId") ?? DEV_APP_ID;
+  const serverUrl = params.get("serverUrl") ?? `http://127.0.0.1:${DEV_SERVER_PORT}`;
+  const playerId = params.get("playerId") ?? getOrCreatePlayerId();
+  const physicsSpeed = params.has("physicsSpeed") ? Number(params.get("physicsSpeed")) : undefined;
+  const spawnX = params.has("spawnX") ? Number(params.get("spawnX")) : undefined;
 
   // Stable dbName per tab — reusing the same OPFS database across refreshes
   // means the local player row and deposits persist, avoiding ghost duplicates.
-  const dbName = `moon-lander-${playerId.slice(0, 8)}`;
+  const dbName = params.get("dbName") ?? `moon-lander-${playerId.slice(0, 8)}`;
+
+  const localAuthToken = params.get("localAuthToken") ?? undefined;
+  const adminSecret = params.get("adminSecret") ?? undefined;
+
+  console.info(
+    "[moon-lander] Connecting to Jazz server at %s (token=%s, admin=%s)",
+    serverUrl,
+    localAuthToken ? "yes" : "auto",
+    adminSecret ? "yes" : "no",
+  );
 
   createRoot(document.getElementById("root")!).render(
     <App
       playerId={playerId}
+      physicsSpeed={physicsSpeed}
+      initialMode={params.has("appId") ? "landed" : undefined}
+      {...(spawnX !== undefined ? { spawnX } : {})}
       config={{
-        appId: DEV_APP_ID,
+        appId,
         dbName,
         serverUrl,
+        ...(localAuthToken ? { localAuthMode: "anonymous" as const, localAuthToken } : {}),
+        ...(adminSecret ? { adminSecret } : {}),
       }}
     />,
   );
