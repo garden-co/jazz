@@ -1,0 +1,101 @@
+---
+title: WHERE Operators
+description: Full reference for filter operators available in Jazz query builders, with examples for each column kind.
+---
+
+import WhereOperatorsTable from "../../partials/quickstarts/where-operators-table.mdx";
+import WhereOperatorsSummary from "../../partials/quickstarts/where-operators-summary.mdx";
+
+## Summary
+
+<WhereOperatorsSummary />
+
+## Operator reference by column type
+
+<WhereOperatorsTable />
+
+## Examples
+
+### Equality and inequality
+
+```ts
+// Exact match (shorthand — no operator object needed)
+db.all(app.players.where({ mode: "walking" }));
+
+// Not equal
+db.all(app.players.where({ playerId: { ne: myPlayerId } }));
+
+// One of a set
+db.all(app.players.where({ mode: { in: ["walking", "flying"] } }));
+```
+
+### Numeric comparisons
+
+```ts
+// Greater than / less than
+db.all(app.players.where({ lastSeen: { gt: staleCutoff } }));
+db.all(app.scores.where({ points: { gte: 1000 } }));
+db.all(app.items.where({ quantity: { lt: 10 } }));
+```
+
+### String contains
+
+```ts
+// Substring match (case-sensitive)
+db.all(app.chat_messages.where({ text: { contains: searchTerm } }));
+```
+
+### Null checks on optional references
+
+```ts
+// Rows where the optional ref is not set
+db.all(app.fuel_deposits.where({ collectedBy: { isNull: true } }));
+
+// Rows where it is set
+db.all(app.fuel_deposits.where({ collectedBy: { isNull: false } }));
+```
+
+### Multiple conditions (AND)
+
+All predicates passed to `where(...)` are AND-combined:
+
+```ts
+// collected AND belongs to this player
+db.all(
+  app.fuel_deposits.where({
+    collected: true,
+    collectedBy: playerId,
+  }),
+);
+```
+
+### Combining with ordering and limits
+
+```ts
+db.all(app.chat_messages.where({ roomId }).orderBy("createdAt", "asc").limit(50));
+```
+
+## Live subscriptions with WHERE
+
+`useAll` and `QuerySubscription` accept the same query builders as `db.all`. The subscription
+stays active and re-delivers results whenever any row enters or exits the filter:
+
+```ts
+// Re-renders whenever a deposit is collected or returned to the surface
+const uncollected = useAll(app.fuel_deposits.where({ collected: false }));
+```
+
+A row update that causes it to match the filter is a **WHERE ENTRY** event; one that causes
+it to stop matching is a **WHERE EXIT** event. Both trigger a re-render with the updated
+result set.
+
+## Using `ne` to exclude the local player
+
+A common pattern in multiplayer apps — subscribe to all rows except your own:
+
+```ts
+const remotePlayers = useAll(app.players.where({ playerId: { ne: myPlayerId } }));
+```
+
+`ne` is Jazz's "not equal" operator. The subscription excludes the local player's row, so
+the component only renders remote player state.

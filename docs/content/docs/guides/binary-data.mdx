@@ -1,0 +1,95 @@
+---
+title: Binary Data
+description: Storing and syncing files, audio, images, and other binary blobs with col.bytes().
+---
+
+## Overview
+
+`col.bytes()` declares a column that stores arbitrary binary data. It maps to `Uint8Array`
+in TypeScript and syncs as a binary blob alongside all other row data — no separate file
+storage API or CDN required.
+
+Binary columns are first-class: they participate in the same subscription and write APIs as
+any other column, and are replicated to every connected client automatically.
+
+## Defining a binary column
+
+```ts
+// schema/current.ts
+import { table, col } from "jazz-tools";
+
+table("instruments", {
+  name: col.string(),
+  sound: col.bytes(), // stores raw audio file contents
+  display_order: col.int(),
+});
+```
+
+The generated TypeScript interface reflects this:
+
+```ts
+// schema/app.ts (auto-generated)
+export interface Instrument {
+  id: string;
+  name: string;
+  sound: Uint8Array; // typed as Uint8Array throughout
+  display_order: number;
+}
+```
+
+## Writing binary data
+
+Read a `File` or `ArrayBuffer` and pass it directly as `Uint8Array`:
+
+```ts
+async function uploadInstrument(name: string, file: File) {
+  const buffer = await file.arrayBuffer();
+  await db.insert(
+    app.instruments,
+    {
+      name,
+      sound: new Uint8Array(buffer),
+      display_order: nextOrder,
+    },
+    { tier: "edge" },
+  );
+}
+```
+
+## Reading binary data
+
+Binary columns are returned as `Uint8Array` and can be used directly with any Web API that
+accepts typed arrays:
+
+```ts
+async function playInstrument(instrument: Instrument) {
+  const audioCtx = new AudioContext();
+  const audioBuffer = await audioCtx.decodeAudioData(instrument.sound.buffer);
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+  source.start();
+}
+```
+
+## Caching on the client
+
+Binary blobs are persisted in OPFS alongside the rest of the database, so they survive page
+reloads without a network round-trip. On a return visit, `db.all` with the default `worker`
+tier serves the blob from local storage immediately.
+
+```ts
+// First visit: fetches from edge and caches locally
+// Subsequent visits: served instantly from OPFS, no network needed
+const instruments = await db.all(app.instruments);
+```
+
+To guard against duplicate seeding on a first visit across concurrent clients, use
+`{ tier: "edge" }` — see [Sync Lifecycle: Gating writes until the edge responds](/docs/guides/sync-lifecycle#gating-writes-until-the-edge-responds).
+
+## Size considerations
+
+Binary blobs are replicated in full to every subscriber. Keep individual blobs reasonable
+for the expected connection quality of your users. For very large assets (video files,
+high-resolution images), consider storing only metadata in Jazz and loading the asset from
+a CDN by URL.
