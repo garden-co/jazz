@@ -1,7 +1,7 @@
 ---
 marp: true
 title: How Moon Lander uses Jazz
-theme: jazz-moon
+theme: jazz
 paginate: true
 ---
 
