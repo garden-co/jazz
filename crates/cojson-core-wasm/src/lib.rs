@@ -1,4 +1,5 @@
 use cojson_core::core::{CoJsonCoreError, SessionMapImpl};
+use js_sys::JSON;
 use serde::Serialize;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
@@ -40,6 +41,11 @@ impl From<CojsonCoreWasmError> for JsValue {
     fn from(err: CojsonCoreWasmError) -> Self {
         JsValue::from_str(&err.to_string())
     }
+}
+
+fn serialize_to_js_value<T: Serialize>(value: &T) -> Result<JsValue, CojsonCoreWasmError> {
+    let json = serde_json::to_string(value)?;
+    JSON::parse(&json).map_err(CojsonCoreWasmError::Js)
 }
 
 // ============================================================================
@@ -229,24 +235,15 @@ impl SessionMap {
     #[wasm_bindgen(js_name = getKnownState)]
     pub fn get_known_state(&self) -> JsValue {
         let known_state = self.internal.get_known_state().clone();
-        // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        known_state
-            .serialize(&serializer)
-            .expect("KnownState serialization should not fail")
+        serialize_to_js_value(&known_state).expect("KnownState serialization should not fail")
     }
 
     /// Get the known state with streaming as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownStateWithStreaming)]
     pub fn get_known_state_with_streaming(&self) -> JsValue {
         match self.internal.get_known_state_with_streaming().cloned() {
-            Some(ks) => {
-                // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
-                let serializer =
-                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-                ks.serialize(&serializer)
-                    .expect("KnownState serialization should not fail")
-            }
+            Some(ks) => serialize_to_js_value(&ks)
+                .expect("KnownState serialization should not fail"),
             None => JsValue::undefined(),
         }
     }

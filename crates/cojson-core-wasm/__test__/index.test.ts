@@ -1104,7 +1104,7 @@ describe("SessionMap - Transaction Flow", () => {
     expect(knownStateWithStreaming!.sessions[session2]).toBe(3);
   });
 
-  test("prototype setter can re-enter mutable SessionMap method during serialization", () => {
+  test("getKnownStateWithStreaming does not trigger inherited prototype setters", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
     const sessionMap = new SessionMap(coId, header, undefined, true);
@@ -1151,9 +1151,9 @@ describe("SessionMap - Transaction Flow", () => {
       }
     }
 
-    expect(setterCalls).toBe(1);
+    expect(setterCalls).toBe(0);
     expect(nestedError).toBeUndefined();
-    expect(sessionMap.getKnownStateWithStreaming()!.sessions[session1]).toBe(6);
+    expect(sessionMap.getKnownStateWithStreaming()!.sessions[session1]).toBe(5);
   });
 
   test("deletion flow", () => {
