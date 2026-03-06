@@ -355,7 +355,7 @@ impl RnSyncSender {
 }
 
 impl SyncSender for RnSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
+    fn send_sync_message(&self, message: OutboxEntry) {
         let is_catalogue = message.payload.is_catalogue();
         let Ok(payload_json) = serde_json::to_string(&message.payload) else {
             return;
