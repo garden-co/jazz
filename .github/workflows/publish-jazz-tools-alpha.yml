@@ -427,7 +427,7 @@ jobs:
       - name: Sync jazz-napi platform package versions and optional deps
         run: |
           cd crates/jazz-napi
-          pnpm exec napi version -p npm
+          pnpm exec napi version --npm-dir npm
           node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
 
       - name: Guard alpha-only lock-stepped publish versions
