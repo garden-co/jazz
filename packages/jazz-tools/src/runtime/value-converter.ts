@@ -1,7 +1,7 @@
 /**
  * Convert JS values to WasmValue types for mutations.
  *
- * Used by Db.insert() and Db.update() to convert typed Init objects
+ * Used by Db.insert()/Db.insertDurable() and Db.update() to convert typed Init objects
  * into the Value[] format expected by JazzClient.
  */
 

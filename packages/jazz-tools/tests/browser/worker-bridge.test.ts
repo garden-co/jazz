@@ -358,6 +358,90 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Task A", "Task B", "Task C"]);
   });
 
+  it("sync insert before bridge init is persisted after init completes", async () => {
+    const dbName = uniqueDbName("sync-insert-before-bridge-ready");
+    const db1 = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    // First I/O operation, bridge hasn't been initialized yet.
+    const { id } = db1.insert(todos, { title: "Test", done: false });
+
+    await waitForCondition(
+      async () => {
+        const row = await db1.one(allTodos, { tier: "worker" });
+        return row?.id === id;
+      },
+      8_000,
+      "sync insert should be forwarded to worker after bridge init",
+    );
+
+    await db1.shutdown();
+    untrack(db1);
+
+    const db2 = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const persistedRow = await db2.one(allTodos, { tier: "worker" });
+    expect(persistedRow?.id).toBe(id);
+  });
+
+  it("sync insert is not persisted if bridge fails to init", async () => {
+    const dbName = uniqueDbName("sync-insert-bridge-init-failure");
+    const db1 = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    // @ts-expect-error - worker is private
+    const worker = db1.worker as Worker;
+    const originalPostMessage = worker.postMessage.bind(worker);
+    worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
+      const typed = message as { type?: string } | undefined;
+      if (typed?.type === "init") {
+        queueMicrotask(() => {
+          worker.dispatchEvent(
+            new MessageEvent("message", {
+              data: { type: "error", message: "forced bridge init failure for test" },
+            }),
+          );
+        });
+        return;
+      }
+      return originalPostMessage(message, { transfer });
+    }) as Worker["postMessage"];
+
+    const { id } = db1.insert(todos, { title: "Test", done: false });
+    expect(id).toBeDefined();
+
+    worker.postMessage = originalPostMessage;
+    // Shutdown fails to ensure bridge is ready, but steps down as leader before that
+    await expect(db1.shutdown()).rejects.toThrow(
+      "Worker init failed: forced bridge init failure for test",
+    );
+
+    untrack(db1);
+
+    const db2 = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const persistedRows = await db2.all(allTodos, { tier: "worker" });
+    expect(persistedRows.length).toEqual(0);
+  });
+
   // -------------------------------------------------------------------------
   // 3. Update + delete through worker bridge
   // -------------------------------------------------------------------------
@@ -428,8 +512,8 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // insert({ tier: "worker" }) ensures data is in OPFS WAL before we crash
-    await db1.insert(todos, { title: "Crash-proof", done: false }, { tier: "worker" });
-    await db1.insert(todos, { title: "Also survives", done: true }, { tier: "worker" });
+    await db1.insertDurable(todos, { title: "Crash-proof", done: false }, { tier: "worker" });
+    await db1.insertDurable(todos, { title: "Also survives", done: true }, { tier: "worker" });
 
     // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
     // WAL has the data, but snapshot is stale. Recovery must replay WAL.
@@ -464,7 +548,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Should be deleted", done: false }, { tier: "worker" });
+    await db.insertDurable(todos, { title: "Should be deleted", done: false }, { tier: "worker" });
     const before = await db.all(allTodos, { tier: "worker" });
     expect(before.length).toBe(1);
     expect(before[0].title).toBe("Should be deleted");
@@ -544,7 +628,11 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // insert("worker") should resolve once the worker's OPFS has it
-    const { id } = await db.insert(todos, { title: "Durable", done: false }, { tier: "worker" });
+    const { id } = await db.insertDurable(
+      todos,
+      { title: "Durable", done: false },
+      { tier: "worker" },
+    );
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
@@ -664,7 +752,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insert(todos, { title, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title, done: false }, { tier: "worker" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -685,7 +773,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbB.insert(todos, { title, done: true }, { tier: "worker" }),
+      dbB.insertDurable(todos, { title, done: true }, { tier: "worker" }),
       10000,
       "B insert(worker) did not resolve",
     );
@@ -716,7 +804,7 @@ describe("Worker Bridge with OPFS", () => {
       ),
     );
 
-    await dbA.insert(todos, { title: "local-only-local-1", done: true }, { tier: "worker" });
+    await dbA.insertDurable(todos, { title: "local-only-local-1", done: true }, { tier: "worker" });
 
     // Wait for initial local-only snapshot.
     await waitForCondition(
@@ -774,7 +862,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const remoteTitle = `remote-for-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insert(todos, { title: remoteTitle, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: remoteTitle, done: false }, { tier: "worker" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -908,7 +996,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const marker = `reopen-${Date.now()}`;
     await withTimeout(
-      currentFollower.insert(todos, { title: marker, done: false }),
+      currentFollower.insertDurable(todos, { title: marker, done: false }, { tier: "worker" }),
       10000,
       "Follower insert during reopen re-election did not resolve",
     );
