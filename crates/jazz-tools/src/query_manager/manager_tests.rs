@@ -6568,6 +6568,235 @@ fn contributing_ids_update_reactively() {
     );
 }
 
+#[test]
+fn contributing_ids_for_limit_offset_include_ordered_prefix() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let handle_a = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("A".into()), Value::Integer(1)],
+        )
+        .unwrap();
+    let handle_b = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("B".into()), Value::Integer(2)],
+        )
+        .unwrap();
+    let handle_c = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("C".into()), Value::Integer(3)],
+        )
+        .unwrap();
+    let _handle_d = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("D".into()), Value::Integer(4)],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("users")
+        .order_by("score")
+        .offset(2)
+        .limit(1)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.process(&mut storage);
+
+    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+
+    assert_eq!(
+        contributing.len(),
+        3,
+        "Paginated queries need the ordered prefix through offset + limit"
+    );
+    assert!(contributing.contains(&(handle_a.row_id, branch.clone())));
+    assert!(contributing.contains(&(handle_b.row_id, branch.clone())));
+    assert!(contributing.contains(&(handle_c.row_id, branch)));
+}
+
+#[test]
+fn contributing_ids_for_offset_only_include_full_input() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let handles = [
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("A".into()), Value::Integer(1)],
+        )
+        .unwrap(),
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("B".into()), Value::Integer(2)],
+        )
+        .unwrap(),
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("C".into()), Value::Integer(3)],
+        )
+        .unwrap(),
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("D".into()), Value::Integer(4)],
+        )
+        .unwrap(),
+    ];
+
+    let query = qm.query("users").order_by("score").offset(2).build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.process(&mut storage);
+
+    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+
+    assert_eq!(
+        contributing.len(),
+        handles.len(),
+        "Offset without limit still needs the full ordered input to replay locally"
+    );
+    for handle in handles {
+        assert!(contributing.contains(&(handle.row_id, branch.clone())));
+    }
+}
+
+#[test]
+fn contributing_ids_for_array_subquery_include_inner_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let user = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .unwrap();
+    let post1 = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post 1".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+    let post2 = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Post 2".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts").correlate("author_id", "users.id")
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.process(&mut storage);
+
+    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+
+    assert_eq!(
+        contributing.len(),
+        3,
+        "Array subquery outputs depend on both outer and inner rows"
+    );
+    assert!(contributing.contains(&(user.row_id, branch.clone())));
+    assert!(contributing.contains(&(post1.row_id, branch.clone())));
+    assert!(contributing.contains(&(post2.row_id, branch)));
+}
+
+#[test]
+fn contributing_ids_for_recursive_hop_include_recursive_dependencies() {
+    let sync_manager = SyncManager::new();
+    let schema = recursive_hop_team_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let team1 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-1".into())])
+        .unwrap();
+    let team2 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-2".into())])
+        .unwrap();
+    let team3 = qm
+        .insert(&mut storage, "teams", &[Value::Text("team-3".into())])
+        .unwrap();
+
+    let edge1 = qm
+        .insert(
+            &mut storage,
+            "team_edges",
+            &[Value::Uuid(team1.row_id), Value::Uuid(team2.row_id)],
+        )
+        .unwrap();
+    let edge2 = qm
+        .insert(
+            &mut storage,
+            "team_edges",
+            &[Value::Uuid(team2.row_id), Value::Uuid(team3.row_id)],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("teams")
+        .filter_eq("name", Value::Text("team-1".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .select(&["parent_team"])
+                .hop("teams", "parent_team")
+                .max_depth(10)
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.process(&mut storage);
+
+    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+
+    assert_eq!(
+        contributing.len(),
+        5,
+        "Recursive hop outputs depend on both discovered rows and traversal edges"
+    );
+    assert!(contributing.contains(&(team1.row_id, branch.clone())));
+    assert!(contributing.contains(&(team2.row_id, branch.clone())));
+    assert!(contributing.contains(&(team3.row_id, branch.clone())));
+    assert!(contributing.contains(&(edge1.row_id, branch.clone())));
+    assert!(contributing.contains(&(edge2.row_id, branch)));
+}
+
 // ============================================================================
 // Server-Side Query Subscription Tests
 // ============================================================================
@@ -7767,6 +7996,287 @@ fn e2e_client_receives_server_data_via_subscription() {
     assert!(names.contains(&"Alice"), "Should contain Alice");
     assert!(names.contains(&"Charlie"), "Should contain Charlie");
     assert!(!names.contains(&"Bob"), "Should NOT contain Bob");
+}
+
+/// E2E: Client can cold-load a paginated remote query with a non-zero offset.
+#[test]
+fn e2e_client_receives_paginated_server_data_on_cold_offset_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+
+    for (name, score) in [("A", 1), ("B", 2), ("C", 3), ("D", 4)] {
+        server
+            .insert(
+                &mut server_io,
+                "users",
+                &[Value::Text(name.into()), Value::Integer(score)],
+            )
+            .unwrap();
+    }
+    server.process(&mut server_io);
+
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client
+        .query("users")
+        .order_by("score")
+        .offset(2)
+        .limit(1)
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "Cold paginated subscription should materialize the requested page"
+    );
+    assert_eq!(results[0].1[0], Value::Text("C".into()));
+    assert_eq!(results[0].1[1], Value::Integer(3));
+}
+
+#[test]
+fn e2e_client_receives_paginated_server_data_on_cold_offset_only_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+
+    for (name, score) in [("A", 1), ("B", 2), ("C", 3), ("D", 4)] {
+        server
+            .insert(
+                &mut server_io,
+                "users",
+                &[Value::Text(name.into()), Value::Integer(score)],
+            )
+            .unwrap();
+    }
+    server.process(&mut server_io);
+
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client.query("users").order_by("score").offset(2).build();
+
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        2,
+        "Offset-only query should keep trailing rows"
+    );
+    assert_eq!(results[0].1[0], Value::Text("C".into()));
+    assert_eq!(results[1].1[0], Value::Text("D".into()));
+}
+
+#[test]
+fn e2e_client_receives_array_subquery_server_data_via_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = users_posts_schema();
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+
+    server
+        .insert(
+            &mut server_io,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post 1".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Post 2".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts").correlate("author_id", "users.id")
+        })
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 1, "Client should receive the user row");
+    assert_eq!(results[0].1[0], Value::Integer(1));
+    assert_eq!(results[0].1[1], Value::Text("Alice".into()));
+
+    let posts = results[0].1[2].as_array().expect("posts array");
+    assert_eq!(
+        posts.len(),
+        2,
+        "Client should receive inner rows needed for the array"
+    );
+}
+
+#[test]
+fn e2e_client_receives_recursive_hop_server_data_via_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = recursive_hop_team_schema();
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+
+    let team1 = server
+        .insert(&mut server_io, "teams", &[Value::Text("team-1".into())])
+        .unwrap();
+    let team2 = server
+        .insert(&mut server_io, "teams", &[Value::Text("team-2".into())])
+        .unwrap();
+    let team3 = server
+        .insert(&mut server_io, "teams", &[Value::Text("team-3".into())])
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "team_edges",
+            &[Value::Uuid(team1.row_id), Value::Uuid(team2.row_id)],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "team_edges",
+            &[Value::Uuid(team2.row_id), Value::Uuid(team3.row_id)],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client
+        .query("teams")
+        .filter_eq("name", Value::Text("team-1".into()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .select(&["parent_team"])
+                .hop("teams", "parent_team")
+                .max_depth(10)
+        })
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let mut names: Vec<String> = client
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+
+    assert_eq!(
+        names,
+        vec!["team-1", "team-2", "team-3"],
+        "Client should receive recursive dependencies needed to replay the closure"
+    );
 }
 
 /// E2E: Client receives new matching rows as server inserts them.
