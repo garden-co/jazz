@@ -99,7 +99,7 @@ export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
 
 // #region writing-durability-expo
 export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
-  const id = await db.insert(
+  const { id } = await db.insert(
     app.todos,
     {
       title: todoTitle,

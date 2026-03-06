@@ -125,16 +125,18 @@ impl std::error::Error for QueryError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueryHandle(pub u64);
 
-/// Handle for tracking insert completion.
+/// Result of an insert, including durability metadata and row values.
 ///
 /// Poll via `is_complete()` to check if the row is persisted.
 /// Poll via `is_indexed()` to check if the row is indexed.
 #[derive(Debug, Clone)]
-pub struct InsertHandle {
+pub struct InsertResult {
     /// The row's ObjectId.
     pub row_id: ObjectId,
     /// CommitId of the row data.
     pub row_commit_id: CommitId,
+    /// Inserted row values in table column order.
+    pub row_values: Vec<Value>,
 }
 
 /// Handle for tracking delete completion.
@@ -146,7 +148,7 @@ pub struct DeleteHandle {
     pub delete_commit_id: CommitId,
 }
 
-impl InsertHandle {
+impl InsertResult {
     /// Check if the row data is durable (persisted to storage).
     ///
     /// Must call `QueryManager::process()` between checks to drive storage operations.
