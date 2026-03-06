@@ -370,7 +370,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const id = await db.insert(todos, { title: "Original", done: false });
+    const { id } = await db.insert(todos, { title: "Original", done: false });
     await db.update(todos, id, { done: true });
 
     const results = await db.all(allTodos);
@@ -387,7 +387,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const id = await db.insert(todos, { title: "Ephemeral", done: false });
+    const { id } = await db.insert(todos, { title: "Ephemeral", done: false });
     expect((await db.all(allTodos)).length).toBe(1);
 
     await db.deleteFrom(todos, id);
@@ -600,7 +600,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const projectId = await db.insert(projects, { name: "Observed Project" });
+    const { id: projectId } = await db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
@@ -608,7 +608,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     await db.insert(todos, { title: "Observed", done: false, project: projectId });
-    const anotherProjectId = await db.insert(projects, { name: "Ignored Project" });
+    const { id: anotherProjectId } = await db.insert(projects, { name: "Ignored Project" });
     await db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
 
     // Wait for subscription to fire
@@ -664,7 +664,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      await dbA.insert(todos, { title, done: false }, { tier: "worker" }),
+      dbA.insert(todos, { title, done: false }, { tier: "worker" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -685,7 +685,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      await dbB.insert(todos, { title, done: true }, { tier: "worker" }),
+      dbB.insert(todos, { title, done: true }, { tier: "worker" }),
       10000,
       "B insert(worker) did not resolve",
     );
@@ -774,7 +774,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const remoteTitle = `remote-for-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      await dbA.insert(todos, { title: remoteTitle, done: false }, { tier: "worker" }),
+      dbA.insert(todos, { title: remoteTitle, done: false }, { tier: "worker" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -869,7 +869,7 @@ describe("Worker Bridge with OPFS", () => {
       "Follower should be promoted to leader after shutdown",
     );
 
-    const id = await follower.insert(todos, { title: "Post-failover", done: true });
+    const { id } = await follower.insert(todos, { title: "Post-failover", done: true });
     await waitForCondition(
       async () => {
         const rows = await follower.all(allTodos, { tier: "worker" });
