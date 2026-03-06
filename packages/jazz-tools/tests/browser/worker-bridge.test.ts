@@ -327,7 +327,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // Insert (sync — runs on main-thread in-memory runtime)
-    const id = await db.insert(todos, { title: "Buy milk", done: false });
+    const { id } = await db.insert(todos, { title: "Buy milk", done: false });
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
@@ -474,7 +474,7 @@ describe("Worker Bridge with OPFS", () => {
     const afterDelete = await db.all(allTodos, { tier: "worker" });
     expect(afterDelete).toEqual([]);
 
-    const id = await db.insert(todos, { title: "Fresh after delete", done: true });
+    const { id } = await db.insert(todos, { title: "Fresh after delete", done: true });
     const afterReinsert = await db.all(allTodos, { tier: "worker" });
     expect(afterReinsert).toHaveLength(1);
     expect(afterReinsert[0].id).toBe(id);
@@ -544,7 +544,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // insert("worker") should resolve once the worker's OPFS has it
-    const id = await db.insert(todos, { title: "Durable", done: false }, { tier: "worker" });
+    const { id } = await db.insert(todos, { title: "Durable", done: false }, { tier: "worker" });
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
