@@ -6,7 +6,6 @@ use std::ops::Bound;
 use bitvec::prelude::*;
 use smallvec::SmallVec;
 
-use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
@@ -37,8 +36,8 @@ use super::relation_ir::RelExpr;
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
-    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, Row, RowDelta, RowDescriptor,
-    Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
+    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +99,8 @@ pub struct QueryGraph {
     dirty_bitmap: BitVec,
     /// The output node ID.
     pub output_node: NodeId,
+    /// The pagination node, when the query applies limit/offset.
+    pagination_node: Option<NodeId>,
     /// Table this query operates on.
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
@@ -129,6 +130,7 @@ impl QueryGraph {
             nodes: Vec::new(),
             dirty_bitmap: BitVec::new(),
             output_node: NodeId(0),
+            pagination_node: None,
             table,
             index_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
@@ -217,42 +219,26 @@ impl QueryGraph {
     /// After calling `settle()`, this method returns the (ObjectId, BranchName) pairs
     /// for all rows currently in the query result.
     pub fn contributing_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
-        // Get all ObjectIds in the final output
-        let output_ids: AHashSet<ObjectId> = self
-            .get_node(self.output_node)
-            .and_then(|node| {
-                if let GraphNode::Output(output) = node {
-                    Some(
-                        output
-                            .current_tuples()
-                            .iter()
-                            .flat_map(|t| t.ids())
-                            .collect(),
-                    )
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+        self.scope_from_tuples(&self.current_output_tuples())
+    }
 
-        // For each IndexScanNode, find which of its ObjectIds are in the output
-        // and pair them with the scan's branch
-        let mut result = HashSet::new();
-
-        for (node_id, _table, _column) in &self.index_scan_nodes {
-            if let Some(GraphNode::IndexScan(scan)) = self.get_node(*node_id) {
-                let branch = BranchName::new(&scan.branch);
-                for tuple in scan.current_tuples() {
-                    for id in tuple.ids() {
-                        if output_ids.contains(&id) {
-                            result.insert((id, branch));
-                        }
-                    }
-                }
-            }
+    /// Returns ObjectIds that must be synced for the client to reproduce the
+    /// current query result locally.
+    pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        if let Some(node_id) = self.pagination_node
+            && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
+        {
+            return self.scope_from_tuples(limit_offset.sync_input_tuples());
         }
 
-        result
+        self.contributing_object_ids()
+    }
+
+    fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
+        tuples
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .collect()
     }
 
     /// Compile a query into a graph (without policy filtering).
@@ -595,6 +581,7 @@ impl QueryGraph {
                 LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
+            graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 
@@ -1276,6 +1263,7 @@ impl QueryGraph {
             );
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
+            graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 
@@ -1545,7 +1533,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
@@ -1965,25 +1953,45 @@ impl QueryGraph {
 
     /// Get current result from output node.
     pub fn current_result(&self) -> Vec<Row> {
+        self.current_output_rows_with_provenance()
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect()
+    }
+
+    /// Get the current output tuples in output order.
+    pub fn current_output_tuples(&self) -> Vec<Tuple> {
         match self.get_node(self.output_node) {
-            Some(GraphNode::Output(node)) => node.current_rows(),
+            Some(GraphNode::Output(node)) => node.ordered_tuples().to_vec(),
             _ => vec![],
         }
+    }
+
+    pub(crate) fn current_output_rows_with_provenance(
+        &self,
+    ) -> Vec<(Row, crate::query_manager::types::TupleProvenance)> {
+        self.current_output_tuples()
+            .into_iter()
+            .filter_map(|tuple| {
+                let row = if tuple.len() == 1 {
+                    tuple.to_single_row()
+                } else {
+                    tuple
+                        .flatten_with_descriptors(
+                            &self.table_descriptors,
+                            &self.combined_descriptor,
+                        )
+                        .and_then(|flattened| flattened.to_single_row())
+                }?;
+                Some((row, tuple.provenance().clone()))
+            })
+            .collect()
     }
 
     /// Returns all current output rows as a RowDelta with everything in `added`.
     /// Used for first delivery after tier-gated settlement.
     pub fn current_result_as_delta(&self) -> RowDelta {
-        let output_tuples: Vec<Tuple> = self
-            .get_node(self.output_node)
-            .and_then(|node| {
-                if let GraphNode::Output(output) = node {
-                    Some(output.ordered_tuples().to_vec())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+        let output_tuples = self.current_output_tuples();
 
         if output_tuples.is_empty() {
             return RowDelta::default();
