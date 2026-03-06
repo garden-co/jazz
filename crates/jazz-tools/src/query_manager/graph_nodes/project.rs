@@ -153,7 +153,7 @@ impl ProjectNode {
             }
         }
 
-        Some(Tuple::new(projected_elements))
+        Some(Tuple::new(projected_elements).with_provenance(tuple.provenance().clone()))
     }
 }
 

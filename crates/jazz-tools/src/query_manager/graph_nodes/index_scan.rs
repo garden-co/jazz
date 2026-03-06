@@ -1,6 +1,6 @@
 use ahash::AHashSet;
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
     ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
@@ -122,16 +122,23 @@ impl SourceNode for IndexScanNode {
         );
 
         self.last_scanned_ids = new_ids;
+        let branch = BranchName::new(&self.branch);
         self.current_tuples = self
             .last_scanned_ids
             .iter()
-            .map(|&id| Tuple::from_id(id))
+            .map(|&id| Tuple::from_scoped_id(id, branch))
             .collect();
         self.dirty = false;
 
         TupleDelta {
-            added: added.into_iter().map(Tuple::from_id).collect(),
-            removed: removed.into_iter().map(Tuple::from_id).collect(),
+            added: added
+                .into_iter()
+                .map(|id| Tuple::from_scoped_id(id, branch))
+                .collect(),
+            removed: removed
+                .into_iter()
+                .map(|id| Tuple::from_scoped_id(id, branch))
+                .collect(),
             moved: vec![],
             updated: vec![],
         }
