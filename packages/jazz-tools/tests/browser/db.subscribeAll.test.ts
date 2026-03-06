@@ -684,7 +684,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const { id: partAId } = await db.insert(fileParts, { label: "A" });
     const { id: partBId } = await db.insert(fileParts, { label: "B" });
-    const { id: fileId } = await db.insert(files, { name: "File", parts: [partAId, partBId] });
+    const { id: fileId } = await db.insert(files, { name: "File", parts: [partAId] });
 
     const deltas: Array<SubscriptionDelta<FilePart>> = [];
     const unsubscribe = trackUnsubscribe(

@@ -249,9 +249,13 @@ describe("db.all browser integration", () => {
   }
 
   async function seedTodosForConditions(db: Db): Promise<void> {
-    const orgId = await db.insert(orgs, { name: "Acme" });
-    const teamId = await db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
-    const userId = await db.insert(users, { name: "Alice", team_id: teamId });
+    const { id: orgId } = await db.insert(orgs, { name: "Acme" });
+    const { id: teamId } = await db.insert(teams, {
+      name: "Core",
+      org_id: orgId,
+      parent_id: undefined,
+    });
+    const { id: userId } = await db.insert(users, { name: "Alice", team_id: teamId });
 
     await db.insert(todos, {
       title: "alpha",
@@ -316,7 +320,7 @@ describe("db.all browser integration", () => {
       }),
     );
 
-    const id = await db.insert(todos, {
+    const { id } = await db.insert(todos, {
       title: "has-bytes",
       done: false,
       priority: 1,
@@ -387,9 +391,13 @@ describe("db.all browser integration", () => {
       }),
     );
 
-    const orgId = await db.insert(orgs, { name: "Acme" });
-    const teamId = await db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
-    const ownerId = await db.insert(users, { name: "Owner", team_id: teamId });
+    const { id: orgId } = await db.insert(orgs, { name: "Acme" });
+    const { id: teamId } = await db.insert(teams, {
+      name: "Core",
+      org_id: orgId,
+      parent_id: undefined,
+    });
+    const { id: ownerId } = await db.insert(users, { name: "Owner", team_id: teamId });
     await db.insert(todos, {
       title: "with-owner-1",
       done: false,
@@ -434,9 +442,13 @@ describe("db.all browser integration", () => {
       }),
     );
 
-    const orgId = await db.insert(orgs, { name: "Org A" });
-    const teamId = await db.insert(teams, { name: "Team A", org_id: orgId, parent_id: undefined });
-    const userId = await db.insert(users, { name: "User A", team_id: teamId });
+    const { id: orgId } = await db.insert(orgs, { name: "Org A" });
+    const { id: teamId } = await db.insert(teams, {
+      name: "Team A",
+      org_id: orgId,
+      parent_id: undefined,
+    });
+    const { id: userId } = await db.insert(users, { name: "User A", team_id: teamId });
 
     const rows = await db.all<Org>(
       makeQuery<Org>("users", {
@@ -457,13 +469,17 @@ describe("db.all browser integration", () => {
       }),
     );
 
-    const orgId = await db.insert(orgs, { name: "FK Org" });
-    const teamId = await db.insert(teams, { name: "FK Team", org_id: orgId, parent_id: undefined });
-    const userId = await db.insert(users, { name: "FK User", team_id: teamId });
+    const { id: orgId } = await db.insert(orgs, { name: "FK Org" });
+    const { id: teamId } = await db.insert(teams, {
+      name: "FK Team",
+      org_id: orgId,
+      parent_id: undefined,
+    });
+    const { id: userId } = await db.insert(users, { name: "FK User", team_id: teamId });
 
-    const partAId = await db.insert(fileParts, { label: "A" });
-    const partBId = await db.insert(fileParts, { label: "B" });
-    const fileId = await db.insert(files, { name: "File 1", parts: [partBId, partAId] });
+    const { id: partAId } = await db.insert(fileParts, { label: "A" });
+    const { id: partBId } = await db.insert(fileParts, { label: "B" });
+    const { id: fileId } = await db.insert(files, { name: "File 1", parts: [partBId, partAId] });
 
     const teamRows = await db.all<Team>(
       makeQuery<Team>("users", {
@@ -492,13 +508,21 @@ describe("db.all browser integration", () => {
       }),
     );
 
-    const rootId = await db.insert(teams, {
+    const { id: rootId } = await db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const midId = await db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
-    const leafId = await db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const { id: midId } = await db.insert(teams, {
+      name: "mid",
+      org_id: undefined,
+      parent_id: rootId,
+    });
+    const { id: leafId } = await db.insert(teams, {
+      name: "leaf",
+      org_id: undefined,
+      parent_id: midId,
+    });
 
     const rows = await db.all<Team>(
       makeQuery<Team>("teams", {
