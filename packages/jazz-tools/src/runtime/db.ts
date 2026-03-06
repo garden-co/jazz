@@ -6,7 +6,8 @@
  *
  * Key design:
  * - createDb() is async (pre-loads WASM module)
- * - insert/update/deleteFrom are async (await WASM bridge readiness, return Promises)
+ * - insert is sync (local-first immediate write, no durability wait)
+ * - insertDurable/update/deleteFrom are async (durability-aware, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
@@ -345,8 +346,8 @@ function isLeaderDebugEnabled(): boolean {
  * ```typescript
  * const db = await createDb({ appId: "my-app", driver });
  *
- * // Async mutations
- * const inserted = await db.insert(app.todos, { title: "Buy milk", done: false });
+ * // Mutations
+ * const inserted = db.insert(app.todos, { title: "Buy milk", done: false });
  * await db.update(app.todos, inserted.id, { done: true });
  * await db.deleteFrom(app.todos, inserted.id);
  *
@@ -979,17 +980,33 @@ export class Db {
   }
 
   /**
+   * Insert a new row into a table without waiting for durability.
+   *
+   * @param table Table proxy from generated app module
+   * @param data Init object with column values
+   * @returns Inserted row
+   */
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+    const client = this.getClient(table._schema);
+    // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
+    // If the bridge fails to initialize, the insert will be lost on restart.
+    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
+    const row = client.create(table._table, values);
+    return transformRow(row, table._schema, table._table);
+  }
+
+  /**
    * Insert a new row into a table and wait for durability at the requested tier.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @param options Optional durability tier override
+   * @param options Durability tier
    * @returns Promise resolving to the inserted row
    */
-  async insert<T, Init>(
+  async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options?: { tier?: DurabilityTier },
+    options: { tier: DurabilityTier },
   ): Promise<T> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
@@ -999,7 +1016,7 @@ export class Db {
     );
     await this.ensureBridgeReady();
     const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
-    const row = await client.create(table._table, values, options);
+    const row = await client.createDurable(table._table, values, options);
     return transformRow(row, table._schema, table._table);
   }
 
