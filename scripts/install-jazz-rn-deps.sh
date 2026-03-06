@@ -7,6 +7,7 @@ export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 JAZZ_SKIP_RN_DEPS="${JAZZ_SKIP_RN_DEPS:-0}"
 JAZZ_RN_PLATFORM="${JAZZ_RN_PLATFORM:-all}"
+JAZZ_RN_ANDROID_TARGETS="${JAZZ_RN_ANDROID_TARGETS:-aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android}"
 RUST_TOOLCHAIN="${JAZZ_RUST_TOOLCHAIN:-1.93.1}"
 
 is_truthy() {
@@ -67,12 +68,11 @@ if is_truthy "$JAZZ_SKIP_RN_DEPS"; then
 fi
 
 if [[ "$JAZZ_RN_PLATFORM" == "all" || "$JAZZ_RN_PLATFORM" == "android" ]]; then
-  rustup target add \
-    aarch64-linux-android \
-    armv7-linux-androideabi \
-    i686-linux-android \
-    x86_64-linux-android \
-    --toolchain "$RUST_TOOLCHAIN"
+  # Split Android CI jobs can scope bootstrap to a single target to avoid
+  # reinstalling every ABI's toolchain on each runner.
+  # shellcheck disable=SC2206
+  android_targets=($JAZZ_RN_ANDROID_TARGETS)
+  rustup target add "${android_targets[@]}" --toolchain "$RUST_TOOLCHAIN"
 fi
 
 if [[ "$JAZZ_RN_PLATFORM" == "all" || "$JAZZ_RN_PLATFORM" == "android" ]]; then

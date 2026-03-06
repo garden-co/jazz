@@ -116,13 +116,10 @@ jobs:
 
   build-linux:
     name: Build CLI Linux (${{ matrix.arch }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: [release-push-gate]
     if: needs.release-push-gate.outputs.should_run == 'true'
     env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 8G
       CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
     strategy:
       fail-fast: false
@@ -146,16 +143,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: release-cli-sccache-${{ github.repository_id }}-${{ matrix.target }}-v1
-          path: /home/runner/.cache/sccache
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
@@ -436,12 +423,22 @@ jobs:
           if-no-files-found: error
 
   build-rn-android:
-    name: Build jazz-rn Android payload
-    runs-on: macos-14
+    name: Build jazz-rn Android payload (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
     needs: [release-push-gate]
     if: needs.release-push-gate.outputs.should_run == 'true'
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+          - target: i686-linux-android
+            abi: x86
+          - target: x86_64-linux-android
+            abi: x86_64
 
     steps:
       - uses: actions/checkout@v6
@@ -456,7 +453,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -469,24 +465,23 @@ jobs:
       - name: Install/build React Native Android prerequisites
         env:
           JAZZ_RN_PLATFORM: android
+          JAZZ_RN_ANDROID_TARGETS: ${{ matrix.target }}
         run: pnpm run ensure:rust-toolchain
 
       - name: Build jazz-rn Android native payload
-        run: pnpm --filter jazz-rn build:rn:android
+        run: pnpm --filter jazz-rn exec ubrn build android --targets ${{ matrix.target }} --and-generate --release
 
       - name: Verify built jazz-rn Android native payload
-        run: |
-          test -f crates/jazz-rn/android/src/main/jniLibs/arm64-v8a/libjazz_rn.a
-          test -f crates/jazz-rn/android/src/main/jniLibs/x86_64/libjazz_rn.a
+        run: test -f crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}/libjazz_rn.a
 
       - name: Stage jazz-rn Android payload artifact
         run: |
-          mkdir -p dist/rn-android
-          cp -R crates/jazz-rn/android/src/main/jniLibs dist/rn-android/
+          mkdir -p dist/rn-android/jniLibs
+          cp -R crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }} dist/rn-android/jniLibs/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jazz-rn-android-payload
+          name: jazz-rn-android-payload-${{ matrix.abi }}
           path: dist/rn-android
           if-no-files-found: error
 
@@ -545,8 +540,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: jazz-rn-android-payload
+          pattern: jazz-rn-android-payload-*
           path: dist/rn-android
+          merge-multiple: true
 
       - name: Stage jazz-rn native payload into npm package sources
         run: |
@@ -726,8 +722,8 @@ jobs:
             exit 1
           }
 
-          # Ensure key Android native slices are present for Expo/RN Android consumers.
-          for abi in arm64-v8a x86_64; do
+          # Ensure Android native slices are present for Expo/RN Android consumers.
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
             grep -q "^package/android/src/main/jniLibs/${abi}/libjazz_rn\\.a$" "${LISTING}" || {
               echo "Missing Android native library for ABI ${abi} in packed jazz-rn tarball."
               exit 1
