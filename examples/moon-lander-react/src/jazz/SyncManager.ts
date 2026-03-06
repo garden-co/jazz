@@ -4,7 +4,7 @@
  * Jazz write APIs used here:
  *   db.insert(table, data, { tier })    — create a new row
  *   db.update(table, id, data, { tier }) — update fields on an existing row
- *   db.deleteFrom(table, id)             — delete a row
+ *   db.deleteFrom(table, id, { tier? })  — delete a row
  *
  * The "edge" tier broadcasts the write to all connected clients' live
  * subscriptions, triggering WHERE ENTRY / WHERE EXIT events remotely.
