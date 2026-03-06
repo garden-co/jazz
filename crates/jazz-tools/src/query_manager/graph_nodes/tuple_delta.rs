@@ -132,14 +132,28 @@ fn tuple_as_id_only(tuple: &Tuple) -> Tuple {
             .map(|elem| TupleElement::Id(elem.id()))
             .collect(),
     )
+    .with_provenance(tuple.provenance().clone())
 }
 
-/// Check if tuple content changed (for tuples with same IDs).
+/// Check if tuple content or provenance changed (for tuples with same IDs).
 fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
-    old.iter()
-        .zip(new.iter())
-        .any(|(o, n)| match (o.content(), n.content()) {
-            (Some(oc), Some(nc)) => oc != nc,
-            _ => false,
-        })
+    if old.provenance() != new.provenance() {
+        return true;
+    }
+
+    old.iter().zip(new.iter()).any(|(o, n)| match (o, n) {
+        (
+            TupleElement::Row {
+                content: old_content,
+                commit_id: old_commit,
+                ..
+            },
+            TupleElement::Row {
+                content: new_content,
+                commit_id: new_commit,
+                ..
+            },
+        ) => old_content != new_content || old_commit != new_commit,
+        _ => false,
+    })
 }
