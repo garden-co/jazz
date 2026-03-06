@@ -1,0 +1,140 @@
+---
+title: Framework Patterns
+description: Side-by-side reference for React and Svelte Jazz APIs — hooks, subscriptions, and dependency injection.
+---
+
+## API equivalents
+
+| Concept         | React / Expo                     | Svelte                          |
+| --------------- | -------------------------------- | ------------------------------- |
+| Provider        | `<JazzProvider client={client}>` | `<JazzSvelteProvider {client}>` |
+| Live query      | `useAll(query)`                  | `new QuerySubscription(query)`  |
+| DB access       | `useDb()`                        | `getDb()`                       |
+| Session         | `useSession()`                   | `getSession()`                  |
+| Client creation | `createJazzClient(config)`       | `createJazzClient(config)`      |
+
+## Provider setup
+
+Both frameworks wrap the app in a provider that makes the database available to every
+component in the tree — no prop drilling required.
+
+```tsx
+// React
+import { createJazzClient, JazzProvider } from "jazz-tools/react";
+
+export function App({ config }) {
+  const [client, setClient] = useState(null);
+  useEffect(() => {
+    let active = true;
+    createJazzClient(config).then((c) => {
+      if (active) setClient(c);
+      else c.shutdown();
+    });
+    return () => {
+      active = false;
+      client?.shutdown();
+    };
+  }, [config.appId, config.serverUrl]);
+
+  return (
+    <JazzProvider client={client}>
+      <YourApp />
+    </JazzProvider>
+  );
+}
+```
+
+```svelte
+<!-- Svelte -->
+<script lang="ts">
+  import { createJazzClient, JazzSvelteProvider } from "jazz-tools/svelte";
+  const client = createJazzClient(config);
+</script>
+
+<JazzSvelteProvider {client}>
+  <YourApp />
+</JazzSvelteProvider>
+```
+
+## Live queries
+
+React uses a hook; Svelte uses a class with a reactive `.current` property.
+
+```tsx
+// React — re-renders automatically on every change
+const deposits = useAll(app.fuel_deposits.where({ collected: false }));
+
+// undefined = not yet connected; [] = connected, no rows; [...] = rows present
+if (deposits === undefined) return <Loading />;
+```
+
+```svelte
+<!-- Svelte — .current stays in sync with the live database -->
+<script lang="ts">
+  import { QuerySubscription } from "jazz-tools/svelte";
+  const deposits = new QuerySubscription(
+    app.fuel_deposits.where({ collected: false }),
+  );
+</script>
+
+{#each deposits.current ?? [] as deposit}
+  <Deposit {deposit} />
+{/each}
+```
+
+The `?? []` guard handles the `undefined` (not yet connected) case in Svelte, equivalent to
+the `undefined` check in React.
+
+## Accessing the database for writes
+
+```tsx
+// React — hook, must be called at component top level
+import { useDb } from "jazz-tools/react";
+const db = useDb();
+
+await db.insert(app.chat_messages, { text, createdAt: Date.now() });
+```
+
+```ts
+// Svelte — function, callable anywhere (component, store, util)
+import { getDb } from "jazz-tools/svelte";
+const db = getDb();
+
+await db.insert(app.chat_messages, { text, createdAt: Date.now() });
+```
+
+`getDb()` in Svelte can be called outside of component lifecycle — useful in event handlers,
+class methods, and utility modules. `useDb()` in React must follow the rules of hooks.
+
+## Session / user identity
+
+```tsx
+// React
+import { useSession } from "jazz-tools/react";
+const session = useSession(); // { user_id: string } | null
+```
+
+```ts
+// Svelte
+import { getSession } from "jazz-tools/svelte";
+const session = getSession(); // { user_id: string } | null
+```
+
+## Settled detection
+
+Both frameworks expose the same `undefined` signal for the not-yet-connected state.
+See [Sync Lifecycle](/docs/guides/sync-lifecycle) for the full pattern.
+
+```tsx
+// React
+const rows = useAll(app.my_table);
+const settled = rows !== undefined;
+```
+
+```svelte
+<!-- Svelte -->
+<script>
+  const rows = new QuerySubscription(app.my_table);
+  $: settled = rows.current !== undefined;
+</script>
+```

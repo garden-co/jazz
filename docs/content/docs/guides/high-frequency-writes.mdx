@@ -1,0 +1,106 @@
+---
+title: High-Frequency Writes
+description: How to safely batch writes from high-frequency sources like game loops, canvas editors, and real-time sensors.
+---
+
+## The problem
+
+Jazz writes are fast locally — they resolve after the OPFS worker acknowledges — but
+running them on every animation frame or physics tick is wasteful. A 60 fps game loop
+generates 3,600 writes per minute per player. Most of those updates are redundant: remote
+clients only need position data a few times per second to render smooth interpolation.
+
+Writing on every frame also creates backpressure in the service worker and risks stalling
+the event loop.
+
+## The pattern: queue and flush
+
+Decouple the write rate from the application frame rate by queuing intent and flushing
+on a fixed interval:
+
+```ts
+export class SyncManager {
+  private pendingState: PlayerState | null = null;
+  private pendingCollections: string[] = [];
+  private intervalId: ReturnType<typeof setInterval>;
+
+  constructor(
+    private db: Db,
+    private playerId: string,
+  ) {
+    // Flush 5×/s regardless of frame rate
+    this.intervalId = setInterval(() => this.flush(), 200);
+  }
+
+  // Called synchronously from the game loop — zero latency
+  updateState(state: PlayerState) {
+    this.pendingState = state; // last-write wins — older frames are discarded
+  }
+
+  collectDeposit(id: string) {
+    this.pendingCollections.push(id); // accumulated — every collection matters
+  }
+
+  destroy() {
+    clearInterval(this.intervalId);
+  }
+
+  private async flush() {
+    // Atomically drain the queue — new items pushed during an async flush
+    // land in the next tick rather than being processed twice.
+    const collections = this.pendingCollections.splice(0);
+    const state = this.pendingState;
+    this.pendingState = null;
+
+    for (const id of collections) {
+      await this.db.update(
+        app.fuel_deposits,
+        id,
+        { collected: true, collectedBy: this.playerId },
+        { tier: "edge" },
+      );
+    }
+
+    if (state && stateChanged(this.lastSynced, state)) {
+      await this.db.update(app.players, this.dbRowId, state, { tier: "edge" });
+      this.lastSynced = state;
+    }
+  }
+}
+```
+
+## Key points
+
+**Use `splice(0)` to drain queues atomically.** `splice(0)` removes all current items and
+returns them in a single synchronous step. Any items pushed to the array while the async
+flush is awaiting will land in the next interval, not the current one. A `forEach` loop
+with `shift()` does not have this guarantee.
+
+**Last-write wins for state, accumulate for events.** Player position only needs the most
+recent value — overwrite `pendingState` each frame. Discrete events (collecting a deposit,
+sending a message) must all be processed — append to an array.
+
+**Skip unchanged state.** Compare the pending state against the last synced value before
+writing. A player standing still should not generate writes on every flush.
+
+**Always clean up the interval.** Call `destroy()` (or equivalent) when the component
+unmounts or the session ends to avoid writes from a detached manager:
+
+```ts
+// React
+const syncRef = useRef<SyncManager | null>(null);
+if (!syncRef.current) syncRef.current = new SyncManager(db, playerId);
+useEffect(() => () => syncRef.current?.destroy(), []);
+```
+
+## Choosing a flush interval
+
+| Interval | Writes/s | Good for                |
+| -------- | -------- | ----------------------- |
+| 50 ms    | 20       | Cursor/pointer tracking |
+| 100 ms   | 10       | Collaborative editors   |
+| 200 ms   | 5        | Game player positions   |
+| 1 000 ms | 1        | Presence heartbeats     |
+
+Remote clients receiving 5 position updates per second can interpolate smoothly at 60 fps
+in their own render loop — they do not need to receive at 60 fps.

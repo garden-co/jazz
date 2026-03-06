@@ -1,0 +1,68 @@
+---
+title: Sync Lifecycle
+description: How to detect when the first sync has completed and how to gate initialisation logic until server data has arrived.
+---
+
+## The settled state
+
+`useAll` (React/Expo) and `new QuerySubscription` (Svelte) return `undefined` until the
+subscription has received its first response from the server. Once the server has delivered
+an initial snapshot, the value becomes an array — empty (`[]`) if no rows match, or populated.
+
+This `undefined` → array transition is the signal that the sync connection is established and
+that the local database reflects the current server state. Code that depends on a consistent
+remote view — deposit reconciliation, seeding, preventing duplicate inserts — should wait for
+this transition before running.
+
+```ts
+// undefined = still connecting to the sync server
+// []        = connected, no matching rows yet
+// [...]     = connected, rows present
+const uncollected = useAll(app.fuel_deposits.where({ collected: false }));
+
+const settled = uncollected !== undefined;
+```
+
+Use `settled` to gate any initialisation that must not run twice or before remote state is known:
+
+```ts
+useEffect(() => {
+  if (!settled) return; // wait for server snapshot before acting
+  reconcileDeposits();
+}, [settled]);
+```
+
+## Gating writes until the edge responds
+
+For one-off setup (seeding instruments, creating a player row on first join), you often need
+to ensure no other client has already done the same work before writing. Use `db.all` with
+`{ tier: "edge" }` to wait for edge-server confirmation before reading:
+
+```ts
+// Reads nothing until the edge server has acknowledged — prevents duplicate seeding
+// from concurrent fresh clients on first visit.
+const existing = await db.all(app.instruments, { tier: "edge" });
+
+if (existing.length === 0) {
+  for (const seed of DEFAULT_INSTRUMENTS) {
+    await db.insert(app.instruments, seed);
+  }
+}
+```
+
+The difference from a plain `db.all`:
+
+| Call                              | Waits for                 | Use when                                          |
+| --------------------------------- | ------------------------- | ------------------------------------------------- |
+| `db.all(query)`                   | Local worker (OPFS)       | Reading cached local state                        |
+| `db.all(query, { tier: "edge" })` | Edge server snapshot      | Seeding or one-time setup that must not duplicate |
+| `useAll(query)`                   | Ongoing — streams updates | Live UI that re-renders on every change           |
+
+## Detecting reconnection
+
+`useAll` does not re-return `undefined` on reconnection after a drop — it retains the last
+known array. The `undefined` state only occurs on the initial mount, before the first server
+response.
+
+If you need to react to connectivity changes (showing a "syncing…" indicator), track a
+separate connection state using a `setInterval` timestamp check or a network status API.

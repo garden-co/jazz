@@ -8,6 +8,7 @@
     "schemas",
     "reading-data",
     "writing-data",
+    "guides",
     "permissions",
     "migrations",
     "mcp"

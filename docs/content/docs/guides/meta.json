@@ -1,0 +1,11 @@
+{
+  "title": "Guides",
+  "pages": [
+    "sync-lifecycle",
+    "durability-in-practice",
+    "binary-data",
+    "high-frequency-writes",
+    "framework-patterns",
+    "where-operators"
+  ]
+}

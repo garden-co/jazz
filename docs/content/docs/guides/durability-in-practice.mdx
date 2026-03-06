@@ -1,0 +1,79 @@
+---
+title: Durability in Practice
+description: Practical guidance on choosing write durability tiers and understanding how they interact with remote subscriptions.
+---
+
+import DurabilityTiersTable from "../../partials/quickstarts/durability-tiers-table.mdx";
+
+## The tiers
+
+<DurabilityTiersTable />
+
+The tier on a write controls _where the promise resolves_ — not whether the write eventually
+reaches every peer. All writes propagate everywhere regardless of tier. The tier only
+determines how far the write must travel before the call returns.
+
+## Which tier to use
+
+**`"worker"` (default)** — the write is persisted to the local OPFS database. The promise
+resolves as soon as the WASM worker confirms it. Other tabs on the same device see the change
+immediately; remote clients do not yet.
+
+Use `worker` for:
+
+- Local-only state (draft text, UI prefs)
+- High-frequency updates where you will batch before syncing (see [High-Frequency Writes](/docs/guides/high-frequency-writes))
+- Any write where you do not need remote confirmation
+
+**`"edge"`** — the write has reached the nearest sync server and been acknowledged. Remote
+clients' subscriptions are triggered from the edge, so `"edge"` is the minimum tier required
+for other clients to see the write.
+
+Use `edge` for:
+
+- Any write that other clients must receive (player positions, collected items, chat messages)
+- Writes that gate further logic on remote state (collecting a deposit, sharing fuel)
+- Seeding or reconciliation that must not duplicate across concurrent clients
+
+**`"global"`** — the write has propagated to the central Global Core and is globally durable.
+Highest latency; use only when loss of an edge-acknowledged write would be unacceptable.
+
+Use `global` for:
+
+- Financial or audit records
+- Actions that must survive edge server failure
+
+## The critical gotcha: subscriptions are triggered from the edge
+
+`worker`-tier writes update the local OPFS database but do not immediately fan out to the
+sync server. Remote clients' `useAll` subscriptions (and `QuerySubscription` in Svelte) are
+fed from the edge — so a `worker`-tier write will _not_ trigger a remote re-render.
+
+```ts
+// ❌ Other clients will NOT see this — promise resolves after local OPFS write only
+await db.update(app.fuel_deposits, id, { collected: true, collectedBy: playerId });
+
+// ✅ Other clients WILL see this — promise resolves after edge acknowledgement
+await db.update(
+  app.fuel_deposits,
+  id,
+  { collected: true, collectedBy: playerId },
+  { tier: "edge" },
+);
+```
+
+This is the most common source of confusion when building multiplayer features. If remote
+clients are not reacting to a write, check whether the tier is `"edge"` or higher.
+
+## Write tier vs read tier
+
+Write tier (`options.tier` on `insert`/`update`/`deleteFrom`) and read tier (`options.tier`
+on `db.all`/`db.subscribeAll`) are independent settings:
+
+- **Write tier** — how far the write must travel before the promise resolves.
+- **Read tier** — how far the initial snapshot must come from before the first result is delivered.
+
+A subscription with a `worker` read tier will deliver local results immediately, then stream
+in remote updates as they arrive from the edge. A subscription with an `edge` read tier
+holds delivery until the edge has responded — useful for gating setup logic (see
+[Sync Lifecycle](/docs/guides/sync-lifecycle)).
