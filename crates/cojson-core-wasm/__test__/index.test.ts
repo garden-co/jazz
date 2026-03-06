@@ -1104,6 +1104,58 @@ describe("SessionMap - Transaction Flow", () => {
     expect(knownStateWithStreaming!.sessions[session2]).toBe(3);
   });
 
+  test("getKnownStateWithStreaming does not trigger inherited prototype setters", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+    const { signerSecret } = createSignerKeyPair();
+
+    const session1 = `${coId}_session_z1`;
+
+    sessionMap.makeNewTrustingTransaction(
+      session1,
+      signerSecret,
+      JSON.stringify({ s: 1 }),
+      undefined,
+      Date.now(),
+    );
+    sessionMap.setStreamingKnownState(JSON.stringify({ [session1]: 5 }));
+
+    const original = Object.getOwnPropertyDescriptor(Object.prototype, "header");
+    let nestedError: unknown;
+    let setterCalls = 0;
+
+    Object.defineProperty(Object.prototype, "header", {
+      configurable: true,
+      set(_value) {
+        setterCalls += 1;
+        delete (Object.prototype as Record<string, unknown>).header;
+        try {
+          sessionMap.setStreamingKnownState(JSON.stringify({ [session1]: 6 }));
+        } catch (error) {
+          nestedError = error;
+        } finally {
+          if (original) {
+            Object.defineProperty(Object.prototype, "header", original);
+          }
+        }
+      },
+    });
+
+    try {
+      expect(() => sessionMap.getKnownStateWithStreaming()).not.toThrow();
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).header;
+      if (original) {
+        Object.defineProperty(Object.prototype, "header", original);
+      }
+    }
+
+    expect(setterCalls).toBe(0);
+    expect(nestedError).toBeUndefined();
+    expect(sessionMap.getKnownStateWithStreaming()!.sessions[session1]).toBe(5);
+  });
+
   test("deletion flow", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
