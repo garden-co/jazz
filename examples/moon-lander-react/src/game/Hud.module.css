@@ -5,7 +5,9 @@
   color: #00ffff;
   background: rgba(10, 4, 20, 0.85);
   border: 1px solid #ff00ff;
-  box-shadow: 0 0 8px rgba(255, 0, 255, 0.3), inset 0 0 12px rgba(255, 0, 255, 0.05);
+  box-shadow:
+    0 0 8px rgba(255, 0, 255, 0.3),
+    inset 0 0 12px rgba(255, 0, 255, 0.05);
   padding: 6px 10px;
   pointer-events: none;
   image-rendering: pixelated;

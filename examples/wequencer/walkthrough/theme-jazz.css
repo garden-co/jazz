@@ -1,20 +1,20 @@
 /* @theme jazz */
 
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap");
 
 /* ── Palette ─────────────────────────────────────────────────────────────── */
 
 :root {
-  --bg:          #ffffff;
-  --bg-raised:   #f8f8fc;
-  --bg-code:     #f5f5ff;
-  --border:      #e0e0f0;
-  --border-dim:  #ebebf5;
-  --accent:      #146aff;
-  --accent-dim:  rgba(20, 106, 255, 0.07);
-  --accent-mid:  rgba(20, 106, 255, 0.20);
-  --text:        #1a1a2e;
-  --text-dim:    #6b7280;
+  --bg: #ffffff;
+  --bg-raised: #f8f8fc;
+  --bg-code: #f5f5ff;
+  --border: #e0e0f0;
+  --border-dim: #ebebf5;
+  --accent: #146aff;
+  --accent-dim: rgba(20, 106, 255, 0.07);
+  --accent-mid: rgba(20, 106, 255, 0.2);
+  --text: #1a1a2e;
+  --text-dim: #6b7280;
   --text-bright: #0f0f1a;
 }
 
@@ -23,7 +23,7 @@
 section {
   background-color: var(--bg);
   color: var(--text);
-  font-family: 'Inter', sans-serif;
+  font-family: "Inter", sans-serif;
   font-size: 1rem;
   font-weight: 400;
   line-height: 1.65;
@@ -38,7 +38,7 @@ section {
 
 /* Dot matrix — covers bottom-right third, perspective receding upward */
 section::before {
-  content: '';
+  content: "";
   position: absolute;
   bottom: 0;
   left: 0;
@@ -48,18 +48,20 @@ section::before {
   background-size: 22px 22px;
   transform: perspective(600px) rotateX(28deg) rotateY(16deg);
   transform-origin: bottom left;
-  -webkit-mask-image: linear-gradient(225deg, transparent 15%, rgba(0,0,0,0.5) 50%, black 75%);
-  mask-image: linear-gradient(225deg, transparent 15%, rgba(0,0,0,0.5) 50%, black 75%);
+  -webkit-mask-image: linear-gradient(225deg, transparent 15%, rgba(0, 0, 0, 0.5) 50%, black 75%);
+  mask-image: linear-gradient(225deg, transparent 15%, rgba(0, 0, 0, 0.5) 50%, black 75%);
   pointer-events: none;
   z-index: 0;
 }
 
 /* ::after is reserved for page number (and hero horizon line) */
 
-section > * { position: relative; z-index: 1; }
+section > * {
+  position: relative;
+  z-index: 1;
+}
 
 /* ── Hero slide ──────────────────────────────────────────────────────────── */
-
 
 section.hero {
   display: flex;
@@ -97,14 +99,17 @@ section.hero::before {
   height: 240px;
   transform: perspective(500px) rotateX(-32deg);
   transform-origin: top center;
-  -webkit-mask-image: linear-gradient(180deg, black 0%, rgba(0,0,0,0.6) 50%, transparent 100%);
-  mask-image: linear-gradient(180deg, black 0%, rgba(0,0,0,0.6) 50%, transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, black 0%, rgba(0, 0, 0, 0.6) 50%, transparent 100%);
+  mask-image: linear-gradient(180deg, black 0%, rgba(0, 0, 0, 0.6) 50%, transparent 100%);
 }
 
 /* ── Headings ────────────────────────────────────────────────────────────── */
 
-h1, h2, h3, h4 {
-  font-family: 'Manrope', sans-serif;
+h1,
+h2,
+h3,
+h4 {
+  font-family: "Manrope", sans-serif;
   color: var(--text-bright);
   margin-top: 0;
   margin-bottom: 0.7em;
@@ -139,7 +144,9 @@ h4 {
 
 /* ── Body text ───────────────────────────────────────────────────────────── */
 
-p { margin: 0 0 0.8em; }
+p {
+  margin: 0 0 0.8em;
+}
 
 strong {
   color: var(--text-bright);
@@ -161,7 +168,7 @@ a {
 /* ── Inline code ─────────────────────────────────────────────────────────── */
 
 code {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 0.82em;
   background: var(--bg-code);
   color: var(--accent);
@@ -174,7 +181,7 @@ code {
 /* ── Code blocks ─────────────────────────────────────────────────────────── */
 
 pre {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 0.78rem;
   line-height: 1.65;
   background: var(--bg-code);
@@ -197,28 +204,55 @@ pre code {
 /* ── Syntax highlighting (hljs) — light theme ────────────────────────────── */
 
 .hljs-keyword,
-.hljs-operator                { color: #146aff; font-weight: 500; }
+.hljs-operator {
+  color: #146aff;
+  font-weight: 500;
+}
 
 .hljs-string,
-.hljs-template-string         { color: #15803d; }
+.hljs-template-string {
+  color: #15803d;
+}
 .hljs-number,
-.hljs-literal                 { color: #c2410c; }
-.hljs-comment                 { color: #9ca3af; font-style: italic; }
+.hljs-literal {
+  color: #c2410c;
+}
+.hljs-comment {
+  color: #9ca3af;
+  font-style: italic;
+}
 .hljs-function,
-.hljs-title.function_         { color: #0051cc; font-weight: 500; }
+.hljs-title.function_ {
+  color: #0051cc;
+  font-weight: 500;
+}
 .hljs-built_in,
-.hljs-class                   { color: #0e7490; }
+.hljs-class {
+  color: #0e7490;
+}
 .hljs-type,
-.hljs-title.class_            { color: #6d28d9; }
+.hljs-title.class_ {
+  color: #6d28d9;
+}
 .hljs-attr,
-.hljs-property                { color: #57534e; }
+.hljs-property {
+  color: #57534e;
+}
 .hljs-variable,
-.hljs-params                  { color: var(--text); }
+.hljs-params {
+  color: var(--text);
+}
 .hljs-tag,
-.hljs-name                    { color: #146aff; }
+.hljs-name {
+  color: #146aff;
+}
 .hljs-selector-id,
-.hljs-selector-class          { color: #c2410c; }
-.hljs-punctuation             { color: #9ca3af; }
+.hljs-selector-class {
+  color: #c2410c;
+}
+.hljs-punctuation {
+  color: #9ca3af;
+}
 
 /* ── Blockquotes ─────────────────────────────────────────────────────────── */
 
@@ -232,12 +266,18 @@ blockquote {
   font-size: 0.9rem;
 }
 
-blockquote strong { color: var(--accent); }
-blockquote code   { color: var(--accent); border-color: var(--accent-mid); }
+blockquote strong {
+  color: var(--accent);
+}
+blockquote code {
+  color: var(--accent);
+  border-color: var(--accent-mid);
+}
 
 /* ── Lists ───────────────────────────────────────────────────────────────── */
 
-ul, ol {
+ul,
+ol {
   padding-left: 1.4em;
   margin: 0 0 0.6em;
 }
@@ -247,7 +287,9 @@ li {
   line-height: 1.55;
 }
 
-li::marker { color: var(--accent); }
+li::marker {
+  color: var(--accent);
+}
 
 /* ── Tables ──────────────────────────────────────────────────────────────── */
 
@@ -262,7 +304,7 @@ table {
 }
 
 th {
-  font-family: 'Manrope', sans-serif;
+  font-family: "Manrope", sans-serif;
   font-weight: 700;
   font-size: 0.72rem;
   letter-spacing: 0.07em;
@@ -281,8 +323,12 @@ td {
   color: var(--text);
 }
 
-tr:last-child td { border-bottom: none; }
-tr:hover td { background: var(--bg-raised); }
+tr:last-child td {
+  border-bottom: none;
+}
+tr:hover td {
+  background: var(--bg-raised);
+}
 
 /* ── Images ──────────────────────────────────────────────────────────────── */
 
@@ -303,7 +349,7 @@ hr {
 
 section[data-marpit-pagination]::after {
   content: attr(data-marpit-pagination);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 0.68rem;
   color: var(--text-dim);
   position: absolute;
