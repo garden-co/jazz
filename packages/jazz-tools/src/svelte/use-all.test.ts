@@ -43,8 +43,10 @@ describe("QuerySubscription subscription wiring", () => {
   it("subscribeAll is called with the query and tier", () => {
     const query = { _build: () => '{"table":"todos"}', _table: "todos" } as any;
 
-    const unsub = mockDb.subscribeAll(query, () => {}, "worker");
-    expect(mockDb.subscribeAll).toHaveBeenCalledWith(query, expect.any(Function), "worker");
+    const unsub = mockDb.subscribeAll(query, () => {}, { tier: "worker" });
+    expect(mockDb.subscribeAll).toHaveBeenCalledWith(query, expect.any(Function), {
+      tier: "worker",
+    });
     expect(typeof unsub).toBe("function");
   });
 
@@ -76,8 +78,8 @@ describe("QuerySubscription subscription wiring", () => {
   });
 
   it("with tier, initial value should be undefined (not yet loaded)", () => {
-    const tier = "worker";
-    let items: any[] | undefined = tier ? undefined : [];
+    const options = { tier: "worker" };
+    let items: any[] | undefined = options?.tier ? undefined : [];
 
     expect(items).toBeUndefined();
 
@@ -87,15 +89,15 @@ describe("QuerySubscription subscription wiring", () => {
       (delta: any) => {
         items = delta.all;
       },
-      tier,
+      options,
     );
     subscribeCallback!({ all: [] });
     expect(items).toEqual([]);
   });
 
   it("without tier, initial value should be empty array (loaded but empty)", () => {
-    const tier = undefined;
-    const items: any[] | undefined = tier ? undefined : [];
+    // Without a tier, results are immediately available as an empty array
+    const items: any[] = [];
     expect(items).toEqual([]);
   });
 });

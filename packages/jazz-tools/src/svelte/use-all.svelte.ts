@@ -9,7 +9,7 @@ import { getJazzContext } from "./context.svelte.js";
  *
  * ```svelte
  * <script lang="ts">
- *   const todos = new QuerySubscription(app.todos.where({ done: false }));
+ *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "edge" });
  * </script>
  *
  * {#if todos.loading}
@@ -30,9 +30,9 @@ export class QuerySubscription<T extends { id: string }> {
 
   #unsubscribe: (() => void) | null = null;
 
-  constructor(query: QueryBuilder<T>, tier?: DurabilityTier) {
+  constructor(query: QueryBuilder<T>, options?: { tier?: DurabilityTier }) {
     const ctx = getJazzContext();
-    this.current = tier ? undefined : [];
+    this.current = options?.tier ? undefined : [];
 
     $effect(() => {
       const db = ctx.db;
@@ -48,7 +48,7 @@ export class QuerySubscription<T extends { id: string }> {
             this.current = delta.all;
             this.loading = false;
           },
-          tier ? { tier } : undefined,
+          options?.tier ? { tier: options.tier } : undefined,
         );
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));
