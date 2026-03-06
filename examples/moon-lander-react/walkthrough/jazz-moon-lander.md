@@ -1,39 +1,15 @@
 ---
 marp: true
 title: How Moon Lander uses Jazz
-theme: default
+theme: jazz-moon
 paginate: true
-style: |
-  section {
-    font-size: 1.4rem;
-  }
-  section.hero h1 {
-    font-size: 2.8rem;
-  }
-  section.hero p {
-    font-size: 1.1rem;
-    color: #555;
-  }
-  pre {
-    font-size: 0.82rem;
-  }
-  img {
-    border-radius: 6px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-  }
-  table {
-    font-size: 0.8rem;
-  }
-  td, th {
-    padding: 0.25rem 0.5rem;
-  }
 ---
 
 <!-- _class: hero -->
 
 # How Moon Lander uses Jazz
 
-A walkthrough of real-time multiplayer in a browser game — built with Jazz, React, and a canvas physics engine.
+A walkthrough of real-time multiplayer in a browser game — built with Jazz, React, and a canvas physics engine.
 
 Players share a moon surface: they collect fuel deposits, trade fuel with each other, and see each other's landers moving in real time.
 
@@ -66,7 +42,7 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
 </svg>
 
 - No REST API. No WebSockets to manage. No manual state reconciliation.
-- Writes are **instant locally** — sync happens in the background.
+- Writes are **instant locally** — sync happens in the background.
 - Every client is always readable, even offline.
 
 ---
@@ -123,7 +99,7 @@ table("chat_messages", {
 
 ## Client setup
 
-One call to `createJazzClient` initialises the WASM worker, opens the OPFS database, and begins syncing. `JazzProvider` makes the `db` available to every component in the tree.
+`createJazzClient` initialises the WASM worker, opens the OPFS database, and begins syncing. `JazzProvider` makes `db` available to every component in the tree.
 
 **[`src/App.tsx`](../src/App.tsx)**
 
@@ -134,24 +110,22 @@ export function App({ config, playerId, ... }: AppProps) {
   const [client, setClient] = useState<JazzClient | null>(null);
 
   useEffect(() => {
-    let active = true;
-    let jazzClient: JazzClient | null = null;
-    createJazzClient(config).then(  // one-time: WASM + OPFS + sync
-      (c) => { if (active) { jazzClient = c; setClient(c); } else c.shutdown(); },
-      (err) => { if (active) console.error("Jazz init failed:", err); },
-    );
+    let active = true, jazzClient: JazzClient | null = null;
+    createJazzClient(config).then((c) => {   // WASM + OPFS + sync, once
+      if (active) { jazzClient = c; setClient(c); } else c.shutdown();
+    });
     return () => { active = false; jazzClient?.shutdown(); };
   }, [config.appId, config.serverUrl]);
 
   return (
     <JazzProvider client={client}>
-      <GameWithSync playerId={playerId} />  {/* all Jazz access lives below here */}
+      <GameWithSync playerId={playerId} />
     </JazzProvider>
   );
 }
 ```
 
-If no config is provided, `<Game>` mounts directly with no Jazz layer — useful for offline play and for the test suite.
+Without a config, `<Game>` mounts directly — no Jazz layer, useful for offline play and tests.
 
 ---
 
@@ -166,7 +140,7 @@ src/jazz/
 └── SyncManager.ts     ← all Jazz writes (batched on a 200 ms interval)
 ```
 
-`src/game/` and `src/Game.tsx` are pure game engine code — they receive data via props and callbacks and know nothing about Jazz.
+`src/game/` and `src/Game.tsx` are pure game engine code — they receive data via props and callbacks and know nothing about Jazz.
 
 This separation means you can read the entire Jazz integration by looking at three files, without touching any physics or rendering code.
 
@@ -182,12 +156,12 @@ This separation means you can read the entire Jazz integration by looking at thr
 import { useAll, useDb } from "jazz-tools/react";
 
 export function useSync(playerId: string): SyncResult {
-  // Other players' positions, modes, fuel levels — live from the server
+  // Other players' positions, modes, fuel levels — live from the server
   const remotePlayers = useAll(
     app.players.where({ playerId: { ne: playerId } }),
   );
 
-  // Deposits on the surface — drives the game's collectible objects
+  // Deposits on the surface — drives the game's collectible objects
   const uncollectedDeposits = useAll(
     app.fuel_deposits.where({ collected: false }),
   );
@@ -200,7 +174,7 @@ export function useSync(playerId: string): SyncResult {
 }
 ```
 
-Results stream from the sync server. When any client writes, every subscriber re-renders automatically — no polling, no manual invalidation.
+Results stream from the sync server. When any client writes, every subscriber re-renders automatically — no polling, no manual invalidation.
 
 ---
 
@@ -217,77 +191,78 @@ const settled = allUncollected !== undefined;
 
 `settled` gates two things:
 
-1. **Deposit reconciliation** — ensuring the surface has the right number of deposits for the current player count (runs once, after settle).
-2. **Player row insert** — the local player is only written to the DB after settle, preventing duplicate rows from concurrent joins.
+1. **Deposit reconciliation** — ensuring the surface has the right number of deposits for the current player count (runs once, after settle).
+2. **Player row insert** — the local player is only written to the DB after settle, preventing duplicate rows from concurrent joins.
 
 ---
 
 ## Durability tiers
 
-The tier on a write controls where the promise resolves. All writes eventually propagate everywhere — the tier just sets how far it must travel first.
+The tier on a write controls where the promise resolves. All writes eventually propagate everywhere — the tier controls how far it must travel before the promise resolves.
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 255" width="960" height="383" style="display:block;margin:0.5rem auto">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 238" width="960" height="357" style="display:block;margin:0.5rem auto">
   <defs>
-    <marker id="aw" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#7c3aed"/></marker>
-    <marker id="ae" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#16a34a"/></marker>
-    <marker id="ag" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#d97706"/></marker>
-    <marker id="as" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#6366f1"/></marker>
+    <marker id="aw" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="rgba(20,106,255,0.45)"/></marker>
+    <marker id="ae" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="rgba(20,106,255,0.7)"/></marker>
+    <marker id="ag" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#146aff"/></marker>
+    <marker id="as" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="#146aff"/></marker>
   </defs>
 
   <!-- Participant boxes (centers: 75, 230, 390, 555) -->
-  <rect x="12"  y="10" width="126" height="38" rx="6" fill="#f9fafb" stroke="#9ca3af" stroke-width="1.5"/>
-  <text x="75"  y="34" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#374151">Client</text>
+  <rect x="12"  y="10" width="126" height="38" rx="4" fill="#f8f8fc" stroke="#e0e0f0" stroke-width="1.5"/>
+  <text x="75"  y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">Client</text>
 
-  <rect x="165" y="10" width="130" height="38" rx="6" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
-  <text x="230" y="34" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#4c1d95">OPFS Worker</text>
+  <rect x="165" y="10" width="130" height="38" rx="4" fill="#f8f8fc" stroke="#e0e0f0" stroke-width="1.5"/>
+  <text x="230" y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">OPFS Worker</text>
 
-  <rect x="325" y="10" width="130" height="38" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
-  <text x="390" y="34" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#166534">Edge Node</text>
+  <rect x="325" y="10" width="130" height="38" rx="4" fill="#f8f8fc" stroke="#e0e0f0" stroke-width="1.5"/>
+  <text x="390" y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">Edge Node</text>
 
-  <rect x="490" y="10" width="130" height="38" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
-  <text x="555" y="34" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#92400e">Global Core</text>
+  <rect x="490" y="10" width="130" height="38" rx="4" fill="#f8f8fc" stroke="#e0e0f0" stroke-width="1.5"/>
+  <text x="555" y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">Global Core</text>
 
   <!-- Lifelines -->
-  <line x1="75"  y1="48" x2="75"  y2="250" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="230" y1="48" x2="230" y2="250" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="390" y1="48" x2="390" y2="250" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="555" y1="48" x2="555" y2="250" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="75"  y1="48" x2="75"  y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="230" y1="48" x2="230" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="390" y1="48" x2="390" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="555" y1="48" x2="555" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
 
   <!-- write "worker": Client → OPFS Worker -->
-  <line x1="79" y1="90" x2="226" y2="90" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#aw)"/>
-  <circle cx="230" cy="90" r="5" fill="#7c3aed" stroke="#fff" stroke-width="1.5"/>
-  <line x1="235" y1="90" x2="386" y2="90" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="394" y1="90" x2="551" y2="90" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
-  <text x="152" y="82" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10.5" fill="#7c3aed">db.insert({tier:"worker"})</text>
+  <line x1="79" y1="90" x2="226" y2="90" stroke="rgba(20,106,255,0.45)" stroke-width="1.5" marker-end="url(#aw)"/>
+  <circle cx="230" cy="90" r="5" fill="rgba(20,106,255,0.45)" stroke="#fff" stroke-width="1.5"/>
+  <line x1="235" y1="90" x2="386" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="394" y1="90" x2="551" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="152" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="rgba(20,106,255,0.6)">db.insert({tier:"worker"})</text>
 
   <!-- write "edge": Client → Edge Node -->
-  <line x1="79" y1="135" x2="386" y2="135" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ae)"/>
-  <circle cx="390" cy="135" r="5" fill="#16a34a" stroke="#fff" stroke-width="1.5"/>
-  <line x1="395" y1="135" x2="551" y2="135" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,3"/>
-  <text x="232" y="127" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10.5" fill="#166534">db.insert({tier:"edge"})</text>
+  <line x1="79" y1="135" x2="386" y2="135" stroke="rgba(20,106,255,0.7)" stroke-width="1.5" marker-end="url(#ae)"/>
+  <circle cx="390" cy="135" r="5" fill="rgba(20,106,255,0.7)" stroke="#fff" stroke-width="1.5"/>
+  <line x1="395" y1="135" x2="551" y2="135" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="232" y="127" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="rgba(20,106,255,0.8)">db.insert({tier:"edge"})</text>
 
   <!-- write "global": Client → Global Core -->
-  <line x1="79" y1="180" x2="551" y2="180" stroke="#d97706" stroke-width="1.5" marker-end="url(#ag)"/>
-  <circle cx="555" cy="180" r="5" fill="#d97706" stroke="#fff" stroke-width="1.5"/>
-  <text x="316" y="172" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10.5" fill="#d97706">db.insert({tier:"global"})</text>
+  <line x1="79" y1="180" x2="551" y2="180" stroke="#146aff" stroke-width="1.5" marker-end="url(#ag)"/>
+  <circle cx="555" cy="180" r="5" fill="#146aff" stroke="#fff" stroke-width="1.5"/>
+  <text x="316" y="172" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#146aff">db.insert({tier:"global"})</text>
 
   <!-- Divider -->
-  <line x1="12" y1="196" x2="628" y2="196" stroke="#f0f0f0" stroke-width="1.5"/>
+  <line x1="12" y1="196" x2="628" y2="196" stroke="#e0e0f0" stroke-width="1.5"/>
 
-  <!-- useAll(q, "edge"): Edge Node → Client -->
-  <line x1="386" y1="212" x2="79" y2="212" stroke="#6366f1" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#as)"/>
-  <text x="232" y="205" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10.5" fill="#6366f1">useAll(q) — edge subscription</text>
-
-  <!-- useAll(q, "global"): Global Core → Client -->
-  <line x1="551" y1="238" x2="79" y2="238" stroke="#6366f1" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#as)"/>
-  <text x="316" y="231" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10.5" fill="#6366f1">useAll(q) — global subscription</text>
+  <!-- useAll(q): streams back from Global Core as writes propagate -->
+  <line x1="551" y1="220" x2="83" y2="220" stroke="#146aff" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#as)"/>
+  <!-- flow chevrons -->
+  <polyline points="468,215 462,220 468,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
+  <polyline points="368,215 362,220 368,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
+  <polyline points="268,215 262,220 268,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
+  <polyline points="168,215 162,220 168,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
+  <text x="316" y="212" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#146aff">useAll(q) — re-renders as writes propagate</text>
 </svg>
 
 ---
 
 ## Why batch writes? The SyncManager
 
-The game engine runs at **60 fps**. Writing on every frame would generate thousands of DB calls per second — far more than anything needs to sync in real time.
+The game engine runs at **60 fps**. Writing on every frame would generate thousands of DB calls per second — far more than anything needs to sync in real time.
 
 **[`src/jazz/SyncManager.ts`](../src/jazz/SyncManager.ts)**
 
@@ -300,7 +275,7 @@ export class SyncManager {
   private pendingMessages: string[] = [];
 
   constructor(private db: ReturnType<typeof useDb>, private playerId: string) {
-    // Drain all queues every 200 ms — 5 writes/s instead of 60
+    // Drain all queues every 200 ms — 5 writes/s instead of 60
     this.intervalId = setInterval(() => this.flush(), DB_SYNC_INTERVAL_MS);
   }
 
@@ -311,7 +286,7 @@ export class SyncManager {
 }
 ```
 
-The game engine calls `collectDeposit()`, `refuel()`, etc. synchronously — they just push to a queue. The writes to Jazz happen asynchronously in `flush()`, 5 times per second.
+The game engine calls `collectDeposit()`, `refuel()`, etc. synchronously — they push to a queue. The writes to Jazz happen asynchronously in `flush()`, 5 times per second.
 
 ---
 
@@ -323,7 +298,7 @@ The game engine calls `collectDeposit()`, `refuel()`, etc. synchronously — the
 When the player walks over a fuel deposit, `collectDeposit` is queued. On the next flush:
 
 ```typescript
-// src/jazz/SyncManager.ts — inside doFlush()
+// src/jazz/SyncManager.ts — inside doFlush()
 await db.update(
   app.fuel_deposits,
   depId,
@@ -332,13 +307,13 @@ await db.update(
 );
 ```
 
-Every other client's `useAll(fuel_deposits.where({ collected: false }), "edge")` subscription updates automatically — the deposit disappears from their surface and into the collector's inventory.
+Every other client's `useAll(fuel_deposits.where({ collected: false }), "edge")` subscription updates automatically — the deposit disappears from their surface and into the collector's inventory.
 
 </div>
 <div>
 <img src="screenshots/03-player-walking.png" style="width:100%;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">
 <blockquote>
-<strong>Concurrent collect?</strong> Both writes go through with <code>collected: true</code>. Last-write-wins resolves <code>collectedBy</code> to whichever timestamp arrived at the edge later — one player wins, the other's collection is silently overwritten on sync. No locks, no errors.
+<strong>Concurrent collect?</strong> Both writes go through with <code>collected: true</code>. Last-write-wins resolves <code>collectedBy</code> to whichever timestamp arrived at the edge later — one player wins, the other's collection is silently overwritten on sync. No locks, no errors.
 </blockquote>
 </div>
 </div>
@@ -347,10 +322,10 @@ Every other client's `useAll(fuel_deposits.where({ collected: false }), "edge")`
 
 ## Sharing fuel cross-client
 
-When Player A gives a deposit to Player B, no new row is created. A just updates `collectedBy`:
+When Player A gives a deposit to Player B, no new row is created. A updates `collectedBy`:
 
 ```typescript
-// src/jazz/SyncManager.ts — inside doFlush()
+// src/jazz/SyncManager.ts — inside doFlush()
 await this.db.update(
   app.fuel_deposits,
   shareId,
@@ -359,7 +334,7 @@ await this.db.update(
 );
 ```
 
-Player B's `useAll(app.fuel_deposits.where({ collected: true }), "edge")` subscription already contains the row. The `collectedBy` update propagates as a plain row update — Player B's inventory reflects the share immediately.
+Player B's `useAll(app.fuel_deposits.where({ collected: true }), "edge")` subscription already contains the row. The `collectedBy` update propagates as a plain row update — Player B's inventory reflects the share immediately.
 
 ---
 
@@ -368,7 +343,7 @@ Player B's `useAll(app.fuel_deposits.where({ collected: true }), "edge")` subscr
 When a player refuels their lander, the deposit is returned to the surface. Rather than updating `collected: false` on the existing row, the code deletes it and inserts a fresh one:
 
 ```typescript
-// src/jazz/SyncManager.ts — releaseDeposit()
+// src/jazz/SyncManager.ts — releaseDeposit()
 await this.db.deleteFrom(app.fuel_deposits, depId);
 await this.db.insert(
   app.fuel_deposits,
@@ -377,7 +352,7 @@ await this.db.insert(
 );
 ```
 
-The fresh INSERT is picked up by all clients' `where({ collected: false })` subscriptions — the deposit reappears on everyone's surface.
+The fresh INSERT is picked up by all clients' `where({ collected: false })` subscriptions — the deposit reappears on everyone's surface.
 
 ---
 
@@ -388,7 +363,7 @@ The fresh INSERT is picked up by all clients' `where({ collected: false })` subs
 Every player's position, velocity, fuel level, and mode are written to the `players` table. SyncManager skips the write if nothing meaningful has changed, using configurable thresholds:
 
 ```typescript
-// src/jazz/SyncManager.ts — inside doFlush()
+// src/jazz/SyncManager.ts — inside doFlush()
 // First flush inserts the row; subsequent flushes update it if state changed
 if (!this.dbRowId && ds.localPlayerSettled) {
   this.dbRowId = await this.db.insert(app.players, state, { tier: "edge" });
@@ -397,20 +372,20 @@ if (!this.dbRowId && ds.localPlayerSettled) {
 }
 ```
 
-Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` subscription updates automatically — their rendering of the remote lander stays in sync. (`ne` is Jazz's "not equal" operator — the subscription excludes the local player's own row.)
+Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` subscription updates automatically — their rendering of the remote lander stays in sync. (`ne` is Jazz's "not equal" operator — the subscription excludes the local player's own row.)
 
 ---
 
-## Jazz API surface — used in Moon Lander
+## Jazz API surface — used in Moon Lander
 
 | API                                    | Used for                                                       |
 | -------------------------------------- | -------------------------------------------------------------- |
 | `createJazzClient(config)`             | Initialise WASM worker + OPFS database, begin syncing          |
-| `JazzProvider`                         | Provide `db` to every component — no prop drilling             |
+| `JazzProvider`                         | Provide `db` to every component — no prop drilling             |
 | `useDb()`                              | Access the db write API from any component                     |
-| `useAll(query)`                        | Live subscription — re-renders on every remote or local change |
+| `useAll(query)`                        | Live subscription — re-renders on every remote or local change |
 | `db.insert(table, data, { tier })`     | Create a new row; `"edge"` broadcasts to remote subscribers    |
 | `db.update(table, id, data, { tier })` | Update fields on an existing row; `"edge"` broadcasts          |
 | `db.deleteFrom(table, id)`             | Delete a row (used before re-inserting a released deposit)     |
 
-**Key insight:** the entire multiplayer state of a real-time game — positions, collectibles, inventory, chat — is managed with just these seven API calls. No custom server, no WebSocket handlers, no conflict resolution code.
+**Key insight:** the entire multiplayer state of a real-time game — positions, collectibles, inventory, chat — is managed with these seven API calls. No custom server, no WebSocket handlers, no conflict resolution code.

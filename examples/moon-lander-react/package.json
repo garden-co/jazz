@@ -7,7 +7,7 @@
     "dev": "npx tsx scripts/dev.ts",
     "build": "vite build",
     "test": "vitest run --config vitest.config.browser.ts",
-    "walkthrough": "npx @marp-team/marp-cli --html walkthrough/jazz-moon-lander.md --preview",
+    "walkthrough": "npx @marp-team/marp-cli --html --theme walkthrough/theme-jazz.css walkthrough/jazz-moon-lander.md --preview",
     "walkthrough:shots": "playwright test --config playwright.screenshots.config.ts"
   },
   "dependencies": {
