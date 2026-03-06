@@ -98,8 +98,9 @@ export function useSync(playerId: string): SyncResult {
     return FUEL_TYPES.map((ft) => counts.get(ft) ?? DEPOSITS_PER_TYPE);
   }, [remotePlayers, localFuelType]);
 
-  // Uncollected deposits — what the game renders on the surface
-  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }));
+  // Uncollected deposits — what the game renders on the surface.
+  // "edge" tier: undefined until the edge subscription connects, which drives settled detection.
+  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), "edge");
 
   // This player's collected deposits (compound WHERE = precise local tracking).
   // WHERE ENTRY fires immediately when this player collects (both fields match).

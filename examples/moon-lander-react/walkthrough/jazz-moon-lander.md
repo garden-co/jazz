@@ -183,8 +183,8 @@ Results stream from the sync server. When any client writes, every subscriber re
 The first `useAll` result may arrive before all remote data has synced. Moon Lander uses a `settled` flag to delay game setup until the edge subscription has delivered its initial payload.
 
 ```typescript
-// undefined = still connecting; [] or [...] = server has responded
-const allUncollected = useAll(app.fuel_deposits.where({ collected: false }));
+// "edge" tier: undefined = still connecting to server; [] or [...] = server has responded
+const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), "edge");
 
 const settled = allUncollected !== undefined;
 ```
@@ -383,9 +383,9 @@ Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` sub
 | `createJazzClient(config)`             | Initialise WASM worker + OPFS database, begin syncing          |
 | `JazzProvider`                         | Provide `db` to every component — no prop drilling             |
 | `useDb()`                              | Access the db write API from any component                     |
-| `useAll(query)`                        | Live subscription — re-renders on every remote or local change |
+| `useAll(query, tier?)`                 | Live subscription — re-renders on every remote or local change |
 | `db.insert(table, data, { tier })`     | Create a new row; `"edge"` broadcasts to remote subscribers    |
 | `db.update(table, id, data, { tier })` | Update fields on an existing row; `"edge"` broadcasts          |
-| `db.deleteFrom(table, id)`             | Delete a row (used before re-inserting a released deposit)     |
+| `db.deleteFrom(table, id, { tier? })`  | Delete a row (used before re-inserting a released deposit)     |
 
 **Key insight:** the entire multiplayer state of a real-time game — positions, collectibles, inventory, chat — is managed with these seven API calls. No custom server, no WebSocket handlers, no conflict resolution code.
