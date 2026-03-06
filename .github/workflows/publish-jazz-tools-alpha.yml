@@ -115,7 +115,7 @@ jobs:
           echo "reason=${{ steps.gate.outputs.reason }}"
 
   build-linux:
-    name: Build Linux (${{ matrix.arch }})
+    name: Build CLI Linux (${{ matrix.arch }})
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate]
     if: needs.release-push-gate.outputs.should_run == 'true'
@@ -123,6 +123,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
+      CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
     strategy:
       fail-fast: false
       matrix:
@@ -178,7 +179,7 @@ jobs:
           path: dist/${{ matrix.output }}
 
   build-macos:
-    name: Build macOS (${{ matrix.arch }})
+    name: Build CLI macOS (${{ matrix.arch }})
     runs-on: macos-14
     needs: [release-push-gate]
     if: needs.release-push-gate.outputs.should_run == 'true'
@@ -219,7 +220,7 @@ jobs:
           path: dist/${{ matrix.output }}
 
   build-windows:
-    name: Build Windows (x64)
+    name: Build CLI Windows (x64)
     runs-on: windows-latest
     needs: [release-push-gate]
     if: needs.release-push-gate.outputs.should_run == 'true'
@@ -266,7 +267,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -341,7 +341,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -399,7 +398,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -451,7 +449,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -519,7 +516,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          cache: pnpm
           registry-url: https://registry.npmjs.org
 
       - run: corepack enable
