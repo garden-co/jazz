@@ -452,8 +452,14 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let id = core.insert(&table, values, None).map_err(runtime_err)?;
-            Ok(id.uuid().to_string())
+            let (id, row_values) = core.insert(&table, values, None).map_err(runtime_err)?;
+            serde_json::to_string(&serde_json::json!({
+                "id": id.uuid().to_string(),
+                "values": row_values,
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("insert serialization failed: {e}"),
+            })
         })
     }
 

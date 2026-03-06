@@ -10,7 +10,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
+use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
@@ -843,7 +843,7 @@ impl SchemaManager {
         storage: &mut H,
         table: &str,
         values: &[Value],
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         let _span =
             tracing::debug_span!("SM::insert", table, schema_hash = %self.context.current_hash)
                 .entered();
@@ -857,7 +857,7 @@ impl SchemaManager {
         table: &str,
         values: &[Value],
         session: Option<&Session>,
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         let aligned_values = self.align_insert_values_to_runtime_schema(table, values);
         self.query_manager.insert_on_branch_with_session(
             storage,

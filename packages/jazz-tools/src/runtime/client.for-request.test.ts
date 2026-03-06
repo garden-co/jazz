@@ -40,7 +40,7 @@ function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    insert: () => "00000000-0000-0000-0000-000000000001",
+    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     update: () => {},
     delete: () => {},
     query: async (
@@ -78,7 +78,7 @@ function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -116,7 +116,7 @@ function makeClient() {
 function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    insert: () => "00000000-0000-0000-0000-000000000001",
+    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     update: () => {},
     delete: () => {},
     query: async () => [],
@@ -124,7 +124,7 @@ function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
