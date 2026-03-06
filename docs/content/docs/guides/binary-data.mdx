@@ -3,10 +3,17 @@ title: Binary Data
 description: Storing and syncing files, audio, images, and other binary blobs with col.bytes().
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
+
+<Callout title="API not finalised">
+  This API is not yet finalised. A future release is likely to introduce a more ergonomic way to
+  store and sync blob-like data.
+</Callout>
+
 ## Overview
 
 `col.bytes()` declares a column that stores arbitrary binary data. It maps to `Uint8Array`
-in TypeScript and syncs as a binary blob alongside all other row data — no separate file
+in TypeScript and syncs as a binary blob alongside all other row data — no separate file
 storage API or CDN required.
 
 Binary columns are first-class: they participate in the same subscription and write APIs as
@@ -18,10 +25,10 @@ any other column, and are replicated to every connected client automatically.
 // schema/current.ts
 import { table, col } from "jazz-tools";
 
-table("instruments", {
+table("recordings", {
   name: col.string(),
-  sound: col.bytes(), // stores raw audio file contents
-  display_order: col.int(),
+  audio: col.bytes(), // stores raw audio file contents
+  duration_ms: col.int(),
 });
 ```
 
@@ -29,11 +36,11 @@ The generated TypeScript interface reflects this:
 
 ```ts
 // schema/app.ts (auto-generated)
-export interface Instrument {
+export interface Recording {
   id: string;
   name: string;
-  sound: Uint8Array; // typed as Uint8Array throughout
-  display_order: number;
+  audio: Uint8Array; // typed as Uint8Array throughout
+  duration_ms: number;
 }
 ```
 
@@ -42,14 +49,14 @@ export interface Instrument {
 Read a `File` or `ArrayBuffer` and pass it directly as `Uint8Array`:
 
 ```ts
-async function uploadInstrument(name: string, file: File) {
+async function uploadRecording(name: string, file: File) {
   const buffer = await file.arrayBuffer();
   await db.insert(
-    app.instruments,
+    app.recordings,
     {
       name,
-      sound: new Uint8Array(buffer),
-      display_order: nextOrder,
+      audio: new Uint8Array(buffer),
+      duration_ms: 0,
     },
     { tier: "edge" },
   );
@@ -62,9 +69,9 @@ Binary columns are returned as `Uint8Array` and can be used directly with any We
 accepts typed arrays:
 
 ```ts
-async function playInstrument(instrument: Instrument) {
+async function playRecording(recording: Recording) {
   const audioCtx = new AudioContext();
-  const audioBuffer = await audioCtx.decodeAudioData(instrument.sound.buffer);
+  const audioBuffer = await audioCtx.decodeAudioData(recording.audio.buffer);
   const source = audioCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(audioCtx.destination);
@@ -81,11 +88,11 @@ tier serves the blob from local storage immediately.
 ```ts
 // First visit: fetches from edge and caches locally
 // Subsequent visits: served instantly from OPFS, no network needed
-const instruments = await db.all(app.instruments);
+const recordings = await db.all(app.recordings);
 ```
 
 To guard against duplicate seeding on a first visit across concurrent clients, use
-`{ tier: "edge" }` — see [Sync Lifecycle: Gating writes until the edge responds](/docs/guides/sync-lifecycle#gating-writes-until-the-edge-responds).
+`{ tier: "global" }` — see [Reading Data: Seeding and one-time setup](/docs/reading-data#seeding-and-one-time-setup).
 
 ## Size considerations
 
