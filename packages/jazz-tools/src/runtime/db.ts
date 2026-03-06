@@ -23,7 +23,7 @@ import {
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
-import { transformRows, type IncludeSpec } from "./row-transformer.js";
+import { transformRow, transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
@@ -327,13 +327,13 @@ function isLeaderDebugEnabled(): boolean {
  * const db = await createDb({ appId: "my-app", driver });
  *
  * // Async mutations
- * const id = await db.insert(app.todos, { title: "Buy milk", done: false });
- * await db.update(app.todos, id, { done: true });
- * await db.deleteFrom(app.todos, id);
+ * const inserted = await db.insert(app.todos, { title: "Buy milk", done: false });
+ * await db.update(app.todos, inserted.id, { done: true });
+ * await db.deleteFrom(app.todos, inserted.id);
  *
  * // Async queries (need storage I/O)
  * const todos = await db.all(app.todos.where({ done: false }));
- * const todo = await db.one(app.todos.where({ id }));
+ * const todo = await db.one(app.todos.where({ id: inserted.id }));
  *
  * // Subscriptions
  * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
@@ -957,17 +957,18 @@ export class Db {
    * @param table Table proxy from generated app module
    * @param data Init object with column values
    * @param options Optional durability tier override
-   * @returns Promise resolving to the new row's ID
+   * @returns Promise resolving to the inserted row
    */
   async insert<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
     options?: { tier?: DurabilityTier },
-  ): Promise<string> {
+  ): Promise<T> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.create(table._table, values, options);
+    const row = await client.create(table._table, values, options);
+    return transformRow(row, table._schema, table._table);
   }
 
   /**

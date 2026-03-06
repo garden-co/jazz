@@ -138,6 +138,8 @@ impl From<QueryError> for RuntimeError {
 
 /// Type alias for query results.
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
+/// Type alias for inserted row payloads.
+pub type InsertedRow = (ObjectId, Vec<Value>);
 
 /// Future that resolves to query results.
 ///

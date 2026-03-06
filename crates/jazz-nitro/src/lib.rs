@@ -419,8 +419,14 @@ impl JazzRuntimeImpl {
         let values = convert_values(&values_json)?;
         self.with_core("insert", |core| {
             core.insert(&table, values, None)
-                .map(|id| id.uuid().to_string())
                 .map_err(|e| format!("Insert failed: {e}"))
+                .and_then(|(id, values)| {
+                    serde_json::to_string(&serde_json::json!({
+                        "id": id.uuid().to_string(),
+                        "values": values,
+                    }))
+                    .map_err(|e| format!("Insert serialization failed: {e}"))
+                })
         })?
     }
 
@@ -590,13 +596,18 @@ impl JazzRuntimeImpl {
         let persistence_tier = parse_tier(&tier)?;
         let values = convert_values(&values_json)?;
 
-        let (object_id, receiver) = self.with_core("insert_persisted", |core| {
-            core.insert_persisted(&table, values, None, persistence_tier)
-                .map_err(|e| format!("Insert failed: {e}"))
-        })??;
+        let ((object_id, row_values), receiver) =
+            self.with_core("insert_persisted", |core| {
+                core.insert_persisted(&table, values, None, persistence_tier)
+                    .map_err(|e| format!("Insert failed: {e}"))
+            })??;
 
         let _ = block_on(receiver);
-        Ok(object_id.uuid().to_string())
+        serde_json::to_string(&serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
+        .map_err(|e| format!("Insert serialization failed: {e}"))
     }
 
     pub fn insert_persisted(&mut self, table: String, values_json: String, tier: String) -> String {
@@ -899,8 +910,18 @@ mod tests {
         ])
         .to_string();
 
-        let id = rt.insert("todos".into(), values_json);
+        let insert_result: serde_json::Value =
+            serde_json::from_str(&rt.insert("todos".into(), values_json)).unwrap();
+        let id = insert_result["id"].as_str().unwrap().to_string();
         assert!(!id.is_empty());
+        assert_eq!(
+            insert_result["values"][0],
+            serde_json::json!({ "type": "Text", "value": "Buy milk" })
+        );
+        assert_eq!(
+            insert_result["values"][1],
+            serde_json::json!({ "type": "Boolean", "value": false })
+        );
 
         let query_json = serde_json::json!({ "table": "todos", "relation_ir": { "TableScan": { "table": "todos" } } }).to_string();
         let result = rt.query(query_json, None, None);
@@ -1142,10 +1163,20 @@ mod tests {
             { "type": "Boolean", "value": false }
         ])
         .to_string();
-        let id = alice.insert("todos".into(), values);
+        let insert_result: serde_json::Value =
+            serde_json::from_str(&alice.insert("todos".into(), values)).unwrap();
+        let id = insert_result["id"].as_str().unwrap().to_string();
         assert!(
             uuid::Uuid::parse_str(&id).is_ok(),
             "Insert should return valid UUID"
+        );
+        assert_eq!(
+            insert_result["values"][0],
+            serde_json::json!({ "type": "Text", "value": "Walk the dog" })
+        );
+        assert_eq!(
+            insert_result["values"][1],
+            serde_json::json!({ "type": "Boolean", "value": false })
         );
 
         // Update: mark done

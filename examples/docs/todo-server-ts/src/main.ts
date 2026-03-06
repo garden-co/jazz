@@ -160,14 +160,13 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         { type: "Text", value: ownerId },
       ];
 
-      const id = await client.create("todos", values);
+      const row = await client.create("todos", values);
+      const todo = rowToTodo(row.id, row.values);
 
-      const todo: Todo = {
-        id,
-        title: body.title,
-        done: false,
-        description: body.description,
-      };
+      if (!todo) {
+        res.status(500).json({ error: "Failed to create todo" });
+        return;
+      }
 
       res.status(201).json(todo);
 

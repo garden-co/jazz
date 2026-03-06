@@ -464,7 +464,7 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
-    ) -> napi::Result<String> {
+    ) -> napi::Result<serde_json::Value> {
         let js_values: Vec<Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let groove_values = convert_values(js_values);
@@ -473,11 +473,14 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let result = core
+        let (object_id, row_values) = core
             .insert(&table, groove_values, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
 
-        Ok(result.uuid().to_string())
+        Ok(serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
     }
 
     #[napi]
@@ -659,20 +662,20 @@ impl NapiRuntime {
     // Persisted CRUD Operations
     // =========================================================================
 
-    #[napi(js_name = "insertDurable", ts_return_type = "Promise<string>")]
+    #[napi(js_name = "insertDurable", ts_return_type = "Promise<any>")]
     pub async fn insert_durable(
         &self,
         table: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
         tier: String,
-    ) -> napi::Result<String> {
+    ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
 
         let js_values: Vec<Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let groove_values = convert_values(js_values);
 
-        let (object_id, receiver) = {
+        let ((object_id, row_values), receiver) = {
             let mut core = self
                 .core
                 .lock()
@@ -682,7 +685,10 @@ impl NapiRuntime {
         };
 
         let _ = receiver.await;
-        Ok(object_id.uuid().to_string())
+        Ok(serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
     }
 
     #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]

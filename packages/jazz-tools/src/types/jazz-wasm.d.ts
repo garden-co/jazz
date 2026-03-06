@@ -29,8 +29,12 @@ declare module "jazz-wasm" {
     );
     schedule?: (task: () => void) => void;
 
-    insert(table: string, values: unknown): string;
-    insertDurable(table: string, values: unknown, tier: string): Promise<string>;
+    insert(table: string, values: unknown): { id: string; values: any[] };
+    insertDurable(
+      table: string,
+      values: unknown,
+      tier: string,
+    ): Promise<{ id: string; values: any[] }>;
     update(objectId: string, values: unknown): void;
     updateDurable(objectId: string, values: unknown, tier: string): Promise<void>;
     delete(objectId: string): void;

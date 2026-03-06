@@ -565,21 +565,26 @@ impl WasmRuntime {
     /// Insert a row into a table.
     ///
     /// # Returns
-    /// The new row's ObjectId as a UUID string.
+    /// The inserted row as `{ id, values }`.
     #[wasm_bindgen]
-    pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
+    pub fn insert(&self, table: &str, values: JsValue) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
         let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
         let groove_values: Vec<Value> = wasm_values;
 
         let mut core = self.core.borrow_mut();
-        let result = core
+        let (object_id, row_values) = core
             .insert(table, groove_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
 
-        let object_id = result.uuid().to_string();
-        tracing::debug!(object_id = %object_id, "inserted");
-        Ok(object_id)
+        let row = SubscriptionRow {
+            id: object_id.uuid().to_string(),
+            values: row_values,
+        };
+        tracing::debug!(object_id = %row.id, "inserted");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        row.serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Execute a query and return results as a Promise.
@@ -691,16 +696,21 @@ impl WasmRuntime {
         let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
         let groove_values: Vec<Value> = wasm_values;
 
-        let (object_id, receiver) = {
+        let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
             core.insert_persisted(table, groove_values, None, persistence_tier)
                 .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
         };
 
-        let id_str = object_id.uuid().to_string();
+        let row = SubscriptionRow {
+            id: object_id.uuid().to_string(),
+            values: row_values,
+        };
         let promise = wasm_bindgen_futures::future_to_promise(async move {
             let _ = receiver.await;
-            Ok(JsValue::from_str(&id_str))
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            row.serialize(&serializer)
+                .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
         });
 
         Ok(promise)

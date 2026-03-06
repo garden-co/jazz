@@ -221,7 +221,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         values: Vec<Value>,
         session: Option<&Session>,
-    ) -> Result<ObjectId, RuntimeError> {
+    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core.insert(table, values, session)?;
         Ok(result)
@@ -515,8 +515,9 @@ mod tests {
             Value::Uuid(ObjectId::new()),
             Value::Text("Alice".to_string()),
         ];
-        let object_id = runtime.insert("users", values, None).unwrap();
+        let (object_id, row_values) = runtime.insert("users", values.clone(), None).unwrap();
         assert!(!object_id.0.is_nil());
+        assert_eq!(row_values, values);
 
         // Query
         let query = Query::new("users");
@@ -540,7 +541,7 @@ mod tests {
 
         // Insert
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
-        let object_id = runtime.insert("users", values, None).unwrap();
+        let (object_id, _row_values) = runtime.insert("users", values, None).unwrap();
 
         // Update
         let updates = vec![("name".to_string(), Value::Text("Charlie".to_string()))];
@@ -596,7 +597,7 @@ mod tests {
 
         // Insert a row - this should trigger the subscription callback
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Eve".to_string())];
-        let _object_id = runtime.insert("users", values, None).unwrap();
+        let (_object_id, _row_values) = runtime.insert("users", values, None).unwrap();
 
         // Verify callback was invoked
         let updates_vec = updates.lock().unwrap();

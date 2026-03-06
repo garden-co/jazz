@@ -56,11 +56,13 @@ describe("react/create-jazz-client integration", () => {
     try {
       client = await createJazzClient({ appId: makeAppId("mutation-query") });
 
-      const id = await client.db.insert(todosTable, { title: "buy milk", done: false });
+      const inserted = await client.db.insert(todosTable, { title: "buy milk", done: false });
       const rows = await client.db.all(allTodosQuery);
 
       expect(
-        rows.some((row) => row.id === id && row.title === "buy milk" && row.done === false),
+        rows.some(
+          (row) => row.id === inserted.id && row.title === "buy milk" && row.done === false,
+        ),
       ).toBe(true);
     } finally {
       if (client) {

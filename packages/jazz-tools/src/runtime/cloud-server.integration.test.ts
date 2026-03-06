@@ -932,59 +932,71 @@ function buildProfileByIdQuery(schema: WasmSchema, id: string): string {
 }
 
 async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
-  const aliceProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "alice" },
-      { type: "Text", value: "alice" },
-    ],
-    { tier: "edge" },
-  );
-  const bobProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "bob" },
-      { type: "Text", value: "bob" },
-    ],
-    { tier: "edge" },
-  );
-  const carolProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "carol" },
-      { type: "Text", value: "carol" },
-    ],
-    { tier: "edge" },
-  );
-  const eveProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "eve" },
-      { type: "Text", value: "eve" },
-    ],
-    { tier: "edge" },
-  );
+  const aliceProfileId = (
+    await client.create(
+      "profiles",
+      [
+        { type: "Text", value: "alice" },
+        { type: "Text", value: "alice" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const bobProfileId = (
+    await client.create(
+      "profiles",
+      [
+        { type: "Text", value: "bob" },
+        { type: "Text", value: "bob" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const carolProfileId = (
+    await client.create(
+      "profiles",
+      [
+        { type: "Text", value: "carol" },
+        { type: "Text", value: "carol" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const eveProfileId = (
+    await client.create(
+      "profiles",
+      [
+        { type: "Text", value: "eve" },
+        { type: "Text", value: "eve" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
   const alicePrincipal = "alice";
   const bobPrincipal = "bob";
   const carolPrincipal = "carol";
   const evePrincipal = "eve";
 
-  const alicePersonId = await client.create(
-    "people",
-    [
-      { type: "Uuid", value: aliceProfileId },
-      { type: "Text", value: alicePrincipal },
-    ],
-    { tier: "edge" },
-  );
-  const bobPersonId = await client.create(
-    "people",
-    [
-      { type: "Uuid", value: bobProfileId },
-      { type: "Text", value: bobPrincipal },
-    ],
-    { tier: "edge" },
-  );
+  const alicePersonId = (
+    await client.create(
+      "people",
+      [
+        { type: "Uuid", value: aliceProfileId },
+        { type: "Text", value: alicePrincipal },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const bobPersonId = (
+    await client.create(
+      "people",
+      [
+        { type: "Uuid", value: bobProfileId },
+        { type: "Text", value: bobPrincipal },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
   await client.create(
     "people",
     [
@@ -993,14 +1005,16 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
     ],
     { tier: "edge" },
   );
-  const evePersonId = await client.create(
-    "people",
-    [
-      { type: "Uuid", value: eveProfileId },
-      { type: "Text", value: evePrincipal },
-    ],
-    { tier: "edge" },
-  );
+  const evePersonId = (
+    await client.create(
+      "people",
+      [
+        { type: "Uuid", value: eveProfileId },
+        { type: "Text", value: evePrincipal },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
 
   await client.create(
     "friendships",
@@ -1255,14 +1269,16 @@ describe("cloud-server integration (Jazz TS)", () => {
         makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      const rowId = await clientA.create(
-        "todos",
-        [
-          { type: "Text", value: "shared-item" },
-          { type: "Boolean", value: false },
-        ],
-        { tier: "edge" },
-      );
+      const rowId = (
+        await clientA.create(
+          "todos",
+          [
+            { type: "Text", value: "shared-item" },
+            { type: "Boolean", value: false },
+          ],
+          { tier: "edge" },
+        )
+      ).id;
 
       const rowsAfterCreate = await waitForRows(clientB, queryAllTodos, (rows) =>
         rows.some((row) => row.id === rowId),

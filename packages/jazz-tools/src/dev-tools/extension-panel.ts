@@ -438,7 +438,7 @@ class DevToolsJazzClient implements JazzClient {
   forRequest(request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: Value[], options?: { tier?: DurabilityTier }): Promise<string> {
+  create(table: string, values: Value[], options?: { tier?: DurabilityTier }): Promise<Row> {
     throw new Error("Method not implemented.");
   }
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {

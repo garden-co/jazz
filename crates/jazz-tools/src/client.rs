@@ -393,7 +393,7 @@ impl JazzClient {
     }
 
     /// Create a new row in a table.
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
+    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
         self.runtime
             .insert(table, values, None)
             .map_err(|e| JazzError::Write(e.to_string()))
@@ -472,7 +472,7 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
+    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
         self.client
             .runtime
             .insert(table, values, Some(&self.session))

@@ -195,3 +195,12 @@ export function transformRows<T>(
     ) as T;
   });
 }
+
+export function transformRow<T>(
+  row: WasmRow,
+  schema: WasmSchema,
+  tableName: string,
+  includes: IncludeSpec = {},
+): T {
+  return transformRows<T>([row], schema, tableName, includes)[0];
+}
