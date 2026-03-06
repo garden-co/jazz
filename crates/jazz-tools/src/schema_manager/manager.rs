@@ -89,6 +89,8 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
+        let schema = normalize_schema(schema);
+
         let context = SchemaContext::new(schema.clone(), env, user_branch);
         let current_hash = SchemaHash::compute(&schema);
 
@@ -894,6 +896,20 @@ impl SchemaManager {
     }
 }
 
+fn normalize_schema(mut schema: Schema) -> Schema {
+    for table_schema in schema.values_mut() {
+        normalize_table_schema(table_schema);
+    }
+    schema
+}
+
+fn normalize_table_schema(table_schema: &mut crate::query_manager::types::TableSchema) {
+    table_schema
+        .columns
+        .columns
+        .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+}
+
 /// Parse a hex-encoded SchemaHash string.
 fn parse_schema_hash(hex_str: &str) -> Result<SchemaHash, SchemaError> {
     let bytes = hex::decode(hex_str)
@@ -945,6 +961,58 @@ mod tests {
         assert_eq!(manager.env(), "dev");
         assert_eq!(manager.user_branch(), "main");
         assert_eq!(manager.app_id(), test_app_id());
+    }
+
+    #[test]
+    fn schema_manager_new_normalizes_table_columns_by_name() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("id", ColumnType::Uuid)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let descriptor = manager.current_schema().get(&"users".into()).unwrap();
+        let column_names: Vec<_> = descriptor
+            .columns
+            .columns
+            .iter()
+            .map(|column| column.name_str())
+            .collect();
+
+        assert_eq!(column_names, vec!["email", "id", "name"]);
+    }
+
+    #[test]
+    fn schema_manager_new_hashes_equivalent_column_orderings_identically() {
+        let schema_a = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("id", ColumnType::Uuid)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+        let schema_b = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .nullable_column("email", ColumnType::Text)
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let manager_a =
+            SchemaManager::new(SyncManager::new(), schema_a, test_app_id(), "dev", "main").unwrap();
+        let manager_b =
+            SchemaManager::new(SyncManager::new(), schema_b, test_app_id(), "dev", "main").unwrap();
+
+        assert_eq!(manager_a.current_hash(), manager_b.current_hash());
     }
 
     #[test]
@@ -1194,9 +1262,24 @@ mod tests {
         let name = Value::Text("Alice".into());
         let email = Value::Text("alice@example.com".into());
 
-        let _handle = manager
-            .insert(&mut storage, "users", &[id_val.clone(), name, email])
-            .unwrap();
+        let descriptor = manager
+            .current_schema()
+            .get(&"users".into())
+            .unwrap()
+            .columns
+            .clone();
+        let values: Vec<_> = descriptor
+            .columns
+            .iter()
+            .map(|column| match column.name_str() {
+                "email" => email.clone(),
+                "id" => id_val.clone(),
+                "name" => name.clone(),
+                other => panic!("unexpected column {other}"),
+            })
+            .collect();
+
+        let _handle = manager.insert(&mut storage, "users", &values).unwrap();
         manager.process(&mut storage);
 
         // Query via subscribe/process/unsubscribe pattern
@@ -1208,6 +1291,7 @@ mod tests {
         qm.unsubscribe_with_sync(sub_id);
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1[0], id_val);
+        let id_idx = descriptor.column_index("id").unwrap();
+        assert_eq!(results[0].1[id_idx], id_val);
     }
 }
