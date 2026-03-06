@@ -234,15 +234,15 @@ impl SessionMap {
     /// Get the known state as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownState)]
     pub fn get_known_state(&self) -> JsValue {
-        let known_state = self.internal.get_known_state().clone();
-        serialize_to_js_value(&known_state).expect("KnownState serialization should not fail")
+        serialize_to_js_value(self.internal.get_known_state())
+            .expect("KnownState serialization should not fail")
     }
 
     /// Get the known state with streaming as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownStateWithStreaming)]
     pub fn get_known_state_with_streaming(&self) -> JsValue {
-        match self.internal.get_known_state_with_streaming().cloned() {
-            Some(ks) => serialize_to_js_value(&ks)
+        match self.internal.get_known_state_with_streaming() {
+            Some(ks) => serialize_to_js_value(ks)
                 .expect("KnownState serialization should not fail"),
             None => JsValue::undefined(),
         }
