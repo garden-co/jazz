@@ -228,10 +228,10 @@ impl SessionMap {
     /// Get the known state as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownState)]
     pub fn get_known_state(&self) -> JsValue {
+        let known_state = self.internal.get_known_state().clone();
         // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        self.internal
-            .get_known_state()
+        known_state
             .serialize(&serializer)
             .expect("KnownState serialization should not fail")
     }
@@ -239,7 +239,7 @@ impl SessionMap {
     /// Get the known state with streaming as a native JavaScript object
     #[wasm_bindgen(js_name = getKnownStateWithStreaming)]
     pub fn get_known_state_with_streaming(&self) -> JsValue {
-        match self.internal.get_known_state_with_streaming() {
+        match self.internal.get_known_state_with_streaming().cloned() {
             Some(ks) => {
                 // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
                 let serializer =

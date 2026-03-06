@@ -1104,6 +1104,44 @@ describe("SessionMap - Transaction Flow", () => {
     expect(knownStateWithStreaming!.sessions[session2]).toBe(3);
   });
 
+  test("getKnownStateWithStreaming can be checked repeatedly without re-entrancy crashes", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+    const { signerSecret } = createSignerKeyPair();
+
+    const session1 = `${coId}_session_z1`;
+    const session2 = `${coId}_session_z2`;
+
+    sessionMap.makeNewTrustingTransaction(
+      session1,
+      signerSecret,
+      JSON.stringify({ s: 1 }),
+      undefined,
+      Date.now(),
+    );
+    sessionMap.makeNewTrustingTransaction(
+      session2,
+      signerSecret,
+      JSON.stringify({ s: 2 }),
+      undefined,
+      Date.now(),
+    );
+    sessionMap.setStreamingKnownState(
+      JSON.stringify({ [session1]: 5, [session2]: 3 }),
+    );
+
+    expect(() => {
+      for (let i = 0; i < 100; i += 1) {
+        expect(Boolean(sessionMap.getKnownStateWithStreaming())).toBe(true);
+        const knownStateWithStreaming = sessionMap.getKnownStateWithStreaming();
+        expect(knownStateWithStreaming).toBeDefined();
+        expect(knownStateWithStreaming!.sessions[session1]).toBe(5);
+        expect(knownStateWithStreaming!.sessions[session2]).toBe(3);
+      }
+    }).not.toThrow();
+  });
+
   test("deletion flow", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
