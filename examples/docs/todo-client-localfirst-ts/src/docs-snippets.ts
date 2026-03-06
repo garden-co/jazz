@@ -71,7 +71,7 @@ export function buildTodoLineageQuery() {
 
 // #region writing-crud-ts
 export async function writeTodoCrud(db: Db, todoId: string) {
-  await db.insert(app.todos, {
+  db.insert(app.todos, {
     title: "Write docs",
     done: false,
     owner_id: EXAMPLE_OWNER_ID,

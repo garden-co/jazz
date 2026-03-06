@@ -17,7 +17,7 @@ export function TodoList() {
 
   // #region writing-use-db-react
   async function addTodo(todoTitle: string) {
-    await db.insert(app.todos, { title: todoTitle, done: false });
+    db.insert(app.todos, { title: todoTitle, done: false });
   }
 
   async function toggleTodo(todo: { id: string; done: boolean }) {
