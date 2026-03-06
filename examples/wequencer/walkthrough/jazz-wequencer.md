@@ -1,26 +1,8 @@
 ---
 marp: true
 title: How Wequencer uses Jazz
-theme: default
+theme: jazz-moon
 paginate: true
-style: |
-  section {
-    font-size: 1.4rem;
-  }
-  section.hero h1 {
-    font-size: 2.8rem;
-  }
-  section.hero p {
-    font-size: 1.1rem;
-    color: #555;
-  }
-  pre {
-    font-size: 0.85rem;
-  }
-  img {
-    border-radius: 6px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-  }
 ---
 
 <!-- _class: hero -->
