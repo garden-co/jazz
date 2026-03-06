@@ -9,7 +9,7 @@ use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
-use super::types::{ColumnType, RowDescriptor, TableName, Value};
+use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
 
 impl QueryManager {
     /// Insert a new row into a table.
@@ -533,7 +533,7 @@ impl QueryManager {
         let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
-        let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+        let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
             let obj = om.get_or_load(id, storage_ref, &branches)?;
             let branch_state = obj.branches.get(&BranchName::new(branch))?;
             let tip_id = branch_state.tips.iter().next()?;
@@ -541,7 +541,11 @@ impl QueryManager {
             if commit.content.is_empty() {
                 return None;
             }
-            Some((commit.content.clone(), *tip_id))
+            Some(LoadedRow::new(
+                commit.content.clone(),
+                *tip_id,
+                [(id, BranchName::new(branch))].into_iter().collect(),
+            ))
         };
 
         for graph in &mut graphs {
