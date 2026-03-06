@@ -358,7 +358,7 @@ jobs:
       - name: Stage jazz-napi platform package artifacts
         run: |
           cd crates/jazz-napi
-          pnpm exec napi create-npm-dirs -t .
+          pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts -d artifacts --dist npm
           node -e 'const fs=require("fs");for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const path=`npm/${entry.name}/package.json`;const p=JSON.parse(fs.readFileSync(path,"utf8"));p.name=`@garden-co/${p.name}`;fs.writeFileSync(path,`${JSON.stringify(p,null,2)}\n`);}'
 
