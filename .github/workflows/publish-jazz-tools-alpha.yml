@@ -38,6 +38,9 @@ jobs:
     outputs:
       should_run: ${{ steps.gate.outputs.should_run }}
       reason: ${{ steps.gate.outputs.reason }}
+      release_pr_number: ${{ steps.gate.outputs.release_pr_number }}
+      release_pr_head_ref: ${{ steps.gate.outputs.release_pr_head_ref }}
+      release_pr_head_sha: ${{ steps.gate.outputs.release_pr_head_sha }}
     steps:
       - id: gate
         uses: actions/github-script@v8
@@ -52,6 +55,9 @@ jobs:
             const sha = process.env.SHA;
             let shouldRun = "false";
             let reason = "";
+            let releasePrNumber = "";
+            let releasePrHeadRef = "";
+            let releasePrHeadSha = "";
 
             if (eventName !== "push") {
               shouldRun = "true";
@@ -100,6 +106,9 @@ jobs:
               if (releasePr) {
                 shouldRun = "true";
                 reason = `merged changeset release PR #${releasePr.number} (${matchSource})`;
+                releasePrNumber = String(releasePr.number);
+                releasePrHeadRef = releasePr.head.ref;
+                releasePrHeadSha = releasePr.head.sha;
               } else {
                 shouldRun = "false";
                 reason = "main push is not from a merged changeset-release/* PR";
@@ -108,17 +117,171 @@ jobs:
 
             core.setOutput("should_run", shouldRun);
             core.setOutput("reason", reason);
+            core.setOutput("release_pr_number", releasePrNumber);
+            core.setOutput("release_pr_head_ref", releasePrHeadRef);
+            core.setOutput("release_pr_head_sha", releasePrHeadSha);
 
       - name: Show gate decision
         run: |
           echo "should_run=${{ steps.gate.outputs.should_run }}"
           echo "reason=${{ steps.gate.outputs.reason }}"
+          echo "release_pr_number=${{ steps.gate.outputs.release_pr_number }}"
+          echo "release_pr_head_ref=${{ steps.gate.outputs.release_pr_head_ref }}"
+          echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
+
+  resolve-preview-artifacts:
+    name: Resolve preview artifact source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      use_preview_artifacts: ${{ steps.resolve.outputs.use_preview_artifacts }}
+      preview_run_id: ${{ steps.resolve.outputs.preview_run_id }}
+      reason: ${{ steps.resolve.outputs.reason }}
+    steps:
+      - id: resolve
+        uses: actions/github-script@v8
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
+          RELEASE_PR_NUMBER: ${{ needs.release-push-gate.outputs.release_pr_number }}
+          RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
+          RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+        with:
+          script: |
+            const eventName = process.env.EVENT_NAME;
+            const ref = process.env.REF;
+            const sha = process.env.SHA;
+            const releaseMode = process.env.RELEASE_MODE;
+            const releasePrNumber = process.env.RELEASE_PR_NUMBER;
+            const releasePrHeadRef = process.env.RELEASE_PR_HEAD_REF;
+            const releasePrHeadSha = process.env.RELEASE_PR_HEAD_SHA;
+            let usePreviewArtifacts = "false";
+            let previewRunId = "";
+            let reason = "";
+
+            if (releaseMode !== "publish") {
+              reason = `preview artifact reuse disabled for mode=${releaseMode}`;
+            } else if (eventName !== "push" || ref !== "refs/heads/main") {
+              reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
+            } else if (!releasePrNumber || !releasePrHeadRef || !releasePrHeadSha) {
+              reason = "release PR metadata unavailable for artifact reuse";
+            } else {
+              const owner = context.repo.owner;
+              const repo = context.repo.repo;
+              const [mergeCommit, previewCommit] = await Promise.all([
+                github.rest.git.getCommit({
+                  owner,
+                  repo,
+                  commit_sha: sha,
+                }),
+                github.rest.git.getCommit({
+                  owner,
+                  repo,
+                  commit_sha: releasePrHeadSha,
+                }),
+              ]);
+
+              const mergeTree = mergeCommit.data.tree.sha;
+              const previewTree = previewCommit.data.tree.sha;
+
+              if (mergeTree !== previewTree) {
+                reason = `main merge tree ${mergeTree} differs from release PR head tree ${previewTree}`;
+              } else {
+                const runs = await github.paginate(
+                  github.rest.actions.listWorkflowRuns,
+                  {
+                    owner,
+                    repo,
+                    workflow_id: "preview-jazz-tools-alpha-release.yml",
+                    branch: releasePrHeadRef,
+                    per_page: 100,
+                  },
+                  (response) => response.data.workflow_runs,
+                );
+
+                const previewRun = runs
+                  .filter(
+                    (run) =>
+                      run.head_sha === releasePrHeadSha &&
+                      run.status === "completed" &&
+                      run.conclusion === "success",
+                  )
+                  .sort(
+                    (a, b) =>
+                      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+                  )[0];
+
+                if (!previewRun) {
+                  reason = `no successful preview run found for ${releasePrHeadRef}@${releasePrHeadSha}`;
+                } else {
+                  const artifacts = await github.paginate(
+                    github.rest.actions.listWorkflowRunArtifacts,
+                    {
+                      owner,
+                      repo,
+                      run_id: previewRun.id,
+                      per_page: 100,
+                    },
+                    (response) => response.data.artifacts,
+                  );
+
+                  const requiredArtifacts = [
+                    "jazz-tools-darwin-arm64",
+                    "jazz-tools-darwin-x64",
+                    "jazz-tools-linux-arm64",
+                    "jazz-tools-linux-x64",
+                    "jazz-tools-windows-x64",
+                    "jazz-wasm-pkg",
+                    "jazz-napi-binding-darwin-arm64",
+                    "jazz-napi-binding-darwin-x64",
+                    "jazz-napi-binding-linux-x64-gnu",
+                    "jazz-napi-binding-win32-x64-msvc",
+                    "jazz-rn-ios-payload",
+                    "jazz-rn-android-payload-arm64-v8a",
+                    "jazz-rn-android-payload-armeabi-v7a",
+                    "jazz-rn-android-payload-x86",
+                    "jazz-rn-android-payload-x86_64",
+                  ];
+
+                  const availableArtifacts = new Set(
+                    artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
+                  );
+                  const missingArtifacts = requiredArtifacts.filter(
+                    (artifactName) => !availableArtifacts.has(artifactName),
+                  );
+
+                  if (missingArtifacts.length > 0) {
+                    reason = `preview run ${previewRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`;
+                  } else {
+                    usePreviewArtifacts = "true";
+                    previewRunId = String(previewRun.id);
+                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
+                  }
+                }
+              }
+            }
+
+            core.setOutput("use_preview_artifacts", usePreviewArtifacts);
+            core.setOutput("preview_run_id", previewRunId);
+            core.setOutput("reason", reason);
+
+      - name: Show artifact reuse decision
+        run: |
+          echo "use_preview_artifacts=${{ steps.resolve.outputs.use_preview_artifacts }}"
+          echo "preview_run_id=${{ steps.resolve.outputs.preview_run_id }}"
+          echo "reason=${{ steps.resolve.outputs.reason }}"
 
   build-linux:
     name: Build CLI Linux (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
       CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
     strategy:
@@ -168,8 +331,8 @@ jobs:
   build-macos:
     name: Build CLI macOS (${{ matrix.arch }})
     runs-on: macos-14
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -209,8 +372,8 @@ jobs:
   build-windows:
     name: Build CLI Windows (x64)
     runs-on: windows-latest
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
 
     steps:
       - uses: actions/checkout@v6
@@ -241,8 +404,8 @@ jobs:
   build-wasm:
     name: Build jazz-wasm
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
@@ -305,8 +468,8 @@ jobs:
   build-napi:
     name: Build jazz-napi (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -386,8 +549,8 @@ jobs:
   build-rn-ios:
     name: Build jazz-rn iOS payload
     runs-on: macos-14
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
       HOMEBREW_NO_AUTO_UPDATE: 1
 
@@ -443,8 +606,8 @@ jobs:
   build-rn-android:
     name: Build jazz-rn Android payload (${{ matrix.abi }})
     runs-on: ubuntu-24.04
-    needs: [release-push-gate]
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -514,6 +677,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - release-push-gate
+      - resolve-preview-artifacts
       - build-linux
       - build-macos
       - build-windows
@@ -521,8 +685,23 @@ jobs:
       - build-napi
       - build-rn-ios
       - build-rn-android
-    if: needs.release-push-gate.outputs.should_run == 'true'
+    if: >-
+      always() &&
+      needs.release-push-gate.outputs.should_run == 'true' &&
+      (
+        needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' ||
+        (
+          needs.build-linux.result == 'success' &&
+          needs.build-macos.result == 'success' &&
+          needs.build-windows.result == 'success' &&
+          needs.build-wasm.result == 'success' &&
+          needs.build-napi.result == 'success' &&
+          needs.build-rn-ios.result == 'success' &&
+          needs.build-rn-android.result == 'success'
+        )
+      )
     permissions:
+      actions: read
       contents: read
       id-token: write
     env:
@@ -546,30 +725,92 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
+      - name: Show artifact source
+        run: |
+          if [ "${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}" = "true" ]; then
+            echo "Artifact source: preview run ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}"
+          else
+            echo "Artifact source: current workflow run"
+          fi
+          echo "Artifact decision reason: ${{ needs.resolve-preview-artifacts.outputs.reason }}"
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           pattern: jazz-tools-*
           path: dist
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           name: jazz-rn-ios-payload
           path: dist/rn-ios
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
+          pattern: jazz-rn-android-payload-*
+          path: dist/rn-android
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-tools-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-napi-binding-*
+          path: crates/jazz-napi/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          name: jazz-rn-ios-payload
+          path: dist/rn-ios
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
           pattern: jazz-rn-android-payload-*
           path: dist/rn-android
           merge-multiple: true
