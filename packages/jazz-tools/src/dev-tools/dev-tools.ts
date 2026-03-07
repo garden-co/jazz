@@ -11,6 +11,7 @@ import {
   DEVTOOLS_COMMANDS,
   DEVTOOLS_EVENTS,
   DevtoolsRequestEnvelope,
+  DevtoolsRequestPayloadByCommand,
   DevtoolsResponseEnvelope,
   isRecord,
   isSerializableDbConfig,
@@ -233,7 +234,11 @@ function hookRegistration(
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE) {
-          const payload = isRecord(envelope.payload) ? envelope.payload : {};
+          const payload = isRecord(envelope.payload)
+            ? (envelope.payload as DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE])
+            : ({} as Partial<
+                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]
+              >);
           const bridgeSubscriptionId = payload.subscriptionId;
           if (typeof bridgeSubscriptionId !== "string") {
             throw new Error("Invalid payload for client.unsubscribe.");
@@ -258,7 +263,12 @@ function hookRegistration(
           return;
         }
 
-        const queryPayload = isRecord(envelope.payload) ? envelope.payload : {};
+        const queryPayload = isRecord(envelope.payload)
+          ? (envelope.payload as Partial<
+              DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_QUERY] &
+                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]
+            >)
+          : {};
         const query = queryPayload.query;
         const tier = queryPayload.tier as DurabilityTier | undefined;
         const options = isRecord(queryPayload.options)

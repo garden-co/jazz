@@ -951,6 +951,11 @@ export class Db {
     return worker;
   }
 
+  getConfig(): DbConfig {
+    // Return a copy of the config to avoid editing the original config.
+    return structuredClone(this.config);
+  }
+
   /**
    * Insert a new row into a table and wait for durability at the requested tier.
    *
