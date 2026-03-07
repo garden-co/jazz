@@ -2,8 +2,8 @@
   import { JazzSvelteProvider } from "jazz-tools/svelte";
   import { JazzFestAccount } from "$lib/schema";
   // @ts-expect-error No real env vars
-	import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
-  import { SyncConfig } from "jazz-tools";
+  import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
+  import type { SyncConfig } from "jazz-tools";
 
   const apiKey = PUBLIC_JAZZ_API_KEY;
   let { children } = $props();
