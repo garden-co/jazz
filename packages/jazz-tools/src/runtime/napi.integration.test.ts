@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
@@ -17,6 +17,7 @@ import type { QueryBuilder } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { wasmSchema as TODO_SERVER_WASM_SCHEMA } from "../../../../examples/todo-server-ts/schema/app.ts";
 
 type Todo = {
   id: string;
@@ -48,6 +49,9 @@ type SyncCaptureServerHandle = {
   stop(): Promise<void>;
 };
 
+const JWT_KID = "napi-test-kid";
+const JWT_SECRET = "napi-test-secret";
+
 const TEST_SCHEMA: WasmSchema = {
   todos: {
     columns: [
@@ -73,6 +77,9 @@ const allTodosQuery: QueryBuilder<Todo> = {
 };
 
 const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", import.meta.url));
+const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
+  new URL("../../../../examples/todo-server-ts/schema", import.meta.url),
+);
 
 beforeAll(async () => {
   await loadNapiModule();
@@ -260,6 +267,78 @@ async function waitForRows(
   );
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function base64Url(input: Buffer | string): string {
+  const encoded = (input instanceof Buffer ? input : Buffer.from(input)).toString("base64");
+  return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+class JwksServer {
+  private readonly server: HttpServer;
+  readonly url: string;
+
+  private constructor(server: HttpServer, url: string) {
+    this.server = server;
+    this.url = url;
+  }
+
+  static async start(secret: string): Promise<JwksServer> {
+    const server = createHttpServer((request, response) => {
+      if (request.url !== "/jwks") {
+        response.statusCode = 404;
+        response.end("not found");
+        return;
+      }
+
+      response.statusCode = 200;
+      response.setHeader("Content-Type", "application/json");
+      response.end(
+        JSON.stringify({
+          keys: [
+            {
+              kty: "oct",
+              kid: JWT_KID,
+              alg: "HS256",
+              k: base64Url(secret),
+            },
+          ],
+        }),
+      );
+    });
+
+    const port = await getAvailablePort();
+    await new Promise<void>((resolve, reject) => {
+      server.listen(port, "127.0.0.1", (error?: unknown) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    return new JwksServer(server, `http://127.0.0.1:${port}/jwks`);
+  }
+
+  async stop(): Promise<void> {
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
 function isNestedOutboxCall(call: unknown[]): call is [null, [string, string, string, boolean]] {
   return (
     call[0] === null &&
@@ -310,12 +389,18 @@ function decodeSessionHeader(headerValue: string | string[] | undefined): Record
 }
 
 function toBase64Url(value: unknown): string {
-  const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
-  return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return base64Url(Buffer.from(JSON.stringify(value), "utf8"));
 }
 
 function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
+}
+
+function signJwt(payload: Record<string, unknown>, secret: string): string {
+  const header = { alg: "HS256", typ: "JWT", kid: JWT_KID };
+  const signedPart = `${toBase64Url(header)}.${toBase64Url(payload)}`;
+  const signature = createHmac("sha256", secret).update(signedPart).digest();
+  return `${signedPart}.${base64Url(signature)}`;
 }
 
 function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
@@ -707,6 +792,243 @@ describe("NAPI integration", () => {
       await captureServer.stop();
     }
   }, 20_000);
+
+  it("filters session-scoped query reads over backend-authenticated sync", async () => {
+    const port = await getAvailablePort();
+    const appId = randomUUID();
+    const backendSecret = "napi-query-backend-secret";
+    const adminSecret = "napi-query-admin-secret";
+    const queryAllTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+      }),
+      TODO_SERVER_WASM_SCHEMA,
+    );
+    const rowTitles = (rows: Row[]): string[] =>
+      rows
+        .map((row) => {
+          const title = row.values[0];
+          if (title?.type !== "Text") {
+            throw new Error(`expected text title at column 0, got ${JSON.stringify(title)}`);
+          }
+          return title.value;
+        })
+        .sort();
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const server = await startLocalJazzServer({
+      appId,
+      port,
+      jwksUrl: jwks.url,
+      backendSecret,
+      adminSecret,
+    });
+    let bobContext: {
+      client(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+    let carolContext: {
+      client(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+    let aliceContext: {
+      client(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+    let readerContext: {
+      asBackend(): JazzClient;
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): {
+        query(query: string, options?: { tier?: "worker" | "edge" | "global" }): Promise<Row[]>;
+      };
+      forRequest(request: { headers: Record<string, string> }): {
+        query(query: string, options?: { tier?: "worker" | "edge" | "global" }): Promise<Row[]>;
+      };
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        env: "test",
+        userBranch: "main",
+      });
+
+      bobContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        jwtToken: signJwt({ sub: "bob", claims: {} }, JWT_SECRET),
+        env: "test",
+        userBranch: "main",
+        tier: "worker",
+      });
+      carolContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        jwtToken: signJwt({ sub: "carol", claims: {} }, JWT_SECRET),
+        env: "test",
+        userBranch: "main",
+        tier: "worker",
+      });
+      aliceContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        jwtToken: signJwt({ sub: "alice", claims: {} }, JWT_SECRET),
+        env: "test",
+        userBranch: "main",
+        tier: "worker",
+      });
+      readerContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "worker",
+      });
+
+      const bobWriter = bobContext.client();
+      const carolWriter = carolContext.client();
+      const aliceWriter = aliceContext.client();
+
+      await withTimeout(
+        bobWriter.create(
+          "todos",
+          [
+            { type: "Text", value: "bob-item" },
+            { type: "Boolean", value: false },
+            { type: "Text", value: "" },
+            { type: "Null" },
+            { type: "Null" },
+            { type: "Text", value: "bob" },
+          ],
+          { tier: "edge" },
+        ),
+        10_000,
+        "bob writer create timed out",
+      );
+      await withTimeout(
+        carolWriter.create(
+          "todos",
+          [
+            { type: "Text", value: "carol-item" },
+            { type: "Boolean", value: false },
+            { type: "Text", value: "" },
+            { type: "Null" },
+            { type: "Null" },
+            { type: "Text", value: "carol" },
+          ],
+          { tier: "edge" },
+        ),
+        10_000,
+        "carol writer create timed out",
+      );
+      await withTimeout(
+        aliceWriter.create(
+          "todos",
+          [
+            { type: "Text", value: "alice-item" },
+            { type: "Boolean", value: false },
+            { type: "Text", value: "" },
+            { type: "Null" },
+            { type: "Null" },
+            { type: "Text", value: "alice" },
+          ],
+          { tier: "edge" },
+        ),
+        10_000,
+        "alice writer create timed out",
+      );
+
+      const readerBackend = readerContext.asBackend();
+      const aliceSessionClient = readerContext.forSession({
+        user_id: "alice",
+        claims: {},
+      });
+      const aliceRequestClient = readerContext.forRequest({
+        headers: {
+          authorization: `Bearer ${makeJwt({ sub: "alice" })}`,
+        },
+      });
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            rowTitles(
+              await withTimeout(
+                readerBackend.queryInternal(queryAllTodos, undefined, { tier: "edge" }),
+                10_000,
+                "backend reader query timed out",
+              ),
+            ),
+          ).toEqual(["alice-item", "bob-item", "carol-item"]);
+        },
+        { timeout: 20_000 },
+      );
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            rowTitles(
+              await withTimeout(
+                aliceSessionClient.query(queryAllTodos, { tier: "edge" }),
+                10_000,
+                "alice session query timed out",
+              ),
+            ),
+          ).toEqual(["alice-item"]);
+        },
+        { timeout: 20_000 },
+      );
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            rowTitles(
+              await withTimeout(
+                aliceRequestClient.query(queryAllTodos, { tier: "edge" }),
+                10_000,
+                "alice request query timed out",
+              ),
+            ),
+          ).toEqual(["alice-item"]);
+        },
+        { timeout: 20_000 },
+      );
+    } finally {
+      if (bobContext) {
+        await bobContext.shutdown();
+      }
+      if (carolContext) {
+        await carolContext.shutdown();
+      }
+      if (aliceContext) {
+        await aliceContext.shutdown();
+      }
+      if (readerContext) {
+        await readerContext.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await server.stop();
+      await jwks.stop();
+    }
+  }, 60_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
     const port = await getAvailablePort();

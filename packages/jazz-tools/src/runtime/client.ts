@@ -240,6 +240,19 @@ function readHeader(request: RequestLike, name: string): string | undefined {
   return raw;
 }
 
+function normalizeSubscriptionCallbackArgs(args: unknown[]): RowDelta | string | undefined {
+  if (args.length === 1) {
+    return args[0] as RowDelta | string;
+  }
+
+  if (args.length === 2 && args[0] == null) {
+    return args[1] as RowDelta | string | undefined;
+  }
+
+  console.error("Invalid subscription callback arguments", args);
+  return undefined;
+}
+
 function decodeBase64Url(value: string): string {
   const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
   const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
@@ -727,7 +740,12 @@ export class JazzClient {
     );
 
     this.scheduler(() => {
-      this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
+      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
+        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+        if (deltaJsonOrObject === undefined) {
+          return;
+        }
+
         const delta: RowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
         callback(delta);
