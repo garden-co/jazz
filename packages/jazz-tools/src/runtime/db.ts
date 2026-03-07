@@ -979,8 +979,8 @@ export class Db {
   ): Promise<string> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
-      table._schema,
       normalizeRuntimeSchema(client.getSchema()),
+      table._schema,
       table._table,
     );
     await this.ensureBridgeReady();
@@ -999,8 +999,8 @@ export class Db {
   ): Promise<void> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
-      table._schema,
       normalizeRuntimeSchema(client.getSchema()),
+      table._schema,
       table._table,
     );
     await this.ensureBridgeReady();
@@ -1096,12 +1096,12 @@ export class Db {
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const planningSchema = resolveSchemaWithTable(runtimeSchema, query._schema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = resolveSchemaWithTable(runtimeSchema, query._schema, outputTable);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes);
@@ -1156,12 +1156,12 @@ export class Db {
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const planningSchema = resolveSchemaWithTable(runtimeSchema, query._schema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = resolveSchemaWithTable(runtimeSchema, query._schema, outputTable);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 

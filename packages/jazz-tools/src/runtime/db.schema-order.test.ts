@@ -14,7 +14,7 @@ class TestDb extends Db {
 }
 
 describe("Db runtime schema order", () => {
-  it("uses the generated schema order for inserts when the runtime schema is sorted", async () => {
+  it("uses the runtime schema order for inserts when the runtime schema is sorted", async () => {
     const generatedSchema: WasmSchema = {
       todos: {
         columns: [
@@ -54,14 +54,14 @@ describe("Db runtime schema order", () => {
     expect(create).toHaveBeenCalledWith(
       "todos",
       [
-        { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
+        { type: "Text", value: "Buy milk" },
       ],
       undefined,
     );
   });
 
-  it("uses the generated schema order when transforming query results", async () => {
+  it("uses the runtime schema order when transforming query results", async () => {
     const generatedSchema: WasmSchema = {
       todos: {
         columns: [
@@ -82,8 +82,8 @@ describe("Db runtime schema order", () => {
       {
         id: "todo-1",
         values: [
-          { type: "Text", value: "Sorted title" },
           { type: "Boolean", value: true },
+          { type: "Text", value: "Sorted title" },
         ],
       },
     ]);
