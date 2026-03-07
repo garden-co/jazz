@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Fix Rust `JazzClient` create/query schema-order compatibility when runtime table columns are sorted differently from the declared app schema.
+Fix Rust schema-order compatibility when runtime table columns are sorted differently from the declared app schema, including `JazzClient` create/query flows and `SchemaManager` inserts.
