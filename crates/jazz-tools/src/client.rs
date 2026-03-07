@@ -47,38 +47,6 @@ struct SubscriptionState {
     runtime_handle: RuntimeSubHandle,
 }
 
-fn align_create_values_to_runtime_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &str,
-    values: &[Value],
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(&table.into()) else {
-        return values.to_vec();
-    };
-    let Some(runtime_table) = runtime_schema.get(&table.into()) else {
-        return values.to_vec();
-    };
-    if values.len() != declared_table.columns.columns.len() {
-        return values.to_vec();
-    }
-
-    let mut values_by_column = HashMap::new();
-    for (column, value) in declared_table.columns.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name.as_str().to_string(), value.clone());
-    }
-
-    let mut reordered = Vec::with_capacity(values.len());
-    for column in &runtime_table.columns.columns {
-        let Some(value) = values_by_column.remove(column.name.as_str()) else {
-            return values.to_vec();
-        };
-        reordered.push(value);
-    }
-
-    reordered
-}
-
 fn align_row_values_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
@@ -496,21 +464,8 @@ impl JazzClient {
 
     /// Create a new row in a table.
     pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        let runtime_schema = self
-            .runtime
-            .current_schema()
-            .map_err(|e| JazzError::Write(e.to_string()))?;
         self.runtime
-            .insert(
-                table,
-                align_create_values_to_runtime_schema(
-                    &self.declared_schema,
-                    &runtime_schema,
-                    table,
-                    &values,
-                ),
-                None,
-            )
+            .insert(table, values, None)
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -588,23 +543,9 @@ pub struct SessionClient<'a> {
 
 impl<'a> SessionClient<'a> {
     pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        let runtime_schema = self
-            .client
-            .runtime
-            .current_schema()
-            .map_err(|e| JazzError::Write(e.to_string()))?;
         self.client
             .runtime
-            .insert(
-                table,
-                align_create_values_to_runtime_schema(
-                    &self.client.declared_schema,
-                    &runtime_schema,
-                    table,
-                    &values,
-                ),
-                Some(&self.session),
-            )
+            .insert(table, values, Some(&self.session))
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -706,10 +647,7 @@ fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration>
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        align_create_values_to_runtime_schema, align_query_rows_to_declared_schema,
-        align_row_values_to_declared_schema,
-    };
+    use super::{align_query_rows_to_declared_schema, align_row_values_to_declared_schema};
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
     };
@@ -736,24 +674,6 @@ mod tests {
         )]
         .into_iter()
         .collect()
-    }
-
-    #[test]
-    fn create_values_follow_runtime_column_order() {
-        let declared_schema = schema_with_todos(&["title", "completed"]);
-        let runtime_schema = schema_with_todos(&["completed", "title"]);
-
-        let values = align_create_values_to_runtime_schema(
-            &declared_schema,
-            &runtime_schema,
-            "todos",
-            &[Value::Text("buy milk".to_string()), Value::Boolean(false)],
-        );
-
-        assert_eq!(
-            values,
-            vec![Value::Boolean(false), Value::Text("buy milk".to_string()),]
-        );
     }
 
     #[test]

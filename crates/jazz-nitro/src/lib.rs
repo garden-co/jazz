@@ -36,38 +36,6 @@ use groove::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
-fn align_create_values_to_runtime_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &str,
-    values: &[Value],
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(&table.into()) else {
-        return values.to_vec();
-    };
-    let Some(runtime_table) = runtime_schema.get(&table.into()) else {
-        return values.to_vec();
-    };
-    if values.len() != declared_table.columns.columns.len() {
-        return values.to_vec();
-    }
-
-    let mut values_by_column = HashMap::new();
-    for (column, value) in declared_table.columns.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name.as_str().to_string(), value.clone());
-    }
-
-    let mut reordered = Vec::with_capacity(values.len());
-    for column in &runtime_table.columns.columns {
-        let Some(value) = values_by_column.remove(column.name.as_str()) else {
-            return values.to_vec();
-        };
-        reordered.push(value);
-    }
-
-    reordered
-}
-
 fn align_row_values_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
@@ -486,21 +454,7 @@ impl JazzRuntimeImpl {
     fn insert_inner(&mut self, table: String, values_json: String) -> Result<String, String> {
         let values = convert_values(&values_json)?;
         self.with_core("insert", |core| {
-            let runtime_schema = core.current_schema().clone();
-            let aligned_values = self
-                .declared_schema
-                .as_ref()
-                .map(|declared_schema| {
-                    align_create_values_to_runtime_schema(
-                        declared_schema,
-                        &runtime_schema,
-                        &table,
-                        &values,
-                    )
-                })
-                .unwrap_or_else(|| values.clone());
-
-            core.insert(&table, aligned_values, None)
+            core.insert(&table, values.clone(), None)
                 .map(|id| id.uuid().to_string())
                 .map_err(|e| format!("Insert failed: {e}"))
         })?
@@ -688,21 +642,7 @@ impl JazzRuntimeImpl {
         let values = convert_values(&values_json)?;
 
         let (object_id, receiver) = self.with_core("insert_persisted", |core| {
-            let runtime_schema = core.current_schema().clone();
-            let aligned_values = self
-                .declared_schema
-                .as_ref()
-                .map(|declared_schema| {
-                    align_create_values_to_runtime_schema(
-                        declared_schema,
-                        &runtime_schema,
-                        &table,
-                        &values,
-                    )
-                })
-                .unwrap_or_else(|| values.clone());
-
-            core.insert_persisted(&table, aligned_values, None, persistence_tier)
+            core.insert_persisted(&table, values.clone(), None, persistence_tier)
                 .map_err(|e| format!("Insert failed: {e}"))
         })??;
 

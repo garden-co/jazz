@@ -65,6 +65,7 @@ pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
+    declared_current_schema: Schema,
     /// Schemas known to this manager (for server mode).
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
@@ -89,6 +90,7 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
+        let declared_current_schema = schema.clone();
         let schema = normalize_schema(schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -106,6 +108,7 @@ impl SchemaManager {
             context,
             query_manager,
             app_id,
+            declared_current_schema,
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
         })
@@ -135,6 +138,7 @@ impl SchemaManager {
             context: SchemaContext::empty(),
             query_manager,
             app_id,
+            declared_current_schema: Schema::new(),
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
         }
@@ -835,11 +839,17 @@ impl SchemaManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<InsertHandle, QueryError> {
+        let aligned_values = align_create_values_to_runtime_schema(
+            &self.declared_current_schema,
+            &self.context.current_schema,
+            table,
+            values,
+        );
         self.query_manager.insert_on_branch_with_session(
             storage,
             table,
             self.context.branch_name().as_str(),
-            values,
+            &aligned_values,
             session,
         )
     }
@@ -908,6 +918,38 @@ fn normalize_table_schema(table_schema: &mut crate::query_manager::types::TableS
         .columns
         .columns
         .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+}
+
+fn align_create_values_to_runtime_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &str,
+    values: &[Value],
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(&table.into()) else {
+        return values.to_vec();
+    };
+    let Some(runtime_table) = runtime_schema.get(&table.into()) else {
+        return values.to_vec();
+    };
+    if values.len() != declared_table.columns.columns.len() {
+        return values.to_vec();
+    }
+
+    let mut values_by_column = HashMap::new();
+    for (column, value) in declared_table.columns.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name.as_str().to_string(), value.clone());
+    }
+
+    let mut reordered = Vec::with_capacity(values.len());
+    for column in &runtime_table.columns.columns {
+        let Some(value) = values_by_column.remove(column.name.as_str()) else {
+            return values.to_vec();
+        };
+        reordered.push(value);
+    }
+
+    reordered
 }
 
 /// Parse a hex-encoded SchemaHash string.
@@ -1262,22 +1304,13 @@ mod tests {
         let name = Value::Text("Alice".into());
         let email = Value::Text("alice@example.com".into());
 
+        let values = vec![id_val.clone(), name.clone(), email.clone()];
         let descriptor = manager
             .current_schema()
             .get(&"users".into())
             .unwrap()
             .columns
             .clone();
-        let values: Vec<_> = descriptor
-            .columns
-            .iter()
-            .map(|column| match column.name_str() {
-                "email" => email.clone(),
-                "id" => id_val.clone(),
-                "name" => name.clone(),
-                other => panic!("unexpected column {other}"),
-            })
-            .collect();
 
         let _handle = manager.insert(&mut storage, "users", &values).unwrap();
         manager.process(&mut storage);
@@ -1291,7 +1324,11 @@ mod tests {
         qm.unsubscribe_with_sync(sub_id);
 
         assert_eq!(results.len(), 1);
+        let email_idx = descriptor.column_index("email").unwrap();
         let id_idx = descriptor.column_index("id").unwrap();
+        let name_idx = descriptor.column_index("name").unwrap();
+        assert_eq!(results[0].1[email_idx], email);
         assert_eq!(results[0].1[id_idx], id_val);
+        assert_eq!(results[0].1[name_idx], name);
     }
 }

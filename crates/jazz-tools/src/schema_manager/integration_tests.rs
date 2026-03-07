@@ -77,13 +77,25 @@ mod tests {
         assert!(result.was_transformed);
 
         // Verify result can be decoded as v2
-        let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
+        let runtime_v2_table = manager
+            .current_schema()
+            .get(&TableName::new("users"))
+            .unwrap();
+        let v2_values = decode_row(&runtime_v2_table.columns, &result.data).unwrap();
 
         assert_eq!(v2_values.len(), 3);
-        assert_eq!(v2_values[0], Value::Uuid(id));
-        assert_eq!(v2_values[1], Value::Text("Alice".to_string()));
-        assert_eq!(v2_values[2], Value::Null); // Added column with default
+        assert_eq!(
+            v2_values[runtime_v2_table.columns.column_index("id").unwrap()],
+            Value::Uuid(id)
+        );
+        assert_eq!(
+            v2_values[runtime_v2_table.columns.column_index("name").unwrap()],
+            Value::Text("Alice".to_string())
+        );
+        assert_eq!(
+            v2_values[runtime_v2_table.columns.column_index("email").unwrap()],
+            Value::Null
+        ); // Added column with default
     }
 
     /// Test copy-on-write update across schema versions.
@@ -301,10 +313,16 @@ mod tests {
         assert!(post_result.was_transformed);
 
         // Verify post has new body column
-        let v2_posts = v2.get(&TableName::new("posts")).unwrap();
-        let v2_post_values = decode_row(&v2_posts.columns, &post_result.data).unwrap();
+        let runtime_v2_posts = manager
+            .current_schema()
+            .get(&TableName::new("posts"))
+            .unwrap();
+        let v2_post_values = decode_row(&runtime_v2_posts.columns, &post_result.data).unwrap();
         assert_eq!(v2_post_values.len(), 4);
-        assert_eq!(v2_post_values[3], Value::Null); // body column
+        assert_eq!(
+            v2_post_values[runtime_v2_posts.columns.column_index("body").unwrap()],
+            Value::Null
+        ); // body column
     }
 
     /// Test draft lens detection and rejection.

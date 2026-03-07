@@ -1069,7 +1069,9 @@ struct MetaExternalIdentityRow {
 struct MetaStore {
     runtime: TokioRuntime<SurrealKvStorage>,
     secret_hash_key: String,
+    apps_insert_descriptor: RowDescriptor,
     apps_descriptor: RowDescriptor,
+    external_identities_insert_descriptor: RowDescriptor,
     external_identities_descriptor: RowDescriptor,
 }
 
@@ -1121,18 +1123,20 @@ impl MetaStore {
             )
             .build();
 
-        let mut apps_descriptor = meta_schema
+        let apps_insert_descriptor = meta_schema
             .get(&TableName::new("apps"))
             .ok_or_else(|| "meta schema missing apps table".to_string())?
             .columns
             .clone();
+        let mut apps_descriptor = apps_insert_descriptor.clone();
         normalize_row_descriptor(&mut apps_descriptor);
 
-        let mut external_identities_descriptor = meta_schema
+        let external_identities_insert_descriptor = meta_schema
             .get(&TableName::new("external_identities"))
             .ok_or_else(|| "meta schema missing external_identities table".to_string())?
             .columns
             .clone();
+        let mut external_identities_descriptor = external_identities_insert_descriptor.clone();
         normalize_row_descriptor(&mut external_identities_descriptor);
 
         let sync_manager = SyncManager::new().with_durability_tiers(vec![
@@ -1158,7 +1162,9 @@ impl MetaStore {
         Ok(Self {
             runtime,
             secret_hash_key,
+            apps_insert_descriptor,
             apps_descriptor,
+            external_identities_insert_descriptor,
             external_identities_descriptor,
         })
     }
@@ -1226,7 +1232,7 @@ impl MetaStore {
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
         let values: Vec<Value> = self
-            .apps_descriptor
+            .apps_insert_descriptor
             .columns
             .iter()
             .map(|column| match column.name.as_str() {
@@ -1364,7 +1370,7 @@ impl MetaStore {
     ) -> Result<MetaExternalIdentityRow, String> {
         let now = now_timestamp_us();
         let values: Vec<Value> = self
-            .external_identities_descriptor
+            .external_identities_insert_descriptor
             .columns
             .iter()
             .map(|column| match column.name.as_str() {
