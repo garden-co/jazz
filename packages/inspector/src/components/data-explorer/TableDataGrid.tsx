@@ -1,16 +1,16 @@
 import {
   flexRender,
   getCoreRowModel,
-  getSortedRowModel,
   type ColumnDef,
   type SortingState,
   useReactTable,
 } from "@tanstack/react-table";
-import { allRowsInTableQuery, type DynamicTableRow } from "jazz-tools";
+import type { ColumnType, DynamicTableRow } from "jazz-tools";
 import { useDb } from "jazz-tools/react";
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
+import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -23,6 +23,22 @@ function formatCellValue(value: unknown): string {
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 
+function isColumnSortable(columnType: ColumnType): boolean {
+  switch (columnType.type) {
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Boolean":
+    case "Text":
+    case "Enum":
+    case "Timestamp":
+    case "Uuid":
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function TableDataGrid() {
   const { table } = useParams();
 
@@ -32,15 +48,24 @@ export function TableDataGrid() {
 
   const { wasmSchema: schema, queryPropagation } = useDevtoolsContext();
   const db = useDb();
-  const queryBuilder = useMemo(
-    () => allRowsInTableQuery<DynamicTableRow>(table, schema),
-    [table, schema],
-  );
   const [rows, setRows] = useState<DynamicTableRow[]>([]);
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
   const schemaColumns = schema[table]?.columns ?? [];
+  const activeSort = sorting[0] ?? { id: "id", desc: false };
+  const sortColumn = activeSort.id;
+  const sortDirection = activeSort.desc ? "desc" : "asc";
+  const queryOffset = pageIndex * pageSize;
+  const queryLimit = pageSize + 1;
+  const queryBuilder = useMemo(
+    () =>
+      new GenericQueryBuilder(table, schema)
+        .orderBy(sortColumn, sortDirection)
+        .limit(queryLimit)
+        .offset(queryOffset),
+    [table, schema, sortColumn, sortDirection, queryLimit, queryOffset],
+  );
 
   useEffect(() => {
     const unsubscribe = db.subscribeAll(
@@ -69,6 +94,7 @@ export function TableDataGrid() {
           id: column.name,
           accessorKey: column.name,
           header: column.name,
+          enableSorting: isColumnSortable(column.column_type),
           cell: (cellContext) => formatCellValue(cellContext.getValue()),
         }),
       ),
@@ -82,22 +108,12 @@ export function TableDataGrid() {
     state: { sorting },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   });
 
-  const sortedRows = tableState.getRowModel().rows;
-  const totalRows = sortedRows.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
-  const clampedPageIndex = Math.min(pageIndex, totalPages - 1);
-  const startRow = clampedPageIndex * pageSize;
-  const endRow = startRow + pageSize;
-  const paginatedRows = sortedRows.slice(startRow, endRow);
-
-  useEffect(() => {
-    if (pageIndex !== clampedPageIndex) {
-      setPageIndex(clampedPageIndex);
-    }
-  }, [pageIndex, clampedPageIndex]);
+  const hasNextPage = rows.length > pageSize;
+  const visibleRows = hasNextPage ? rows.slice(0, pageSize) : rows;
+  const startRow = pageIndex * pageSize;
+  const endRow = startRow + visibleRows.length;
 
   return (
     <section className={styles.container}>
@@ -105,8 +121,8 @@ export function TableDataGrid() {
         <div>
           <h2 className={styles.title}>{table}</h2>
           <p className={styles.stats}>
-            {columnDefs.length} column{columnDefs.length === 1 ? "" : "s"} · {rows.length} row
-            {rows.length === 1 ? "" : "s"}
+            {columnDefs.length} column{columnDefs.length === 1 ? "" : "s"} · {visibleRows.length}{" "}
+            row{visibleRows.length === 1 ? "" : "s"} on page
           </p>
         </div>
       </header>
@@ -117,13 +133,23 @@ export function TableDataGrid() {
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => {
                   const sortDirection = header.column.getIsSorted();
+                  const canSort = header.column.getCanSort();
                   return (
                     <th
                       key={header.id}
-                      onClick={header.column.getToggleSortingHandler()}
-                      className={
-                        header.column.getCanSort() ? styles.sortableHeader : styles.headerCell
+                      onClick={
+                        canSort
+                          ? () => {
+                              const nextSort =
+                                sortDirection === "asc"
+                                  ? [{ id: header.column.id, desc: true }]
+                                  : [{ id: header.column.id, desc: false }];
+                              setSorting(nextSort);
+                              setPageIndex(0);
+                            }
+                          : undefined
                       }
+                      className={canSort ? styles.sortableHeader : styles.headerCell}
                     >
                       {header.isPlaceholder
                         ? null
@@ -136,19 +162,24 @@ export function TableDataGrid() {
             ))}
           </thead>
           <tbody>
-            {paginatedRows.map((row) => (
-              <tr key={row.id}>
-                {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-                ))}
-              </tr>
-            ))}
+            {tableState
+              .getRowModel()
+              .rows.slice(0, pageSize)
+              .map((row) => (
+                <tr key={row.id}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td key={cell.id}>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              ))}
           </tbody>
         </table>
       </div>
       <footer className={styles.footer}>
         <div className={styles.paginationInfo}>
-          Showing {totalRows === 0 ? 0 : startRow + 1}-{Math.min(endRow, totalRows)} of {totalRows}
+          Showing {visibleRows.length === 0 ? 0 : startRow + 1}-{endRow}
         </div>
         <div className={styles.paginationControls}>
           <label className={styles.pageSizeLabel}>
@@ -168,22 +199,20 @@ export function TableDataGrid() {
               ))}
             </select>
           </label>
-          <span className={styles.pageIndicator}>
-            Page {clampedPageIndex + 1} / {totalPages}
-          </span>
+          <span className={styles.pageIndicator}>Page {pageIndex + 1}</span>
           <button
             type="button"
             className={styles.secondaryButton}
             onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
-            disabled={clampedPageIndex === 0}
+            disabled={pageIndex === 0}
           >
             Previous
           </button>
           <button
             type="button"
             className={styles.secondaryButton}
-            onClick={() => setPageIndex((current) => Math.min(totalPages - 1, current + 1))}
-            disabled={clampedPageIndex >= totalPages - 1}
+            onClick={() => setPageIndex((current) => current + 1)}
+            disabled={!hasNextPage}
           >
             Next
           </button>

@@ -23,6 +23,36 @@
   gap: 6px;
 }
 
+.topBarActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.schemaSelectLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #9ca8b9;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.schemaSelect {
+  border: 1px solid #36465d;
+  background: #202937;
+  color: #d6dde7;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  min-width: 220px;
+}
+
+.schemaSelect:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .tabLink {
   display: inline-flex;
   align-items: center;

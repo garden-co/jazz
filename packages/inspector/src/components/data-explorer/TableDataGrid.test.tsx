@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
@@ -18,15 +18,6 @@ const mockWasmSchema = {
 vi.mock("jazz-tools/react", () => ({
   useDb: () => ({
     subscribeAll: (...args: unknown[]) => mockSubscribeAll(...args),
-  }),
-}));
-
-vi.mock("jazz-tools", () => ({
-  allRowsInTableQuery: () => ({
-    _table: "todos",
-    _schema: {},
-    _rowType: undefined,
-    _build: () => JSON.stringify({ table: "todos" }),
   }),
 }));
 
@@ -67,8 +58,8 @@ describe("TableDataGrid", () => {
     render(<TableDataGrid />);
 
     expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
-    expect(screen.getByText("4 columns · 2 rows")).not.toBeNull();
-    expect(screen.getByRole("columnheader", { name: "ID" })).not.toBeNull();
+    expect(screen.getByText("4 columns · 2 rows on page")).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "meta" })).not.toBeNull();
@@ -77,17 +68,25 @@ describe("TableDataGrid", () => {
     expect(screen.getByText('{"done":true}')).not.toBeNull();
   });
 
-  it("sorts rows when a column header is clicked", () => {
+  it("updates query sorting when a sortable column header is clicked", () => {
     render(<TableDataGrid />);
 
-    const titleHeader = screen.getAllByRole("columnheader", { name: "title" })[0];
+    const firstQuery = mockSubscribeAll.mock.calls[0]?.[0] as { _build: () => string };
+    expect(JSON.parse(firstQuery._build())).toMatchObject({
+      orderBy: [["id", "asc"]],
+      limit: 11,
+      offset: 0,
+    });
+
+    const titleHeader = screen.getByRole("columnheader", { name: "title" });
     fireEvent.click(titleHeader);
 
-    const renderedRows = screen.getAllByRole("row");
-    const firstDataRow = renderedRows[1];
-    const firstDataRowCells = within(firstDataRow).getAllByRole("cell");
-
-    expect(firstDataRowCells[1]?.textContent).toBe("alpha");
+    const sortedQuery = mockSubscribeAll.mock.calls.at(-1)?.[0] as { _build: () => string };
+    expect(JSON.parse(sortedQuery._build())).toMatchObject({
+      orderBy: [["title", "asc"]],
+      limit: 11,
+      offset: 0,
+    });
   });
 
   it("subscribes with local-only propagation in extension mode", () => {
