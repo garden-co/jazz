@@ -27,7 +27,12 @@ describe("TS Query API", () => {
   });
 
   it("queries by id", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-id") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("query-by-id") },
+      }),
+    );
 
     const id = await db.insert(app.projects, { name: "Project A" });
 
@@ -42,7 +47,7 @@ describe("TS Query API", () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        dbName: uniqueDbName("include-corruption"),
+        driver: { type: "persistent", dbName: uniqueDbName("include-corruption") },
       }),
     );
 
@@ -69,7 +74,7 @@ describe("TS Query API", () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        dbName: uniqueDbName("include-returns-entity"),
+        driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
       }),
     );
 
@@ -97,7 +102,7 @@ describe("TS Query API", () => {
       const db = track(
         await createDb({
           appId: "test-app",
-          dbName: uniqueDbName("query-by-array-column-equality"),
+          driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-equality") },
         }),
       );
       const projectId = await db.insert(app.projects, { name: "Project A" });
@@ -129,7 +134,7 @@ describe("TS Query API", () => {
       const db = track(
         await createDb({
           appId: "test-app",
-          dbName: uniqueDbName("query-by-array-column-contains"),
+          driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-contains") },
         }),
       );
       const projectId = await db.insert(app.projects, { name: "Project A" });

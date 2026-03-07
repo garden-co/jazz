@@ -89,7 +89,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   const context = createJazzContext({
     appId,
     app: schemaApp,
-    dataPath: dbPath,
+    driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
     userBranch: "main",
   });
