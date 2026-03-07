@@ -71,9 +71,9 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     userBranch: "main",
   });
   const client = context.client();
-  const runtimeTodoColumns = client.getSchema().todos.columns;
+  const todoColumns = schemaApp.wasmSchema.todos.columns;
   const todoColumnIndexes = new Map(
-    runtimeTodoColumns.map((column, index) => [column.name, index] as const),
+    todoColumns.map((column, index) => [column.name, index] as const),
   );
 
   function getTodoValue(values: Value[], columnName: string): Value | undefined {
@@ -84,7 +84,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   function buildTodoValues(body: CreateTodoRequest): Value[] {
     const ownerId = body.owner_id ?? "anonymous";
 
-    return runtimeTodoColumns.map((column) => {
+    return todoColumns.map((column) => {
       switch (column.name) {
         case "description":
           return body.description
