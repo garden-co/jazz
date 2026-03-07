@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
   type IncomingMessage,
@@ -6,6 +7,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
@@ -28,10 +31,12 @@ type SyncRequestBody = {
 
 type SyncCaptureServerHandle = {
   baseUrl: string;
+  eventClientIds: string[];
   syncRequests: Array<{
     headers: IncomingMessage["headers"];
     body: SyncRequestBody;
   }>;
+  closeLatestStream(): void;
   stop(): Promise<void>;
 };
 
@@ -131,17 +136,20 @@ async function listen(server: HttpServer): Promise<number> {
 
 async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
   const syncRequests: SyncCaptureServerHandle["syncRequests"] = [];
+  const eventClientIds: string[] = [];
   const openStreams = new Set<ServerResponse>();
   const server = createHttpServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
     if (request.method === "GET" && url.pathname === "/events") {
+      const clientId = `server-client-${eventClientIds.length + 1}`;
+      eventClientIds.push(clientId);
       openStreams.add(response);
       response.once("close", () => {
         openStreams.delete(response);
       });
       response.writeHead(200, { "Content-Type": "application/octet-stream" });
-      response.write(encodeFrames([{ type: "Connected", client_id: "server-client-1" }]));
+      response.write(encodeFrames([{ type: "Connected", client_id: clientId }]));
       return;
     }
 
@@ -170,7 +178,12 @@ async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
+    eventClientIds,
     syncRequests,
+    closeLatestStream() {
+      const latest = Array.from(openStreams).at(-1);
+      latest?.destroy();
+    },
     async stop() {
       for (const stream of openStreams) {
         stream.destroy();
@@ -189,6 +202,7 @@ async function waitForRows(
   client: JazzClient,
   predicate: (rows: Row[]) => boolean,
   timeoutMs = 20_000,
+  queryOptions: { tier?: "worker" | "edge" | "global" } = { tier: "edge" },
 ): Promise<Row[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: Row[] = [];
@@ -196,7 +210,7 @@ async function waitForRows(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await client.query(allTodosQuery, { tier: "edge" });
+      const rows = await client.query(allTodosQuery, queryOptions);
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
@@ -233,8 +247,20 @@ function isQuerySubscriptionPayload(payloadJson: string): boolean {
   }
 }
 
+function isQuerySubscriptionRequest(request: { body: SyncRequestBody }): boolean {
+  return (
+    typeof request.body.payload === "object" &&
+    request.body.payload !== null &&
+    "QuerySubscription" in (request.body.payload as Record<string, unknown>)
+  );
+}
+
 async function settleAsyncSyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+async function createTempDir(prefix: string): Promise<string> {
+  return await mkdtemp(join(tmpdir(), prefix));
 }
 
 describe("NAPI integration", () => {
@@ -301,13 +327,19 @@ describe("NAPI integration", () => {
       const client = context.asBackend();
       const subscriptionId = client.subscribe(allTodosQuery, () => undefined, { tier: "edge" });
 
-      await vi.waitFor(() => expect(captureServer.syncRequests).toHaveLength(1), {
-        timeout: 15_000,
-      });
+      await vi.waitFor(
+        () => expect(captureServer.syncRequests.filter(isQuerySubscriptionRequest)).toHaveLength(1),
+        {
+          timeout: 15_000,
+        },
+      );
 
       client.unsubscribe(subscriptionId);
 
-      const request = captureServer.syncRequests[0];
+      const request = captureServer.syncRequests.find(isQuerySubscriptionRequest);
+      if (!request) {
+        throw new Error("expected a QuerySubscription sync request");
+      }
       expect(request.headers["x-jazz-backend-secret"]).toBe("napi-backend-secret");
       expect(request.headers.authorization).toBeUndefined();
       expect(request.headers["x-jazz-local-mode"]).toBeUndefined();
@@ -322,6 +354,62 @@ describe("NAPI integration", () => {
       await captureServer.stop();
     }
   }, 20_000);
+
+  it("replays active backend query subscriptions after the events stream reconnects", async () => {
+    const captureServer = await startSyncCaptureServer();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let context: {
+      asBackend(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: `napi-backend-reconnect-${randomUUID()}`,
+        app: { wasmSchema: TEST_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: captureServer.baseUrl,
+        backendSecret: "napi-backend-secret",
+      });
+
+      const client = context.asBackend();
+      const subscriptionId = client.subscribe(allTodosQuery, () => undefined, { tier: "edge" });
+
+      await vi.waitFor(
+        () => expect(captureServer.syncRequests.filter(isQuerySubscriptionRequest)).toHaveLength(1),
+        {
+          timeout: 15_000,
+        },
+      );
+      expect(captureServer.eventClientIds).toEqual(["server-client-1"]);
+
+      captureServer.closeLatestStream();
+
+      await vi.waitFor(() => expect(captureServer.eventClientIds).toHaveLength(2), {
+        timeout: 15_000,
+      });
+      await vi.waitFor(
+        () => expect(captureServer.syncRequests.filter(isQuerySubscriptionRequest)).toHaveLength(2),
+        {
+          timeout: 15_000,
+        },
+      );
+
+      client.unsubscribe(subscriptionId);
+
+      const querySubscriptions = captureServer.syncRequests.filter(isQuerySubscriptionRequest);
+      expect(querySubscriptions[1]?.body.client_id).toBe("server-client-2");
+      expect(querySubscriptions[1]?.headers["x-jazz-backend-secret"]).toBe("napi-backend-secret");
+    } finally {
+      consoleError.mockRestore();
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await captureServer.stop();
+    }
+  }, 25_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
     const port = await getAvailablePort();
@@ -411,4 +499,72 @@ describe("NAPI integration", () => {
       await server.stop();
     }
   }, 60_000);
+
+  it("reopens persistent backend runtimes cleanly and retains local data", async () => {
+    const dataRoot = await createTempDir("jazz-napi-persistent-");
+    const dataPath = join(dataRoot, "runtime.skv");
+    const appId = randomUUID();
+    let writerContext: {
+      client(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+    let reopenedContext: {
+      client(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      writerContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TEST_SCHEMA },
+        driver: { type: "persistent", dataPath },
+      });
+
+      const writer = writerContext.client();
+      const rowId = await writer.create(
+        "todos",
+        [
+          { type: "Text", value: "persisted-local-item" },
+          { type: "Boolean", value: false },
+        ],
+        { tier: "worker" },
+      );
+
+      await waitForRows(writer, (rows) => rows.some((row) => row.id === rowId), 10_000, {
+        tier: "worker",
+      });
+
+      await writerContext.shutdown();
+      writerContext = null;
+      await settleAsyncSyncWork();
+
+      reopenedContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TEST_SCHEMA },
+        driver: { type: "persistent", dataPath },
+      });
+
+      const reopened = reopenedContext.client();
+      const reopenedRows = await waitForRows(
+        reopened,
+        (rows) => rows.some((row) => row.id === rowId),
+        10_000,
+        { tier: "worker" },
+      );
+
+      const reopenedRow = reopenedRows.find((row) => row.id === rowId);
+      expect(reopenedRow?.values[0]).toEqual({ type: "Text", value: "persisted-local-item" });
+      expect(reopenedRow?.values[1]).toEqual({ type: "Boolean", value: false });
+    } finally {
+      if (writerContext) {
+        await writerContext.shutdown();
+      }
+      if (reopenedContext) {
+        await reopenedContext.shutdown();
+      }
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
