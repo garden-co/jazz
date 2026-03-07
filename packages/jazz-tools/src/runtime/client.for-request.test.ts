@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Runtime } from "./client.js";
+import { JazzClient, type Runtime, type WasmModule } from "./client.js";
 import type { AppContext } from "./context.js";
 
 const schemaWithTodos = {
@@ -522,6 +522,123 @@ describe("JazzClient schema order", () => {
     );
   });
 
+  it("reorders create values for wasm runtimes", async () => {
+    const insertDurable = vi.fn(async () => "todo-1");
+
+    class FakeWasmRuntime implements Runtime {
+      constructor(..._args: unknown[]) {}
+
+      insert() {
+        return "todo-1";
+      }
+
+      update() {}
+
+      delete() {}
+
+      async query() {
+        return [];
+      }
+
+      subscribe() {
+        return 0;
+      }
+
+      createSubscription() {
+        return 0;
+      }
+
+      executeSubscription() {}
+
+      unsubscribe() {}
+
+      async insertDurable(table: string, values: unknown, tier: string) {
+        return insertDurable(table, values, tier);
+      }
+
+      async updateDurable() {}
+
+      async deleteDurable() {}
+
+      onSyncMessageReceived() {}
+
+      onSyncMessageToSend() {}
+
+      addServer() {}
+
+      removeServer() {}
+
+      addClient() {
+        return "client-1";
+      }
+
+      getSchema() {
+        return new Map([
+          [
+            "todos",
+            {
+              columns: [
+                {
+                  name: "done",
+                  column_type: { type: "Boolean" as const },
+                  nullable: false,
+                },
+                {
+                  name: "title",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+        ]);
+      }
+
+      getSchemaHash() {
+        return "schema-hash";
+      }
+    }
+
+    const client = JazzClient.connectSync(
+      {
+        WasmRuntime: FakeWasmRuntime,
+      } as unknown as WasmModule,
+      {
+        appId: "test-app",
+        schema: {
+          todos: {
+            columns: [
+              {
+                name: "title",
+                column_type: { type: "Text" as const },
+                nullable: false,
+              },
+              {
+                name: "done",
+                column_type: { type: "Boolean" as const },
+                nullable: false,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    await client.create("todos", [
+      { type: "Text", value: "Buy milk" },
+      { type: "Boolean", value: false },
+    ]);
+
+    expect(insertDurable).toHaveBeenCalledWith(
+      "todos",
+      [
+        { type: "Boolean", value: false },
+        { type: "Text", value: "Buy milk" },
+      ],
+      "worker",
+    );
+  });
+
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => "todo-1",
@@ -712,6 +829,207 @@ describe("JazzClient schema order", () => {
     ]);
   });
 
+  it("reorders included relation rows recursively back to the declared schema order", async () => {
+    const runtime: Runtime = {
+      insert: () => "todo-1",
+      update: () => {},
+      delete: () => {},
+      query: async () => [
+        {
+          id: "user-1",
+          values: [
+            { type: "Uuid", value: "team-1" },
+            { type: "Text", value: "Alice" },
+            {
+              type: "Array",
+              value: [
+                {
+                  type: "Row",
+                  value: {
+                    id: "todo-1",
+                    values: [
+                      { type: "Boolean", value: false },
+                      { type: "Uuid", value: "user-1" },
+                      { type: "Text", value: "Buy milk" },
+                      {
+                        type: "Array",
+                        value: [
+                          {
+                            type: "Row",
+                            value: {
+                              id: "user-1",
+                              values: [
+                                { type: "Uuid", value: "team-1" },
+                                { type: "Text", value: "Alice" },
+                              ],
+                            },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => "todo-1",
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "client-1",
+      getSchema: () =>
+        new Map([
+          [
+            "users",
+            {
+              columns: [
+                {
+                  name: "team_id",
+                  column_type: { type: "Uuid" as const },
+                  nullable: false,
+                },
+                {
+                  name: "name",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+          [
+            "todos",
+            {
+              columns: [
+                {
+                  name: "done",
+                  column_type: { type: "Boolean" as const },
+                  nullable: false,
+                },
+                {
+                  name: "owner_id",
+                  column_type: { type: "Uuid" as const },
+                  nullable: false,
+                },
+                {
+                  name: "title",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+        ]),
+      getSchemaHash: () => "schema-hash",
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema: {
+        users: {
+          columns: [
+            {
+              name: "name",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "team_id",
+              column_type: { type: "Uuid" as const },
+              nullable: false,
+            },
+          ],
+        },
+        todos: {
+          columns: [
+            {
+              name: "title",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "done",
+              column_type: { type: "Boolean" as const },
+              nullable: false,
+            },
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" as const },
+              nullable: false,
+            },
+          ],
+        },
+      },
+    });
+
+    const rows = await client.query(
+      JSON.stringify({
+        relation_ir: { TableScan: { table: "users" } },
+        array_subqueries: [
+          {
+            column_name: "todosViaOwner",
+            table: "todos",
+            nested_arrays: [
+              {
+                column_name: "owner",
+                table: "users",
+                nested_arrays: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(rows).toEqual([
+      {
+        id: "user-1",
+        values: [
+          { type: "Text", value: "Alice" },
+          { type: "Uuid", value: "team-1" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "todo-1",
+                  values: [
+                    { type: "Text", value: "Buy milk" },
+                    { type: "Boolean", value: false },
+                    { type: "Uuid", value: "user-1" },
+                    {
+                      type: "Array",
+                      value: [
+                        {
+                          type: "Row",
+                          value: {
+                            id: "user-1",
+                            values: [
+                              { type: "Text", value: "Alice" },
+                              { type: "Uuid", value: "team-1" },
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
   it("reorders subscription deltas back to the declared schema order", async () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
@@ -803,6 +1121,188 @@ describe("JazzClient schema order", () => {
           values: [
             { type: "Text", value: "Buy milk" },
             { type: "Boolean", value: false },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it("reorders included relation rows inside subscription deltas", async () => {
+    let onUpdate: ((delta: unknown) => void) | undefined;
+    const runtime: Runtime = {
+      insert: () => "todo-1",
+      update: () => {},
+      delete: () => {},
+      query: async () => [],
+      subscribe: () => 0,
+      createSubscription: () => 1,
+      executeSubscription: (_handle, callback) => {
+        onUpdate = callback as (delta: unknown) => void;
+      },
+      unsubscribe: () => {},
+      insertDurable: async () => "todo-1",
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "client-1",
+      getSchema: () =>
+        new Map([
+          [
+            "users",
+            {
+              columns: [
+                {
+                  name: "team_id",
+                  column_type: { type: "Uuid" as const },
+                  nullable: false,
+                },
+                {
+                  name: "name",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+          [
+            "todos",
+            {
+              columns: [
+                {
+                  name: "done",
+                  column_type: { type: "Boolean" as const },
+                  nullable: false,
+                },
+                {
+                  name: "owner_id",
+                  column_type: { type: "Uuid" as const },
+                  nullable: false,
+                },
+                {
+                  name: "title",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+        ]),
+      getSchemaHash: () => "schema-hash",
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema: {
+        users: {
+          columns: [
+            {
+              name: "name",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "team_id",
+              column_type: { type: "Uuid" as const },
+              nullable: false,
+            },
+          ],
+        },
+        todos: {
+          columns: [
+            {
+              name: "title",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "done",
+              column_type: { type: "Boolean" as const },
+              nullable: false,
+            },
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" as const },
+              nullable: false,
+            },
+          ],
+        },
+      },
+    });
+    const callback = vi.fn();
+
+    client.subscribe(
+      JSON.stringify({
+        relation_ir: { TableScan: { table: "users" } },
+        array_subqueries: [
+          {
+            column_name: "todosViaOwner",
+            table: "todos",
+            nested_arrays: [],
+          },
+        ],
+      }),
+      callback,
+    );
+    await flushMicrotasks();
+    onUpdate?.([
+      {
+        kind: 0,
+        id: "user-1",
+        index: 0,
+        row: {
+          id: "user-1",
+          values: [
+            { type: "Uuid", value: "team-1" },
+            { type: "Text", value: "Alice" },
+            {
+              type: "Array",
+              value: [
+                {
+                  type: "Row",
+                  value: {
+                    id: "todo-1",
+                    values: [
+                      { type: "Boolean", value: false },
+                      { type: "Uuid", value: "user-1" },
+                      { type: "Text", value: "Buy milk" },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(callback).toHaveBeenCalledWith([
+      {
+        kind: 0,
+        id: "user-1",
+        index: 0,
+        row: {
+          id: "user-1",
+          values: [
+            { type: "Text", value: "Alice" },
+            { type: "Uuid", value: "team-1" },
+            {
+              type: "Array",
+              value: [
+                {
+                  type: "Row",
+                  value: {
+                    id: "todo-1",
+                    values: [
+                      { type: "Text", value: "Buy milk" },
+                      { type: "Boolean", value: false },
+                      { type: "Uuid", value: "user-1" },
+                    ],
+                  },
+                },
+              ],
+            },
           ],
         },
       },
