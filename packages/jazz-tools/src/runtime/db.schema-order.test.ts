@@ -44,14 +44,21 @@ describe("Db runtime schema order", () => {
       _schema: generatedSchema,
       _rowType: {} as { id: string; title: string; done: boolean },
       _initType: {} as { title: string; done: boolean },
-    } satisfies TableProxy<{ id: string; title: string; done: boolean }, { title: string; done: boolean }>;
+    } satisfies TableProxy<
+      { id: string; title: string; done: boolean },
+      { title: string; done: boolean }
+    >;
 
     await db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith("todos", [
-      { type: "Boolean", value: false },
-      { type: "Text", value: "Buy milk" },
-    ], undefined);
+    expect(create).toHaveBeenCalledWith(
+      "todos",
+      [
+        { type: "Boolean", value: false },
+        { type: "Text", value: "Buy milk" },
+      ],
+      undefined,
+    );
   });
 
   it("uses the runtime schema order when transforming query results", async () => {
