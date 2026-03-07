@@ -139,7 +139,9 @@ export interface QueryInput {
 }
 
 type RelationIrNode = Record<string, unknown>;
-type BuilderIncludeSpec = Record<string, boolean | BuilderIncludeSpec>;
+interface BuilderIncludeSpec {
+  [key: string]: boolean | BuilderIncludeSpec;
+}
 type IncludeAlignmentPlan = {
   table: string;
   nested: IncludeAlignmentPlan[];

@@ -523,7 +523,9 @@ describe("JazzClient schema order", () => {
   });
 
   it("reorders create values for wasm runtimes", async () => {
-    const insertDurable = vi.fn(async () => "todo-1");
+    const insertDurable = vi.fn<(...args: [string, unknown, string]) => Promise<string>>(
+      async () => "todo-1",
+    );
 
     class FakeWasmRuntime implements Runtime {
       constructor(..._args: unknown[]) {}
