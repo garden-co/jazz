@@ -17,6 +17,7 @@ import {
   frameworks,
 } from "./config.js";
 import {
+  AGENTS_MD_URL,
   type PackageManager,
   getFrameworkSpecificDocsUrl,
   getPkgManager,
@@ -344,7 +345,7 @@ module.exports = mergeConfig(getDefaultConfig(__dirname), config);`;
 
   // Step 5: Clone cursor-docs
   const docsSpinner = ora({
-    text: chalk.blue(`Adding .cursor directory...`),
+    text: chalk.blue(`Adding AI docs and skills...`),
     spinner: "dots",
   }).start();
 
@@ -366,21 +367,37 @@ module.exports = mergeConfig(getDefaultConfig(__dirname), config);`;
 
     if (fs.existsSync(cursorDirSource)) {
       fs.cpSync(cursorDirSource, cursorDirTarget, { recursive: true });
-      docsSpinner.succeed(chalk.green(".cursor directory added successfully"));
     } else {
       docsSpinner.fail(chalk.red(".cursor directory not found in cursor-docs"));
     }
 
+    // Copy .skills directory if present
+    const skillsDirSource = `${tempDocsDir}/.skills`;
+    const skillsDirTarget = `${projectName}/.skills`;
+    if (fs.existsSync(skillsDirSource)) {
+      fs.cpSync(skillsDirSource, skillsDirTarget, { recursive: true });
+    }
+
     // Clean up temp directory
     fs.rmSync(tempDocsDir, { recursive: true, force: true });
+
+    // Fetch latest llms-full.md
     const urlToFetch = getFrameworkSpecificDocsUrl(framework);
     const response = await fetch(urlToFetch);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const text = await response.text();
     fs.writeFileSync(`${projectName}/.cursor/docs/llms-full.md`, text, "utf-8");
-    docsSpinner.succeed(chalk.green("Fetched latest llms-full.md"));
+
+    // Fetch AGENTS.md
+    const agentsResponse = await fetch(AGENTS_MD_URL);
+    if (agentsResponse.ok) {
+      const agentsContent = await agentsResponse.text();
+      fs.writeFileSync(`${projectName}/AGENTS.md`, agentsContent, "utf-8");
+    }
+
+    docsSpinner.succeed(chalk.green("AI docs and skills added successfully"));
   } catch (error) {
-    docsSpinner.fail(chalk.red("Failed to add .cursor directory"));
+    docsSpinner.fail(chalk.red("Failed to add AI docs and skills"));
     throw error;
   }
 
