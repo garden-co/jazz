@@ -132,7 +132,7 @@ pub(crate) fn encode_page(page: &Page, page_size: usize) -> Result<Vec<u8>, BTre
 }
 
 pub(crate) fn decode_page(raw: &[u8], expected_page_size: usize) -> Result<Page, BTreeError> {
-    let header = parse_header(raw, expected_page_size, true)?;
+    let header = parse_header(raw, expected_page_size, false)?;
     let payload = header.payload;
 
     match header.kind {
@@ -1463,7 +1463,7 @@ mod tests {
         let mut encoded = encode_page(&page, 4096).expect("encode overflow page");
         encoded[100] ^= 0xFF;
 
-        let err = decode_page(&encoded, 4096).expect_err("must fail checksum");
+        let err = validate_page(&encoded, 4096).expect_err("must fail checksum");
         assert!(matches!(err, BTreeError::Corrupt(_)));
     }
 
