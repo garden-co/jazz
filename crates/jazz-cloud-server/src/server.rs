@@ -26,7 +26,7 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
-    ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchema, Value,
+    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TableSchema, Value,
 };
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
@@ -1069,6 +1069,24 @@ struct MetaExternalIdentityRow {
 struct MetaStore {
     runtime: TokioRuntime<SurrealKvStorage>,
     secret_hash_key: String,
+    apps_descriptor: RowDescriptor,
+    external_identities_descriptor: RowDescriptor,
+}
+
+fn normalize_row_descriptor(descriptor: &mut RowDescriptor) {
+    descriptor
+        .columns
+        .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+}
+
+fn descriptor_value<'a>(
+    descriptor: &RowDescriptor,
+    values: &'a [Value],
+    column: &str,
+) -> Option<&'a Value> {
+    descriptor
+        .column_index(column)
+        .and_then(|index| values.get(index))
 }
 
 impl MetaStore {
@@ -1103,6 +1121,20 @@ impl MetaStore {
             )
             .build();
 
+        let mut apps_descriptor = meta_schema
+            .get(&TableName::new("apps"))
+            .ok_or_else(|| "meta schema missing apps table".to_string())?
+            .columns
+            .clone();
+        normalize_row_descriptor(&mut apps_descriptor);
+
+        let mut external_identities_descriptor = meta_schema
+            .get(&TableName::new("external_identities"))
+            .ok_or_else(|| "meta schema missing external_identities table".to_string())?
+            .columns
+            .clone();
+        normalize_row_descriptor(&mut external_identities_descriptor);
+
         let sync_manager = SyncManager::new().with_durability_tiers(vec![
             DurabilityTier::EdgeServer,
             DurabilityTier::GlobalServer,
@@ -1126,6 +1158,8 @@ impl MetaStore {
         Ok(Self {
             runtime,
             secret_hash_key,
+            apps_descriptor,
+            external_identities_descriptor,
         })
     }
 
@@ -1154,7 +1188,7 @@ impl MetaStore {
             .map_err(|e| format!("meta query await error: {e}"))?;
 
         rows.into_iter()
-            .map(|(object_id, values)| Self::decode_row(object_id, &values))
+            .map(|(object_id, values)| self.decode_row(object_id, &values))
             .collect()
     }
 
@@ -1171,7 +1205,7 @@ impl MetaStore {
             .map_err(|e| format!("meta query await error: {e}"))?;
 
         if let Some((object_id, values)) = rows.pop() {
-            Ok(Some(Self::decode_row(object_id, &values)?))
+            Ok(Some(self.decode_row(object_id, &values)?))
         } else {
             Ok(None)
         }
@@ -1191,22 +1225,28 @@ impl MetaStore {
         admin_secret: Option<String>,
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
-        let values = vec![
-            Value::Uuid(app_id.as_object_id()),
-            Value::Text(app_name.clone()),
-            Value::Text(jwks_endpoint.clone()),
-            Value::Boolean(allow_anonymous),
-            Value::Boolean(allow_demo),
-            Value::Text(backend_secret_hash.clone()),
-            Value::Text(admin_secret_hash.clone()),
-            Value::Text(status.as_str().to_string()),
-            Value::Timestamp(now),
-            Value::Timestamp(now),
-            match &admin_secret {
-                Some(value) => Value::Text(value.clone()),
-                None => Value::Null,
-            },
-        ];
+        let values: Vec<Value> = self
+            .apps_descriptor
+            .columns
+            .iter()
+            .map(|column| match column.name.as_str() {
+                "admin_secret" => match &admin_secret {
+                    Some(value) => Value::Text(value.clone()),
+                    None => Value::Null,
+                },
+                "admin_secret_hash" => Value::Text(admin_secret_hash.clone()),
+                "allow_anonymous" => Value::Boolean(allow_anonymous),
+                "allow_demo" => Value::Boolean(allow_demo),
+                "app_id" => Value::Uuid(app_id.as_object_id()),
+                "app_name" => Value::Text(app_name.clone()),
+                "backend_secret_hash" => Value::Text(backend_secret_hash.clone()),
+                "created_at" => Value::Timestamp(now),
+                "jwks_endpoint" => Value::Text(jwks_endpoint.clone()),
+                "status" => Value::Text(status.as_str().to_string()),
+                "updated_at" => Value::Timestamp(now),
+                other => panic!("unexpected meta apps column {other}"),
+            })
+            .collect();
 
         let object_id = self
             .runtime
@@ -1309,9 +1349,7 @@ impl MetaStore {
             .map_err(|e| format!("external identity query await error: {e}"))?;
 
         if let Some((object_id, values)) = rows.pop() {
-            Ok(Some(Self::decode_external_identity_row(
-                object_id, &values,
-            )?))
+            Ok(Some(self.decode_external_identity_row(object_id, &values)?))
         } else {
             Ok(None)
         }
@@ -1325,14 +1363,20 @@ impl MetaStore {
         principal_id: &str,
     ) -> Result<MetaExternalIdentityRow, String> {
         let now = now_timestamp_us();
-        let values = vec![
-            Value::Uuid(app_id.as_object_id()),
-            Value::Text(issuer.to_string()),
-            Value::Text(subject.to_string()),
-            Value::Text(principal_id.to_string()),
-            Value::Timestamp(now),
-            Value::Timestamp(now),
-        ];
+        let values: Vec<Value> = self
+            .external_identities_descriptor
+            .columns
+            .iter()
+            .map(|column| match column.name.as_str() {
+                "app_id" => Value::Uuid(app_id.as_object_id()),
+                "created_at" => Value::Timestamp(now),
+                "issuer" => Value::Text(issuer.to_string()),
+                "principal_id" => Value::Text(principal_id.to_string()),
+                "subject" => Value::Text(subject.to_string()),
+                "updated_at" => Value::Timestamp(now),
+                other => panic!("unexpected external identity column {other}"),
+            })
+            .collect();
 
         let object_id = self
             .runtime
@@ -1349,121 +1393,119 @@ impl MetaStore {
         })
     }
 
-    fn decode_row(object_id: ObjectId, values: &[Value]) -> Result<MetaAppRow, String> {
-        if values.len() < 8 {
-            return Err(format!(
-                "meta row has invalid column count: expected at least 8, got {}",
-                values.len()
-            ));
-        }
-
-        let app_obj_id = match &values[0] {
-            Value::Uuid(id) => *id,
-            other => {
+    fn decode_row(&self, object_id: ObjectId, values: &[Value]) -> Result<MetaAppRow, String> {
+        let app_obj_id = match descriptor_value(&self.apps_descriptor, values, "app_id") {
+            Some(Value::Uuid(id)) => *id,
+            Some(other) => {
                 return Err(format!(
                     "meta row field app_id expected uuid, got {other:?}"
                 ));
             }
+            None => return Err("meta row missing app_id".to_string()),
         };
 
-        let app_name = match &values[1] {
-            Value::Text(s) => s.clone(),
-            other => {
+        let app_name = match descriptor_value(&self.apps_descriptor, values, "app_name") {
+            Some(Value::Text(s)) => s.clone(),
+            Some(other) => {
                 return Err(format!(
                     "meta row field app_name expected text, got {other:?}"
                 ));
             }
+            None => return Err("meta row missing app_name".to_string()),
         };
 
-        let jwks_endpoint = match &values[2] {
-            Value::Text(s) => s.clone(),
-            other => {
+        let jwks_endpoint = match descriptor_value(&self.apps_descriptor, values, "jwks_endpoint") {
+            Some(Value::Text(s)) => s.clone(),
+            Some(other) => {
                 return Err(format!(
                     "meta row field jwks_endpoint expected text, got {other:?}"
                 ));
             }
+            None => return Err("meta row missing jwks_endpoint".to_string()),
         };
-        let (allow_anonymous, allow_demo, idx_shift) = if values.len() >= 10 {
-            let allow_anonymous = match &values[3] {
-                Value::Boolean(v) => *v,
-                other => {
+
+        let allow_anonymous =
+            match descriptor_value(&self.apps_descriptor, values, "allow_anonymous") {
+                Some(Value::Boolean(v)) => *v,
+                Some(other) => {
                     return Err(format!(
                         "meta row field allow_anonymous expected boolean, got {other:?}"
                     ));
                 }
+                None => true,
             };
-            let allow_demo = match &values[4] {
-                Value::Boolean(v) => *v,
-                other => {
+
+        let allow_demo = match descriptor_value(&self.apps_descriptor, values, "allow_demo") {
+            Some(Value::Boolean(v)) => *v,
+            Some(other) => {
+                return Err(format!(
+                    "meta row field allow_demo expected boolean, got {other:?}"
+                ));
+            }
+            None => true,
+        };
+
+        let backend_secret_hash =
+            match descriptor_value(&self.apps_descriptor, values, "backend_secret_hash") {
+                Some(Value::Text(s)) => s.clone(),
+                Some(other) => {
                     return Err(format!(
-                        "meta row field allow_demo expected boolean, got {other:?}"
+                        "meta row field backend_secret_hash expected text, got {other:?}"
                     ));
                 }
+                None => return Err("meta row missing backend_secret_hash".to_string()),
             };
-            (allow_anonymous, allow_demo, 2)
-        } else {
-            // Backward-compat for older rows before auth mode flags existed.
-            (true, true, 0)
-        };
 
-        let backend_secret_hash = match &values[3 + idx_shift] {
-            Value::Text(s) => s.clone(),
-            other => {
-                return Err(format!(
-                    "meta row field backend_secret_hash expected text, got {other:?}"
-                ));
-            }
-        };
+        let admin_secret_hash =
+            match descriptor_value(&self.apps_descriptor, values, "admin_secret_hash") {
+                Some(Value::Text(s)) => s.clone(),
+                Some(other) => {
+                    return Err(format!(
+                        "meta row field admin_secret_hash expected text, got {other:?}"
+                    ));
+                }
+                None => return Err("meta row missing admin_secret_hash".to_string()),
+            };
 
-        let admin_secret_hash = match &values[4 + idx_shift] {
-            Value::Text(s) => s.clone(),
-            other => {
-                return Err(format!(
-                    "meta row field admin_secret_hash expected text, got {other:?}"
-                ));
-            }
-        };
-
-        let status = match &values[5 + idx_shift] {
-            Value::Text(s) => AppStatus::from_str(s)
+        let status = match descriptor_value(&self.apps_descriptor, values, "status") {
+            Some(Value::Text(s)) => AppStatus::from_str(s)
                 .ok_or_else(|| format!("meta row has invalid status value: {s}"))?,
-            other => {
+            Some(other) => {
                 return Err(format!(
                     "meta row field status expected text, got {other:?}"
                 ));
             }
+            None => return Err("meta row missing status".to_string()),
         };
 
-        let created_at = match &values[6 + idx_shift] {
-            Value::Timestamp(ts) => *ts,
-            other => {
+        let created_at = match descriptor_value(&self.apps_descriptor, values, "created_at") {
+            Some(Value::Timestamp(ts)) => *ts,
+            Some(other) => {
                 return Err(format!(
                     "meta row field created_at expected timestamp, got {other:?}"
                 ));
             }
+            None => return Err("meta row missing created_at".to_string()),
         };
 
-        let updated_at = match &values[7 + idx_shift] {
-            Value::Timestamp(ts) => *ts,
-            other => {
+        let updated_at = match descriptor_value(&self.apps_descriptor, values, "updated_at") {
+            Some(Value::Timestamp(ts)) => *ts,
+            Some(other) => {
                 return Err(format!(
                     "meta row field updated_at expected timestamp, got {other:?}"
                 ));
             }
+            None => return Err("meta row missing updated_at".to_string()),
         };
 
-        let admin_secret = if values.len() > 8 + idx_shift {
-            match &values[8 + idx_shift] {
-                Value::Text(value) => Some(value.clone()),
-                Value::Null => None,
-                other => {
-                    return Err(format!(
-                        "meta row field admin_secret expected text|null, got {other:?}"
-                    ));
-                }
+        let admin_secret = match descriptor_value(&self.apps_descriptor, values, "admin_secret") {
+            Some(Value::Text(value)) => Some(value.clone()),
+            Some(Value::Null) | None => None,
+            Some(other) => {
+                return Err(format!(
+                    "meta row field admin_secret expected text|null, got {other:?}"
+                ));
             }
-        } else {
-            None
         };
 
         Ok(MetaAppRow {
@@ -1483,24 +1525,20 @@ impl MetaStore {
     }
 
     fn decode_external_identity_row(
+        &self,
         _object_id: ObjectId,
         values: &[Value],
     ) -> Result<MetaExternalIdentityRow, String> {
-        if values.len() < 6 {
-            return Err(format!(
-                "external identity row has invalid column count: expected at least 6, got {}",
-                values.len()
-            ));
-        }
-
-        let principal_id = match &values[3] {
-            Value::Text(s) => s.clone(),
-            other => {
-                return Err(format!(
-                    "external identity field principal_id expected text, got {other:?}"
-                ));
-            }
-        };
+        let principal_id =
+            match descriptor_value(&self.external_identities_descriptor, values, "principal_id") {
+                Some(Value::Text(s)) => s.clone(),
+                Some(other) => {
+                    return Err(format!(
+                        "external identity field principal_id expected text, got {other:?}"
+                    ));
+                }
+                None => return Err("external identity row missing principal_id".to_string()),
+            };
 
         Ok(MetaExternalIdentityRow { principal_id })
     }
