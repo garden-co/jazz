@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.20.13
+
+### Patch Changes
+
+- 307b11d: fix(better-auth): import createAuthMiddleware from better-auth/api for compatibility with better-auth 1.5.3
+  - cojson@0.20.13
+  - cojson-storage-indexeddb@0.20.13
+  - cojson-transport-ws@0.20.13
+
 ## 0.20.12
 
 ### Patch Changes
