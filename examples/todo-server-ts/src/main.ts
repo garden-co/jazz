@@ -53,29 +53,6 @@ export interface RunningServer extends TodoServer {
 // Helpers
 // ============================================================================
 
-function rowToTodo(id: string, values: Value[]): Todo | null {
-  if (values.length < 2) return null;
-
-  const titleVal = values[0];
-  const doneVal = values[1];
-  const descVal = values[2];
-
-  if (titleVal.type !== "Text" || doneVal.type !== "Boolean") {
-    return null;
-  }
-
-  return {
-    id,
-    title: titleVal.value,
-    done: doneVal.value,
-    description: descVal?.type === "Text" && descVal.value ? descVal.value : undefined,
-  };
-}
-
-// ============================================================================
-// Server Factory
-// ============================================================================
-
 /**
  * Create a todo server.
  *
@@ -94,6 +71,58 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     userBranch: "main",
   });
   const client = context.client();
+  const runtimeTodoColumns = client.getSchema().todos.columns;
+  const todoColumnIndexes = new Map(
+    runtimeTodoColumns.map((column, index) => [column.name, index] as const),
+  );
+
+  function getTodoValue(values: Value[], columnName: string): Value | undefined {
+    const index = todoColumnIndexes.get(columnName);
+    return index === undefined ? undefined : values[index];
+  }
+
+  function buildTodoValues(body: CreateTodoRequest): Value[] {
+    const ownerId = body.owner_id ?? "anonymous";
+
+    return runtimeTodoColumns.map((column) => {
+      switch (column.name) {
+        case "description":
+          return body.description
+            ? ({ type: "Text", value: body.description } as const)
+            : ({ type: "Null" } as const);
+        case "done":
+          return { type: "Boolean", value: false } as const;
+        case "owner_id":
+          return { type: "Text", value: ownerId } as const;
+        case "parent":
+        case "project":
+          return { type: "Null" } as const;
+        case "title":
+          return { type: "Text", value: body.title } as const;
+        default:
+          throw new Error(`Unsupported todo column: ${column.name}`);
+      }
+    });
+  }
+
+  function rowToTodo(id: string, values: Value[]): Todo | null {
+    if (values.length < 2) return null;
+
+    const titleVal = getTodoValue(values, "title");
+    const doneVal = getTodoValue(values, "done");
+    const descVal = getTodoValue(values, "description");
+
+    if (titleVal?.type !== "Text" || doneVal?.type !== "Boolean") {
+      return null;
+    }
+
+    return {
+      id,
+      title: titleVal.value,
+      done: doneVal.value,
+      description: descVal?.type === "Text" && descVal.value ? descVal.value : undefined,
+    };
+  }
 
   // Create Express app
   const app = express();
@@ -148,15 +177,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const ownerId = body.owner_id ?? "anonymous";
-      const values: Value[] = [
-        { type: "Text", value: body.title },
-        { type: "Boolean", value: false },
-        { type: "Text", value: body.description ?? "" },
-        { type: "Null" },
-        { type: "Null" },
-        { type: "Text", value: ownerId },
-      ];
+      const values = buildTodoValues(body);
 
       const id = await client.create("todos", values);
 
