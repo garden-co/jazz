@@ -4,9 +4,9 @@
  * Connects QueryBuilder to JazzClient for actual query execution.
  * Handles query translation, execution, and result transformation.
  *
- * Key design: Mutations are SYNC after WASM pre-loading.
+ * Key design:
  * - createDb() is async (pre-loads WASM module)
- * - insert/update/deleteFrom are sync (operate on in-memory WASM runtime)
+ * - insert/update/deleteFrom are async (await WASM bridge readiness, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
@@ -37,7 +37,7 @@ import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 export interface DbConfig {
   /** Application identifier (used for isolation) */
   appId: string;
-  /** Storage driver implementation (optional — storage is in-memory by default) */
+  /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
@@ -64,8 +64,14 @@ export interface DbConfig {
   localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
-  /** Database name for OPFS persistence (browser only, default: appId) */
-  dbName?: string;
+}
+
+function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
+  return driver ?? { type: "persistent" };
+}
+
+function isMemoryDriver(driver?: StorageDriver): boolean {
+  return resolveStorageDriver(driver).type === "memory";
 }
 
 /**
@@ -235,7 +241,7 @@ interface FollowerSyncMessage {
   fromTabId: string;
   toLeaderTabId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 interface LeaderSyncMessage {
@@ -243,7 +249,7 @@ interface LeaderSyncMessage {
   fromLeaderTabId: string;
   toTabId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 interface FollowerCloseMessage {
@@ -261,8 +267,8 @@ function resolveBroadcastChannelCtor(): (new (name: string) => BroadcastChannelL
   return ctor as new (name: string) => BroadcastChannelLike;
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+function isBinaryPayloadArray(value: unknown): value is Uint8Array[] {
+  return Array.isArray(value) && value.every((entry) => entry instanceof Uint8Array);
 }
 
 function isTabSyncMessage(value: unknown): value is TabSyncMessage {
@@ -274,7 +280,7 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromTabId === "string" &&
       typeof message.toLeaderTabId === "string" &&
       typeof message.term === "number" &&
-      isStringArray(message.payload)
+      isBinaryPayloadArray(message.payload)
     );
   }
 
@@ -283,7 +289,7 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromLeaderTabId === "string" &&
       typeof message.toTabId === "string" &&
       typeof message.term === "number" &&
-      isStringArray(message.payload)
+      isBinaryPayloadArray(message.payload)
     );
   }
 
@@ -320,10 +326,10 @@ function isLeaderDebugEnabled(): boolean {
  * ```typescript
  * const db = await createDb({ appId: "my-app", driver });
  *
- * // Sync mutations (after WASM is pre-loaded)
- * const id = db.insert(app.todos, { title: "Buy milk", done: false });
- * db.update(app.todos, id, { done: true });
- * db.deleteFrom(app.todos, id);
+ * // Async mutations
+ * const id = await db.insert(app.todos, { title: "Buy milk", done: false });
+ * await db.update(app.todos, id, { done: true });
+ * await db.deleteFrom(app.todos, id);
  *
  * // Async queries (need storage I/O)
  * const todos = await db.all(app.todos.where({ done: false }));
@@ -404,7 +410,11 @@ export class Db {
   static async createWithWorker(config: DbConfig): Promise<Db> {
     const wasmModule = await loadWasmModule();
     const db = new Db(config, wasmModule);
-    db.primaryDbName = config.dbName ?? config.appId;
+    const persistentDriver = resolveStorageDriver(config.driver);
+    if (persistentDriver.type !== "persistent") {
+      throw new Error("Worker-backed Db requires driver.type='persistent'");
+    }
+    db.primaryDbName = persistentDriver.dbName ?? config.appId;
     db.workerDbName = db.primaryDbName;
 
     try {
@@ -467,21 +477,36 @@ export class Db {
 
     if (!this.clients.has(key)) {
       // Create in-memory runtime (works for both direct and worker mode)
-      const client = JazzClient.connectSync(this.wasmModule, {
-        appId: this.config.appId,
-        schema,
-        driver: this.config.driver,
-        // In worker mode, don't connect to server directly — worker handles it
-        serverUrl: this.worker ? undefined : this.config.serverUrl,
-        serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
-        env: this.config.env,
-        userBranch: this.config.userBranch,
-        jwtToken: this.config.jwtToken,
-        localAuthMode: this.config.localAuthMode,
-        localAuthToken: this.config.localAuthToken,
-        adminSecret: this.config.adminSecret,
-        tier: this.worker ? undefined : "worker",
-      });
+      const client = JazzClient.connectSync(
+        this.wasmModule,
+        {
+          appId: this.config.appId,
+          schema,
+          driver: this.config.driver,
+          // In worker mode, don't connect to server directly — worker handles it
+          serverUrl: this.worker ? undefined : this.config.serverUrl,
+          serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
+          env: this.config.env,
+          userBranch: this.config.userBranch,
+          jwtToken: this.config.jwtToken,
+          localAuthMode: this.config.localAuthMode,
+          localAuthToken: this.config.localAuthToken,
+          adminSecret: this.config.adminSecret,
+          tier: this.worker ? undefined : "worker",
+          // Keep worker-bridged browser clients on worker durability by default.
+          // For direct (non-worker) clients connected to a server, default to edge.
+          defaultDurabilityTier: this.worker
+            ? undefined
+            : this.config.serverUrl
+              ? "edge"
+              : undefined,
+        },
+        {
+          // Worker-bridged runtimes exchange postcard payloads with peers;
+          // direct browser/server routing keeps JSON payloads.
+          useBinaryEncoding: this.worker !== null,
+        },
+      );
 
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
@@ -521,12 +546,17 @@ export class Db {
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
+    const driver = resolveStorageDriver(this.config.driver);
+    if (driver.type !== "persistent") {
+      throw new Error("Worker bridge is only available for driver.type='persistent'");
+    }
+
     return {
       schemaJson,
       appId: this.config.appId,
       env: this.config.env ?? "dev",
       userBranch: this.config.userBranch ?? "main",
-      dbName: this.workerDbName ?? this.config.dbName ?? this.config.appId,
+      dbName: this.workerDbName ?? driver.dbName ?? this.config.appId,
       serverUrl: this.config.serverUrl,
       serverPathPrefix: this.config.serverPathPrefix,
       jwtToken: this.config.jwtToken,
@@ -829,7 +859,11 @@ export class Db {
   }
 
   private currentWorkerNamespace(): string {
-    return this.workerDbName ?? this.config.dbName ?? this.config.appId;
+    const driver = resolveStorageDriver(this.config.driver);
+    if (driver.type !== "persistent") {
+      throw new Error("Worker namespace is only available for driver.type='persistent'");
+    }
+    return this.workerDbName ?? driver.dbName ?? this.config.appId;
   }
 
   private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
@@ -978,6 +1012,10 @@ export class Db {
    * - If file deletion fails, still respawns worker and then rethrows the deletion error
    */
   async deleteClientStorage(): Promise<void> {
+    if (resolveStorageDriver(this.config.driver).type !== "persistent") {
+      throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
+    }
+
     if (!isBrowser()) {
       console.error(
         "deleteClientStorage() is only available on browser worker-backed Db instances.",
@@ -1176,7 +1214,7 @@ function isBrowser(): boolean {
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the WASM module.
- * After creation, mutations (insert/update/deleteFrom) are synchronous.
+ * After creation, mutations (insert/update/deleteFrom) are async and return Promises.
  *
  * In browser environments, automatically uses a dedicated worker for
  * OPFS persistence. In Node.js, uses in-memory storage.
@@ -1194,7 +1232,13 @@ function isBrowser(): boolean {
  */
 export async function createDb(config: DbConfig): Promise<Db> {
   const resolvedConfig = resolveLocalAuthDefaults(config);
-  if (isBrowser()) {
+  const driver = resolveStorageDriver(resolvedConfig.driver);
+
+  if (driver.type === "memory" && !resolvedConfig.serverUrl) {
+    throw new Error("driver.type='memory' requires serverUrl.");
+  }
+
+  if (isBrowser() && driver.type === "persistent") {
     return Db.createWithWorker(resolvedConfig);
   }
   return Db.create(resolvedConfig);

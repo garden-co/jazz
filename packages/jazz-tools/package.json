@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.11",
+  "version": "2.0.0-alpha.14",
   "description": "Jazz TypeScript SDK, React bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -74,7 +74,7 @@
   "devDependencies": {
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitest/browser": "catalog:default",

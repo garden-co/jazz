@@ -286,7 +286,10 @@ describe("db.all browser integration", () => {
   });
 
   beforeAll(async () => {
-    conditionsDb = await createDb({ appId: "db-all-test", dbName: uniqueDbName("ops") });
+    conditionsDb = await createDb({
+      appId: "db-all-test",
+      driver: { type: "persistent", dbName: uniqueDbName("ops") },
+    });
     await seedTodosForConditions(conditionsDb);
   });
 
@@ -306,7 +309,12 @@ describe("db.all browser integration", () => {
   }
 
   it("returns BYTEA columns as Uint8Array", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("bytea") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("bytea") },
+      }),
+    );
 
     const id = await db.insert(todos, {
       title: "has-bytes",
@@ -329,7 +337,12 @@ describe("db.all browser integration", () => {
   });
 
   it("supports orderBy + limit + offset", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("paginate") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("paginate") },
+      }),
+    );
 
     await db.insert(todos, {
       title: "p1",
@@ -367,7 +380,12 @@ describe("db.all browser integration", () => {
   });
 
   it("supports include relations", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("include") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include") },
+      }),
+    );
 
     const orgId = await db.insert(orgs, { name: "Acme" });
     const teamId = await db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
@@ -409,7 +427,12 @@ describe("db.all browser integration", () => {
   });
 
   it("supports multi-hop queries", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("hops") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("hops") },
+      }),
+    );
 
     const orgId = await db.insert(orgs, { name: "Org A" });
     const teamId = await db.insert(teams, { name: "Team A", org_id: orgId, parent_id: undefined });
@@ -427,7 +450,12 @@ describe("db.all browser integration", () => {
   });
 
   it("supports one-off all queries across scalar and UUID[] foreign-key hops", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("fk-hops") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("fk-hops") },
+      }),
+    );
 
     const orgId = await db.insert(orgs, { name: "FK Org" });
     const teamId = await db.insert(teams, { name: "FK Team", org_id: orgId, parent_id: undefined });
@@ -457,7 +485,12 @@ describe("db.all browser integration", () => {
   });
 
   it("supports gather queries", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("gather") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("gather") },
+      }),
+    );
 
     const rootId = await db.insert(teams, {
       name: "root",

@@ -3,7 +3,6 @@
 //! Creates minimal query graphs to evaluate policy conditions like USING and INHERITS.
 //! These graphs are throwaway - created, settled until complete, then discarded.
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 
 use crate::storage::Storage;
@@ -20,7 +19,7 @@ use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::ColumnName;
-use super::types::{Schema, TableName, TupleDescriptor, Value};
+use super::types::{LoadedRow, Schema, TableName, TupleDescriptor, Value};
 
 /// A one-shot graph for evaluating a policy condition.
 ///
@@ -247,7 +246,7 @@ impl PolicyGraph {
     pub fn settle(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> bool {
         let _delta = self.graph.settle(io, row_loader);
         true
@@ -389,7 +388,7 @@ mod tests {
         let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
-        let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };
+        let mut row_loader = |_id: ObjectId| -> Option<LoadedRow> { None };
 
         // Settle the graph
         pg.settle(&storage, &mut row_loader);

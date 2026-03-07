@@ -11,11 +11,45 @@ import {
   readBinaryFrames,
   sendSyncPayload,
   SyncStreamController,
+  type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 
 describe("sync-transport", () => {
   const originalFetch = globalThis.fetch;
   const textEncoder = new TextEncoder();
+  const outboxInvokers: Array<
+    [
+      name: string,
+      invoke: (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => void,
+    ]
+  > = [
+    [
+      "wasm/rn",
+      (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => router(destinationKind, destinationId, payloadJson, isCatalogue),
+    ],
+    [
+      "napi-callee-handled",
+      (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => router(null, destinationKind, destinationId, payloadJson, isCatalogue),
+    ],
+  ];
 
   function encodeFrames(events: unknown[]): Uint8Array {
     const chunks: Uint8Array[] = events.map((event) => {
@@ -450,22 +484,54 @@ describe("sync-transport", () => {
     controller.stop();
   });
 
-  it("sync outbox router routes server and client destinations", async () => {
-    const onServerPayload = vi.fn().mockResolvedValue(undefined);
-    const onClientPayload = vi.fn();
-    const router = createSyncOutboxRouter({
-      onServerPayload,
-      onClientPayload,
-    });
+  it.each(outboxInvokers)(
+    "sync outbox router routes server and client destinations (%s)",
+    async (_name, invoke) => {
+      const onServerPayload = vi.fn().mockResolvedValue(undefined);
+      const onClientPayload = vi.fn();
+      const router = createSyncOutboxRouter({
+        onServerPayload,
+        onClientPayload,
+      });
 
-    router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
-    router("client", "client-1", JSON.stringify({ Pong: {} }), false);
+      invoke(router, "server", "upstream-1", JSON.stringify({ Ping: {} }), false);
+      invoke(router, "client", "client-1", JSON.stringify({ Pong: {} }), false);
 
-    await vi.waitFor(() =>
-      expect(onServerPayload).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), false),
-    );
-    expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
-  });
+      await vi.waitFor(() =>
+        expect(onServerPayload).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), false),
+      );
+      expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
+    },
+  );
+
+  it.each(outboxInvokers)(
+    "sync outbox router posts server payloads via sendSyncPayload (%s)",
+    async (_name, invoke) => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const router = createSyncOutboxRouter({
+        onServerPayload: (payload, isCatalogue) =>
+          sendSyncPayload("http://localhost:3000", payload as string, isCatalogue, {
+            backendSecret: "backend-secret",
+          }),
+      });
+
+      const payloadJson = JSON.stringify({ QuerySubscription: { id: "q-1" } });
+      invoke(router, "server", "upstream-1", payloadJson, false);
+
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
+        payload: unknown;
+      };
+      expect(requestBody.payload).toEqual(JSON.parse(payloadJson));
+      expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/sync");
+      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+        "X-Jazz-Backend-Secret": "backend-secret",
+      });
+    },
+  );
 
   it("sync outbox router surfaces server-send failures", async () => {
     const error = new Error("network down");

@@ -56,9 +56,18 @@ impl LimitOffsetNode {
             Some(limit) => (start + limit).min(self.all_tuples.len()),
             None => self.all_tuples.len(),
         };
+        let sync_scope = self.sync_scope_provenance();
         self.windowed_tuples.clear();
         self.windowed_tuples
-            .extend_from_slice(&self.all_tuples[start..end]);
+            .extend(
+                self.all_tuples[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|mut tuple| {
+                        tuple.merge_provenance(&sync_scope);
+                        tuple
+                    }),
+            );
         self.current_tuples = self.windowed_tuples.iter().cloned().collect();
     }
 
@@ -75,6 +84,26 @@ impl LimitOffsetNode {
     /// Ordered tuples currently visible after applying offset/limit.
     pub fn windowed_tuples(&self) -> &[Tuple] {
         &self.windowed_tuples
+    }
+
+    /// Tuples that must be present locally to reproduce this paginated window.
+    ///
+    /// For offset-based pagination, the client must have the ordered prefix up to
+    /// `offset + limit` so it can reapply the same windowing logic locally.
+    /// When no limit is present, that means the full ordered input.
+    pub fn sync_input_tuples(&self) -> &[Tuple] {
+        let end = match self.limit {
+            Some(limit) => self.offset.saturating_add(limit).min(self.all_tuples.len()),
+            None => self.all_tuples.len(),
+        };
+        &self.all_tuples[..end]
+    }
+
+    fn sync_scope_provenance(&self) -> crate::query_manager::types::TupleProvenance {
+        self.sync_input_tuples()
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .collect()
     }
 }
 

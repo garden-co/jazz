@@ -4,7 +4,12 @@ import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./index.module.css";
 
 export function DataExplorer() {
-  const schema = useDevtoolsContext().wasmSchema;
+  const {
+    wasmSchema: schema,
+    runtime,
+    queryPropagation,
+    setQueryPropagation,
+  } = useDevtoolsContext();
   const { table } = useParams();
 
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
@@ -12,7 +17,22 @@ export function DataExplorer() {
   return (
     <div className={styles.layout}>
       <aside className={styles.sidebar}>
-        <h2 className={styles.sidebarTitle}>Tables</h2>
+        <div className={styles.sidebarHeader}>
+          <h2 className={styles.sidebarTitle}>Tables</h2>
+          {runtime === "extension" ? (
+            <label className={styles.propagationSwitch}>
+              <span className={styles.propagationLabel}>Local-only</span>
+              <input
+                type="checkbox"
+                checked={queryPropagation === "local-only"}
+                onChange={(event) => {
+                  setQueryPropagation(event.target.checked ? "local-only" : "full");
+                }}
+                aria-label="Toggle query propagation between local-only and full"
+              />
+            </label>
+          ) : null}
+        </div>
         <ul className={styles.tableList}>
           {tableNames.map((tableName) => (
             <li key={tableName}>
