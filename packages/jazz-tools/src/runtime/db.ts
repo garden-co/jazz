@@ -11,7 +11,7 @@
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { Session } from "./context.js";
 import {
   JazzClient,
@@ -209,6 +209,14 @@ function resolveHopOutputTable(
     currentTable = relation.toTable;
   }
   return currentTable;
+}
+
+function resolveSchemaWithTable(
+  preferredSchema: WasmSchema,
+  fallbackSchema: WasmSchema,
+  tableName: string,
+): WasmSchema {
+  return preferredSchema[tableName] ? preferredSchema : fallbackSchema;
 }
 
 /**
@@ -970,9 +978,13 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): Promise<string> {
     const client = this.getClient(table._schema);
-    const runtimeSchema = client.getSchema();
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
     await this.ensureBridgeReady();
-    const values = toValueArray(data as Record<string, unknown>, runtimeSchema, table._table);
+    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
     return client.create(table._table, values, options);
   }
 
@@ -986,9 +998,13 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
-    const runtimeSchema = client.getSchema();
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
     await this.ensureBridgeReady();
-    const updates = toUpdateRecord(data as Record<string, unknown>, runtimeSchema, table._table);
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await client.update(id, updates, options);
   }
 
@@ -1077,16 +1093,18 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const runtimeSchema = client.getSchema();
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const rows = await client.query(translateQuery(builderJson, runtimeSchema), options);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(runtimeSchema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    return transformRows<T>(rows, runtimeSchema, outputTable, outputIncludes);
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes);
   }
 
   /**
@@ -1135,18 +1153,20 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
-    const runtimeSchema = client.getSchema();
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(runtimeSchema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    const wasmQuery = translateQuery(builderJson, runtimeSchema);
+    const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], runtimeSchema, outputTable, outputIncludes)[0];
+      return transformRows<T>([row], outputSchema, outputTable, outputIncludes)[0];
     };
 
     const subId = client.subscribeInternal(

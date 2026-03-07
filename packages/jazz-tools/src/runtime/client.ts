@@ -7,7 +7,7 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
   generateClientId,
@@ -137,6 +137,8 @@ export interface QueryInput {
   _schema?: WasmSchema;
 }
 
+type RelationIrNode = Record<string, unknown>;
+
 function resolveQueryJson(query: string | QueryInput): string {
   if (typeof query === "string") {
     return query;
@@ -159,6 +161,66 @@ function resolveQueryJson(query: string | QueryInput): string {
   }
 
   return translateQuery(builtQuery, schema);
+}
+
+function resolveRelationIrOutputTable(node: unknown): string | null {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  const relation = node as RelationIrNode;
+
+  if ("TableScan" in relation) {
+    const tableScan = relation.TableScan as { table?: unknown } | undefined;
+    return typeof tableScan?.table === "string" ? tableScan.table : null;
+  }
+
+  if ("Filter" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.Filter as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("OrderBy" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.OrderBy as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("Limit" in relation) {
+    return resolveRelationIrOutputTable((relation.Limit as { input?: unknown } | undefined)?.input);
+  }
+
+  if ("Offset" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.Offset as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("Project" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.Project as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("Gather" in relation) {
+    const gather = relation.Gather as { seed?: unknown } | undefined;
+    return resolveRelationIrOutputTable(gather?.seed);
+  }
+
+  return null;
+}
+
+function resolveQueryOutputTable(queryJson: string): string | null {
+  try {
+    const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
+    if (typeof parsed.table === "string") {
+      return parsed.table;
+    }
+    return resolveRelationIrOutputTable(parsed.relation_ir);
+  } catch {
+    return null;
+  }
 }
 
 function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
@@ -621,12 +683,130 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
+  private alignCreateValuesToRuntimeSchema(
+    table: string,
+    values: Value[],
+    runtimeSchema = this.getSchema(),
+  ): Value[] {
+    const declaredTable = this.context.schema[table];
+    const runtimeTable = runtimeSchema[table];
+
+    if (!declaredTable || !runtimeTable || values.length !== declaredTable.columns.length) {
+      return values;
+    }
+
+    const valuesByColumn = new Map<string, Value>();
+    for (let index = 0; index < declaredTable.columns.length; index += 1) {
+      const column = declaredTable.columns[index];
+      const value = values[index];
+      if (value === undefined) {
+        return values;
+      }
+      valuesByColumn.set(column.name, value);
+    }
+
+    const reorderedValues: Value[] = [];
+    for (const column of runtimeTable.columns) {
+      const value = valuesByColumn.get(column.name);
+      if (value === undefined) {
+        return values;
+      }
+      reorderedValues.push(value);
+    }
+
+    return reorderedValues;
+  }
+
+  private alignRowValuesToDeclaredSchema(
+    table: string,
+    values: Value[],
+    runtimeSchema = this.getSchema(),
+  ): Value[] {
+    const declaredTable = this.context.schema[table];
+    const runtimeTable = runtimeSchema[table];
+
+    if (!declaredTable || !runtimeTable || values.length < runtimeTable.columns.length) {
+      return values;
+    }
+
+    const valuesByColumn = new Map<string, Value>();
+    for (let index = 0; index < runtimeTable.columns.length; index += 1) {
+      const column = runtimeTable.columns[index];
+      const value = values[index];
+      if (value === undefined) {
+        return values;
+      }
+      valuesByColumn.set(column.name, value);
+    }
+
+    const reorderedValues: Value[] = [];
+    for (const column of declaredTable.columns) {
+      const value = valuesByColumn.get(column.name);
+      if (value === undefined) {
+        return values;
+      }
+      reorderedValues.push(value);
+    }
+
+    return reorderedValues.concat(values.slice(runtimeTable.columns.length));
+  }
+
+  private alignQueryRowsToDeclaredSchema(
+    queryJson: string,
+    rows: Row[],
+    runtimeSchema = this.getSchema(),
+  ): Row[] {
+    const outputTable = resolveQueryOutputTable(queryJson);
+    if (!outputTable) {
+      return rows;
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(outputTable, row.values, runtimeSchema),
+    }));
+  }
+
+  private alignSubscriptionDeltaToDeclaredSchema(
+    queryJson: string,
+    delta: RowDelta,
+    runtimeSchema = this.getSchema(),
+  ): RowDelta {
+    const outputTable = resolveQueryOutputTable(queryJson);
+    if (!outputTable || !Array.isArray(delta)) {
+      return delta;
+    }
+
+    return delta.map((change) => {
+      if ((change.kind === 0 || change.kind === 2) && change.row) {
+        return {
+          ...change,
+          row: {
+            ...change.row,
+            values: this.alignRowValuesToDeclaredSchema(
+              outputTable,
+              change.row.values as Value[],
+              runtimeSchema,
+            ),
+          },
+        };
+      }
+
+      return change;
+    });
+  }
+
   /**
    * Insert a new row into a table and wait for durability at the requested tier.
    */
   async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
     const tier = this.resolveWriteTier(options);
-    return this.runtime.insertDurable(table, values, tier);
+    const runtimeSchema = this.getSchema();
+    return this.runtime.insertDurable(
+      table,
+      this.alignCreateValuesToRuntimeSchema(table, values, runtimeSchema),
+      tier,
+    );
   }
 
   /**
@@ -653,13 +833,14 @@ export class JazzClient {
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
+    const runtimeSchema = this.getSchema();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
       normalizedOptions.tier,
       optionsJson,
     );
-    return results as Row[];
+    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
   }
 
   /**
@@ -718,6 +899,7 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
+    const runtimeSchema = this.getSchema();
 
     const handle = this.runtime.createSubscription(
       queryJson,
@@ -730,7 +912,7 @@ export class JazzClient {
       this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
         const delta: RowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
+        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
       });
     });
 
@@ -750,7 +932,7 @@ export class JazzClient {
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    return this.runtime.getSchema() as WasmSchema;
+    return normalizeRuntimeSchema(this.runtime.getSchema());
   }
 
   /**
