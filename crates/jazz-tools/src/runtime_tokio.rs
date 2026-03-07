@@ -111,7 +111,7 @@ impl CallbackSyncSender {
 }
 
 impl SyncSender for CallbackSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry, _sender_tier: &'static str) {
+    fn send_sync_message(&self, message: OutboxEntry) {
         (self.callback)(message);
     }
 }

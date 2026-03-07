@@ -268,6 +268,11 @@ pub trait Storage {
 
     /// Flush only the WAL buffer (not the snapshot). No-op for storage without WAL.
     fn flush_wal(&self) {}
+
+    /// Close and release storage resources (e.g. file locks). No-op by default.
+    fn close(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
@@ -406,6 +411,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn flush_wal(&self) {
         (**self).flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        (**self).close()
     }
 }
 

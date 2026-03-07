@@ -6,7 +6,6 @@
 use ahash::AHashSet;
 use std::collections::HashSet;
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{column_is_null, decode_column};
 use crate::query_manager::policy::{
@@ -16,7 +15,8 @@ use crate::query_manager::policy::{
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnType, Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement, Value,
+    ColumnType, LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement,
+    Value,
 };
 
 use crate::storage::Storage;
@@ -131,7 +131,7 @@ impl PolicyFilterNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
 
@@ -211,7 +211,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
         let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -244,7 +244,7 @@ impl PolicyFilterNode {
         &self,
         row: &Row,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> bool {
         let mut visited_referencing = HashSet::new();
         self.evaluate_row_access_with_referencing(
@@ -271,7 +271,7 @@ impl PolicyFilterNode {
         table_name: &str,
         local_policy_override: Option<&PolicyExpr>,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -332,7 +332,7 @@ impl PolicyFilterNode {
         row: &Row,
         target_table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -371,16 +371,20 @@ impl PolicyFilterNode {
         };
 
         for source_row_id in candidate_ids {
-            let Some((source_content, source_commit_id)) = row_loader(source_row_id) else {
+            let Some(source_row) = row_loader(source_row_id) else {
                 continue;
             };
 
-            if !referencing_edge_matches_target(source_descriptor, &source_content, col_idx, row.id)
-            {
+            if !referencing_edge_matches_target(
+                source_descriptor,
+                &source_row.data,
+                col_idx,
+                row.id,
+            ) {
                 continue;
             }
 
-            let source_row = Row::new(source_row_id, source_content, source_commit_id);
+            let source_row = Row::new(source_row_id, source_row.data, source_row.commit_id);
             if self.evaluate_row_access_with_referencing(
                 operation,
                 &source_row,
@@ -409,7 +413,7 @@ impl PolicyFilterNode {
         descriptor: &RowDescriptor,
         table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -512,7 +516,7 @@ impl PolicyFilterNode {
         descriptor: &RowDescriptor,
         _table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -554,7 +558,7 @@ impl PolicyFilterNode {
         }
         visited.insert(parent_id);
 
-        let (parent_content, parent_commit_id) = match row_loader(parent_id) {
+        let parent_row = match row_loader(parent_id) {
             Some(content) => content,
             None => return false,
         };
@@ -580,7 +584,7 @@ impl PolicyFilterNode {
             None => return true,
         };
 
-        let parent_row = Row::new(parent_id, parent_content, parent_commit_id);
+        let parent_row = Row::new(parent_id, parent_row.data, parent_row.commit_id);
         self.evaluate_expr_with_context(
             parent_policy,
             &parent_row,
@@ -603,7 +607,7 @@ impl PolicyFilterNode {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -645,7 +649,7 @@ impl PolicyFilterNode {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
