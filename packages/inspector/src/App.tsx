@@ -84,6 +84,7 @@ export default function App() {
             env: storedConfig.env,
             userBranch: storedConfig.branch,
             adminSecret: storedConfig.adminSecret,
+            driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(storedConfig.serverUrl, {
             adminSecret: storedConfig.adminSecret,

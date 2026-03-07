@@ -19,8 +19,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash, TableName,
-    TableSchema, Value, build_ordered_delta_with_post_ids,
+    ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash,
+    TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -690,7 +690,7 @@ impl QueryManager {
             // For single-branch subscriptions, reads from that branch
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
-            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, branches);
                 if obj.is_none() {
                     tracing::trace!(%id, "row_loader: object not found");
@@ -741,7 +741,13 @@ impl QueryManager {
                     let transformer = LensTransformer::new(schema_context, &table);
                     match transformer.transform(&content, commit_id, source_hash) {
                         Ok(result) => {
-                            return Some((result.data, commit_id));
+                            return Some(LoadedRow::new(
+                                result.data,
+                                commit_id,
+                                [(id, BranchName::new(&source_branch))]
+                                    .into_iter()
+                                    .collect(),
+                            ));
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -759,7 +765,13 @@ impl QueryManager {
                     }
                 }
 
-                Some((content, commit_id))
+                Some(LoadedRow::new(
+                    content,
+                    commit_id,
+                    [(id, BranchName::new(&source_branch))]
+                        .into_iter()
+                        .collect(),
+                ))
             };
 
             let delta = subscription.graph.settle(storage_ref, row_loader);

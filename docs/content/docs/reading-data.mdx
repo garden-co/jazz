@@ -66,6 +66,16 @@ Use framework bindings immediately after subscription concepts:
   </Tab>
 </Tabs>
 
+### React Suspense and Transitions
+
+The docs React example app includes a Suspense-based list that keeps the previous result visible
+while a filter or page change resolves by moving the query behind a `Suspense` boundary and
+reading it with `useAllSuspense(query)`.
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/ConcurrentTodoList.tsx#reading-concurrent-rendering-react
+</include>
+
 ## Filters
 
 ### API Reference

@@ -201,7 +201,7 @@ describe("Worker Bridge with OPFS", () => {
     return track(
       await createDb({
         appId: APP_ID,
-        dbName: uniqueDbName(label),
+        driver: { type: "persistent", dbName: uniqueDbName(label) },
         serverUrl,
         localAuthMode: "anonymous",
         localAuthToken,
@@ -304,7 +304,12 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("creates Db with worker in browser environment", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("init") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("init") },
+      }),
+    );
     expect(db).toBeDefined();
     expect(db).toBeInstanceOf(Db);
   });
@@ -314,7 +319,12 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("inserts a row and queries it back", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("insert-query") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("insert-query") },
+      }),
+    );
 
     // Insert (sync — runs on main-thread in-memory runtime)
     const id = await db.insert(todos, { title: "Buy milk", done: false });
@@ -330,7 +340,12 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("inserts multiple rows and queries all", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("multi-insert") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("multi-insert") },
+      }),
+    );
 
     await db.insert(todos, { title: "Task A", done: false });
     await db.insert(todos, { title: "Task B", done: true });
@@ -348,7 +363,12 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("updates a row", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("update") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("update") },
+      }),
+    );
 
     const id = await db.insert(todos, { title: "Original", done: false });
     await db.update(todos, id, { done: true });
@@ -360,7 +380,12 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("deletes a row", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("delete") },
+      }),
+    );
 
     const id = await db.insert(todos, { title: "Ephemeral", done: false });
     expect((await db.all(allTodos)).length).toBe(1);
@@ -377,7 +402,7 @@ describe("Worker Bridge with OPFS", () => {
   it("persists data across shutdown and re-create (OPFS)", async () => {
     const dbName = uniqueDbName("persistence");
 
-    const db1 = await createDb({ appId: "test-app", dbName });
+    const db1 = await createDb({ appId: "test-app", driver: { type: "persistent", dbName } });
     await db1.insert(todos, { title: "Survive reload", done: true });
     const before = await db1.all(allTodos);
     expect(before.length).toBe(1);
@@ -386,7 +411,9 @@ describe("Worker Bridge with OPFS", () => {
     // New Db with same dbName — worker reopens OPFS, main thread starts empty.
     // Using "worker" settled tier makes the query wait for the worker's
     // QuerySettled response, ensuring OPFS data arrives before resolving.
-    const db2 = track(await createDb({ appId: "test-app", dbName }));
+    const db2 = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     const after = await db2.all(allTodos, { tier: "worker" });
     expect(after.length).toBe(1);
     expect(after[0].title).toBe("Survive reload");
@@ -396,7 +423,9 @@ describe("Worker Bridge with OPFS", () => {
   it("recovers data from WAL after crash (no snapshot flush)", async () => {
     const dbName = uniqueDbName("crash-recovery");
 
-    const db1 = track(await createDb({ appId: "test-app", dbName }));
+    const db1 = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
 
     // insert({ tier: "worker" }) ensures data is in OPFS WAL before we crash
     await db1.insert(todos, { title: "Crash-proof", done: false }, { tier: "worker" });
@@ -417,7 +446,9 @@ describe("Worker Bridge with OPFS", () => {
     await db1.shutdown();
 
     // New Db with same dbName — worker must recover from OPFS WAL
-    const db2 = track(await createDb({ appId: "test-app", dbName }));
+    const db2 = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     const after = await db2.all(allTodos, { tier: "worker" });
     expect(after.length).toBe(2);
 
@@ -426,7 +457,12 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("delete-storage") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("delete-storage") },
+      }),
+    );
 
     await db.insert(todos, { title: "Should be deleted", done: false }, { tier: "worker" });
     const before = await db.all(allTodos, { tier: "worker" });
@@ -448,7 +484,9 @@ describe("Worker Bridge with OPFS", () => {
 
   it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
     const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
-    const seeded = track(await createDb({ appId: "test-app", dbName }));
+    const seeded = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
 
     // Initialize worker/main runtimes with schema v2 from client context.
     await seeded.all(allCatalogueTodos, { tier: "worker" });
@@ -468,7 +506,9 @@ describe("Worker Bridge with OPFS", () => {
     await seeded.shutdown();
     untrack(seeded);
 
-    const offline = track(await createDb({ appId: "test-app", dbName }));
+    const offline = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     await offline.all(allCatalogueTodos, { tier: "worker" });
 
     await waitForCondition(
@@ -496,7 +536,12 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("insert resolves when worker acks", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("with-ack") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("with-ack") },
+      }),
+    );
 
     // insert("worker") should resolve once the worker's OPFS has it
     const id = await db.insert(todos, { title: "Durable", done: false }, { tier: "worker" });
@@ -514,7 +559,12 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("subscriptions fire on insert", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("subscribe") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("subscribe") },
+      }),
+    );
 
     const received: Todo[][] = [];
 
@@ -541,7 +591,12 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("subscriptions fire when using queries with filters", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("subscribe") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("subscribe") },
+      }),
+    );
 
     const received: Todo[][] = [];
 
@@ -571,7 +626,12 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("forwards page lifecycle hints from main thread to worker bridge", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("lifecycle") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("lifecycle") },
+      }),
+    );
 
     await db.insert(todos, { title: "Prime bridge", done: false });
     await (db as any).ensureBridgeReady();
@@ -641,7 +701,9 @@ describe("Worker Bridge with OPFS", () => {
 
   it("local-only subscriptions receive rows from opfs", async () => {
     const dbName = uniqueDbName("sync-local-only");
-    const dbA = track(await createDb({ appId: "test-app", dbName }));
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
@@ -669,7 +731,9 @@ describe("Worker Bridge with OPFS", () => {
     await dbA.shutdown();
     untrack(dbA);
 
-    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
 
     await waitForCondition(
       async () => {
@@ -745,8 +809,12 @@ describe("Worker Bridge with OPFS", () => {
 
   it("routes follower writes through the elected leader", async () => {
     const dbName = uniqueDbName("leader-route");
-    const dbA = track(await createDb({ appId: "test-app", dbName }));
-    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
 
     const receivedByLeader: string[] = [];
@@ -784,8 +852,12 @@ describe("Worker Bridge with OPFS", () => {
 
   it("fails over to follower after leader shutdown", async () => {
     const dbName = uniqueDbName("leader-failover");
-    const dbA = track(await createDb({ appId: "test-app", dbName }));
-    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
 
     await leader.shutdown();
@@ -810,8 +882,12 @@ describe("Worker Bridge with OPFS", () => {
 
   it("re-elects cleanly when a closed leader tab is reopened", async () => {
     const dbName = uniqueDbName("leader-reopen");
-    const dbA = track(await createDb({ appId: "test-app", dbName }));
-    const dbB = track(await createDb({ appId: "test-app", dbName }));
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     const { leader: initialLeader, follower: survivor } = await waitForLeaderAndFollower(dbA, dbB);
 
     await initialLeader.shutdown();
@@ -823,7 +899,9 @@ describe("Worker Bridge with OPFS", () => {
       "Surviving tab should become leader after leader closes",
     );
 
-    const reopened = track(await createDb({ appId: "test-app", dbName }));
+    const reopened = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
     const currentLeader = await waitForSingleLeader([survivor, reopened]);
     const currentFollower = currentLeader === survivor ? reopened : survivor;
     await currentLeader.all(allTodos, { tier: "worker" });

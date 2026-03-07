@@ -37,7 +37,7 @@ import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 export interface DbConfig {
   /** Application identifier (used for isolation) */
   appId: string;
-  /** Storage driver implementation (optional — storage is in-memory by default) */
+  /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
@@ -64,8 +64,14 @@ export interface DbConfig {
   localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
-  /** Database name for OPFS persistence (browser only, default: appId) */
-  dbName?: string;
+}
+
+function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
+  return driver ?? { type: "persistent" };
+}
+
+function isMemoryDriver(driver?: StorageDriver): boolean {
+  return resolveStorageDriver(driver).type === "memory";
 }
 
 /**
@@ -404,7 +410,11 @@ export class Db {
   static async createWithWorker(config: DbConfig): Promise<Db> {
     const wasmModule = await loadWasmModule();
     const db = new Db(config, wasmModule);
-    db.primaryDbName = config.dbName ?? config.appId;
+    const persistentDriver = resolveStorageDriver(config.driver);
+    if (persistentDriver.type !== "persistent") {
+      throw new Error("Worker-backed Db requires driver.type='persistent'");
+    }
+    db.primaryDbName = persistentDriver.dbName ?? config.appId;
     db.workerDbName = db.primaryDbName;
 
     try {
@@ -467,21 +477,36 @@ export class Db {
 
     if (!this.clients.has(key)) {
       // Create in-memory runtime (works for both direct and worker mode)
-      const client = JazzClient.connectSync(this.wasmModule, {
-        appId: this.config.appId,
-        schema,
-        driver: this.config.driver,
-        // In worker mode, don't connect to server directly — worker handles it
-        serverUrl: this.worker ? undefined : this.config.serverUrl,
-        serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
-        env: this.config.env,
-        userBranch: this.config.userBranch,
-        jwtToken: this.config.jwtToken,
-        localAuthMode: this.config.localAuthMode,
-        localAuthToken: this.config.localAuthToken,
-        adminSecret: this.config.adminSecret,
-        tier: this.worker ? undefined : "worker",
-      });
+      const client = JazzClient.connectSync(
+        this.wasmModule,
+        {
+          appId: this.config.appId,
+          schema,
+          driver: this.config.driver,
+          // In worker mode, don't connect to server directly — worker handles it
+          serverUrl: this.worker ? undefined : this.config.serverUrl,
+          serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
+          env: this.config.env,
+          userBranch: this.config.userBranch,
+          jwtToken: this.config.jwtToken,
+          localAuthMode: this.config.localAuthMode,
+          localAuthToken: this.config.localAuthToken,
+          adminSecret: this.config.adminSecret,
+          tier: this.worker ? undefined : "worker",
+          // Keep worker-bridged browser clients on worker durability by default.
+          // For direct (non-worker) clients connected to a server, default to edge.
+          defaultDurabilityTier: this.worker
+            ? undefined
+            : this.config.serverUrl
+              ? "edge"
+              : undefined,
+        },
+        {
+          // Worker-bridged runtimes exchange postcard payloads with peers;
+          // direct browser/server routing keeps JSON payloads.
+          useBinaryEncoding: this.worker !== null,
+        },
+      );
 
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
@@ -521,12 +546,17 @@ export class Db {
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
+    const driver = resolveStorageDriver(this.config.driver);
+    if (driver.type !== "persistent") {
+      throw new Error("Worker bridge is only available for driver.type='persistent'");
+    }
+
     return {
       schemaJson,
       appId: this.config.appId,
       env: this.config.env ?? "dev",
       userBranch: this.config.userBranch ?? "main",
-      dbName: this.workerDbName ?? this.config.dbName ?? this.config.appId,
+      dbName: this.workerDbName ?? driver.dbName ?? this.config.appId,
       serverUrl: this.config.serverUrl,
       serverPathPrefix: this.config.serverPathPrefix,
       jwtToken: this.config.jwtToken,
@@ -829,7 +859,11 @@ export class Db {
   }
 
   private currentWorkerNamespace(): string {
-    return this.workerDbName ?? this.config.dbName ?? this.config.appId;
+    const driver = resolveStorageDriver(this.config.driver);
+    if (driver.type !== "persistent") {
+      throw new Error("Worker namespace is only available for driver.type='persistent'");
+    }
+    return this.workerDbName ?? driver.dbName ?? this.config.appId;
   }
 
   private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
@@ -978,6 +1012,10 @@ export class Db {
    * - If file deletion fails, still respawns worker and then rethrows the deletion error
    */
   async deleteClientStorage(): Promise<void> {
+    if (resolveStorageDriver(this.config.driver).type !== "persistent") {
+      throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
+    }
+
     if (!isBrowser()) {
       console.error(
         "deleteClientStorage() is only available on browser worker-backed Db instances.",
@@ -1194,7 +1232,13 @@ function isBrowser(): boolean {
  */
 export async function createDb(config: DbConfig): Promise<Db> {
   const resolvedConfig = resolveLocalAuthDefaults(config);
-  if (isBrowser()) {
+  const driver = resolveStorageDriver(resolvedConfig.driver);
+
+  if (driver.type === "memory" && !resolvedConfig.serverUrl) {
+    throw new Error("driver.type='memory' requires serverUrl.");
+  }
+
+  if (isBrowser() && driver.type === "persistent") {
     return Db.createWithWorker(resolvedConfig);
   }
   return Db.create(resolvedConfig);
