@@ -1,7 +1,0 @@
-Jazz data propagates through tiers, from fastest local confirmation to broader durability.
-
-| Tier       | Where                 | When to use                                                         |
-| ---------- | --------------------- | ------------------------------------------------------------------- |
-| `"worker"` | Local runtime/storage | Default. Optimistic updates and local durability.                   |
-| `"edge"`   | Nearest sync server   | Confirm data has left the device. Useful for guarded transitions.   |
-| `"core"`   | Central server        | Globally consistent state and strongest durability acknowledgement. |

@@ -1,7 +1,9 @@
 use std::hash::{Hash, Hasher};
 
+use ahash::AHashSet;
+
 use crate::commit::CommitId;
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 
 use super::encoding::{decode_row, encode_row};
 use super::*;
@@ -79,22 +81,55 @@ impl TupleElement {
 /// A tuple of elements with identity based on IDs only.
 /// Length corresponds to number of tables in query (1 for single-table, 2 for join, etc.)
 #[derive(Clone, Debug)]
-pub struct Tuple(pub Vec<TupleElement>);
+pub struct Tuple(pub Vec<TupleElement>, pub TupleProvenance);
+
+pub type ScopedObject = (ObjectId, BranchName);
+pub type TupleProvenance = AHashSet<ScopedObject>;
+
+#[derive(Clone, Debug)]
+pub struct LoadedRow {
+    pub data: Vec<u8>,
+    pub commit_id: CommitId,
+    pub provenance: TupleProvenance,
+}
+
+impl LoadedRow {
+    pub fn new(data: Vec<u8>, commit_id: CommitId, provenance: TupleProvenance) -> Self {
+        Self {
+            data,
+            commit_id,
+            provenance,
+        }
+    }
+}
 
 impl Tuple {
     /// Create a new tuple from elements.
     pub fn new(elements: Vec<TupleElement>) -> Self {
-        Self(elements)
+        Self(elements, TupleProvenance::new())
+    }
+
+    /// Create a tuple with explicit contributing-object provenance.
+    pub fn new_with_provenance(elements: Vec<TupleElement>, provenance: TupleProvenance) -> Self {
+        Self(elements, provenance)
     }
 
     /// Create a single-element tuple from an ObjectId.
     pub fn from_id(id: ObjectId) -> Self {
-        Self(vec![TupleElement::Id(id)])
+        Self::new(vec![TupleElement::Id(id)])
+    }
+
+    /// Create a single-element tuple from an ObjectId scoped to a branch.
+    pub fn from_scoped_id(id: ObjectId, branch: BranchName) -> Self {
+        Self::new_with_provenance(
+            vec![TupleElement::Id(id)],
+            [(id, branch)].into_iter().collect(),
+        )
     }
 
     /// Create a single-element tuple from a Row.
     pub fn from_row(row: &Row) -> Self {
-        Self(vec![TupleElement::from_row(row)])
+        Self::new(vec![TupleElement::from_row(row)])
     }
 
     /// Get all IDs in the tuple.
@@ -178,11 +213,14 @@ impl Tuple {
         let first_id = self.first_id()?;
         let commit_id = first_commit_id.unwrap_or(CommitId([0; 32]));
 
-        Some(Tuple::new(vec![TupleElement::Row {
-            id: first_id,
-            content: combined_content,
-            commit_id,
-        }]))
+        Some(
+            Tuple::new(vec![TupleElement::Row {
+                id: first_id,
+                content: combined_content,
+                commit_id,
+            }])
+            .with_provenance(self.provenance().clone()),
+        )
     }
 
     /// Iterate over elements.
@@ -193,6 +231,27 @@ impl Tuple {
     /// Iterate mutably over elements.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TupleElement> {
         self.0.iter_mut()
+    }
+
+    /// Get the contributing-object provenance for this tuple.
+    pub fn provenance(&self) -> &TupleProvenance {
+        &self.1
+    }
+
+    /// Replace the contributing-object provenance for this tuple.
+    pub fn with_provenance(mut self, provenance: TupleProvenance) -> Self {
+        self.1 = provenance;
+        self
+    }
+
+    /// Merge another tuple's provenance into this tuple.
+    pub fn merge_provenance_from(&mut self, other: &Tuple) {
+        self.1.extend(other.1.iter().copied());
+    }
+
+    /// Merge an explicit provenance set into this tuple.
+    pub fn merge_provenance(&mut self, provenance: &TupleProvenance) {
+        self.1.extend(provenance.iter().copied());
     }
 }
 
@@ -273,23 +332,24 @@ impl TupleDelta {
                 }
             })
             .collect();
-        let updated: Option<Vec<(Row, Row)>> = self
-            .updated
-            .iter()
-            .map(|(old, new)| {
-                if old.len() == 1 && new.len() == 1 {
-                    Some((old.to_single_row()?, new.to_single_row()?))
-                } else {
-                    None
-                }
-            })
-            .collect();
+
+        let mut updated = Vec::with_capacity(self.updated.len());
+        for (old, new) in &self.updated {
+            if old.len() != 1 || new.len() != 1 {
+                return None;
+            }
+            let old_row = old.to_single_row()?;
+            let new_row = new.to_single_row()?;
+            if old_row != new_row {
+                updated.push((old_row, new_row));
+            }
+        }
 
         Some(RowDelta {
             added: added?,
             removed: removed?,
             moved: self.moved.iter().filter_map(|t| t.first_id()).collect(),
-            updated: updated?,
+            updated,
         })
     }
 
@@ -332,31 +392,30 @@ impl TupleDelta {
                 }
             })
             .collect();
-        let updated: Option<Vec<(Row, Row)>> = self
-            .updated
-            .iter()
-            .map(|(old, new)| {
-                let old_row = if old.len() == 1 {
-                    old.to_single_row()
-                } else {
-                    old.flatten_with_descriptors(descriptors, combined_descriptor)?
-                        .to_single_row()
-                }?;
-                let new_row = if new.len() == 1 {
-                    new.to_single_row()
-                } else {
-                    new.flatten_with_descriptors(descriptors, combined_descriptor)?
-                        .to_single_row()
-                }?;
-                Some((old_row, new_row))
-            })
-            .collect();
+        let mut updated = Vec::with_capacity(self.updated.len());
+        for (old, new) in &self.updated {
+            let old_row = if old.len() == 1 {
+                old.to_single_row()
+            } else {
+                old.flatten_with_descriptors(descriptors, combined_descriptor)?
+                    .to_single_row()
+            }?;
+            let new_row = if new.len() == 1 {
+                new.to_single_row()
+            } else {
+                new.flatten_with_descriptors(descriptors, combined_descriptor)?
+                    .to_single_row()
+            }?;
+            if old_row != new_row {
+                updated.push((old_row, new_row));
+            }
+        }
 
         Some(RowDelta {
             added: added?,
             removed: removed?,
             moved: self.moved.iter().filter_map(|t| t.first_id()).collect(),
-            updated: updated?,
+            updated,
         })
     }
 

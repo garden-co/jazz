@@ -1,5 +1,5 @@
-import type { QueryExecutionOptions, WasmSchema } from "../index.js";
-import type { DbConfig, QueryBuilder } from "../runtime/db.js";
+import type { DurabilityTier, QueryExecutionOptions, QueryInput, WasmSchema } from "../index.js";
+import type { DbConfig } from "../runtime/db.js";
 
 export const DEVTOOLS_BRIDGE_CHANNEL = "jazz-devtools-v1" as const;
 export const DEVTOOLS_PORT_NAME = "jazz-inspector-devtools" as const;
@@ -33,14 +33,16 @@ export type DevtoolsAnnounceResponsePayload = {
 };
 
 export type DevtoolsClientQueryRequestPayload = {
-  query: Omit<QueryBuilder<any>, "_build"> & { _build: string };
+  query: string | QueryInput;
   options?: QueryExecutionOptions;
+  tier?: DurabilityTier;
 };
 export type DevtoolsClientQueryResponsePayload = unknown[];
 
 export type DevtoolsClientSubscribeRequestPayload = {
-  query: Omit<QueryBuilder<any>, "_build"> & { _build: string };
+  query: string | QueryInput;
   options?: QueryExecutionOptions;
+  tier?: DurabilityTier;
   subscriptionId: string;
 };
 export type DevtoolsClientSubscribeResponsePayload = { subscribed: true };
@@ -161,6 +163,6 @@ export function sanitizeDbConfigForBridge(dbConfig: DbConfig | null): DbConfig |
     localAuthMode: dbConfig.localAuthMode,
     localAuthToken: dbConfig.localAuthToken,
     adminSecret: dbConfig.adminSecret,
-    dbName: dbConfig.dbName,
+    driver: dbConfig.driver,
   };
 }

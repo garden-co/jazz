@@ -28,11 +28,12 @@ use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchema, Value,
 };
+use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, InboxEntry, PersistenceTier, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncManager, SyncPayload,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -648,10 +649,21 @@ enum WorkerCommand {
         session: Session,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    EnsureClientAsBackend {
+        app_id: AppId,
+        client_id: ClientId,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     SyncAsSession {
         app_id: AppId,
         client_id: ClientId,
         session: Session,
+        payload: SyncPayload,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SyncAsBackend {
+        app_id: AppId,
+        client_id: ClientId,
         payload: SyncPayload,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
@@ -677,7 +689,9 @@ impl WorkerCommand {
         match self {
             WorkerCommand::CreateRuntime { app_id, .. }
             | WorkerCommand::EnsureClientWithSession { app_id, .. }
+            | WorkerCommand::EnsureClientAsBackend { app_id, .. }
             | WorkerCommand::SyncAsSession { app_id, .. }
+            | WorkerCommand::SyncAsBackend { app_id, .. }
             | WorkerCommand::SyncAsAdmin { app_id, .. }
             | WorkerCommand::GetCatalogueSchema { app_id, .. }
             | WorkerCommand::GetSchemaHashes { app_id, .. } => *app_id,
@@ -845,6 +859,21 @@ impl WorkerPool {
         Self::await_result(worker, response_rx).await
     }
 
+    async fn ensure_client_as_backend(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::EnsureClientAsBackend {
+            app_id,
+            client_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
     async fn sync_as_session(
         &self,
         app_id: AppId,
@@ -857,6 +886,23 @@ impl WorkerPool {
             app_id,
             client_id,
             session,
+            payload,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn sync_as_backend(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        payload: SyncPayload,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::SyncAsBackend {
+            app_id,
+            client_id,
             payload,
             response: response_tx,
         };
@@ -1057,7 +1103,10 @@ impl MetaStore {
             )
             .build();
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new().with_durability_tiers(vec![
+            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
+        ]);
         let schema_manager = SchemaManager::new(
             sync_manager,
             meta_schema,
@@ -1097,7 +1146,7 @@ impl MetaStore {
         let query = QueryBuilder::new("apps").build();
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("meta query error: {e}"))?;
 
         let rows = future
@@ -1115,7 +1164,7 @@ impl MetaStore {
             .build();
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("meta query error: {e}"))?;
         let mut rows = future
             .await
@@ -1253,7 +1302,7 @@ impl MetaStore {
 
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("external identity query error: {e}"))?;
         let mut rows = future
             .await
@@ -1486,7 +1535,10 @@ impl AppRuntime {
             )
         })?;
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new().with_durability_tiers(vec![
+            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
+        ]);
         let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
         let db_path = data_dir.join("jazz.surrealkv");
@@ -1635,6 +1687,32 @@ async fn run_worker_loop(
                         );
                     }
                 }
+                WorkerCommand::EnsureClientAsBackend {
+                    app_id,
+                    client_id,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
+                                Err(err.to_string())
+                            } else {
+                                Ok(())
+                            }
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "ensure-backend response receiver dropped"
+                        );
+                    }
+                }
                 WorkerCommand::SyncAsSession {
                     app_id,
                     client_id,
@@ -1666,6 +1744,38 @@ async fn run_worker_loop(
                             app_id = %app_id,
                             client_id = %client_id,
                             "session-sync response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::SyncAsBackend {
+                    app_id,
+                    client_id,
+                    payload,
+                    response,
+                } => {
+                    let result = match app_runtimes.get(&app_id) {
+                        Some(runtime) => {
+                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
+                                source: Source::Client(client_id),
+                                payload,
+                            }) {
+                                Err(err.to_string())
+                            } else {
+                                runtime.runtime.flush().await.map_err(|err| err.to_string())
+                            }
+                        }
+                        None => Err(format!("missing runtime for app {app_id}")),
+                    };
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "backend-sync response receiver dropped"
                         );
                     }
                 }
@@ -1752,6 +1862,7 @@ struct ServerState {
     meta_store: Arc<MetaStore>,
     jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
     http_client: reqwest::Client,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl ServerState {
@@ -1928,6 +2039,8 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+
     let state = Arc::new(ServerState {
         apps: tokio::sync::RwLock::new(app_map),
         data_root,
@@ -1936,6 +2049,7 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         meta_store,
         jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
         http_client,
+        shutdown_tx: shutdown_tx.clone(),
     });
 
     info!(
@@ -1958,12 +2072,12 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_tx))
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -1985,6 +2099,7 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
+    let _ = shutdown_tx.send(true);
     info!("shutdown signal received");
 }
 
@@ -2569,6 +2684,22 @@ fn validate_admin_secret(
     }
 }
 
+fn validate_backend_secret(
+    headers: &HeaderMap,
+    app_config: &AppConfig,
+    meta_store: &MetaStore,
+) -> Result<bool, (StatusCode, &'static str)> {
+    let provided = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match provided {
+        Some(got) if meta_store.verify_secret(got, &app_config.backend_secret_hash) => Ok(true),
+        Some(_) => Err((StatusCode::UNAUTHORIZED, "Invalid backend secret")),
+        None => Ok(false),
+    }
+}
+
 fn validate_internal_secret(
     headers: &HeaderMap,
     expected_secret: &str,
@@ -2925,13 +3056,9 @@ async fn events_handler(
         ));
     }
 
-    let session = extract_session(&headers, app_id, &cfg, &state)
-        .await
-        .map_err(|(status, msg)| (status, msg.to_string()))?
-        .ok_or((
-            StatusCode::UNAUTHORIZED,
-            "session required for event stream".to_string(),
-        ))?;
+    let is_backend = validate_backend_secret(&headers, &cfg, &state.meta_store)
+        .map_err(|(status, msg)| (status, msg.to_string()))?;
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
 
     let client_id = match params.client_id {
         Some(s) => ClientId::parse(&s)
@@ -2939,12 +3066,30 @@ async fn events_handler(
         None => ClientId::new(),
     };
 
-    if let Err(err) = state
-        .workers
-        .ensure_client_with_session(app_id, client_id, session)
-        .await
-    {
-        return Err(worker_dispatch_status_and_message(err));
+    if is_backend && !has_session_header {
+        if let Err(err) = state
+            .workers
+            .ensure_client_as_backend(app_id, client_id)
+            .await
+        {
+            return Err(worker_dispatch_status_and_message(err));
+        }
+    } else {
+        let session = extract_session(&headers, app_id, &cfg, &state)
+            .await
+            .map_err(|(status, msg)| (status, msg.to_string()))?
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                "session required for event stream".to_string(),
+            ))?;
+
+        if let Err(err) = state
+            .workers
+            .ensure_client_with_session(app_id, client_id, session)
+            .await
+        {
+            return Err(worker_dispatch_status_and_message(err));
+        }
     }
 
     let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
@@ -2976,6 +3121,7 @@ async fn events_handler(
     );
 
     let mut sync_rx = app.sync_broadcast.subscribe();
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
     let app_cleanup = app.clone();
     let client_id_str = client_id.to_string();
     let next_sync_seq = 1u64;
@@ -3013,6 +3159,11 @@ async fn events_handler(
                 }
                 _ = heartbeat_interval.tick() => {
                     yield Ok(encode_frame(&ServerEvent::Heartbeat));
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
             }
         }
@@ -3071,11 +3222,23 @@ async fn sync_handler(
             return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
     };
+    let is_backend = match validate_backend_secret(&headers, &cfg, &state.meta_store) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
 
     let dispatch_result = if is_admin {
         state
             .workers
             .sync_as_admin(app_id, request.client_id, request.payload)
+            .await
+    } else if is_backend && !has_session_header {
+        state
+            .workers
+            .sync_as_backend(app_id, request.client_id, request.payload)
             .await
     } else {
         let session = match extract_session(&headers, app_id, &cfg, &state).await {

@@ -11,6 +11,7 @@ export interface SyncAuth {
   jwtToken?: string;
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
+  backendSecret?: string;
   adminSecret?: string;
   clientId?: string;
   pathPrefix?: string;
@@ -39,7 +40,7 @@ export interface StreamCallbacks {
 
 export interface SyncStreamControllerOptions {
   logPrefix?: string;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
   onConnected(): void;
@@ -53,13 +54,13 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(): void;
   removeServer(): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(payload: string): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
   logPrefix?: string;
   getRuntime(): RuntimeSyncTarget | null | undefined;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
 }
@@ -207,7 +208,7 @@ export class SyncStreamController {
     const headers: Record<string, string> = {
       Accept: "application/octet-stream",
     };
-    applyUserAuthHeaders(headers, this.options.getAuth());
+    applySyncAuthHeaders(headers, this.options.getAuth());
 
     const abortController = new AbortController();
     this.streamAbortController = abortController;
@@ -278,16 +279,71 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
 }
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payload: unknown): void | Promise<void>;
-  onClientPayload?(payloadJson: string): void;
+  onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
+}
+
+export type OutboxDestinationKind = "server" | "client";
+export type RuntimeSyncOutboxCallbackArgs =
+  | [
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payload: Uint8Array | string,
+      isCatalogue: boolean,
+    ]
+  | [
+      err: unknown,
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payload: Uint8Array | string,
+      isCatalogue: boolean,
+    ];
+export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
+
+function isOutboxDestinationKind(value: unknown): value is OutboxDestinationKind {
+  return value === "server" || value === "client";
+}
+
+function isOutboxPayload(value: unknown): value is Uint8Array | string {
+  return typeof value === "string" || value instanceof Uint8Array;
+}
+
+function normalizeOutboxCallbackArgs(args: unknown[]): {
+  destinationKind: OutboxDestinationKind;
+  payload: Uint8Array | string;
+  isCatalogue: boolean;
+} | null {
+  // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[0])) {
+    const payload = args[2];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[0],
+      payload: payload,
+      isCatalogue: Boolean(args[3]),
+    };
+  }
+
+  // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[1])) {
+    const payload = args[3];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[1],
+      payload: payload,
+      isCatalogue: Boolean(args[4]),
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -295,39 +351,29 @@ export interface SyncOutboxRouterOptions {
  */
 export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
-): (envelope: string) => void {
+): RuntimeSyncOutboxCallback {
   const logPrefix = options.logPrefix ?? "";
 
-  return (envelope: string) => {
-    let parsed: { destination?: unknown; payload?: unknown };
-    try {
-      parsed = JSON.parse(envelope) as { destination?: unknown; payload?: unknown };
-    } catch (error) {
-      console.error(`${logPrefix}Sync envelope parse error:`, error);
+  return (...args: RuntimeSyncOutboxCallbackArgs) => {
+    const normalized = normalizeOutboxCallbackArgs(args);
+    if (!normalized) {
+      console.error(`${logPrefix}Invalid sync outbox callback arguments`, args);
       return;
     }
 
-    const destination = parsed.destination;
-    const payload = parsed.payload;
-    const isObjectDestination = destination !== null && typeof destination === "object";
+    const { destinationKind, payload, isCatalogue } = normalized;
+    if (destinationKind === "client") {
+      options.onClientPayload?.(payload as Uint8Array);
+      return;
+    }
 
-    if (isObjectDestination && "Client" in destination) {
-      const payloadJson = JSON.stringify(payload);
-      if (payloadJson !== undefined) {
-        options.onClientPayload?.(payloadJson);
+    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
+      if (options.onServerPayloadError) {
+        options.onServerPayloadError(error);
+        return;
       }
-      return;
-    }
-
-    if (isObjectDestination && "Server" in destination) {
-      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
-        if (options.onServerPayloadError) {
-          options.onServerPayloadError(error);
-          return;
-        }
-        console.error(`${logPrefix}Sync POST error:`, error);
-      });
-    }
+      console.error(`${logPrefix}Sync POST error:`, error);
+    });
   };
 }
 
@@ -424,16 +470,19 @@ export function applyUserAuthHeaders(headers: Record<string, string>, auth: Sync
 }
 
 /**
- * Check if a sync payload is for a catalogue object (schema or lens).
- * Catalogue payloads use admin-secret auth instead of JWT.
+ * Apply runtime sync auth headers.
+ *
+ * Precedence:
+ * 1. Backend privileged auth (`X-Jazz-Backend-Secret`)
+ * 2. End-user auth (JWT/local)
  */
-export function isCataloguePayload(payload: any): boolean {
-  const metadata = payload?.ObjectUpdated?.metadata?.metadata;
-  if (metadata) {
-    const t = metadata["type"];
-    return t === "catalogue_schema" || t === "catalogue_lens";
+export function applySyncAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
+  if (auth.backendSecret) {
+    headers["X-Jazz-Backend-Secret"] = auth.backendSecret;
+    return;
   }
-  return false;
+
+  applyUserAuthHeaders(headers, auth);
 }
 
 /**
@@ -444,12 +493,12 @@ export function isCataloguePayload(payload: any): boolean {
  */
 export async function sendSyncPayload(
   serverUrl: string,
-  payload: any,
+  payloadJson: string,
+  isCatalogue: boolean,
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  const cataloguePayload = isCataloguePayload(payload);
-  if (cataloguePayload && !auth.adminSecret) {
+  if (isCatalogue && !auth.adminSecret) {
     return;
   }
 
@@ -457,18 +506,15 @@ export async function sendSyncPayload(
     "Content-Type": "application/json",
   };
 
-  if (cataloguePayload) {
+  if (isCatalogue) {
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
   } else {
-    applyUserAuthHeaders(headers, auth);
+    applySyncAuthHeaders(headers, auth);
   }
 
-  const body = JSON.stringify({
-    payload,
-    client_id: auth.clientId ?? fallbackClientId,
-  });
+  const body = `{"payload":${payloadJson},"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
 
   let response: Response;
   try {

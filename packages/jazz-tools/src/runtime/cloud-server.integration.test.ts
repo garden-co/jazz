@@ -322,7 +322,7 @@ async function waitForRows(
   queryJson: string,
   predicate: (rows: Row[]) => boolean,
   timeoutMs = 20000,
-  settledTier: "edge" | undefined = "edge",
+  tier: "edge" | undefined = "edge",
 ): Promise<Row[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: Row[] = [];
@@ -330,7 +330,7 @@ async function waitForRows(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await client.query(queryJson, settledTier ? { settledTier } : undefined);
+      const rows = await client.query(queryJson, tier ? { tier } : undefined);
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
@@ -346,6 +346,24 @@ async function waitForRows(
   );
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function connectClient(context: AppContext): Promise<JazzClient> {
   const [clientMod, runtimeUtils] = await Promise.all([
     import("./client.js"),
@@ -356,6 +374,7 @@ async function connectClient(context: AppContext): Promise<JazzClient> {
     appId: context.appId,
     env: context.env,
     userBranch: context.userBranch,
+    tier: "worker",
   });
 
   return clientMod.JazzClient.connectWithRuntime(runtime, context);
@@ -913,77 +932,77 @@ function buildProfileByIdQuery(schema: WasmSchema, id: string): string {
 }
 
 async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
-  const aliceProfileId = await client.createWithAck(
+  const aliceProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "alice" },
       { type: "Text", value: "alice" },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const bobProfileId = await client.createWithAck(
+  const bobProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "bob" },
       { type: "Text", value: "bob" },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const carolProfileId = await client.createWithAck(
+  const carolProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "carol" },
       { type: "Text", value: "carol" },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const eveProfileId = await client.createWithAck(
+  const eveProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "eve" },
       { type: "Text", value: "eve" },
     ],
-    "edge",
+    { tier: "edge" },
   );
   const alicePrincipal = "alice";
   const bobPrincipal = "bob";
   const carolPrincipal = "carol";
   const evePrincipal = "eve";
 
-  const alicePersonId = await client.createWithAck(
+  const alicePersonId = await client.create(
     "people",
     [
       { type: "Uuid", value: aliceProfileId },
       { type: "Text", value: alicePrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const bobPersonId = await client.createWithAck(
+  const bobPersonId = await client.create(
     "people",
     [
       { type: "Uuid", value: bobProfileId },
       { type: "Text", value: bobPrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  await client.createWithAck(
+  await client.create(
     "people",
     [
       { type: "Uuid", value: carolProfileId },
       { type: "Text", value: carolPrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const evePersonId = await client.createWithAck(
+  const evePersonId = await client.create(
     "people",
     [
       { type: "Uuid", value: eveProfileId },
       { type: "Text", value: evePrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
 
-  await client.createWithAck(
+  await client.create(
     "friendships",
     [
       { type: "Uuid", value: alicePersonId },
@@ -991,9 +1010,9 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
       { type: "Text", value: alicePrincipal },
       { type: "Text", value: bobPrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  await client.createWithAck(
+  await client.create(
     "friendships",
     [
       { type: "Uuid", value: evePersonId },
@@ -1001,7 +1020,7 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
       { type: "Text", value: evePrincipal },
       { type: "Text", value: alicePrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
 
   return {
@@ -1033,27 +1052,41 @@ async function runSocialReadPermissionsScenario(style: SocialPolicyStyle): Promi
 
     const aliceSession = seeder.forSession({ user_id: seeded.alicePrincipal, claims: {} });
     const carolSession = seeder.forSession({ user_id: seeded.carolPrincipal, claims: {} });
-    await seeder.shutdown();
-    seeder = null;
 
-    const aliceProfiles = await aliceSession.query(queryAllProfiles);
+    const aliceProfiles = await withTimeout(
+      aliceSession.query(queryAllProfiles),
+      10000,
+      "alice session query(all profiles) timed out",
+    );
     const visibleIds = [...new Set(aliceProfiles.map((row) => row.id))].sort();
     expect(visibleIds).toEqual([seeded.bobProfileId, seeded.eveProfileId].sort());
 
-    const bobRows = await aliceSession.query(
-      buildProfileByIdQuery(socialSchema, seeded.bobProfileId),
+    const bobRows = await withTimeout(
+      aliceSession.query(buildProfileByIdQuery(socialSchema, seeded.bobProfileId)),
+      10000,
+      "alice session query(bob profile) timed out",
     );
     expect(bobRows).toHaveLength(1);
     expect(bobRows[0]?.values[0]).toEqual({ type: "Text", value: "bob" });
 
-    const carolRowsForAlice = await aliceSession.query(
-      buildProfileByIdQuery(socialSchema, seeded.carolProfileId),
+    const carolRowsForAlice = await withTimeout(
+      aliceSession.query(buildProfileByIdQuery(socialSchema, seeded.carolProfileId)),
+      10000,
+      "alice session query(carol profile) timed out",
     );
     expect(carolRowsForAlice).toEqual([]);
 
-    const carolFriendships = await carolSession.query(queryAllFriendships);
+    const carolFriendships = await withTimeout(
+      carolSession.query(queryAllFriendships),
+      10000,
+      "carol session query(friendships) timed out",
+    );
     expect(carolFriendships).toHaveLength(2);
-    const carolProfiles = await carolSession.query(queryAllProfiles);
+    const carolProfiles = await withTimeout(
+      carolSession.query(queryAllProfiles),
+      10000,
+      "carol session query(all profiles) timed out",
+    );
     expect(carolProfiles).toEqual([]);
   } finally {
     if (seeder) await seeder.shutdown();
@@ -1108,7 +1141,8 @@ describe("cloud-server integration (Jazz TS)", () => {
 
       await sendSyncPayload(
         server.baseUrl,
-        makeSyncPayload(),
+        JSON.stringify(makeSyncPayload()),
+        false,
         { jwtToken: signJwt("valid-user", JWT_SECRET), pathPrefix },
         "[valid] ",
       );
@@ -1116,7 +1150,8 @@ describe("cloud-server integration (Jazz TS)", () => {
       await expect(
         sendSyncPayload(
           server.baseUrl,
-          makeSyncPayload(),
+          JSON.stringify(makeSyncPayload()),
+          false,
           { jwtToken: signJwt("invalid-user", "wrong-secret"), pathPrefix },
           "[invalid] ",
         ),
@@ -1220,13 +1255,13 @@ describe("cloud-server integration (Jazz TS)", () => {
         makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      const rowId = await clientA.createWithAck(
+      const rowId = await clientA.create(
         "todos",
         [
           { type: "Text", value: "shared-item" },
           { type: "Boolean", value: false },
         ],
-        "edge",
+        { tier: "edge" },
       );
 
       const rowsAfterCreate = await waitForRows(clientB, queryAllTodos, (rows) =>
@@ -1235,7 +1270,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
       expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
 
-      await clientA.updateWithAck(rowId, { done: { type: "Boolean", value: true } }, "edge");
+      await clientA.update(rowId, { done: { type: "Boolean", value: true } }, { tier: "edge" });
       const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
         const row = rows.find((r) => r.id === rowId);
         return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
@@ -1243,7 +1278,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await clientA.deleteWithAck(rowId, "edge");
+      await clientA.delete(rowId, { tier: "edge" });
       await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (clientA) await clientA.shutdown();
@@ -1287,13 +1322,13 @@ describe("cloud-server integration (Jazz TS)", () => {
         writer = await connectClient(
           makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
-        await writer.createWithAck(
+        await writer.create(
           "todos",
           [
             { type: "Text", value: "persisted-item" },
             { type: "Boolean", value: false },
           ],
-          "edge",
+          { tier: "edge" },
         );
         await waitForRows(writer, queryAllTodos, (rows) => rows.length >= 1, 15000);
         return app.app_id;
@@ -1403,21 +1438,21 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
         makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), schema),
       );
 
-      await seeder.createWithAck(
+      await seeder.create(
         "owned_items",
         [
           { type: "Text", value: "bob-item" },
           { type: "Text", value: "bob" },
         ],
-        "edge",
+        { tier: "edge" },
       );
-      await seeder.createWithAck(
+      await seeder.create(
         "owned_items",
         [
           { type: "Text", value: "carol-item" },
           { type: "Text", value: "carol" },
         ],
-        "edge",
+        { tier: "edge" },
       );
 
       await seeder.shutdown();
@@ -1427,17 +1462,17 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       aliceClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
       );
-      await aliceClient.createWithAck(
+      await aliceClient.create(
         "owned_items",
         [
           { type: "Text", value: "alice-item" },
           { type: "Text", value: "alice" },
         ],
-        "edge",
+        { tier: "edge" },
       );
 
       // Establish sync by fetching data without session first.
-      await aliceClient.queryInternal(queryAllItems, undefined, { settledTier: "edge" });
+      await aliceClient.queryInternal(queryAllItems, undefined, { tier: "edge" });
 
       // query() should only return alice's row.
       const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 1);
@@ -1504,13 +1539,13 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       aliceClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
       );
-      await aliceClient.createWithAck(
+      await aliceClient.create(
         "owned_items",
         [
           { type: "Text", value: "alice-item" },
           { type: "Text", value: "alice" },
         ],
-        "edge",
+        { tier: "edge" },
       );
 
       // Bob connects and queries WITHOUT a session (explicitly undefined).
@@ -1518,7 +1553,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       bobClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("bob", JWT_SECRET), schema),
       );
-      const rows = await bobClient.queryInternal(queryAllItems, undefined, { settledTier: "edge" });
+      const rows = await bobClient.queryInternal(queryAllItems, undefined, { tier: "edge" });
 
       // Server should fall back to Bob's connection-level session.
       // The hashed principal ID won't match Alice's ownerId, so zero rows.

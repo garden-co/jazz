@@ -7,8 +7,8 @@ import { access, readdir, writeFile } from "fs/promises";
 import { join, basename, dirname } from "path";
 import { pathToFileURL } from "url";
 import { register } from "tsx/esm/api";
-import { schemaToSql, lensToSql } from "./sql-gen.js";
-import { getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
+import { schemaToSql, lensesToSql } from "./sql-gen.js";
+import { getCollectedSchema, getCollectedMigrations, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
 import type { Lens, Schema, TablePolicies, OperationPolicy } from "./schema.js";
 
@@ -52,12 +52,12 @@ async function loadSchema(filePath: string): Promise<Schema> {
   return getCollectedSchema();
 }
 
-async function loadMigrationModule(filePath: string): Promise<Lens | null> {
+async function loadMigrationModule(filePath: string): Promise<Lens[]> {
   resetCollectedState();
   // Add cache-busting query param since Node.js caches dynamic imports
   const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
   await import(url);
-  return getCollectedMigration();
+  return getCollectedMigrations();
 }
 
 async function generateSqlForSchemaFile(tsFile: string, schema: Schema): Promise<void> {
@@ -104,15 +104,15 @@ function migrationSqlFilename(tsFile: string, direction: "fwd" | "bwd"): string 
 }
 
 async function generateSqlForMigrationFile(tsFile: string): Promise<void> {
-  const lens = await loadMigrationModule(tsFile);
+  const lenses = await loadMigrationModule(tsFile);
 
-  if (!lens) {
+  if (lenses.length === 0) {
     console.error(`No migration found in ${basename(tsFile)}`);
     return;
   }
 
-  const fwdSql = lensToSql(lens, "fwd");
-  const bwdSql = lensToSql(lens, "bwd");
+  const fwdSql = lensesToSql(lenses, "fwd");
+  const bwdSql = lensesToSql(lenses, "bwd");
 
   const fwdFile = migrationSqlFilename(tsFile, "fwd");
   const bwdFile = migrationSqlFilename(tsFile, "bwd");

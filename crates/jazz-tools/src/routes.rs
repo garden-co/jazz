@@ -22,7 +22,7 @@ use tower_http::trace::TraceLayer;
 use crate::commands::server::{ConnectionState, ServerState};
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
-    validate_jwt_identity,
+    validate_backend_secret, validate_jwt_identity,
 };
 use jazz_tools::query_manager::types::SchemaHash;
 
@@ -98,46 +98,59 @@ async fn events_handler(
         tracing::info!(%client_id, "events stream connecting");
     }
 
-    // Extract session from headers (JWT or backend impersonation)
-    let session = {
-        let external_identities = state.external_identities.read().await;
-        match extract_session(
-            &headers,
-            state.app_id,
-            &state.auth_config,
-            Some(&external_identities),
-        ) {
-            Ok(s) => s,
-            Err((status, msg)) => {
-                return Err((status, msg.to_string()));
-            }
+    let backend_secret = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|v| v.to_str().ok());
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
+
+    if backend_secret.is_some() && !has_session_header {
+        if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
+            return Err((status, msg.to_string()));
         }
-    };
+        let _ = state.runtime.add_client(client_id, None);
+        let _ = state.runtime.set_client_backend(client_id);
+    } else {
+        // Extract session from headers (JWT, local auth, or backend impersonation)
+        let session = {
+            let external_identities = state.external_identities.read().await;
+            match extract_session(
+                &headers,
+                state.app_id,
+                &state.auth_config,
+                Some(&external_identities),
+            ) {
+                Ok(s) => s,
+                Err((status, msg)) => {
+                    return Err((status, msg.to_string()));
+                }
+            }
+        };
+
+        // Require a valid session — reject connections without authentication.
+        let session = match session {
+            Some(s) => s,
+            None => {
+                tracing::error!(
+                    "Stream connection rejected: no session (client_id={}). Client must send auth headers.",
+                    client_id
+                );
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Session required for event stream. Provide JWT, local auth headers, or backend secret."
+                        .to_string(),
+                ));
+            }
+        };
+
+        // Ensure client is registered with session (idempotent — won't overwrite
+        // existing role if client was already registered by a /sync request).
+        let _ = state.runtime.ensure_client_with_session(client_id, session);
+    }
 
     // Generate connection ID
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-    // Require a valid session — reject connections without authentication.
-    let session = match session {
-        Some(s) => s,
-        None => {
-            tracing::error!(
-                "Stream connection rejected: no session (client_id={}). Client must send auth headers.",
-                client_id
-            );
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "Session required for event stream. Provide JWT, local auth headers, or backend secret."
-                    .to_string(),
-            ));
-        }
-    };
-
-    // Ensure client is registered with session (idempotent — won't overwrite
-    // existing role if client was already registered by a /sync request).
-    let _ = state.runtime.ensure_client_with_session(client_id, session);
 
     // Subscribe to broadcast channel for this client's events
     let mut sync_rx = state.sync_broadcast.subscribe();
@@ -278,6 +291,29 @@ async fn sync_handler(
                 .into_response();
         }
         if let Err(e) = state.runtime.set_client_admin(request.client_id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
+    } else if headers.get("X-Jazz-Backend-Secret").is_some()
+        && headers.get("X-Jazz-Session").is_none()
+    {
+        let backend_secret = headers
+            .get("X-Jazz-Backend-Secret")
+            .and_then(|v| v.to_str().ok());
+        if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+        if let Err(e) = state.runtime.add_client(request.client_id, None) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
+        if let Err(e) = state.runtime.set_client_backend(request.client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -651,7 +687,7 @@ mod tests {
     use groove::runtime_tokio::TokioRuntime;
     use groove::schema_manager::{AppId, SchemaManager};
     use groove::storage::SurrealKvStorage;
-    use groove::sync_manager::{ClientId, PersistenceTier, SyncManager, SyncPayload};
+    use groove::sync_manager::{ClientId, DurabilityTier, SyncManager, SyncPayload};
     use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::{RwLock, broadcast};
@@ -667,7 +703,8 @@ mod tests {
         let storage =
             SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
         let schema_manager =
             SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
         let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
@@ -756,7 +793,8 @@ mod tests {
             )
             .build();
         let schema_hash = SchemaHash::compute(&schema);
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
         let schema_manager = SchemaManager::new(
             sync_manager,
             schema,

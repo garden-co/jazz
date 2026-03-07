@@ -18,6 +18,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Once;
 
 use js_sys::Function;
+use js_sys::Uint8Array;
 use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
@@ -38,11 +39,14 @@ fn init_tracing() {
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::manager::LocalUpdates;
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
-use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +57,8 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
+    SyncPayload,
 };
 
 use crate::query::parse_query;
@@ -82,13 +87,13 @@ struct WasmLensEdgeDebug {
 }
 
 /// Parse a persistence tier string from JS.
-fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
+fn parse_tier(tier: &str) -> Result<DurabilityTier, JsError> {
     match tier {
-        "worker" => Ok(PersistenceTier::Worker),
-        "edge" => Ok(PersistenceTier::EdgeServer),
-        "core" => Ok(PersistenceTier::CoreServer),
+        "worker" => Ok(DurabilityTier::Worker),
+        "edge" => Ok(DurabilityTier::EdgeServer),
+        "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(JsError::new(&format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'core'.",
+            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
             tier
         ))),
     }
@@ -97,23 +102,147 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 #[derive(Debug, serde::Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
+    local_updates: Option<String>,
 }
 
-fn parse_propagation(options_json: Option<String>) -> Result<QueryPropagation, JsError> {
+fn parse_read_durability_options(
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<(ReadDurabilityOptions, QueryPropagation), JsError> {
+    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
     let Some(raw) = options_json else {
-        return Ok(QueryPropagation::Full);
+        return Ok((
+            ReadDurabilityOptions {
+                tier: parsed_tier,
+                local_updates: LocalUpdates::Immediate,
+            },
+            QueryPropagation::Full,
+        ));
     };
 
     let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
         .map_err(|e| JsError::new(&format!("Invalid query options JSON: {}", e)))?;
 
-    match options.propagation.as_deref() {
+    let propagation = match options.propagation.as_deref() {
         None | Some("full") => Ok(QueryPropagation::Full),
         Some("local-only") => Ok(QueryPropagation::LocalOnly),
         Some(other) => Err(JsError::new(&format!(
             "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
             other
         ))),
+    }?;
+
+    let local_updates = match options.local_updates.as_deref() {
+        None | Some("immediate") => Ok(LocalUpdates::Immediate),
+        Some("deferred") => Ok(LocalUpdates::Deferred),
+        Some(other) => Err(JsError::new(&format!(
+            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
+            other
+        ))),
+    }?;
+
+    Ok((
+        ReadDurabilityOptions {
+            tier: parsed_tier,
+            local_updates,
+        },
+        propagation,
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_subscription_inputs(
+    query_json: &str,
+    session_json: Option<String>,
+    settled_tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<
+    (
+        Query,
+        Option<Session>,
+        ReadDurabilityOptions,
+        QueryPropagation,
+    ),
+    JsError,
+> {
+    let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
+    let session = if let Some(json) = session_json {
+        Some(
+            serde_json::from_str::<Session>(&json)
+                .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
+        )
+    } else {
+        None
+    };
+    let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
+    Ok((query, session, durability, propagation))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn make_subscription_callback(on_update: Function) -> impl Fn(SubscriptionDelta) + 'static {
+    move |delta: SubscriptionDelta| {
+        let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
+            let values = decode_row(descriptor, &row.data)
+                .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
+                .unwrap_or_default();
+            SubscriptionRow {
+                id: row.id.uuid().to_string(),
+                values,
+            }
+        };
+
+        let descriptor = &delta.descriptor;
+        let wasm_delta = SubscriptionRowDelta(
+            delta
+                .ordered_delta
+                .removed
+                .iter()
+                .map(|change| {
+                    SubscriptionRowChange::Removed(SubscriptionRowRemoved {
+                        kind: 1,
+                        id: change.id.uuid().to_string(),
+                        index: change.index,
+                    })
+                })
+                .chain(delta.ordered_delta.updated.iter().map(|change| {
+                    SubscriptionRowChange::Updated(SubscriptionRowUpdated {
+                        kind: 2,
+                        id: change.id.uuid().to_string(),
+                        index: change.new_index,
+                        row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
+                    })
+                }))
+                .chain(delta.ordered_delta.added.iter().map(|change| {
+                    SubscriptionRowChange::Added(SubscriptionRowAdded {
+                        kind: 0,
+                        id: change.id.uuid().to_string(),
+                        index: change.index,
+                        row: row_to_wasm(&change.row, descriptor),
+                    })
+                }))
+                .collect::<Vec<_>>(),
+        );
+
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+            let _ = on_update.call1(&JsValue::NULL, &delta_value);
+        }
+    }
+}
+
+fn parse_node_durability_tiers(tier: Option<&str>) -> Result<Vec<DurabilityTier>, JsError> {
+    let Some(raw) = tier else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![parse_tier(raw)?])
+}
+
+fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
+    match tier {
+        Some("worker") => "worker",
+        Some("edge") => "edge",
+        Some("global") => "global",
+        _ => "client",
     }
 }
 
@@ -201,12 +330,14 @@ impl Scheduler for WasmScheduler {
 /// The callback is set lazily via `on_sync_message_to_send()`.
 pub struct JsSyncSender {
     callback: RefCell<Option<Function>>,
+    use_binary_encoding: bool,
 }
 
 impl JsSyncSender {
-    fn new() -> Self {
+    fn new(use_binary_encoding: bool) -> Self {
         Self {
             callback: RefCell::new(None),
+            use_binary_encoding,
         }
     }
 
@@ -218,9 +349,31 @@ impl JsSyncSender {
 impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
-            if let Ok(json) = serde_json::to_string(&message) {
-                let js_value = JsValue::from_str(&json);
-                let _ = callback.call1(&JsValue::NULL, &js_value);
+            let is_catalogue = message.payload.is_catalogue();
+            let (destination_kind, destination_id) = match message.destination {
+                Destination::Server(server_id) => ("server", server_id.0.to_string()),
+                Destination::Client(client_id) => ("client", client_id.0.to_string()),
+            };
+            if self.use_binary_encoding || destination_kind == "client" {
+                if let Ok(payload_bytes) = message.payload.to_bytes() {
+                    let payload_js = Uint8Array::from(payload_bytes.as_slice());
+                    let _ = callback.call4(
+                        &JsValue::NULL,
+                        &JsValue::from_str(destination_kind),
+                        &JsValue::from_str(&destination_id),
+                        &payload_js.into(),
+                        &JsValue::from_bool(is_catalogue),
+                    );
+                }
+            } else {
+                let payload_json = message.payload.to_json().unwrap();
+                let _ = callback.call4(
+                    &JsValue::NULL,
+                    &JsValue::from_str(destination_kind),
+                    &JsValue::from_str(&destination_id),
+                    &JsValue::from_str(&payload_json),
+                    &JsValue::from_bool(is_catalogue),
+                );
             }
         }
     }
@@ -254,8 +407,10 @@ impl WasmRuntime {
     /// * `app_id` - Application identifier
     /// * `env` - Environment (e.g., "dev", "prod")
     /// * `user_branch` - User's branch name (e.g., "main")
-    /// * `tier` - Optional persistence tier ("worker", "edge", "core").
+    /// * `tier` - Optional node durability tier ("worker", "edge", "global").
     ///            Set for server nodes to enable ack emission.
+    /// * `use_binary_encoding` - Optional outgoing sync payload encoding mode.
+    ///   `Some(true)` emits postcard bytes (`Uint8Array`), otherwise JSON strings.
     #[wasm_bindgen(constructor)]
     pub fn new(
         schema_json: &str,
@@ -263,17 +418,13 @@ impl WasmRuntime {
         env: &str,
         user_branch: &str,
         tier: Option<String>,
+        use_binary_encoding: Option<bool>,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
         init_tracing();
 
-        let tier_label = match tier.as_deref() {
-            Some("worker") => "worker",
-            Some("edge") => "edge",
-            Some("core") => "core",
-            _ => "client",
-        };
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
         let _span = info_span!(
             "WasmRuntime::new",
             tier = tier_label,
@@ -291,12 +442,12 @@ impl WasmRuntime {
         let schema: Schema = wasm_schema;
 
         // Parse optional tier
-        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+        let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
-        if let Some(t) = persistence_tier {
-            sync_manager = sync_manager.with_tier(t);
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
@@ -308,7 +459,7 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new();
+        let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
@@ -338,12 +489,12 @@ impl WasmRuntime {
     /// Called by JS when a sync message arrives from the server.
     ///
     /// # Arguments
-    /// * `message_json` - JSON-encoded SyncPayload
+    /// * `payload` - Either postcard-encoded SyncPayload bytes (`Uint8Array`)
+    ///   or JSON-encoded SyncPayload (`string`)
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(&self, message_json: &str) -> Result<(), JsError> {
+    pub fn on_sync_message_received(&self, payload: JsValue) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload: SyncPayload = serde_json::from_str(message_json)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Server(ServerId::new()),
@@ -358,12 +509,12 @@ impl WasmRuntime {
     ///
     /// # Arguments
     /// * `client_id` - UUID string of the sending client
-    /// * `message_json` - JSON-encoded SyncPayload
+    /// * `payload` - Postcard-encoded SyncPayload bytes
     #[wasm_bindgen(js_name = onSyncMessageReceivedFromClient)]
     pub fn on_sync_message_received_from_client(
         &self,
         client_id: &str,
-        message_json: &str,
+        payload: JsValue,
     ) -> Result<(), JsError> {
         let _span = debug_span!(
             "wasm::onSyncMessageReceivedFromClient",
@@ -375,8 +526,7 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
 
-        let payload: SyncPayload = serde_json::from_str(message_json)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
@@ -385,6 +535,21 @@ impl WasmRuntime {
 
         self.core.borrow_mut().park_sync_message(entry);
         Ok(())
+    }
+
+    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
+        if let Some(json) = payload.as_string() {
+            SyncPayload::from_json(&json)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+        } else if payload.is_instance_of::<Uint8Array>() {
+            let bytes = Uint8Array::new(&payload).to_vec();
+            SyncPayload::from_bytes(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+        } else {
+            Err(JsError::new(
+                "Invalid sync payload type: expected Uint8Array or JSON string",
+            ))
+        }
     }
 
     /// Register a callback for outgoing sync messages.
@@ -419,7 +584,7 @@ impl WasmRuntime {
 
     /// Execute a query and return results as a Promise.
     ///
-    /// Optional `settled_tier` holds delivery until the tier confirms.
+    /// Optional durability tier controls remote settlement behavior.
     #[wasm_bindgen]
     pub fn query(
         &self,
@@ -440,12 +605,11 @@ impl WasmRuntime {
             None
         };
 
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query_with_propagation(query, session, tier, propagation)
+            core.query_with_propagation(query, session, durability, propagation)
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -514,9 +678,9 @@ impl WasmRuntime {
 
     /// Insert a row and return a Promise that resolves when the tier acks.
     ///
-    /// `tier` must be one of: "worker", "edge", "core".
-    #[wasm_bindgen(js_name = insertWithAck)]
-    pub fn insert_with_ack(
+    /// `tier` must be one of: "worker", "edge", "global".
+    #[wasm_bindgen(js_name = insertDurable)]
+    pub fn insert_durable(
         &self,
         table: &str,
         values: JsValue,
@@ -543,8 +707,8 @@ impl WasmRuntime {
     }
 
     /// Update a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = updateWithAck)]
-    pub fn update_with_ack(
+    #[wasm_bindgen(js_name = updateDurable)]
+    pub fn update_durable(
         &self,
         object_id: &str,
         values: JsValue,
@@ -574,8 +738,8 @@ impl WasmRuntime {
     }
 
     /// Delete a row and return a Promise that resolves when the tier acks.
-    #[wasm_bindgen(js_name = deleteWithAck)]
-    pub fn delete_with_ack(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
+    #[wasm_bindgen(js_name = deleteDurable)]
+    pub fn delete_durable(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -606,7 +770,7 @@ impl WasmRuntime {
     /// - with upstream server: first callback waits for protocol QuerySettled convergence
     /// - without upstream server: first callback is local-immediate
     ///
-    /// Pass `settled_tier` to override this default.
+    /// Pass durability options to override this default.
     ///
     /// # Returns
     /// Subscription handle (f64) for later unsubscription.
@@ -621,77 +785,18 @@ impl WasmRuntime {
         options_json: Option<String>,
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
-        let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
-
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json)
-                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
-            )
-        } else {
-            None
-        };
-
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
-
-        let callback = move |delta: SubscriptionDelta| {
-            let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
-                let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
-                    .unwrap_or_default();
-                SubscriptionRow {
-                    id: row.id.uuid().to_string(),
-                    values,
-                }
-            };
-
-            let descriptor = &delta.descriptor;
-            let wasm_delta = SubscriptionRowDelta(
-                delta
-                    .ordered_delta
-                    .removed
-                    .iter()
-                    .map(|change| {
-                        SubscriptionRowChange::Removed(SubscriptionRowRemoved {
-                            kind: 1,
-                            id: change.id.uuid().to_string(),
-                            index: change.index,
-                        })
-                    })
-                    .chain(delta.ordered_delta.updated.iter().map(|change| {
-                        SubscriptionRowChange::Updated(SubscriptionRowUpdated {
-                            kind: 2,
-                            id: change.id.uuid().to_string(),
-                            index: change.new_index,
-                            row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
-                        })
-                    }))
-                    .chain(delta.ordered_delta.added.iter().map(|change| {
-                        SubscriptionRowChange::Added(SubscriptionRowAdded {
-                            kind: 0,
-                            id: change.id.uuid().to_string(),
-                            index: change.index,
-                            row: row_to_wasm(&change.row, descriptor),
-                        })
-                    }))
-                    .collect::<Vec<_>>(),
-            );
-
-            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-            if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
-                let _ = on_update.call1(&JsValue::NULL, &delta_value);
-            }
-        };
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
+        let callback = make_subscription_callback(on_update);
 
         let handle = self
             .core
             .borrow_mut()
-            .subscribe_with_settled_tier_and_propagation(
+            .subscribe_with_durability_and_propagation(
                 query,
                 callback,
                 session,
-                tier,
+                durability,
                 propagation,
             )
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
@@ -710,6 +815,54 @@ impl WasmRuntime {
         self.core
             .borrow_mut()
             .unsubscribe(SubscriptionHandle(sub_id));
+    }
+
+    /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
+    /// No compilation, no sync, no tick — just bookkeeping.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = createSubscription)]
+    pub fn create_subscription(
+        &self,
+        query_json: &str,
+        session_json: Option<String>,
+        settled_tier: Option<String>,
+        options_json: Option<String>,
+    ) -> Result<f64, JsError> {
+        let _span = debug_span!("wasm::createSubscription", tier = self.tier_label).entered();
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
+
+        let handle =
+            self.core
+                .borrow_mut()
+                .create_subscription(query, session, durability, propagation);
+
+        tracing::debug!(handle = handle.0, "subscription created (pending)");
+        Ok(handle.0 as f64)
+    }
+
+    /// Phase 2 of 2-phase subscribe: compile graph, register subscription,
+    /// sync to servers, attach callback, and deliver the first delta.
+    ///
+    /// No-ops silently if the handle was already unsubscribed.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = executeSubscription)]
+    pub fn execute_subscription(&self, handle: f64, on_update: Function) -> Result<(), JsError> {
+        let sub_handle = SubscriptionHandle(handle as u64);
+        let _span = debug_span!(
+            "wasm::executeSubscription",
+            handle = sub_handle.0,
+            tier = self.tier_label
+        )
+        .entered();
+        let callback = make_subscription_callback(on_update);
+
+        self.core
+            .borrow_mut()
+            .execute_subscription(sub_handle, callback)
+            .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
+
+        Ok(())
     }
 
     // =========================================================================
@@ -916,17 +1069,13 @@ impl WasmRuntime {
         user_branch: &str,
         db_name: &str,
         tier: Option<String>,
+        use_binary_encoding: bool,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
         init_tracing();
 
-        let tier_label = match tier.as_deref() {
-            Some("worker") => "worker",
-            Some("edge") => "edge",
-            Some("core") => "core",
-            _ => "client",
-        };
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
         let _span = info_span!(
             "WasmRuntime::openPersistent",
             tier = tier_label,
@@ -944,13 +1093,13 @@ impl WasmRuntime {
 
         let schema: Schema = wasm_schema;
 
-        // Parse optional tier
-        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+        // Parse optional node durability tiers
+        let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
-        if let Some(t) = persistence_tier {
-            sync_manager = sync_manager.with_tier(t);
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
@@ -977,7 +1126,7 @@ impl WasmRuntime {
         schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new();
+        let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);

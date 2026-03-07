@@ -1,12 +1,19 @@
 import {
   JazzClient,
+  DurabilityTier,
+  QueryExecutionOptions,
+  QueryInput,
+  RequestLike,
+  Row,
+  Runtime,
   Session,
+  SessionClient,
   SubscriptionCallback,
-  SubscriptionDelta,
+  Value,
   WasmModule,
   WasmSchema,
 } from "../index.js";
-import { Db, DbConfig, QueryBuilder, QueryOptions } from "../runtime/db.js";
+import { Db, DbConfig } from "../runtime/db.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -45,12 +52,8 @@ let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
 const pendingRequests = new Map<string, PendingRequest>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
-
-function unsubscribeBridgeSubscription(subscriptionId: string): void {
-  void sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE, {
-    subscriptionId,
-  }).catch(() => undefined);
-}
+const pendingSubscriptionBridgeIds = new Map<number, string>();
+let nextSubscriptionHandle = 1;
 
 function randomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -243,7 +246,9 @@ async function ensureDevtoolsPort(): Promise<any> {
         return;
       }
       const delta = payload.delta;
-
+      if (!Array.isArray(delta)) {
+        return;
+      }
       callback(delta as Parameters<SubscriptionCallback>[0]);
       return;
     }
@@ -284,6 +289,8 @@ async function ensureDevtoolsPort(): Promise<any> {
     }
     pendingRequests.clear();
     pendingSubscriptionCallbacks.clear();
+    pendingSubscriptionBridgeIds.clear();
+    nextSubscriptionHandle = 1;
     devtoolsPort = null;
     announcedBootstrap = null;
     announcePromise = null;
@@ -304,7 +311,6 @@ async function sendDevtoolsRequest<TCommand extends DevtoolsBridgeCommand>(
 ): Promise<DevtoolsResponsePayloadByCommand[TCommand]> {
   const port = await ensureDevtoolsPort();
   const requestId = randomId();
-
   const envelope = {
     channel: DEVTOOLS_BRIDGE_CHANNEL,
     kind: "request",
@@ -412,58 +418,125 @@ class DevToolsDb extends Db {
     return ensureDevtoolsAnnounced();
   }
 
-  protected getClient(): JazzClient {
-    throw new Error("DevToolsDb does not support getClient.");
+  getConnectedSchema(): WasmSchema | null {
+    return announcedBootstrap?.wasmSchema ?? null;
   }
 
-  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const payload = {
-      query: {
-        ...query,
-        _build: query._build(),
-      },
-      options,
-    };
-    return sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload) as Promise<T[]>;
+  getConnectedConfig(): DbConfig | null {
+    return announcedBootstrap?.dbConfig ?? null;
   }
 
-  subscribeAll<T extends { id: string }>(
-    query: QueryBuilder<T>,
-    callback: (delta: SubscriptionDelta<T>) => void,
-    options?: QueryOptions,
-    _session?: Session,
-  ): () => void {
+  protected getClient(schema: WasmSchema): JazzClient {
+    // @ts-expect-error proxy client intentionally implements query-only surface.
+    return new DevToolsJazzClient(schema);
+  }
+}
+
+// @ts-expect-error
+class DevToolsJazzClient implements JazzClient {
+  private readonly fallbackSchema: WasmSchema;
+
+  constructor(schema: WasmSchema) {
+    this.fallbackSchema = schema;
+  }
+
+  forSession(session: Session): SessionClient {
+    throw new Error("Method not implemented.");
+  }
+  forRequest(request: RequestLike): SessionClient {
+    throw new Error("Method not implemented.");
+  }
+  create(table: string, values: Value[], options?: { tier?: DurabilityTier }): Promise<string> {
+    throw new Error("Method not implemented.");
+  }
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    await ensureDevtoolsAnnounced();
+    const payload = { query, options, tier: options?.tier };
+    return (await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload)) as Row[];
+  }
+  queryInternal(
+    queryJson: string,
+    session?: Session,
+    options?: QueryExecutionOptions,
+  ): Promise<Row[]> {
+    throw new Error("Method not implemented.");
+  }
+  update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: { tier?: DurabilityTier },
+  ): Promise<void> {
+    throw new Error("Method not implemented.");
+  }
+  delete(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
+    throw new Error("Method not implemented.");
+  }
+  subscribe(
+    query: string | QueryInput,
+    callback: SubscriptionCallback,
+    options?: QueryExecutionOptions,
+  ): number {
+    const handle = nextSubscriptionHandle++;
     const bridgeSubscriptionId = randomId();
-    pendingSubscriptionCallbacks.set(
-      bridgeSubscriptionId,
-      callback as unknown as SubscriptionCallback,
-    );
-    let isUnsubscribed = false;
+    pendingSubscriptionCallbacks.set(bridgeSubscriptionId, callback);
+    pendingSubscriptionBridgeIds.set(handle, bridgeSubscriptionId);
 
     void ensureDevtoolsAnnounced()
-      .then(async () => {
-        if (isUnsubscribed) return;
-        await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
-          query: {
-            ...query,
-            _build: query._build(),
-          },
+      .then(() =>
+        sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
+          query,
           options,
+          tier: options?.tier,
           subscriptionId: bridgeSubscriptionId,
-        });
-        if (isUnsubscribed) {
-          unsubscribeBridgeSubscription(bridgeSubscriptionId);
-        }
-      })
+        }),
+      )
       .catch(() => {
         pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
+        pendingSubscriptionBridgeIds.delete(handle);
       });
 
-    return () => {
-      if (isUnsubscribed) return;
-      isUnsubscribed = true;
-      pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
-      unsubscribeBridgeSubscription(bridgeSubscriptionId);
-    };
+    return handle;
+  }
+  subscribeInternal(
+    query: string | QueryInput,
+    callback: SubscriptionCallback,
+    session?: Session,
+    options?: QueryExecutionOptions,
+  ): number {
+    if (session) {
+      throw new Error("DevTools subscribe does not support session-scoped subscriptions.");
+    }
+    return this.subscribe(query, callback, options);
+  }
+  unsubscribe(subscriptionId: number): void {
+    const bridgeSubscriptionId = pendingSubscriptionBridgeIds.get(subscriptionId);
+    if (!bridgeSubscriptionId) {
+      return;
+    }
+
+    pendingSubscriptionBridgeIds.delete(subscriptionId);
+    pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
+
+    void sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE, {
+      subscriptionId: bridgeSubscriptionId,
+    }).catch(() => undefined);
+  }
+  getSchema(): WasmSchema {
+    if (announcedBootstrap?.wasmSchema) {
+      return announcedBootstrap.wasmSchema;
+    }
+    return this.fallbackSchema;
+  }
+  getRuntime(): Runtime {
+    throw new Error("Method not implemented.");
+  }
+  getServerUrl(): string | undefined {
+    throw new Error("Method not implemented.");
+  }
+  getRequestUrl(path: string): string {
+    throw new Error("Method not implemented.");
+  }
+  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+    throw new Error("Method not implemented.");
   }
 }

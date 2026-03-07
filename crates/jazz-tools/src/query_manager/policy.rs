@@ -831,13 +831,39 @@ fn resolve_policy_value(value: &PolicyValue, session: &Session) -> Option<Value>
     }
 }
 
+/// Resolve an outer-row column reference to a literal `Value`.
+///
+/// Tries the named column first; if the descriptor has no column called `"id"`,
+/// falls back to the row's `ObjectId` (UUID), which is stored separately from the
+/// content bytes. Returns `None` on any failure.
+fn resolve_outer_col(
+    outer_col: &str,
+    outer_content: &[u8],
+    outer_descriptor: &RowDescriptor,
+    outer_row_id: Option<ObjectId>,
+) -> Option<Value> {
+    if let Some(col_index) = outer_descriptor.column_index(outer_col) {
+        decode_column(outer_descriptor, outer_content, col_index).ok()
+    } else if outer_col == "id" {
+        // `@session.__jazz_outer_row.id` refers to the row's ObjectId (UUID),
+        // which is not a content column.
+        Some(Value::Uuid(outer_row_id?))
+    } else {
+        None
+    }
+}
+
 /// Bind outer-row references encoded as `@session.__jazz_outer_row.<column>` to literals.
+///
+/// `outer_row_id` must be supplied when the policy may reference
+/// `@session.__jazz_outer_row.id` (the row's UUID primary key).
 ///
 /// Returns `None` if a referenced outer column cannot be resolved.
 pub fn bind_outer_row_refs(
     expr: &PolicyExpr,
     outer_content: &[u8],
     outer_descriptor: &RowDescriptor,
+    outer_row_id: Option<ObjectId>,
 ) -> Option<PolicyExpr> {
     match expr {
         PolicyExpr::Cmp { column, op, value } => {
@@ -845,9 +871,12 @@ pub fn bind_outer_row_refs(
                 PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
                 PolicyValue::SessionRef(path) => {
                     if let Some(outer_col) = outer_row_ref_column(path) {
-                        let col_index = outer_descriptor.column_index(outer_col)?;
-                        let resolved =
-                            decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                        let resolved = resolve_outer_col(
+                            outer_col,
+                            outer_content,
+                            outer_descriptor,
+                            outer_row_id,
+                        )?;
                         PolicyValue::Literal(resolved)
                     } else {
                         PolicyValue::SessionRef(path.clone())
@@ -872,9 +901,12 @@ pub fn bind_outer_row_refs(
                 PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
                 PolicyValue::SessionRef(path) => {
                     if let Some(outer_col) = outer_row_ref_column(path) {
-                        let col_index = outer_descriptor.column_index(outer_col)?;
-                        let resolved =
-                            decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                        let resolved = resolve_outer_col(
+                            outer_col,
+                            outer_content,
+                            outer_descriptor,
+                            outer_row_id,
+                        )?;
                         PolicyValue::Literal(resolved)
                     } else {
                         PolicyValue::SessionRef(path.clone())
@@ -905,9 +937,12 @@ pub fn bind_outer_row_refs(
                     PolicyValue::Literal(v) => Some(PolicyValue::Literal(v.clone())),
                     PolicyValue::SessionRef(path) => {
                         if let Some(outer_col) = outer_row_ref_column(path) {
-                            let col_index = outer_descriptor.column_index(outer_col)?;
-                            let resolved =
-                                decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                            let resolved = resolve_outer_col(
+                                outer_col,
+                                outer_content,
+                                outer_descriptor,
+                                outer_row_id,
+                            )?;
                             Some(PolicyValue::Literal(resolved))
                         } else {
                             Some(PolicyValue::SessionRef(path.clone()))
@@ -950,19 +985,24 @@ pub fn bind_outer_row_refs(
         PolicyExpr::And(exprs) => Some(PolicyExpr::And(
             exprs
                 .iter()
-                .map(|expr| bind_outer_row_refs(expr, outer_content, outer_descriptor))
+                .map(|expr| {
+                    bind_outer_row_refs(expr, outer_content, outer_descriptor, outer_row_id)
+                })
                 .collect::<Option<Vec<_>>>()?,
         )),
         PolicyExpr::Or(exprs) => Some(PolicyExpr::Or(
             exprs
                 .iter()
-                .map(|expr| bind_outer_row_refs(expr, outer_content, outer_descriptor))
+                .map(|expr| {
+                    bind_outer_row_refs(expr, outer_content, outer_descriptor, outer_row_id)
+                })
                 .collect::<Option<Vec<_>>>()?,
         )),
         PolicyExpr::Not(expr) => Some(PolicyExpr::Not(Box::new(bind_outer_row_refs(
             expr,
             outer_content,
             outer_descriptor,
+            outer_row_id,
         )?))),
         PolicyExpr::True => Some(PolicyExpr::True),
         PolicyExpr::False => Some(PolicyExpr::False),
@@ -1612,7 +1652,7 @@ fn evaluate_simple_recursive(
         }),
 
         PolicyExpr::Exists { table, condition } => {
-            let bound = match bind_outer_row_refs(condition, content, descriptor) {
+            let bound = match bind_outer_row_refs(condition, content, descriptor, None) {
                 Some(expr) => expr,
                 None => return SimpleEvalResult::fail(),
             };
@@ -1775,6 +1815,49 @@ mod tests {
 
         let result = evaluate_simple_parts(&expr, &content, &descriptor, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_bind_outer_row_refs_id_resolves_to_object_id_when_not_a_column() {
+        // Regression test: `@session.__jazz_outer_row.id` must resolve to the row's
+        // ObjectId (UUID) even when "id" is not a named column in the descriptor.
+        // This is the common case — e.g. `EXISTS (SELECT FROM chatMembers WHERE chat =
+        // @session.__jazz_outer_row.id AND userId = @session.user_id)`.
+        use crate::object::ObjectId;
+
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("owner_id", ColumnType::Text)]);
+        let content = encode_row(&descriptor, &[Value::Text("user-1".into())]).unwrap();
+
+        let row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(
+            0xdead_beef_cafe_0000_0000_0000_0000_0001,
+        ));
+
+        let expr = PolicyExpr::Cmp {
+            column: "chat".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec![OUTER_ROW_SESSION_PREFIX.into(), "id".into()]),
+        };
+
+        // Without a row_id: "id" is not a column, so binding must fail.
+        assert!(
+            bind_outer_row_refs(&expr, &content, &descriptor, None).is_none(),
+            "should fail when id is not a column and no row_id is provided"
+        );
+
+        // With a row_id: should resolve to the UUID literal.
+        let bound = bind_outer_row_refs(&expr, &content, &descriptor, Some(row_id));
+        assert!(
+            matches!(
+                &bound,
+                Some(PolicyExpr::Cmp {
+                    value: PolicyValue::Literal(Value::Uuid(id)),
+                    ..
+                }) if *id == row_id
+            ),
+            "expected @session.__jazz_outer_row.id to resolve to Value::Uuid(row_id), got {:?}",
+            bound
+        );
     }
 
     #[test]

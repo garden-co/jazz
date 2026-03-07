@@ -1,5 +1,58 @@
 # jazz-tools
 
+## 2.0.0-alpha.14
+
+### Patch Changes
+
+- ad29f43: fix query sync provenance for paginated, nested subquery, and recursive subscriptions
+- a4da52d: Wait for the initial server event stream handshake before returning from `JazzClient::connect`, preventing `EdgeServer` settled queries from racing the connection after server restart.
+- 78092d3: Add support for `EXISTS (SELECT FROM <table> WHERE <expr>)` in SQL policy expressions.
+- 78092d3: Fix `@session.__jazz_outer_row.id` not resolving inside EXISTS subquery policies. Previously the outer row's UUID was silently treated as an unresolvable column, causing all EXISTS policy checks to evaluate to false on the server.
+- dc25263: Fix: sync server now falls back to the server-established session when a `QuerySubscription` payload omits one.
+
+  Demo and anonymous auth clients sent `session: None` in subscription payloads, causing all their queries to return empty results after the payload-session change in #147. The server now prefers the session it validated from auth headers during the SSE handshake, falling back to the payload only for fully unauthenticated clients. Payload sessions that differ from the server-established session are ignored and a warning is logged.
+
+- 2943587: Fix a race condition in `subscribe_internal` where the callback could be called before it was registered.
+- a952d98: Fix missing `id` fields on rows returned from included array subqueries, including nested relation results.
+- ec0ff2d: Add a built-in MCP server (`npx jazz-tools mcp`) that exposes Jazz documentation as tools for AI assistants. Supports full-text search via SQLite FTS5 (Node 22.13+) with a plain-text fallback for older runtimes.
+- 2f5ccba: Add an in-memory storage driver across the Jazz JS, WASM, NAPI, and React Native runtimes.
+
+  Backend contexts can now opt into memory-backed runtimes without local persistence, and runtime driver-mode coverage was expanded to exercise the new in-memory path.
+
+- 49307fa: Quote keyword and non-bare identifiers when emitting frozen schema and lens SQL from Rust so round-tripping generated SQL continues to parse.
+- Updated dependencies [2f5ccba]
+  - jazz-wasm@2.0.0-alpha.14
+
+## 2.0.0-alpha.13
+
+### Patch Changes
+
+- ff4ccb3: Support quoted SQL identifiers in `jazz-tools` schema parsing/generation, including reserved keyword column names like `"table"`.
+  - jazz-wasm@2.0.0-alpha.13
+
+## 2.0.0-alpha.12
+
+### Patch Changes
+
+- 8bcde79: Harden runtime sync outbox handling across WASM/RN and NAPI callback contracts by typing both callback shapes, routing both through a shared normalizer, and adding conformance tests that assert identical `/sync` behavior.
+  - jazz-wasm@2.0.0-alpha.12
+
+## 2.0.0-alpha.11
+
+### Patch Changes
+
+- 969a139: Overhauled durability APIs to use a single `DurabilityTier` model across reads and writes.
+  - Reads now take `{ tier, localUpdates }`, where `localUpdates` defaults to `"immediate"` so local writes are reflected right away even when waiting for a more remote durability tier.
+  - Writes now use the base methods with optional `{ tier }` and environment-aware defaults (`"worker"` for clients, `"edge"` for backend contexts).
+  - Renamed the top tier from `"core"` to `"global"` for clearer semantics.
+  - Added multi-tier node identity support so single-node deployments (like CLI and cloud-server today) can acknowledge both `"edge"` and `"global"`.
+
+- 98ba0f9: Fixed array subquery incremental updates so parent row fields stay correct. Previously, when related rows changed after subscribing, update payloads could return corrupted parent values (for example, garbled `id` or `name`).
+- 48053ac: fix(codegen): generate DROP COLUMN statements for all affected tables in multi-table migrations
+- debd2c3: Add `asBackend()` for server-side Jazz clients using backend-secret auth, and enforce backend-role limits so backend sync can write row data but cannot write schema/permissions catalogue entries.
+- a955504: Allow backend `JazzClient` and `SessionClient` query/subscribe calls to consume generated query builders directly. Query-builder payloads with `_schema` are now translated automatically to runtime query JSON (`relation_ir`), so backend code can call `context.forRequest(...).query(app.todos.where(...))` without manual `translateQuery(...)`.
+  - jazz-wasm@2.0.0-alpha.11
+
 ## 2.0.0-alpha.10
 
 ### Patch Changes

@@ -12,7 +12,7 @@ type AuthenticatedRequest = Request<
 const context = createJazzContext({
   appId: "todo-server-ts",
   app: schemaApp,
-  dataPath: "./data/jazz.db",
+  driver: { type: "persistent", dataPath: "./data/jazz.db" },
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
 });

@@ -9,7 +9,7 @@
 //! "obj:{uuid}:meta"                                       → JSON metadata
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "ack:{commit_hex}"                                      → JSON HashSet<PersistenceTier>
+//! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
 //! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
 //! ```
@@ -29,7 +29,7 @@ use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::DurabilityTier;
 
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
@@ -338,7 +338,7 @@ impl Storage for SurrealKvStorage {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError> {
         self.with_eventual_write(|txn| {
             store_ack_tier_core(
@@ -476,6 +476,10 @@ impl Storage for SurrealKvStorage {
     fn flush_wal(&self) {
         let _span = tracing::debug_span!("SurrealKvStorage::flush_wal").entered();
         self.flush();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        SurrealKvStorage::close(self)
     }
 }
 

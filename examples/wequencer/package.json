@@ -1,0 +1,32 @@
+{
+  "name": "wequencer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx tsx scripts/dev.ts",
+    "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.browser.ts",
+    "test:e2e": "playwright test",
+    "walkthrough": "npx @marp-team/marp-cli --html walkthrough/jazz-wequencer.md --preview",
+    "walkthrough:shots": "playwright test --config playwright.screenshots.config.ts"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "svelte": "^5.0.0",
+    "tone": "^15.1.22"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@vitejs/plugin-basic-ssl": "^2.1.4",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "catalog:default"
+  }
+}

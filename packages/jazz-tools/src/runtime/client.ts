@@ -18,10 +18,13 @@ import {
   isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type SyncStreamController,
+  type SyncAuth,
   type LinkExternalResponse,
+  type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveJwtSession } from "./client-session.js";
+import { translateQuery } from "./query-adapter.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -42,27 +45,34 @@ export interface RequestLike {
  */
 export interface Runtime {
   insert(table: string, values: any): string;
+  insertDurable(table: string, values: any, tier: string): Promise<string>;
   update(object_id: string, values: any): void;
+  updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   delete(object_id: string): void;
+  deleteDurable(object_id: string, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
   subscribe(
     query_json: string,
     on_update: Function,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
     options_json?: string | null,
   ): number;
+  createSubscription(
+    query_json: string,
+    session_json?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
+  ): number;
+  executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  insertWithAck(table: string, values: any, tier: string): Promise<string>;
-  updateWithAck(object_id: string, values: any, tier: string): Promise<void>;
-  deleteWithAck(object_id: string, tier: string): Promise<void>;
-  onSyncMessageReceived(message_json: string): void;
-  onSyncMessageToSend(callback: Function): void;
+  onSyncMessageReceived(payload: Uint8Array | string): void;
+  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
   addServer(): void;
   removeServer(): void;
   addClient(): string;
@@ -70,7 +80,7 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
+  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
 }
 
 /**
@@ -78,13 +88,19 @@ export interface Runtime {
  *
  * - `worker`: Persisted in web worker / local storage
  * - `edge`: Persisted at edge server
- * - `core`: Persisted at core server
+ * - `global`: Persisted at global server
  */
-export type PersistenceTier = "worker" | "edge" | "core";
+export type DurabilityTier = "worker" | "edge" | "global";
+export type LocalUpdatesMode = "immediate" | "deferred";
 export type QueryPropagation = "full" | "local-only";
 export interface QueryExecutionOptions {
-  settledTier?: PersistenceTier;
+  tier?: DurabilityTier;
+  localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
+}
+
+export interface WriteDurabilityOptions {
+  tier?: DurabilityTier;
 }
 
 /**
@@ -108,36 +124,95 @@ export interface LinkExternalIdentityOptions {
 
 export type LinkExternalIdentityResult = LinkExternalResponse;
 
+export interface ConnectSyncRuntimeOptions {
+  useBinaryEncoding?: boolean;
+}
+
 /**
  * QueryBuilder-compatible input accepted by query and subscribe APIs.
  */
 export interface QueryInput {
   _build(): string;
+  /** Optional schema metadata available on generated QueryBuilder objects. */
+  _schema?: WasmSchema;
 }
 
 function resolveQueryJson(query: string | QueryInput): string {
-  return typeof query === "string" ? query : query._build();
-}
-
-function normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
-  if (!options) {
-    return { propagation: "full" };
+  if (typeof query === "string") {
+    return query;
   }
 
-  return {
-    settledTier: options.settledTier,
-    propagation: options.propagation ?? "full",
-  };
+  const builtQuery = query._build();
+  const schema = query._schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return builtQuery;
+  }
+
+  // Query payloads already in runtime form include relation_ir and should pass through unchanged.
+  try {
+    const parsed = JSON.parse(builtQuery) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && "relation_ir" in parsed) {
+      return builtQuery;
+    }
+  } catch {
+    return builtQuery;
+  }
+
+  return translateQuery(builtQuery, schema);
+}
+
+function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
+  if (!tier) return undefined;
+  if (Array.isArray(tier)) {
+    return tier[0];
+  }
+  return tier;
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function getScheduler(): (task: () => void) => void {
+  if ("scheduler" in globalThis) {
+    return (task: () => void) => {
+      // See: https://developer.mozilla.org/en-US/docs/Web/API/Scheduler/postTask
+      // @ts-ignore Scheduler is not yet provided by the dom library
+      void globalThis.scheduler.postTask(task, { priority: "user-visible" });
+    };
+  }
+
+  return queueMicrotask;
+}
+
+function resolveDefaultDurabilityTier(context: AppContext): DurabilityTier {
+  if (context.defaultDurabilityTier) {
+    return context.defaultDurabilityTier;
+  }
+
+  if (isBrowserRuntime()) {
+    return "worker";
+  }
+
+  // In non-browser environments, default to edge when connected to a server.
+  // For local/in-memory runtimes without a server, keep worker semantics.
+  return context.serverUrl ? "edge" : "worker";
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
-  if ((options.propagation ?? "full") === "full") {
+  const payload: { propagation?: QueryPropagation; local_updates?: LocalUpdatesMode } = {};
+  if ((options.propagation ?? "full") !== "full") {
+    payload.propagation = options.propagation;
+  }
+  if ((options.localUpdates ?? "immediate") !== "immediate") {
+    payload.local_updates = options.localUpdates;
+  }
+
+  if (!payload.propagation && !payload.local_updates) {
     return undefined;
   }
 
-  return JSON.stringify({
-    propagation: options.propagation,
-  });
+  return JSON.stringify(payload);
 }
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -313,7 +388,7 @@ export class SessionClient {
    * Query as this session's user.
    */
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.client.queryInternal(resolveQueryJson(query), this.session, options);
+    return this.client.queryInternal(query, this.session, options);
   }
 
   /**
@@ -335,21 +410,25 @@ export class JazzClient {
   private runtime: Runtime;
   private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private subscriptions = new Map<number, SubscriptionCallback>();
+  private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
+  private defaultDurabilityTier: DurabilityTier;
+  private useBackendSyncAuth = false;
 
-  private constructor(runtime: Runtime, context: AppContext) {
+  private constructor(
+    runtime: Runtime,
+    context: AppContext,
+    defaultDurabilityTier: DurabilityTier,
+  ) {
     this.runtime = runtime;
+    this.scheduler = getScheduler();
     this.context = context;
+    this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
-      getAuth: () => ({
-        jwtToken: this.context.jwtToken,
-        localAuthMode: this.context.localAuthMode,
-        localAuthToken: this.context.localAuthToken,
-      }),
+      getAuth: () => this.getSyncAuth(),
       getClientId: () => this.serverClientId,
       setClientId: (clientId) => {
         this.serverClientId = clientId;
@@ -376,10 +455,14 @@ export class JazzClient {
       resolvedContext.appId,
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
-      resolvedContext.tier,
+      resolveNodeTier(resolvedContext.tier),
     );
 
-    const client = new JazzClient(runtime, resolvedContext);
+    const client = new JazzClient(
+      runtime,
+      resolvedContext,
+      resolveDefaultDurabilityTier(resolvedContext),
+    );
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
@@ -399,7 +482,11 @@ export class JazzClient {
    * @param context Application context with driver and schema
    * @returns Connected JazzClient instance (created synchronously)
    */
-  static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+  static connectSync(
+    wasmModule: WasmModule,
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Create WASM runtime (storage is now synchronous in-memory)
@@ -409,10 +496,15 @@ export class JazzClient {
       resolvedContext.appId,
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
-      resolvedContext.tier,
+      resolveNodeTier(resolvedContext.tier),
+      runtimeOptions?.useBinaryEncoding ?? false,
     );
 
-    const client = new JazzClient(runtime, resolvedContext);
+    const client = new JazzClient(
+      runtime,
+      resolvedContext,
+      resolveDefaultDurabilityTier(resolvedContext),
+    );
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
@@ -433,7 +525,7 @@ export class JazzClient {
    * @returns Connected JazzClient instance
    */
   static connectWithRuntime(runtime: Runtime, context: AppContext): JazzClient {
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, context, resolveDefaultDurabilityTier(context));
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
@@ -485,95 +577,109 @@ export class JazzClient {
   }
 
   /**
-   * Insert a new row into a table (sync, fire-and-forget).
+   * Enable backend-scoped sync auth for this client.
    *
-   * @param table Table name
-   * @param values Array of column values
-   * @returns The new row's ID (UUID string)
+   * In backend mode, sync/event transport uses `X-Jazz-Backend-Secret` instead
+   * of end-user auth headers and intentionally does not send admin headers.
    */
-  create(table: string, values: Value[]): string {
-    return this.runtime.insert(table, values);
+  asBackend(): JazzClient {
+    if (!this.context.backendSecret) {
+      throw new Error("backendSecret required for backend mode");
+    }
+    if (!this.context.serverUrl) {
+      throw new Error("serverUrl required for backend mode");
+    }
+    this.useBackendSyncAuth = true;
+    this.streamController.updateAuth();
+    return this;
+  }
+
+  private getSyncAuth(): SyncAuth {
+    if (this.useBackendSyncAuth) {
+      return {
+        backendSecret: this.context.backendSecret,
+      };
+    }
+
+    return {
+      jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+      adminSecret: this.context.adminSecret,
+    };
+  }
+
+  private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+    return {
+      tier: options?.tier ?? this.defaultDurabilityTier,
+      localUpdates: options?.localUpdates ?? "immediate",
+      propagation: options?.propagation ?? "full",
+    };
+  }
+
+  private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
+    return options?.tier ?? this.defaultDurabilityTier;
   }
 
   /**
-   * Insert a row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table name
-   * @param values Array of column values
-   * @param tier Acknowledgement tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acknowledges
+   * Insert a new row into a table and wait for durability at the requested tier.
    */
-  async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertWithAck(table, values, tier);
+  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
+    const tier = this.resolveWriteTier(options);
+    return this.runtime.insertDurable(table, values, tier);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
    * @param query Query builder or JSON-encoded query specification
-   * @param settledTier Optional tier to hold delivery until confirmed
+   * @param options Optional read durability options
    * @returns Array of matching rows
    */
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.queryInternal(resolveQueryJson(query), this.resolvedSession ?? undefined, options);
+    return this.queryInternal(query, this.resolvedSession ?? undefined, options);
   }
 
   /**
-   * Internal query with optional session and settled tier.
+   * Internal query with optional session and read durability options.
    * @internal
    */
   async queryInternal(
-    queryJson: string,
+    query: string | QueryInput,
     session?: Session,
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
-    const normalizedOptions = normalizeQueryExecutionOptions(options);
+    const normalizedOptions = this.normalizeQueryExecutionOptions(options);
+    const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
-      normalizedOptions.settledTier,
+      normalizedOptions.tier,
       optionsJson,
     );
     return results as Row[];
   }
 
   /**
-   * Update a row by ID (sync, fire-and-forget).
-   *
-   * @param objectId Row ID (UUID string)
-   * @param updates Object mapping column names to new values
+   * Update a row by ID and wait for durability at the requested tier.
    */
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.runtime.update(objectId, updates);
-  }
-
-  /**
-   * Update a row and wait for acknowledgement at the specified tier.
-   */
-  async updateWithAck(
+  async update(
     objectId: string,
     updates: Record<string, Value>,
-    tier: PersistenceTier,
+    options?: WriteDurabilityOptions,
   ): Promise<void> {
-    await this.runtime.updateWithAck(objectId, updates, tier);
+    const tier = this.resolveWriteTier(options);
+    await this.runtime.updateDurable(objectId, updates, tier);
   }
 
   /**
-   * Delete a row by ID (sync, fire-and-forget).
-   *
-   * @param objectId Row ID (UUID string)
+   * Delete a row by ID and wait for durability at the requested tier.
    */
-  delete(objectId: string): void {
-    this.runtime.delete(objectId);
-  }
-
-  /**
-   * Delete a row and wait for acknowledgement at the specified tier.
-   */
-  async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deleteWithAck(objectId, tier);
+  async delete(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+    const tier = this.resolveWriteTier(options);
+    await this.runtime.deleteDurable(objectId, tier);
   }
 
   /**
@@ -581,7 +687,7 @@ export class JazzClient {
    *
    * @param query Query builder or JSON-encoded query specification
    * @param callback Called with delta whenever results change
-   * @param settledTier Optional tier to hold initial delivery until confirmed
+   * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
@@ -593,7 +699,13 @@ export class JazzClient {
   }
 
   /**
-   * Internal subscribe with optional session and settled tier.
+   * Internal subscribe with optional session and read durability options.
+   *
+   * Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
+   * a handle synchronously (zero work), then `executeSubscription` is deferred
+   * via the scheduler so compilation + first tick run outside the caller's
+   * synchronous stack (e.g. outside a React render).
+   *
    * @internal
    */
   subscribeInternal(
@@ -602,24 +714,27 @@ export class JazzClient {
     session?: Session,
     options?: QueryExecutionOptions,
   ): number {
-    const normalizedOptions = normalizeQueryExecutionOptions(options);
+    const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const subId = this.runtime.subscribe(
+
+    const handle = this.runtime.createSubscription(
       queryJson,
-      (deltaJsonOrObject: RowDelta | string) => {
-        // WASM runtime passes delta as JSON string, need to parse it
+      sessionJson,
+      normalizedOptions.tier,
+      optionsJson,
+    );
+
+    this.scheduler(() => {
+      this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
         const delta: RowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
         callback(delta);
-      },
-      sessionJson,
-      normalizedOptions.settledTier,
-      optionsJson,
-    );
-    this.subscriptions.set(subId, callback);
-    return subId;
+      });
+    });
+
+    return handle;
   }
 
   /**
@@ -629,7 +744,6 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
-    this.subscriptions.delete(subscriptionId);
   }
 
   /**
@@ -766,11 +880,6 @@ export class JazzClient {
   async shutdown(): Promise<void> {
     this.streamController.stop();
 
-    // Close driver if it supports it
-    if (this.context.driver?.close) {
-      await this.context.driver.close();
-    }
-
     // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
     if (this.runtime.close) {
       await this.runtime.close();
@@ -782,7 +891,8 @@ export class JazzClient {
       createSyncOutboxRouter({
         logPrefix: "[client] ",
         retryServerPayloads: true,
-        onServerPayload: (payload) => this.sendSyncMessage(payload),
+        onServerPayload: (payload, isCatalogue) =>
+          this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {
@@ -797,18 +907,21 @@ export class JazzClient {
     this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(payload: unknown): Promise<void> {
+  private async sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
     const serverUrl = this.streamController.getServerUrl();
     if (!serverUrl) return;
 
-    await sendSyncPayload(serverUrl, payload, {
-      jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
-      adminSecret: this.context.adminSecret,
-      clientId: this.serverClientId,
-      pathPrefix: this.streamController.getPathPrefix(),
-    });
+    await sendSyncPayload(
+      serverUrl,
+      payloadJson,
+      isCatalogue,
+      {
+        ...this.getSyncAuth(),
+        clientId: this.serverClientId,
+        pathPrefix: this.streamController.getPathPrefix(),
+      },
+      "[client] ",
+    );
   }
 }
 

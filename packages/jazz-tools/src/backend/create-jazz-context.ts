@@ -15,21 +15,37 @@ export interface BackendQuerySchemaSource {
 
 export type BackendSchemaInput = WasmSchema | BackendSchemaSource | BackendQuerySchemaSource;
 
+export type BackendDriver =
+  | {
+      type: "persistent";
+      /** Path to the SurrealKV file used by the server runtime. */
+      dataPath: string;
+    }
+  | {
+      type: "memory";
+    };
+
 export interface BackendContextConfig extends Omit<
   AppContext,
   "schema" | "driver" | "clientId" | "tier"
 > {
-  /** Path to the SurrealKV file used by the server runtime. */
-  dataPath: string;
+  /** Server runtime driver mode and storage location. */
+  driver: BackendDriver;
   /** Optional default schema source (typically generated `app` export). */
   app?: BackendSchemaSource;
-  /** Optional persistence tier for ack semantics. */
-  tier?: "worker" | "edge" | "core";
+  /** Optional node durability tier identity. */
+  tier?: "worker" | "edge" | "global";
 }
 
 interface ResolvedBackendContextConfig extends BackendContextConfig {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
+}
+
+function assertValidBackendConfig(config: BackendContextConfig): void {
+  if (config.driver.type === "memory" && !config.serverUrl) {
+    throw new Error("driver.type='memory' requires serverUrl.");
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,7 +84,7 @@ function resolveSchema(input: BackendSchemaInput): WasmSchema {
 /**
  * Server-side Jazz context with lazy runtime setup.
  *
- * The first call to `client()`, `forRequest()`, or `forSession()` initializes
+ * The first call to `client()`, `asBackend()`, `forRequest()`, or `forSession()` initializes
  * a NAPI runtime and JazzClient using the provided app/schema source. Later
  * calls reuse the same initialized runtime.
  */
@@ -80,6 +96,7 @@ export class JazzContext {
   private clientInstance?: JazzClient;
 
   constructor(config: BackendContextConfig) {
+    assertValidBackendConfig(config);
     this.config = resolveLocalAuthDefaults(config);
     this.defaultSchemaInput = config.app;
   }
@@ -88,7 +105,7 @@ export class JazzContext {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
       throw new Error(
-        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling client()/forRequest()/forSession().",
+        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling client()/asBackend()/forRequest()/forSession().",
       );
     }
     return resolveSchema(selected);
@@ -97,15 +114,26 @@ export class JazzContext {
   private createClient(schema: WasmSchema): JazzClient {
     const schemaJson = serializeRuntimeSchema(schema);
     this.initializedSchemaJson = schemaJson;
+    const nodeTier = this.config.tier ?? "edge";
 
-    this.runtime = new NapiRuntime(
-      schemaJson,
-      this.config.appId,
-      this.config.env ?? "dev",
-      this.config.userBranch ?? "main",
-      this.config.dataPath,
-      this.config.tier,
-    );
+    if (this.config.driver.type === "persistent") {
+      this.runtime = new NapiRuntime(
+        schemaJson,
+        this.config.appId,
+        this.config.env ?? "dev",
+        this.config.userBranch ?? "main",
+        this.config.driver.dataPath,
+        nodeTier,
+      );
+    } else {
+      this.runtime = NapiRuntime.inMemory(
+        schemaJson,
+        this.config.appId,
+        this.config.env ?? "dev",
+        this.config.userBranch ?? "main",
+        nodeTier,
+      );
+    }
 
     const context: AppContext = {
       appId: this.config.appId,
@@ -119,7 +147,8 @@ export class JazzContext {
       localAuthToken: this.config.localAuthToken,
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
-      tier: this.config.tier,
+      tier: nodeTier,
+      defaultDurabilityTier: "edge",
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);
@@ -144,6 +173,13 @@ export class JazzContext {
     }
 
     return this.clientInstance;
+  }
+
+  /**
+   * Get a backend-scoped client authenticated with `backendSecret`.
+   */
+  asBackend(source?: BackendSchemaInput): JazzClient {
+    return this.client(source).asBackend();
   }
 
   /**

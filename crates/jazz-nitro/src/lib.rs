@@ -20,18 +20,20 @@ use futures::executor::block_on;
 
 use groove::object::ObjectId;
 use groove::query_manager::encoding::decode_row;
+use groove::query_manager::manager::LocalUpdates;
 use groove::query_manager::parse_query_json;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, SchemaHash, Value};
 use groove::runtime_core::{
-    RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
+    ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
+    SyncSender,
 };
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::SurrealKvStorage;
 use groove::sync_manager::QueryPropagation;
 use groove::sync_manager::{
-    ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 fn convert_values(values_json: &str) -> Result<Vec<Value>, String> {
@@ -60,13 +62,13 @@ fn parse_session(session_json: Option<String>) -> Result<Option<Session>, String
     }
 }
 
-fn parse_tier(tier: &str) -> Result<PersistenceTier, String> {
+fn parse_tier(tier: &str) -> Result<DurabilityTier, String> {
     match tier {
-        "worker" => Ok(PersistenceTier::Worker),
-        "edge" => Ok(PersistenceTier::EdgeServer),
-        "core" => Ok(PersistenceTier::CoreServer),
+        "worker" => Ok(DurabilityTier::Worker),
+        "edge" => Ok(DurabilityTier::EdgeServer),
+        "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(format!(
-            "Invalid tier '{tier}'. Must be 'worker', 'edge', or 'core'."
+            "Invalid tier '{tier}'. Must be 'worker', 'edge', or 'global'."
         )),
     }
 }
@@ -74,23 +76,61 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, String> {
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
+    local_updates: Option<String>,
 }
 
-fn parse_propagation(options_json: Option<String>) -> Result<QueryPropagation, String> {
+fn parse_read_durability_options(
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<(ReadDurabilityOptions, QueryPropagation), String> {
+    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
     let Some(raw) = options_json else {
-        return Ok(QueryPropagation::Full);
+        return Ok((
+            ReadDurabilityOptions {
+                tier: parsed_tier,
+                local_updates: LocalUpdates::Immediate,
+            },
+            QueryPropagation::Full,
+        ));
     };
 
     let options: QueryExecutionOptionsWire =
         serde_json::from_str(&raw).map_err(|e| format!("Invalid query options JSON: {e}"))?;
 
-    match options.propagation.as_deref() {
+    let propagation = match options.propagation.as_deref() {
         None | Some("full") => Ok(QueryPropagation::Full),
         Some("local-only") => Ok(QueryPropagation::LocalOnly),
         Some(other) => Err(format!(
             "Invalid propagation '{other}'. Must be 'full' or 'local-only'."
         )),
-    }
+    }?;
+
+    let local_updates = match options.local_updates.as_deref() {
+        None | Some("immediate") => Ok(LocalUpdates::Immediate),
+        Some("deferred") => Ok(LocalUpdates::Deferred),
+        Some(other) => Err(format!(
+            "Invalid localUpdates '{other}'. Must be 'immediate' or 'deferred'."
+        )),
+    }?;
+
+    Ok((
+        ReadDurabilityOptions {
+            tier: parsed_tier,
+            local_updates,
+        },
+        propagation,
+    ))
+}
+
+fn parse_node_durability_tiers(tier: Option<String>) -> Result<Vec<DurabilityTier>, String> {
+    let Some(raw) = tier else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![parse_tier(&raw)?])
+}
+
+fn parse_node_durability_tier(tier: Option<String>) -> Result<Vec<DurabilityTier>, String> {
+    parse_node_durability_tiers(tier)
 }
 
 fn row_to_json(
@@ -315,11 +355,11 @@ impl JazzRuntimeImpl {
         let schema: Schema =
             serde_json::from_str(&schema_json).map_err(|e| format!("Invalid schema JSON: {e}"))?;
 
-        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+        let node_tiers = parse_node_durability_tier(tier)?;
 
         let mut sync_manager = SyncManager::new();
-        if let Some(t) = persistence_tier {
-            sync_manager = sync_manager.with_tier(t);
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
         }
 
         let app_id_obj = AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
@@ -428,16 +468,15 @@ impl JazzRuntimeImpl {
         &mut self,
         query_json: String,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
         options_json: Option<String>,
     ) -> Result<String, String> {
         let query = parse_query(&query_json)?;
         let session = parse_session(session_json)?;
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
         let fut = self.with_core("query", |core| {
-            core.query_with_propagation(query, session, tier, propagation)
+            core.query_with_propagation(query, session, durability, propagation)
         })?;
 
         let results = block_on(fut).map_err(|e| format!("Query failed: {e}"))?;
@@ -459,9 +498,9 @@ impl JazzRuntimeImpl {
         &mut self,
         query_json: String,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
     ) -> String {
-        self.query_inner(query_json, session_json, settled_tier, None)
+        self.query_inner(query_json, session_json, tier, None)
             .unwrap_or_else(error_json)
     }
 
@@ -472,13 +511,12 @@ impl JazzRuntimeImpl {
         query_json: String,
         on_update: Box<dyn Fn(String)>,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
         options_json: Option<String>,
     ) -> Result<f64, String> {
         let query = parse_query(&query_json)?;
         let session = parse_session(session_json)?;
-        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
-        let propagation = parse_propagation(options_json)?;
+        let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
         // The generated Func_void_std__string wrapper implements Send + Sync,
         // so this transmute is safe — the underlying closure is already
@@ -493,7 +531,7 @@ impl JazzRuntimeImpl {
         >::new()));
 
         let handle = self.with_core("subscribe", |core| {
-            core.subscribe_with_settled_tier_and_propagation(
+            core.subscribe_with_durability_and_propagation(
                 query,
                 {
                     let rows_by_id = Arc::clone(&rows_by_id);
@@ -510,7 +548,7 @@ impl JazzRuntimeImpl {
                     }
                 },
                 session,
-                tier,
+                durability,
                 propagation,
             )
             .map_err(|e| format!("Subscribe failed: {e}"))
@@ -524,9 +562,9 @@ impl JazzRuntimeImpl {
         query_json: String,
         on_update: Box<dyn Fn(String)>,
         session_json: Option<String>,
-        settled_tier: Option<String>,
+        tier: Option<String>,
     ) -> f64 {
-        self.subscribe_inner(query_json, on_update, session_json, settled_tier, None)
+        self.subscribe_inner(query_json, on_update, session_json, tier, None)
             .unwrap_or_else(|e| {
                 log::error!("subscribe failed: {e}");
                 -1.0

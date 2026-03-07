@@ -8,6 +8,7 @@ mod tests {
     use crate::metadata::MetadataKey;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
+    use crate::query_manager::manager::LocalUpdates;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
@@ -2050,7 +2051,7 @@ mod tests {
     // ========================================================================
 
     use crate::sync_manager::{
-        ClientId, ClientRole, Destination, InboxEntry, PersistenceTier, QueryId, ServerId, Source,
+        ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, QueryId, ServerId, Source,
         SyncPayload,
     };
 
@@ -3001,7 +3002,7 @@ mod tests {
 
         // === Setup Server B (Worker tier) ===
         let mut server_b = SchemaManager::new(
-            SyncManager::new().with_tier(PersistenceTier::Worker),
+            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
             schema.clone(),
             test_app_id(),
             "dev",
@@ -3035,7 +3036,7 @@ mod tests {
             .build();
         let sub_id = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
             .unwrap();
         client_a.process(&mut io_a);
 
@@ -3145,7 +3146,12 @@ mod tests {
             .build();
         let sub_id = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::EdgeServer))
+            .subscribe_with_sync_with_local_updates(
+                query,
+                None,
+                Some(DurabilityTier::EdgeServer),
+                LocalUpdates::Deferred,
+            )
             .unwrap();
         client_a.process(&mut io_a);
 
@@ -3176,7 +3182,7 @@ mod tests {
                 source: Source::Server(server_b_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
@@ -3200,7 +3206,7 @@ mod tests {
                 source: Source::Server(server_b_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::EdgeServer,
+                    tier: DurabilityTier::EdgeServer,
                     through_seq: 0,
                 },
             });
@@ -3246,7 +3252,12 @@ mod tests {
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync_with_local_updates(
+                query,
+                None,
+                Some(DurabilityTier::Worker),
+                LocalUpdates::Deferred,
+            )
             .unwrap();
         client.process(&mut storage);
 
@@ -3279,7 +3290,7 @@ mod tests {
                 source: Source::Server(server_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
@@ -3335,7 +3346,7 @@ mod tests {
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
             .unwrap();
         client.process(&mut storage);
 
@@ -3360,7 +3371,7 @@ mod tests {
                 source: Source::Server(server_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
@@ -3407,7 +3418,7 @@ mod tests {
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
             .unwrap();
         client.process(&mut storage);
 
@@ -3432,7 +3443,7 @@ mod tests {
                 source: Source::Server(server_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
