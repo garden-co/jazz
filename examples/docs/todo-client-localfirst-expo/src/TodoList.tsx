@@ -37,31 +37,31 @@ export function TodoList() {
   // #endregion reading-reactive-hooks-expo
 
   // #region writing-use-db-expo
-  const addTodo = () => {
+  const addTodo = async () => {
     const trimmed = title.trim();
     if (!trimmed || !sessionUserId) return;
-    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    await db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
-  const toggleTodo = (todo: Todo) => {
-    db.update(app.todos, todo.id, { done: !todo.done });
+  const toggleTodo = async (todo: Todo) => {
+    await db.update(app.todos, todo.id, { done: !todo.done });
   };
 
-  const removeTodo = (id: string) => {
-    db.deleteFrom(app.todos, id);
+  const removeTodo = async (id: string) => {
+    await db.deleteFrom(app.todos, id);
   };
   // #endregion writing-use-db-expo
 
   const renderItem: ListRenderItem<Todo> = ({ item }) => {
     return (
       <View style={styles.todoRow}>
-        <Switch value={item.done} onValueChange={() => toggleTodo(item)} />
+        <Switch value={item.done} onValueChange={() => void toggleTodo(item)} />
         <View style={styles.todoTextWrap}>
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
-        <Pressable onPress={() => removeTodo(item.id)} style={styles.deleteButton}>
+        <Pressable onPress={() => void removeTodo(item.id)} style={styles.deleteButton}>
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>
@@ -77,10 +77,10 @@ export function TodoList() {
           placeholder="What needs to be done?"
           style={styles.input}
           returnKeyType="done"
-          onSubmitEditing={addTodo}
+          onSubmitEditing={() => void addTodo()}
         />
         <Pressable
-          onPress={addTodo}
+          onPress={() => void addTodo()}
           style={[styles.addButton, !sessionUserId && styles.addButtonDisabled]}
           disabled={!sessionUserId}
         >

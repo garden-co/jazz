@@ -25,9 +25,17 @@ dist/
 # Test
 coverage/
 __screenshots__
+playwright-report/
+test-results/
+
+# Generated
+examples/wequencer/walkthrough/*.html
 
 # Local data
 data/
+
+# Sync server data
+data-multi/
 
 # Environment
 .env

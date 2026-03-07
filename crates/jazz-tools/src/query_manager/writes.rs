@@ -9,7 +9,7 @@ use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
-use super::types::{ColumnType, RowDescriptor, TableName, Value};
+use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
 
 impl QueryManager {
     /// Insert a new row into a table.
@@ -120,7 +120,7 @@ impl QueryManager {
         tracing::trace!(%object_id, table, "index_insert complete");
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(table);
+        self.mark_subscriptions_dirty_local(table);
         tracing::trace!(table, "mark_subscriptions_dirty");
 
         tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
@@ -232,7 +232,7 @@ impl QueryManager {
         )?;
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(table);
+        self.mark_subscriptions_dirty_local(table);
 
         Ok(InsertHandle {
             row_id: object_id,
@@ -362,7 +362,12 @@ impl QueryManager {
                 }
                 Ok(())
             }
-            (ColumnType::Row { columns: desc }, Value::Row(row_values)) => {
+            (
+                ColumnType::Row { columns: desc },
+                Value::Row {
+                    values: row_values, ..
+                },
+            ) => {
                 for (idx, row_col) in desc.columns.iter().enumerate() {
                     let Some(row_value) = row_values.get(idx) else {
                         break;
@@ -528,7 +533,7 @@ impl QueryManager {
         let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
-        let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+        let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
             let obj = om.get_or_load(id, storage_ref, &branches)?;
             let branch_state = obj.branches.get(&BranchName::new(branch))?;
             let tip_id = branch_state.tips.iter().next()?;
@@ -536,7 +541,11 @@ impl QueryManager {
             if commit.content.is_empty() {
                 return None;
             }
-            Some((commit.content.clone(), *tip_id))
+            Some(LoadedRow::new(
+                commit.content.clone(),
+                *tip_id,
+                [(id, BranchName::new(branch))].into_iter().collect(),
+            ))
         };
 
         for graph in &mut graphs {
@@ -939,7 +948,7 @@ impl QueryManager {
         tracing::trace!(%id, table = %table_name.0, "index_update complete");
 
         // Mark subscriptions dirty and notify about content update
-        self.mark_subscriptions_dirty(&table_name.0);
+        self.mark_subscriptions_dirty_local(&table_name.0);
         self.mark_row_updated_in_subscriptions(&table_name.0, id);
         tracing::trace!(table = %table_name.0, "mark_subscriptions_dirty");
 
@@ -1077,7 +1086,7 @@ impl QueryManager {
         tracing::trace!(%id, table = %table, "index_remove complete (soft delete)");
 
         // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_local(&table);
         self.mark_row_deleted_in_subscriptions(&table, id);
         tracing::trace!(table = %table, "mark_subscriptions_dirty (delete)");
 
@@ -1160,7 +1169,7 @@ impl QueryManager {
         )?;
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(table);
+        self.mark_subscriptions_dirty_local(table);
         self.mark_row_deleted_in_subscriptions(table, id);
 
         Ok(DeleteHandle {
@@ -1255,7 +1264,7 @@ impl QueryManager {
         self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
 
         // Mark subscriptions dirty
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_local(&table);
 
         Ok(InsertHandle {
             row_id: id,
@@ -1347,7 +1356,7 @@ impl QueryManager {
         );
 
         // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_local(&table);
         self.mark_row_deleted_in_subscriptions(&table, id);
 
         Ok(DeleteHandle {

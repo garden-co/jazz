@@ -57,7 +57,7 @@ All relevant types (Query, Condition, Value, etc.) implement Serialize/Deseriali
 
 ## Client subscribe_with_sync()
 
-`subscribe_with_sync_and_propagation(query, session, settled_tier, propagation)`:
+`subscribe_with_sync_and_propagation(query, session, durability_tier, propagation)`:
 
 1. Creates local subscription via `subscribe_with_session()`
 2. Sends `QuerySubscription` to connected servers based on propagation mode
@@ -68,7 +68,7 @@ Also: `unsubscribe_with_sync()` for cleanup.
 Propagation behavior:
 
 - `full` (default): forward subscription and unsubscription upstream; replay on reconnect.
-- `local-only`: do not forward past the local persistence boundary. In browser main->worker topology this still reaches worker (OPFS tier), but worker will not forward to edge/core.
+- `local-only`: do not forward past the local durability boundary. In browser main->worker topology this still reaches worker (OPFS tier), but worker will not forward to edge/global.
 
 > [`query_manager/subscriptions.rs:26`](../../crates/jazz-tools/src/query_manager/subscriptions.rs#L26)
 > [`query_manager/subscriptions.rs:205`](../../crates/jazz-tools/src/query_manager/subscriptions.rs#L205)
@@ -88,13 +88,14 @@ Server forwards received `QuerySubscription` to upstream servers only when `prop
 
 End-to-end path:
 
-1. Local `subscribe_with_sync_and_propagation(query, session, settled_tier, propagation)` creates a local subscription and conditionally forwards `QuerySubscription` upstream.
+1. Local `subscribe_with_sync_and_propagation(query, session, durability_tier, propagation)` creates a local subscription and conditionally forwards `QuerySubscription` upstream.
 2. Upstream/server `QueryManager` compiles + settles a server-side graph and computes scope.
 3. On first server-side settle, it emits exactly one `QuerySettled { query_id, tier }`.
 4. Any intermediate sync node relays that payload to original downstream clients via `query_origin`.
 5. Receiver stores `(query_id, tier)` in `pending_query_settled`.
 6. In local `QueryManager::process()`, pending `QuerySettled` is consumed before local subscription settle/delivery.
-7. Delivery gate checks `achieved_tiers >= settled_tier`; if satisfied, first delivery is full snapshot, else delivery is held.
+7. Delivery gate checks `achieved_tiers >= durability_tier`; if satisfied, first delivery is full snapshot, else delivery is held.
+8. With `local_updates = Immediate`, local write deltas can bypass tier waiting only after that first delivery (`settled_once = true`). Initial delivery never bypasses tier gating.
 
 > [`query_manager/subscriptions.rs:160`](../../crates/jazz-tools/src/query_manager/subscriptions.rs#L160)
 > [`query_manager/server_queries.rs:23`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L23)
@@ -112,6 +113,7 @@ Why this ordering matters:
 - `ObjectUpdated` may arrive in the same batch as `QuerySettled`.
 - Because `QuerySettled` is applied before local delivery checks, first delivery can unblock in the same tick once both data and tier condition are true.
 - If tier is not satisfied, query state still settles locally; only delivery is deferred.
+- `local_updates = Immediate` changes post-initial behavior only: later local writes can still notify immediately while waiting on higher-tier confirmation.
 
 ## PersistenceAck Integration (Detailed)
 
@@ -119,7 +121,7 @@ Why this ordering matters:
 
 End-to-end path:
 
-1. Persisted write API (`insert_persisted`, `update_persisted`, `delete_persisted`) registers an ack watcher keyed by commit ID and requested tier.
+1. Durable write APIs register an ack watcher keyed by commit ID and requested tier.
 2. Commit is synced upstream via `ObjectUpdated`.
 3. Receiver with `my_tier` set applies the commit and emits `PersistenceAck` for newly persisted commit IDs.
 4. Ack receiver stores tier to storage and in-memory commit ack state, then queues it for runtime.

@@ -13,15 +13,15 @@ import {
   generateClientId,
   buildEventsUrl,
   applyUserAuthHeaders,
-  isCataloguePayload,
   isExpectedFetchAbortError,
+  OutboxDestinationKind,
 } from "../runtime/sync-transport.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
 declare const self: {
-  postMessage(msg: unknown): void;
+  postMessage(msg: unknown, transfer?: Transferable[]): void;
   onmessage: ((event: MessageEvent) => void) | null;
   close(): void;
   location?: { origin?: string };
@@ -43,9 +43,9 @@ let streamConnecting = false;
 let streamAttached = false;
 const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
-let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
-let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
-let pendingSyncPayloadsForMain: string[] = [];
+let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
+let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
+let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
 let bootstrapCatalogueForwarding = false;
@@ -91,7 +91,7 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
   }
 }
 
-function enqueueSyncMessageForMain(payload: string): void {
+function enqueueSyncMessageForMain(payload: Uint8Array | string): void {
   pendingSyncPayloadsForMain.push(payload);
   if (syncBatchFlushQueued) return;
 
@@ -106,7 +106,21 @@ function enqueueSyncMessageForMain(payload: string): void {
 }
 
 function post(msg: WorkerToMainMessage): void {
-  self.postMessage(msg);
+  const transfer =
+    msg.type === "sync" || msg.type === "peer-sync"
+      ? collectPayloadTransferables(msg.payload)
+      : undefined;
+  self.postMessage(msg, transfer);
+}
+
+function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
+  const transferables = [];
+  for (const payload of payloads) {
+    if (payload instanceof Uint8Array) {
+      transferables.push(payload.buffer);
+    }
+  }
+  return transferables;
 }
 
 // ============================================================================
@@ -171,6 +185,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
       msg.userBranch,
       msg.dbName,
       "worker",
+      false,
     );
 
     // Store auth
@@ -184,49 +199,54 @@ async function handleInit(msg: InitMessage): Promise<void> {
     runtime.setClientRole(mainClientId, "peer");
 
     // Set up outbox routing
-    runtime.onSyncMessageToSend((envelope: string) => {
-      const parsed = JSON.parse(envelope);
-
-      if (parsed.destination && "Client" in parsed.destination) {
-        const destinationClientId = parsed.destination.Client as string;
-        if (destinationClientId === mainClientId) {
-          // Local main-thread client-bound payload.
-          enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
-          return;
-        }
-
-        // Follower peer client-bound payload.
-        const peerId = peerIdByRuntimeClient.get(destinationClientId);
-        if (!peerId) {
-          return;
-        }
-        const term = peerTermByPeerId.get(peerId) ?? 0;
-        post({
-          type: "peer-sync",
-          peerId,
-          term,
-          payload: [JSON.stringify(parsed.payload)],
-        });
-      } else if (parsed.destination && "Server" in parsed.destination) {
-        if (bootstrapCatalogueForwarding) {
-          if (isCataloguePayload(parsed.payload)) {
-            enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+    runtime.onSyncMessageToSend(
+      (
+        destinationKind: OutboxDestinationKind,
+        destinationId: string,
+        payload: Uint8Array | string,
+        isCatalogue: boolean,
+      ) => {
+        if (destinationKind === "client") {
+          const destinationClientId = destinationId;
+          if (destinationClientId === mainClientId) {
+            // Local main-thread client-bound payload.
+            enqueueSyncMessageForMain(payload);
+            return;
           }
-          return;
-        }
 
-        // Server-bound → HTTP POST to upstream
-        if (activeServerUrl) {
-          void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
-            if (!isExpectedFetchAbortError(error)) {
-              console.error("[worker] Sync POST error:", error);
-            }
-            detachServer();
-            scheduleReconnect();
+          // Follower peer client-bound payload.
+          const peerId = peerIdByRuntimeClient.get(destinationClientId);
+          if (!peerId) {
+            return;
+          }
+          const term = peerTermByPeerId.get(peerId) ?? 0;
+          post({
+            type: "peer-sync",
+            peerId,
+            term,
+            payload: [payload as Uint8Array],
           });
+        } else if (destinationKind === "server") {
+          if (bootstrapCatalogueForwarding) {
+            if (isCatalogue) {
+              enqueueSyncMessageForMain(payload);
+            }
+            return;
+          }
+
+          // Server-bound → HTTP POST to upstream
+          if (activeServerUrl) {
+            void sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
+              if (!isExpectedFetchAbortError(error)) {
+                console.error("[worker] Sync POST error:", error);
+              }
+              detachServer();
+              scheduleReconnect();
+            });
+          }
         }
-      }
-    });
+      },
+    );
 
     // Runtime is now fully ready to ingest client sync traffic.
     const bufferedSyncMessages = pendingSyncMessages;
@@ -276,10 +296,15 @@ async function handleInit(msg: InitMessage): Promise<void> {
 // ============================================================================
 
 /** POST a sync payload to the upstream server. */
-async function sendToServer(serverUrl: string, payload: any): Promise<void> {
+async function sendToServer(
+  serverUrl: string,
+  payloadJson: string,
+  isCatalogue: boolean,
+): Promise<void> {
   await sendSyncPayload(
     serverUrl,
-    payload,
+    payloadJson,
+    isCatalogue,
     {
       jwtToken,
       localAuthMode,
@@ -379,7 +404,7 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
         onConnected: (clientId) => {
           console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;

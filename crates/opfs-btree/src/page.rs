@@ -132,7 +132,7 @@ pub(crate) fn encode_page(page: &Page, page_size: usize) -> Result<Vec<u8>, BTre
 }
 
 pub(crate) fn decode_page(raw: &[u8], expected_page_size: usize) -> Result<Page, BTreeError> {
-    let header = parse_header(raw, expected_page_size, true)?;
+    let header = parse_header(raw, expected_page_size, false)?;
     let payload = header.payload;
 
     match header.kind {
@@ -871,14 +871,11 @@ fn parse_header<'a>(
     }
 
     let kind = decode_kind(raw[4])?;
-    let next_page_id = nonzero(u64::from_le_bytes(
-        raw[8..16].try_into().expect("next page id header slice"),
-    ));
-    let item_count = u32::from_le_bytes(raw[16..20].try_into().expect("item count header slice"));
+    let next_page_id = nonzero(read_le_u64(raw, 8));
+    let item_count = read_le_u32(raw, 16);
 
     if verify_checksum {
-        let expected_checksum =
-            u32::from_le_bytes(raw[20..24].try_into().expect("checksum header slice"));
+        let expected_checksum = read_le_u32(raw, 20);
         let actual_checksum = page_checksum(raw);
         if expected_checksum != actual_checksum {
             return Err(BTreeError::Corrupt(format!(
@@ -1348,6 +1345,30 @@ fn page_checksum(raw: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+#[inline]
+fn read_le_u32(raw: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        raw[offset],
+        raw[offset + 1],
+        raw[offset + 2],
+        raw[offset + 3],
+    ])
+}
+
+#[inline]
+fn read_le_u64(raw: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        raw[offset],
+        raw[offset + 1],
+        raw[offset + 2],
+        raw[offset + 3],
+        raw[offset + 4],
+        raw[offset + 5],
+        raw[offset + 6],
+        raw[offset + 7],
+    ])
+}
+
 fn nonzero(value: u64) -> Option<u64> {
     if value == 0 { None } else { Some(value) }
 }
@@ -1442,7 +1463,7 @@ mod tests {
         let mut encoded = encode_page(&page, 4096).expect("encode overflow page");
         encoded[100] ^= 0xFF;
 
-        let err = decode_page(&encoded, 4096).expect_err("must fail checksum");
+        let err = validate_page(&encoded, 4096).expect_err("must fail checksum");
         assert!(matches!(err, BTreeError::Corrupt(_)));
     }
 

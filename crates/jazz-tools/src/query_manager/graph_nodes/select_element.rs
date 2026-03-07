@@ -45,7 +45,7 @@ impl SelectElementNode {
 
     fn select_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
         let element = tuple.get(self.element_index)?.clone();
-        Some(Tuple::new(vec![element]))
+        Some(Tuple::new(vec![element]).with_provenance(tuple.provenance().clone()))
     }
 
     fn tuple_content_changed(old_tuple: &Tuple, new_tuple: &Tuple) -> bool {

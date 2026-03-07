@@ -10,32 +10,32 @@ export function TodoList() {
   // #endregion reading-reactive-hooks-react
 
   // #region reading-filtering-react
-  const incompleteTodos = useAll(
+  const _incompleteTodos = useAll(
     app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
   );
   // #endregion reading-filtering-react
 
   // #region writing-use-db-react
-  function addTodo(todoTitle: string) {
-    db.insert(app.todos, { title: todoTitle, done: false });
+  async function addTodo(todoTitle: string) {
+    await db.insert(app.todos, { title: todoTitle, done: false });
   }
 
-  function toggleTodo(todo: { id: string; done: boolean }) {
-    db.update(app.todos, todo.id, { done: !todo.done });
+  async function toggleTodo(todo: { id: string; done: boolean }) {
+    await db.update(app.todos, todo.id, { done: !todo.done });
   }
 
-  function removeTodo(id: string) {
-    db.deleteFrom(app.todos, id);
+  async function removeTodo(id: string) {
+    await db.deleteFrom(app.todos, id);
   }
   // #endregion writing-use-db-react
   // #endregion read-write-react
 
   const [title, setTitle] = useState("");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    addTodo(title.trim());
+    await addTodo(title.trim());
     setTitle("");
   };
 
@@ -57,12 +57,12 @@ export function TodoList() {
             <input
               type="checkbox"
               checked={todo.done}
-              onChange={() => toggleTodo(todo)}
+              onChange={() => void toggleTodo(todo)}
               className="toggle"
             />
             <span>{todo.title}</span>
             {todo.description && <small>{todo.description}</small>}
-            <button className="delete-btn" onClick={() => removeTodo(todo.id)}>
+            <button className="delete-btn" onClick={() => void removeTodo(todo.id)}>
               &times;
             </button>
           </li>

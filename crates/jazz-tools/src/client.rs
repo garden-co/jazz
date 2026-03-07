@@ -7,17 +7,19 @@ use std::time::Duration;
 
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
+use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, Value};
+use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::SchemaManager;
 use crate::storage::{Storage, StorageError, SurrealKvStorage};
 use crate::sync_manager::{
-    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 use bytes::BytesMut;
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::transport::{AuthConfig, ServerConnection};
 use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
@@ -32,8 +34,6 @@ pub struct JazzClient {
     server_connection: Option<Arc<ServerConnection>>,
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
-    /// Subscription delta senders (for routing deltas from callbacks to streams).
-    subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
     /// Handle for the stream listener task.
@@ -183,18 +183,21 @@ impl JazzClient {
             tracing::warn!("Failed to register server with sync manager: {}", e);
         }
 
-        // Create shared subscription senders map
-        let subscription_senders: Arc<
-            RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<OrderedRowDelta>>>,
-        > = Arc::new(RwLock::new(HashMap::new()));
-
         // Spawn binary stream listener if connected to server
+        let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let stream_listener_task = if let Some(ref conn) = server_connection {
             let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
             let stream_headers = conn.build_stream_headers();
             let server_id_for_stream = server_id;
+            let mut initial_stream_ready_tx = initial_stream_ready_tx;
 
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
@@ -241,6 +244,14 @@ impl JazzClient {
 
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
+                                                    if matches!(
+                                                        event,
+                                                        ServerEvent::Connected { .. }
+                                                    ) && let Some(tx) =
+                                                        initial_stream_ready_tx.take()
+                                                    {
+                                                        let _ = tx.send(());
+                                                    }
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
@@ -285,11 +296,25 @@ impl JazzClient {
             None
         };
 
+        if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
+            tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
+                .await
+                .map_err(|_| {
+                    JazzError::Connection(
+                        "timed out waiting for server event stream to connect".to_string(),
+                    )
+                })?
+                .map_err(|_| {
+                    JazzError::Connection(
+                        "server event stream ended before sending Connected".to_string(),
+                    )
+                })?;
+        }
+
         Ok(Self {
             runtime,
             server_connection,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            subscription_senders,
             next_handle: std::sync::atomic::AtomicU64::new(1),
             stream_listener_task,
         })
@@ -313,11 +338,11 @@ impl JazzClient {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         );
 
-        // Create channel for this subscription's deltas
+        // Create channel for this subscription's deltas.
+        // tx is moved directly into the callback so the delta is never dropped due
+        // to the race where immediate_tick fires the callback before we can insert
+        // tx into a shared map.
         let (tx, rx) = mpsc::channel::<OrderedRowDelta>(64);
-
-        // Store sender before subscribing so callback can find it
-        let senders = self.subscription_senders.clone();
 
         // Register with runtime using callback pattern
         // The callback bridges runtime updates to the channel
@@ -326,23 +351,13 @@ impl JazzClient {
             .subscribe(
                 query.clone(),
                 move |delta| {
-                    // Route delta to the subscription's channel
-                    // Note: We need to use try_send since we're in a sync callback
-                    if let Ok(senders_guard) = senders.try_read()
-                        && let Some(sender) = senders_guard.get(&delta.handle)
-                    {
-                        let _ = sender.try_send(delta.ordered_delta);
-                    }
+                    // Route delta to the subscription's channel.
+                    // Note: We use try_send since we're in a sync callback.
+                    let _ = tx.try_send(delta.ordered_delta);
                 },
                 session,
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
-
-        // Register sender for this subscription
-        {
-            let mut senders = self.subscription_senders.write().await;
-            senders.insert(runtime_handle, tx);
-        }
 
         // Track subscription metadata
         {
@@ -353,17 +368,24 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx))
     }
 
-    /// One-shot query, optionally waiting for a settled tier.
+    /// One-shot query, optionally waiting for a durability tier.
     ///
     /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
     pub async fn query(
         &self,
         query: Query,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .runtime
-            .query(query, None, settled_tier)
+            .query(
+                query,
+                None,
+                ReadDurabilityOptions {
+                    tier: durability_tier,
+                    local_updates: LocalUpdates::Immediate,
+                },
+            )
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
@@ -395,10 +417,6 @@ impl JazzClient {
     pub async fn unsubscribe(&self, handle: SubscriptionHandle) -> Result<()> {
         let mut subs = self.subscriptions.write().await;
         if let Some(state) = subs.remove(&handle) {
-            // Remove sender
-            let mut senders = self.subscription_senders.write().await;
-            senders.remove(&state.runtime_handle);
-            // Unsubscribe from runtime
             let _ = self.runtime.unsubscribe(state.runtime_handle);
         }
         Ok(())
@@ -478,12 +496,19 @@ impl<'a> SessionClient<'a> {
     pub async fn query(
         &self,
         query: Query,
-        settled_tier: Option<PersistenceTier>,
+        durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .client
             .runtime
-            .query(query, Some(self.session.clone()), settled_tier)
+            .query(
+                query,
+                Some(self.session.clone()),
+                ReadDurabilityOptions {
+                    tier: durability_tier,
+                    local_updates: LocalUpdates::Immediate,
+                },
+            )
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await

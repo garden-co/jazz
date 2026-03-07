@@ -1,6 +1,6 @@
 import type { Request } from "express";
-import { translateQuery, type JazzContext, type Session } from "jazz-tools/backend";
-import { app as schemaApp, wasmSchema as schema } from "../schema/app.js";
+import { type JazzContext, type Session } from "jazz-tools/backend";
+import { app as schemaApp } from "../schema/app.js";
 
 type RequesterIdentity = {
   userId: string;
@@ -10,30 +10,6 @@ type RequesterIdentity = {
 function verifyJwtAndExtractIdentity(_jwt: string): RequesterIdentity {
   // Replace with your auth provider's JWT verification logic.
   return { userId: "replace-with-verified-sub", claims: {} };
-}
-
-function buildQuery(table: string): string {
-  return translateQuery(
-    JSON.stringify({
-      table,
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    }),
-    schema,
-  );
-}
-
-function buildFolderScopedQuery(folderId: string): string {
-  return translateQuery(
-    JSON.stringify({
-      table: "todos",
-      conditions: [{ column: "folder_id", op: "eq", value: folderId }],
-      includes: {},
-      orderBy: [],
-    }),
-    schema,
-  );
 }
 
 export function sessionFromRequest(req: Request): Session {
@@ -49,13 +25,13 @@ export function sessionFromRequest(req: Request): Session {
 
 export async function listTodosForRequester(req: Request, context: JazzContext) {
   const userClient = context.forSession(sessionFromRequest(req), schemaApp);
-  const rows = await userClient.query(buildQuery("todos"));
+  const rows = await userClient.query(schemaApp.todos);
   return rows;
 }
 
 export async function listTodosWithSimplePolicy(req: Request, context: JazzContext) {
   const userClient = context.forSession(sessionFromRequest(req), schemaApp);
-  return userClient.query(buildQuery("todos"));
+  return userClient.query(schemaApp.todos);
 }
 
 export async function listTodosWithInheritedPolicy(
@@ -64,5 +40,5 @@ export async function listTodosWithInheritedPolicy(
   folderId: string,
 ) {
   const userClient = context.forSession(sessionFromRequest(req), schemaApp);
-  return userClient.query(buildFolderScopedQuery(folderId));
+  return userClient.query(schemaApp.todos.where({ project: folderId }));
 }

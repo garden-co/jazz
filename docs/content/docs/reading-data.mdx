@@ -60,6 +60,16 @@ Use framework bindings immediately after subscription concepts:
   </Tab>
 </Tabs>
 
+### React Suspense and Transitions
+
+The docs React example app includes a Suspense-based list that keeps the previous result visible
+while a filter or page change resolves by moving the query behind a `Suspense` boundary and
+reading it with `useAllSuspense(query)`.
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/ConcurrentTodoList.tsx#reading-concurrent-rendering-react
+</include>
+
 ## Filters
 
 ### API Reference
@@ -175,44 +185,49 @@ Recursive queries compute bounded transitive closures from a seed row set.
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
 </include>
 
-## Read Settled Tiers
+## Read Durability Options
 
 ### API Reference
 
-- `db.all(query, settledTier?)`
-- `db.one(query, settledTier?)`
-- `db.subscribeAll(query, callback, settledTier?)`
-- `settledTier`: `"worker" | "edge" | "core"`
+- `db.all(query, options?)`
+- `db.one(query, options?)`
+- `db.subscribeAll(query, callback, options?)`
+- `options.tier`: `"worker" | "edge" | "global"`
+- `options.localUpdates`: `"immediate" | "deferred"` (default: `"immediate"`)
 
-Settled tiers control when initial query delivery is considered confirmed:
+Durability tiers control when initial query delivery is considered confirmed:
 
 - `worker`: wait for worker/local storage acknowledgement.
 - `edge`: wait for edge server acknowledgement.
-- `core`: wait for core server acknowledgement.
+- `global`: wait for global server acknowledgement.
 
-Without a `settledTier`, reads are local-first and return immediately from local runtime state.
+Defaults:
+
+- Browser/client default tier is `worker`.
+- Backend/server-connected default tier is `edge`.
+- `localUpdates: "immediate"` keeps local subscription updates synchronous after the first tier-confirmed snapshot. The initial delivery remains tier-gated.
 
 Tradeoff summary:
 
-- Lower settled tier: lower latency, narrower confirmation scope.
-- Higher settled tier: higher latency, broader confirmation scope.
+- Lower tier: lower latency, narrower confirmation scope.
+- Higher tier: higher latency, broader confirmation scope.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-settled-tier-ts
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
     </include>
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-settled-tier-rust
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
 
-Read settled tiers pair naturally with write ack tiers:
+Read durability options pair naturally with write durability tiers:
 
-- Use write ack tiers to gate mutation durability checkpoints.
-- Use settled tiers to gate query/subscription delivery checkpoints.
+- Use write durability tiers to gate mutation durability checkpoints.
+- Use read durability options to gate query/subscription delivery checkpoints.
 
-See [Write Ack Tiers](/docs/writing-data#write-ack-tiers) for write-side semantics.
+See [Write Durability Tiers](/docs/writing-data#write-durability-tiers) for write-side semantics.

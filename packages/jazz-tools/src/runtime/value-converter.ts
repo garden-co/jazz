@@ -85,7 +85,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       const columns = columnType.columns;
       return {
         type: "Row",
-        value: columns.map((col) => toValue(rowValue[col.name], col.column_type)),
+        value: { values: columns.map((col) => toValue(rowValue[col.name], col.column_type)) },
       };
     }
     default:

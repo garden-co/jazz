@@ -7,14 +7,19 @@ import { createJazzContext } from "./create-jazz-context.js";
 const mocks = vi.hoisted(() => {
   const resolveLocalAuthDefaults = vi.fn();
   const runtimeCtor = vi.fn();
+  const inMemoryRuntimeCtor = vi.fn();
   const runtimeInstances: Array<{ flush: ReturnType<typeof vi.fn> }> = [];
   const clients: Array<{
+    asBackend: ReturnType<typeof vi.fn>;
     forRequest: ReturnType<typeof vi.fn>;
     forSession: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
   }> = [];
   const connectWithRuntime = vi.fn((_runtime: unknown, _context: AppContext) => {
     const client = {
+      asBackend: vi.fn(function (this: unknown) {
+        return this;
+      }),
       forRequest: vi.fn(() => ({ kind: "request-client" })),
       forSession: vi.fn(() => ({ kind: "session-client" })),
       shutdown: vi.fn(async () => undefined),
@@ -37,6 +42,18 @@ const mocks = vi.hoisted(() => {
       runtimeCtor(schemaJson, appId, env, userBranch, dataPath, tier);
       runtimeInstances.push(this);
     }
+
+    static inMemory(
+      schemaJson: string,
+      appId: string,
+      env: string,
+      userBranch: string,
+      tier?: string,
+    ) {
+      inMemoryRuntimeCtor(schemaJson, appId, env, userBranch, tier);
+      const instance = new MockNapiRuntime(schemaJson, appId, env, userBranch, "__memory__", tier);
+      return instance;
+    }
   }
 
   class MockJazzClient {
@@ -48,12 +65,14 @@ const mocks = vi.hoisted(() => {
     MockJazzClient,
     resolveLocalAuthDefaults,
     runtimeCtor,
+    inMemoryRuntimeCtor,
     runtimeInstances,
     connectWithRuntime,
     clients,
     reset() {
       resolveLocalAuthDefaults.mockReset();
       runtimeCtor.mockReset();
+      inMemoryRuntimeCtor.mockReset();
       runtimeInstances.length = 0;
       connectWithRuntime.mockClear();
       clients.length = 0;
@@ -90,7 +109,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
-      dataPath: "/tmp/jazz.db",
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
     expect(mocks.runtimeCtor).not.toHaveBeenCalled();
@@ -108,15 +127,15 @@ describe("backend/create-jazz-context", () => {
       "dev",
       "main",
       "/tmp/jazz.db",
-      undefined,
+      "edge",
     );
   });
 
-  it("BC-U02: supports request/session-scoped helpers", () => {
+  it("BC-U02: supports backend/request/session-scoped helpers", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
-      dataPath: "/tmp/jazz.db",
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
       backendSecret: "secret",
     });
 
@@ -125,12 +144,15 @@ describe("backend/create-jazz-context", () => {
     };
     const session: Session = { user_id: "u1", claims: {} };
 
+    const backendClient = context.asBackend();
     const requestClient = context.forRequest(req);
     const sessionClient = context.forSession(session);
 
+    expect(backendClient).toBe(mocks.clients[0]);
     expect(requestClient).toEqual({ kind: "request-client" });
     expect(sessionClient).toEqual({ kind: "session-client" });
     expect(mocks.clients).toHaveLength(1);
+    expect(mocks.clients[0].asBackend).toHaveBeenCalledTimes(1);
     expect(mocks.clients[0].forRequest).toHaveBeenCalledWith(req);
     expect(mocks.clients[0].forSession).toHaveBeenCalledWith(session);
   });
@@ -138,7 +160,7 @@ describe("backend/create-jazz-context", () => {
   it("BC-U03: throws when no schema source is available", () => {
     const context = createJazzContext({
       appId: "server-app",
-      dataPath: "/tmp/jazz.db",
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
     expect(() => context.client()).toThrow("No schema source provided");
@@ -147,7 +169,7 @@ describe("backend/create-jazz-context", () => {
   it("BC-U04: rejects switching to a different schema after initialization", () => {
     const context = createJazzContext({
       appId: "server-app",
-      dataPath: "/tmp/jazz.db",
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
     context.client({ wasmSchema: SCHEMA_A });
@@ -161,7 +183,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
-      dataPath: "/tmp/jazz.db",
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
     expect(() => context.flush()).not.toThrow();
@@ -176,7 +198,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
-      dataPath: "/tmp/jazz.db",
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
     context.client();
@@ -188,5 +210,36 @@ describe("backend/create-jazz-context", () => {
     context.client();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(2);
     expect(mocks.runtimeCtor).toHaveBeenCalledTimes(2);
+  });
+
+  it("BC-U07: uses in-memory runtime when driver.type is memory", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      driver: { type: "memory" },
+      serverUrl: "http://localhost:1625",
+    });
+
+    context.client();
+
+    expect(mocks.inMemoryRuntimeCtor).toHaveBeenCalledTimes(1);
+    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
+      serializeRuntimeSchema(SCHEMA_A),
+      "server-app",
+      "dev",
+      "main",
+      "__memory__",
+      "edge",
+    );
+  });
+
+  it("BC-U08: rejects memory driver without serverUrl", () => {
+    expect(() =>
+      createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        driver: { type: "memory" },
+      }),
+    ).toThrow("driver.type='memory' requires serverUrl.");
   });
 });

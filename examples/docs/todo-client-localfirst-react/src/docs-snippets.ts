@@ -90,15 +90,16 @@ export async function combinedQuery(db: Db) {
 // #region reading-tier-react
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
   return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length), {
-    settledTier: "edge",
+    tier: "edge",
+    localUpdates: "immediate",
   });
 }
 // #endregion reading-tier-react
 
-// #region writing-ack-react
-export async function writeWithAck(db: Db, todoTitle: string) {
-  const id = await db.insertWithAck(app.todos, { title: todoTitle, done: false }, "edge");
-  await db.updateWithAck(app.todos, id, { done: true }, "edge");
-  await db.deleteFromWithAck(app.todos, id, "core");
+// #region writing-durability-react
+export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
+  const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
+  await db.update(app.todos, id, { done: true }, { tier: "edge" });
+  await db.deleteFrom(app.todos, id, { tier: "global" });
 }
-// #endregion writing-ack-react
+// #endregion writing-durability-react

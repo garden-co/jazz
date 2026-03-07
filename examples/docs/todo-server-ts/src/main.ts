@@ -10,8 +10,8 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, translateQuery, type JazzClient, type Value } from "jazz-tools/backend";
-import { app as schemaApp, wasmSchema as schema } from "../schema/app.js";
+import { createJazzContext, type JazzClient, type Value } from "jazz-tools/backend";
+import { app as schemaApp } from "../schema/app.js";
 
 // ============================================================================
 // Types
@@ -72,18 +72,6 @@ function rowToTodo(id: string, values: Value[]): Todo | null {
   };
 }
 
-function buildQuery(table: string) {
-  return translateQuery(
-    JSON.stringify({
-      table,
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    }),
-    schema,
-  );
-}
-
 // ============================================================================
 // Server Factory
 // ============================================================================
@@ -102,7 +90,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   const context = createJazzContext({
     appId,
     app: schemaApp,
-    dataPath: dbPath,
+    driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
     userBranch: "main",
   });
@@ -118,7 +106,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
   // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
-    const rows = await client.query(buildQuery("todos"));
+    const rows = await client.query(schemaApp.todos);
     const todos = rows
       .map((row) => rowToTodo(row.id, row.values))
       .filter((t): t is Todo => t !== null);
@@ -141,7 +129,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // List all todos
   app.get("/todos", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const rows = await client.query(buildQuery("todos"));
+      const rows = await client.query(schemaApp.todos);
       const todos = rows
         .map((row) => rowToTodo(row.id, row.values))
         .filter((t): t is Todo => t !== null);
@@ -193,7 +181,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // List todos as a specific session user (for policy verification/testing)
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const rows = await client.queryInternal(buildQuery("todos"), {
+      const rows = await client.queryInternal(schemaApp.todos, {
         user_id: req.params.userId,
         claims: {},
       });
@@ -218,7 +206,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     sseConnections.add(res);
 
     // Send initial state
-    const rows = await client.query(buildQuery("todos"));
+    const rows = await client.query(schemaApp.todos);
     const todos = rows
       .map((row) => rowToTodo(row.id, row.values))
       .filter((t): t is Todo => t !== null);
@@ -235,7 +223,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      const rows = await client.query(buildQuery("todos"));
+      const rows = await client.query(schemaApp.todos.where({ id }));
       const row = rows.find((r) => r.id === id);
 
       if (!row) {
@@ -275,7 +263,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
       if (Object.keys(updates).length === 0) {
         // No updates, just return the current todo
-        const rows = await client.query(buildQuery("todos"));
+        const rows = await client.query(schemaApp.todos.where({ id }));
         const row = rows.find((r) => r.id === id);
 
         if (!row) {
@@ -291,7 +279,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       await client.update(id, updates);
 
       // Fetch updated todo
-      const rows = await client.query(buildQuery("todos"));
+      const rows = await client.query(schemaApp.todos.where({ id }));
       const row = rows.find((r) => r.id === id);
 
       if (!row) {

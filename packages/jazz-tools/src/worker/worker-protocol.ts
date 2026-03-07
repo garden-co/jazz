@@ -28,7 +28,7 @@ export interface InitMessage {
 /** Forward a sync payload from main thread to worker. */
 export interface SyncToWorkerMessage {
   type: "sync";
-  payload: string[]; // JSON-encoded SyncPayloads
+  payload: Uint8Array[];
 }
 
 export type WorkerLifecycleEvent =
@@ -56,7 +56,7 @@ export interface PeerSyncToWorkerMessage {
   type: "peer-sync";
   peerId: string;
   term: number;
-  payload: string[]; // JSON-encoded SyncPayloads
+  payload: Uint8Array[];
 }
 
 /**
@@ -134,7 +134,7 @@ export interface InitOkMessage {
 /** Forward a sync payload from worker to main thread. */
 export interface SyncToMainMessage {
   type: "sync";
-  payload: string[]; // JSON-encoded SyncPayloads
+  payload: (Uint8Array | string)[];
 }
 
 /** Forward sync payload(s) to a specific follower peer through leader main thread. */
@@ -142,7 +142,7 @@ export interface PeerSyncToMainMessage {
   type: "peer-sync";
   peerId: string;
   term: number;
-  payload: string[]; // JSON-encoded SyncPayloads
+  payload: Uint8Array[];
 }
 
 /** Worker encountered an error. */

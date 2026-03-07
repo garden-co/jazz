@@ -84,6 +84,7 @@ export default function App() {
             env: storedConfig.env,
             userBranch: storedConfig.branch,
             adminSecret: storedConfig.adminSecret,
+            driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(storedConfig.serverUrl, {
             adminSecret: storedConfig.adminSecret,
@@ -158,7 +159,7 @@ export default function App() {
 
   return (
     <JazzProvider client={client}>
-      <DevtoolsProvider wasmSchema={wasmSchema}>
+      <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
         <ConfigResetProvider onReset={handleReset}>
           <BrowserRouter>
             <InspectorRoutes />

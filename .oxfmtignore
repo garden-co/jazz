@@ -2,3 +2,8 @@ crates/jazz-rn/src/**
 crates/jazz-tools/Cargo.toml
 crates/jazz-napi/index.d.ts
 crates/jazz-napi/index.js
+examples/wequencer/walkthrough/*.html
+examples/*/schema/app.ts
+examples/docs/*/schema/app.ts
+crates/jazz-napi/index.d.ts
+crates/jazz-napi/index.js
