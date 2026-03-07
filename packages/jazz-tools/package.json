@@ -1,7 +1,7 @@
 {
   "name": "jazz-tools",
   "version": "2.0.0-alpha.14",
-  "description": "Jazz TypeScript SDK, React bindings, and CLI tools",
+  "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
   },
@@ -25,6 +25,10 @@
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
+    },
+    "./vue": {
+      "types": "./dist/vue/index.d.ts",
+      "default": "./dist/vue/index.js"
     },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
@@ -87,17 +91,22 @@
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
     "vitest": "catalog:default",
+    "vue": "^3.5.22",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
     "react": "^18 || ^19",
-    "svelte": "^5.0.0"
+    "svelte": "^5.0.0",
+    "vue": "^3.5.0"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
     },
     "svelte": {
+      "optional": true
+    },
+    "vue": {
       "optional": true
     }
   },

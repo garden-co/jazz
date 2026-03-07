@@ -14,10 +14,15 @@ Mutation methods return promises that resolve when the requested durability tier
 
 Use the framework context binding to access the shared `Db` instance and execute mutations.
 
-<Tabs groupId="jazz-framework" items={["React", "Expo", "Svelte"]} persist>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Expo", "Svelte"]} persist>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-vue/src/TodoList.vue#writing-use-db-vue
     </include>
   </Tab>
   <Tab value="Expo">

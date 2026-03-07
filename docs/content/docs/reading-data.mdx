@@ -40,12 +40,18 @@ import WhereOperatorsTable from "../partials/quickstarts/where-operators-table.m
 Use framework bindings immediately after subscription concepts:
 
 - React/Expo: `useAll(query)` for reactive query results.
+- Vue: `useAll(query)` for a reactive result ref.
 - Svelte: `new QuerySubscription(query)` for reactive `.current` data.
 
-<Tabs groupId="jazz-framework" items={["React", "Expo", "Svelte"]} persist>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Expo", "Svelte"]} persist>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-vue/src/TodoList.vue#reading-reactive-hooks-vue
     </include>
   </Tab>
   <Tab value="Expo">
