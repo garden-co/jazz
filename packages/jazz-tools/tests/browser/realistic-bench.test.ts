@@ -18,6 +18,10 @@ import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot
 
 type PersistenceTier = "worker" | "edge" | "core";
 
+function durabilityOptions(tier: PersistenceTier): { tier: "worker" | "edge" | "global" } {
+  return { tier: tier === "core" ? "global" : tier };
+}
+
 interface ProfileConfig {
   id: string;
   seed: number;
@@ -216,7 +220,7 @@ interface ScenarioResult {
   extra: Record<string, unknown>;
 }
 
-const schema = schemaJson as unknown as WasmSchema;
+const schema = (schemaJson as { tables: WasmSchema }).tables;
 const profile = profileJson as unknown as ProfileConfig;
 const w1 = w1Json as unknown as W1Scenario;
 const w3 = w3Json as unknown as W3Scenario;
@@ -434,7 +438,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
   const ts = nowMicros();
   for (let i = 0; i < config.users; i += 1) {
     reportLoopProgress("seed users", i, config.users);
-    const id = db.insert(usersTable, {
+    const id = await db.insert(usersTable, {
       display_name: `User ${i}`,
       email: `user${i}@bench.test`,
     });
@@ -443,7 +447,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 
   for (let i = 0; i < config.organizations; i += 1) {
     reportLoopProgress("seed organizations", i, config.organizations);
-    const id = db.insert(organizationsTable, {
+    const id = await db.insert(organizationsTable, {
       name: `Org ${i}`,
       created_at: ts + i,
     });
@@ -452,7 +456,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 
   for (let i = 0; i < config.users; i += 1) {
     reportLoopProgress("seed memberships", i, config.users);
-    db.insert(membershipsTable, {
+    await db.insert(membershipsTable, {
       organization_id: organizations[i % organizations.length],
       user_id: users[i],
       role: i % 9 === 0 ? "admin" : "member",
@@ -461,7 +465,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 
   for (let i = 0; i < config.projects; i += 1) {
     reportLoopProgress("seed projects", i, config.projects);
-    const id = db.insert(projectsTable, {
+    const id = await db.insert(projectsTable, {
       organization_id: organizations[i % organizations.length],
       name: `Project ${i}`,
       archived: false,
@@ -475,7 +479,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
     reportLoopProgress("seed tasks", i, config.tasks);
     const projectIdx = i % projects.length;
     const assigneeIdx = i % users.length;
-    const id = db.insert(tasksTable, {
+    const id = await db.insert(tasksTable, {
       project_id: projects[projectIdx],
       title: `Task ${i}`,
       status: statuses[i % statuses.length],
@@ -491,7 +495,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
   for (let i = 0; i < config.comments; i += 1) {
     reportLoopProgress("seed comments", i, config.comments);
     const taskIdx = i % taskIds.length;
-    db.insert(commentsTable, {
+    await db.insert(commentsTable, {
       task_id: taskIds[taskIdx],
       author_id: users[(i * 7) % users.length],
       body: `Comment ${i} body`,
@@ -503,7 +507,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
   for (let taskIdx = 0; taskIdx < taskIds.length; taskIdx += 1) {
     reportLoopProgress("seed task_watchers", taskIdx, taskIds.length);
     for (let w = 0; w < config.watchers_per_task; w += 1) {
-      db.insert(taskWatchersTable, {
+      await db.insert(taskWatchersTable, {
         task_id: taskIds[taskIdx],
         user_id: users[(taskIdx + w) % users.length],
       });
@@ -513,7 +517,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
   for (let i = 0; i < config.activity_events; i += 1) {
     reportLoopProgress("seed activity_events", i, config.activity_events);
     const taskIdx = i % taskIds.length;
-    db.insert(activityTable, {
+    await db.insert(activityTable, {
       project_id: projects[taskProjectIdx[taskIdx]],
       task_id: taskIds[taskIdx],
       actor_id: users[(i * 11) % users.length],
@@ -602,7 +606,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
       }
       case "update_task_status": {
         const taskIdx = rng.nextInt(state.taskIds.length);
-        db.update(tasksTable, state.taskIds[taskIdx], {
+        await db.update(tasksTable, state.taskIds[taskIdx], {
           status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
           priority: 1 + rng.nextInt(4),
           assignee_id: state.users[rng.nextInt(state.users.length)],
@@ -612,7 +616,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
       }
       case "insert_comment": {
         const taskIdx = rng.nextInt(state.taskIds.length);
-        db.insert(commentsTable, {
+        await db.insert(commentsTable, {
           task_id: state.taskIds[taskIdx],
           author_id: state.users[rng.nextInt(state.users.length)],
           body: `interactive comment ${i}`,
@@ -623,7 +627,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
       }
       case "update_project_meta": {
         const projectIdx = rng.nextInt(state.projects.length);
-        db.update(projectsTable, state.projects[projectIdx], {
+        await db.update(projectsTable, state.projects[projectIdx], {
           name: `Project ${projectIdx} v${i}`,
           updated_at: nowMicros(),
         });
@@ -851,7 +855,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B1 inserts", i, insertCount);
       const taskIdx = rng.nextInt(state.taskIds.length);
       const t0 = performance.now();
-      const id = db.insert(commentsTable, {
+      const id = await db.insert(commentsTable, {
         task_id: state.taskIds[taskIdx],
         author_id: state.users[rng.nextInt(state.users.length)],
         body: `b1_insert_comment_${i}`,
@@ -865,7 +869,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B1 updates", i, updateCount);
       const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
       const t0 = performance.now();
-      db.update(tasksTable, taskId, {
+      await db.update(tasksTable, taskId, {
         priority: 1 + rng.nextInt(4),
         status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
         updated_at: nowMicros(),
@@ -877,7 +881,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B1 deletes", i, deleteCount);
       const id = insertedCommentIds[i];
       const t0 = performance.now();
-      db.deleteFrom(commentsTable, id);
+      await db.deleteFrom(commentsTable, id);
       (latencies.delete_sync ||= []).push(performance.now() - t0);
     }
 
@@ -1092,7 +1096,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
     writer = await createServerDb(dbName, "realistic-b4-writer");
     const state = await seedDataset(writer, config);
     const targetTaskId = state.taskIds[0];
-    writer.update(tasksTable, targetTaskId, {
+    await writer.update(tasksTable, targetTaskId, {
       priority: 0,
       updated_at: nowMicros(),
     });
@@ -1123,7 +1127,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
         // Warmup update confirms all subscribers are active before measured rounds.
         targetPriority = 9_000 + subscriberCount;
         seenAt.fill(0);
-        writer.update(tasksTable, targetTaskId, {
+        await writer.update(tasksTable, targetTaskId, {
           priority: targetPriority,
           updated_at: nowMicros(),
         });
@@ -1137,7 +1141,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
           seenAt.fill(0);
 
           const t0 = performance.now();
-          writer.update(tasksTable, targetTaskId, {
+          await writer.update(tasksTable, targetTaskId, {
             priority: targetPriority,
             updated_at: nowMicros(),
           });
@@ -1335,69 +1339,71 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
   };
 
   return {
-    tables: {
-      folders: {
-        columns: [
-          {
-            name: "parent_id",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "folders",
-          },
-          {
-            name: "owner_id",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-          {
-            name: "title",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-          {
-            name: "updated_at",
-            column_type: { type: "Timestamp" },
-            nullable: false,
-          },
-        ],
-        policies: {
-          select: folderSelectPolicy,
-          update: folderUpdatePolicy,
+    folders: {
+      columns: [
+        {
+          name: "parent_id",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "folders",
         },
+        {
+          name: "owner_id",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+        {
+          name: "title",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+        {
+          name: "updated_at",
+          column_type: { type: "Timestamp" },
+          nullable: false,
+        },
+      ],
+      policies: {
+        select: folderSelectPolicy,
+        insert: {},
+        update: folderUpdatePolicy,
+        delete: {},
       },
-      documents: {
-        columns: [
-          {
-            name: "folder_id",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "folders",
-          },
-          {
-            name: "editor_id",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-          {
-            name: "body",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-          {
-            name: "revision",
-            column_type: { type: "Integer" },
-            nullable: false,
-          },
-          {
-            name: "updated_at",
-            column_type: { type: "Timestamp" },
-            nullable: false,
-          },
-        ],
-        policies: {
-          select: documentSelectPolicy,
-          update: documentUpdatePolicy,
+    },
+    documents: {
+      columns: [
+        {
+          name: "folder_id",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "folders",
         },
+        {
+          name: "editor_id",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+        {
+          name: "body",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+        {
+          name: "revision",
+          column_type: { type: "Integer" },
+          nullable: false,
+        },
+        {
+          name: "updated_at",
+          column_type: { type: "Timestamp" },
+          nullable: false,
+        },
+      ],
+      policies: {
+        select: documentSelectPolicy,
+        insert: {},
+        update: documentUpdatePolicy,
+        delete: {},
       },
     },
   };
@@ -1437,7 +1443,7 @@ async function seedPermissionDataset(
   const allowedFolders: string[] = [];
   const deniedFolders: string[] = [];
   const ts = nowMicros();
-  const allowedRootId = await db.insertWithAck(
+  const allowedRootId = await db.insert(
     folderTable,
     {
       parent_id: null,
@@ -1445,9 +1451,9 @@ async function seedPermissionDataset(
       title: "allowed-root",
       updated_at: ts,
     },
-    tier,
+    durabilityOptions(tier),
   );
-  const deniedRootId = await db.insertWithAck(
+  const deniedRootId = await db.insert(
     folderTable,
     {
       parent_id: null,
@@ -1455,7 +1461,7 @@ async function seedPermissionDataset(
       title: "denied-root",
       updated_at: ts + 1,
     },
-    tier,
+    durabilityOptions(tier),
   );
   allowedFolders.push(allowedRootId);
   deniedFolders.push(deniedRootId);
@@ -1466,7 +1472,7 @@ async function seedPermissionDataset(
     const parent = allowedChain
       ? allowedFolders[allowedFolders.length - 1]
       : deniedFolders[deniedFolders.length - 1];
-    const id = await db.insertWithAck(
+    const id = await db.insert(
       folderTable,
       {
         parent_id: parent,
@@ -1476,7 +1482,7 @@ async function seedPermissionDataset(
         title: `folder-${i}`,
         updated_at: ts + i,
       },
-      tier,
+      durabilityOptions(tier),
     );
     if (allowedChain) {
       allowedFolders.push(id);
@@ -1501,7 +1507,7 @@ async function seedPermissionDataset(
         ? owners.allowedOwnerId
         : owners.intermediateOwnerId
       : owners.deniedOwnerId;
-    const id = await db.insertWithAck(
+    const id = await db.insert(
       documentTable,
       {
         folder_id: folderId,
@@ -1510,7 +1516,7 @@ async function seedPermissionDataset(
         revision: 0,
         updated_at: ts + 10_000 + i,
       },
-      tier,
+      durabilityOptions(tier),
     );
     if (useAllowed) {
       allowedDocumentIds.push(id);
@@ -1573,6 +1579,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   let allowedDb: Db | null = null;
   let deniedDb: Db | null = null;
   let unsubscribeAllowed: (() => void) | null = null;
+  let unsubscribeAllowedFolders: (() => void) | null = null;
   let unsubscribeDenied: (() => void) | null = null;
 
   try {
@@ -1592,6 +1599,20 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       localAuthMode,
       intermediateLocalToken,
     );
+    const allowedSession = {
+      user_id: allowedPrincipalId,
+      claims: {
+        auth_mode: "local",
+        local_mode: localAuthMode,
+      },
+    };
+    const deniedSession = {
+      user_id: deniedPrincipalId,
+      claims: {
+        auth_mode: "local",
+        local_mode: localAuthMode,
+      },
+    };
 
     // Seed with a sync-enabled client, then validate with two non-privileged
     // browser clients that authenticate only via local-auth HTTP headers.
@@ -1649,14 +1670,33 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     let warmDeniedVisible = 0;
     let initialAllowedVisible: PermissionDocumentRow[] = [];
     let initialDeniedVisible: PermissionDocumentRow[] = [];
-    unsubscribeAllowed = allowedDb.subscribeAll(visibleDocumentsQuery, (delta) => {
-      initialAllowedVisible = delta.all;
-      warmAllowedVisible = delta.all.length;
-    });
-    unsubscribeDenied = deniedDb.subscribeAll(visibleDocumentsQuery, (delta) => {
-      initialDeniedVisible = delta.all;
-      warmDeniedVisible = delta.all.length;
-    });
+    let visibleAllowedFolders: PermissionFolderRow[] = [];
+    unsubscribeAllowed = allowedDb.subscribeAll(
+      visibleDocumentsQuery,
+      (delta) => {
+        initialAllowedVisible = delta.all;
+        warmAllowedVisible = delta.all.length;
+      },
+      undefined,
+      allowedSession,
+    );
+    unsubscribeAllowedFolders = allowedDb.subscribeAll(
+      foldersQuery,
+      (delta) => {
+        visibleAllowedFolders = delta.all;
+      },
+      undefined,
+      allowedSession,
+    );
+    unsubscribeDenied = deniedDb.subscribeAll(
+      visibleDocumentsQuery,
+      (delta) => {
+        initialDeniedVisible = delta.all;
+        warmDeniedVisible = delta.all.length;
+      },
+      undefined,
+      deniedSession,
+    );
     let warmed = false;
     const warmupDeadline = performance.now() + 20_000;
     let lastWarmupLog = 0;
@@ -1692,7 +1732,6 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const initialAllowedVisibleIds = new Set(initialAllowedVisible.map((row) => row.id));
     const initialAllowedVisibleById = new Map(initialAllowedVisible.map((row) => [row.id, row]));
     const initialDeniedVisibleIds = new Set(initialDeniedVisible.map((row) => row.id));
-    const visibleAllowedFolders = await allowedDb.all(foldersQuery);
     const visibleAllowedFolderIds = new Set(visibleAllowedFolders.map((row) => row.id));
     const deniedDocumentIdsForAllowed = seeded.deniedDocumentIds.filter(
       (id) => !initialAllowedVisibleIds.has(id),
@@ -1745,7 +1784,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
         : deniedUpdateIds[rng.nextInt(deniedUpdateIds.length)];
       const t0 = performance.now();
       try {
-        allowedDb.update(documentTable, targetId, {
+        await allowedDb.update(documentTable, targetId, {
           body: `b5-update-${i}`,
           revision: i + 1,
           updated_at: nowMicros(),
@@ -1776,8 +1815,8 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     }
     const wallMs = performance.now() - wallStart;
 
-    const visibleAllowedDocuments = await allowedDb.all(visibleDocumentsQuery);
-    const visibleDeniedDocuments = await deniedDb.all(visibleDocumentsQuery);
+    const visibleAllowedDocuments = initialAllowedVisible;
+    const visibleDeniedDocuments = initialDeniedVisible;
     const allowedVisibleIds = new Set(visibleAllowedDocuments.map((row) => row.id));
     const deniedVisibleIds = new Set(visibleDeniedDocuments.map((row) => row.id));
     const leakedDeniedReads = deniedDocumentIdsForAllowed.filter((id) =>
@@ -1840,6 +1879,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     };
   } finally {
     if (unsubscribeAllowed) unsubscribeAllowed();
+    if (unsubscribeAllowedFolders) unsubscribeAllowedFolders();
     if (unsubscribeDenied) unsubscribeDenied();
     if (seedDb) await seedDb.shutdown();
     if (allowedDb) await allowedDb.shutdown();
@@ -1867,7 +1907,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B6 hotspot updates", i, updateCount);
       const taskId = hotTasks[rng.nextInt(hotTasks.length)];
       const t0 = performance.now();
-      db.update(tasksTable, taskId, {
+      await db.update(tasksTable, taskId, {
         title: `Hotspot ${taskId.slice(0, 8)} rev ${i}`,
         priority: 1 + (i % 4),
         status: ["todo", "in_progress", "review", "done"][i % 4],

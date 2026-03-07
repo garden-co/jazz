@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
+import { deriveLocalPrincipalId } from "./client-session.js";
 
 const schemaWithTodos = {
   todos: {
@@ -522,6 +523,80 @@ describe("JazzClient schema order", () => {
     );
   });
 
+  it("uses the local auth session for direct queries and subscriptions", async () => {
+    const query = vi.fn(async () => []);
+    const createSubscription = vi.fn(() => 0);
+    const runtime: Runtime = {
+      insert: () => "todo-1",
+      update: () => {},
+      delete: () => {},
+      query,
+      subscribe: () => 0,
+      createSubscription,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => "todo-1",
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "client-1",
+      getSchema: () =>
+        new Map([
+          [
+            "todos",
+            {
+              columns: [
+                {
+                  name: "title",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+        ]),
+      getSchemaHash: () => "schema-hash",
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema: {
+        todos: {
+          columns: [
+            {
+              name: "title",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+          ],
+        },
+      },
+      localAuthMode: "anonymous",
+      localAuthToken: "device-token",
+    });
+
+    await client.query(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }));
+    client.subscribe(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }), () => {});
+
+    const expectedSession = JSON.stringify({
+      user_id: await deriveLocalPrincipalId("test-app", "anonymous", "device-token"),
+      claims: {
+        auth_mode: "local",
+        local_mode: "anonymous",
+      },
+    });
+
+    expect(query).toHaveBeenCalledWith(expect.any(String), expectedSession, "worker", undefined);
+    expect(createSubscription).toHaveBeenCalledWith(
+      expect.any(String),
+      expectedSession,
+      "worker",
+      undefined,
+    );
+  });
+
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => "todo-1",
@@ -703,6 +778,153 @@ describe("JazzClient schema order", () => {
                 value: {
                   id: "project-1",
                   values: [{ type: "Text", value: "Inbox" }],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("reorders included relation row values to the declared schema order", async () => {
+    const runtime: Runtime = {
+      insert: () => "todo-1",
+      update: () => {},
+      delete: () => {},
+      query: async () => [
+        {
+          id: "todo-1",
+          values: [
+            { type: "Boolean", value: false },
+            { type: "Text", value: "Buy milk" },
+            {
+              type: "Array",
+              value: [
+                {
+                  type: "Row",
+                  value: {
+                    id: "project-1",
+                    values: [
+                      { type: "Text", value: "inbox" },
+                      { type: "Text", value: "Inbox" },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => "todo-1",
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "client-1",
+      getSchema: () =>
+        new Map([
+          [
+            "todos",
+            {
+              columns: [
+                {
+                  name: "done",
+                  column_type: { type: "Boolean" as const },
+                  nullable: false,
+                },
+                {
+                  name: "title",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+          [
+            "projects",
+            {
+              columns: [
+                {
+                  name: "slug",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+                {
+                  name: "name",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+        ]),
+      getSchemaHash: () => "schema-hash",
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema: {
+        todos: {
+          columns: [
+            {
+              name: "title",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "done",
+              column_type: { type: "Boolean" as const },
+              nullable: false,
+            },
+          ],
+        },
+        projects: {
+          columns: [
+            {
+              name: "name",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "slug",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+          ],
+        },
+      },
+    });
+
+    const rows = await client.query(
+      JSON.stringify({
+        relation_ir: { TableScan: { table: "todos" } },
+        array_subqueries: [{ table: "projects", nested_arrays: [] }],
+      }),
+    );
+
+    expect(rows).toEqual([
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "project-1",
+                  values: [
+                    { type: "Text", value: "Inbox" },
+                    { type: "Text", value: "inbox" },
+                  ],
                 },
               },
             ],
