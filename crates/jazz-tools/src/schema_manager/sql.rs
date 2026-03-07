@@ -105,6 +105,9 @@ enum Token {
     True,
     False,
     References,
+    Exists,
+    From,
+    Where,
     // Punctuation
     LParen,
     RParen,
@@ -285,7 +288,8 @@ impl<'a> Tokenizer<'a> {
                 self.advance();
                 Token::Gt
             }
-            '\'' | '"' => Token::StringLit(self.read_string()?),
+            '\'' => Token::StringLit(self.read_string()?),
+            '"' => Token::Ident(self.read_string()?),
             '-' if self.input[self.pos..].starts_with("-") && {
                 let next = self.input[self.pos + 1..].chars().next();
                 next.map(|c| c.is_ascii_digit()).unwrap_or(false)
@@ -330,6 +334,9 @@ impl<'a> Tokenizer<'a> {
                     "TRUE" => Token::True,
                     "FALSE" => Token::False,
                     "REFERENCES" => Token::References,
+                    "EXISTS" => Token::Exists,
+                    "FROM" => Token::From,
+                    "WHERE" => Token::Where,
                     _ => Token::Ident(ident),
                 }
             }
@@ -639,6 +646,20 @@ impl Parser {
                         max_depth: None,
                     })
                 }
+            }
+            Some(Token::Exists) => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::Select)?;
+                self.expect(&Token::From)?;
+                let table = self.expect_ident()?;
+                self.expect(&Token::Where)?;
+                let condition = self.parse_policy_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(PolicyExpr::Exists {
+                    table,
+                    condition: Box::new(condition),
+                })
             }
             Some(Token::Ident(_)) => {
                 let column = self.expect_ident()?;
@@ -1247,6 +1268,74 @@ pub fn schema_to_sql(schema: &Schema) -> String {
     blocks.join("\n\n")
 }
 
+fn is_bare_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first.is_alphabetic() || first == '_') {
+        return false;
+    }
+
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_reserved_keyword(identifier: &str) -> bool {
+    matches!(
+        identifier.to_ascii_uppercase().as_str(),
+        "CREATE"
+            | "TABLE"
+            | "POLICY"
+            | "ON"
+            | "FOR"
+            | "USING"
+            | "WITH"
+            | "CHECK"
+            | "SESSION"
+            | "INHERITS"
+            | "INHERIT"
+            | "VIA"
+            | "REFERENCING"
+            | "SELECT"
+            | "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "AND"
+            | "OR"
+            | "IN"
+            | "CONTAINS"
+            | "IS"
+            | "ALTER"
+            | "ADD"
+            | "DROP"
+            | "COLUMN"
+            | "RENAME"
+            | "TO"
+            | "NOT"
+            | "NULL"
+            | "DEFAULT"
+            | "TRUE"
+            | "FALSE"
+            | "REFERENCES"
+    )
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    if is_bare_identifier(identifier) && !is_reserved_keyword(identifier) {
+        return identifier.to_string();
+    }
+
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn session_path_to_sql(path: &[String]) -> String {
+    path.iter()
+        .map(|segment| quote_identifier(segment))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
     let mut columns = Vec::new();
 
@@ -1255,7 +1344,11 @@ fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
         columns.push(format!("    {}", col_sql));
     }
 
-    format!("CREATE TABLE {} (\n{}\n);", table_name, columns.join(",\n"))
+    format!(
+        "CREATE TABLE {} (\n{}\n);",
+        quote_identifier(table_name),
+        columns.join(",\n")
+    )
 }
 
 fn table_policies_to_sql(table_name: &str, policies: &TablePolicies) -> Vec<String> {
@@ -1273,11 +1366,11 @@ fn table_policies_to_sql(table_name: &str, policies: &TablePolicies) -> Vec<Stri
         if clauses.is_empty() {
             continue;
         }
+        let policy_name = quote_identifier(&format!("{}_{}_policy", table_name, name));
         statements.push(format!(
-            "CREATE POLICY {}_{}_policy ON {} FOR {} {};",
-            table_name,
-            name,
-            table_name,
+            "CREATE POLICY {} ON {} FOR {} {};",
+            policy_name,
+            quote_identifier(table_name),
             sql_op,
             clauses.join(" ")
         ));
@@ -1302,23 +1395,31 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         PolicyExpr::Cmp { column, op, value } => {
             format!(
                 "{} {} {}",
-                column,
+                quote_identifier(column),
                 cmp_op_to_sql(op),
                 policy_value_to_sql(value)
             )
         }
-        PolicyExpr::IsNull { column } => format!("{} IS NULL", column),
-        PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", column),
+        PolicyExpr::IsNull { column } => format!("{} IS NULL", quote_identifier(column)),
+        PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", quote_identifier(column)),
         PolicyExpr::Contains { column, value } => {
-            format!("{} CONTAINS {}", column, policy_value_to_sql(value))
+            format!(
+                "{} CONTAINS {}",
+                quote_identifier(column),
+                policy_value_to_sql(value)
+            )
         }
         PolicyExpr::In {
             column,
             session_path,
-        } => format!("{} IN @session.{}", column, session_path.join(".")),
+        } => format!(
+            "{} IN @session.{}",
+            quote_identifier(column),
+            session_path_to_sql(session_path)
+        ),
         PolicyExpr::InList { column, values } => format!(
             "{} IN ({})",
-            column,
+            quote_identifier(column),
             values
                 .iter()
                 .map(policy_value_to_sql)
@@ -1328,7 +1429,7 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         PolicyExpr::Exists { table, condition } => {
             format!(
                 "EXISTS (SELECT FROM {} WHERE {})",
-                table,
+                quote_identifier(table),
                 policy_expr_to_sql(condition)
             )
         }
@@ -1341,13 +1442,13 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
             Some(depth) => format!(
                 "INHERITS {} VIA {} MAX DEPTH {}",
                 operation_to_sql(*operation),
-                via_column,
+                quote_identifier(via_column),
                 depth
             ),
             None => format!(
                 "INHERITS {} VIA {}",
                 operation_to_sql(*operation),
-                via_column
+                quote_identifier(via_column)
             ),
         },
         PolicyExpr::InheritsReferencing {
@@ -1358,16 +1459,16 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         } => match max_depth {
             Some(depth) => format!(
                 "INHERITS {} REFERENCING {} VIA {} MAX DEPTH {}",
-                operation.to_string().to_uppercase(),
-                source_table,
-                via_column,
+                operation_to_sql(*operation),
+                quote_identifier(source_table),
+                quote_identifier(via_column),
                 depth
             ),
             None => format!(
                 "INHERITS {} REFERENCING {} VIA {}",
-                operation.to_string().to_uppercase(),
-                source_table,
-                via_column
+                operation_to_sql(*operation),
+                quote_identifier(source_table),
+                quote_identifier(via_column)
             ),
         },
         PolicyExpr::And(exprs) => exprs
@@ -1389,7 +1490,7 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
 fn policy_value_to_sql(value: &PolicyValue) -> String {
     match value {
         PolicyValue::Literal(value) => value_to_sql(value),
-        PolicyValue::SessionRef(path) => format!("@session.{}", path.join(".")),
+        PolicyValue::SessionRef(path) => format!("@session.{}", session_path_to_sql(path)),
     }
 }
 
@@ -1416,14 +1517,14 @@ fn operation_to_sql(operation: Operation) -> &'static str {
 fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
     let type_str = column_type_to_sql(&col.column_type);
     let ref_str = match &col.references {
-        Some(table) => format!(" REFERENCES {}", table.as_str()),
+        Some(table) => format!(" REFERENCES {}", quote_identifier(table.as_str())),
         None => String::new(),
     };
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
 
     format!(
         "{} {}{}{}",
-        col.name.as_str(),
+        quote_identifier(col.name.as_str()),
         type_str,
         ref_str,
         nullable_str
@@ -1460,11 +1561,18 @@ fn lens_op_to_sql(op: &LensOp) -> String {
             let default_str = value_to_sql(default);
             format!(
                 "ALTER TABLE {} ADD COLUMN {} {} DEFAULT {};",
-                table, column, type_str, default_str
+                quote_identifier(table),
+                quote_identifier(column),
+                type_str,
+                default_str
             )
         }
         LensOp::RemoveColumn { table, column, .. } => {
-            format!("ALTER TABLE {} DROP COLUMN {};", table, column)
+            format!(
+                "ALTER TABLE {} DROP COLUMN {};",
+                quote_identifier(table),
+                quote_identifier(column)
+            )
         }
         LensOp::RenameColumn {
             table,
@@ -1473,12 +1581,14 @@ fn lens_op_to_sql(op: &LensOp) -> String {
         } => {
             format!(
                 "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                table, old_name, new_name
+                quote_identifier(table),
+                quote_identifier(old_name),
+                quote_identifier(new_name)
             )
         }
         LensOp::AddTable { table, schema } => table_schema_to_sql(table, schema),
         LensOp::RemoveTable { table, .. } => {
-            format!("DROP TABLE {};", table)
+            format!("DROP TABLE {};", quote_identifier(table))
         }
     }
 }
@@ -1528,7 +1638,7 @@ fn value_to_sql(val: &Value) -> String {
         Value::Uuid(id) => format!("'{:?}'", id),
         Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
         Value::Array(_) => "'[]'".to_string(),
-        Value::Row(_) => "'{}'".to_string(),
+        Value::Row { .. } => "'{}'".to_string(),
     }
 }
 
@@ -1561,6 +1671,26 @@ mod tests {
         assert_eq!(completed.name.as_str(), "completed");
         assert_eq!(completed.column_type, ColumnType::Boolean);
         assert!(!completed.nullable);
+    }
+
+    #[test]
+    fn parse_quoted_identifiers() {
+        let sql = r#"
+            CREATE TABLE "data_entry_entries" (
+                "table" TEXT NOT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        assert_eq!(schema.len(), 1);
+
+        let entries = schema.get(&TableName::new("data_entry_entries")).unwrap();
+        assert_eq!(entries.columns.columns.len(), 1);
+
+        let table = &entries.columns.columns[0];
+        assert_eq!(table.name.as_str(), "table");
+        assert_eq!(table.column_type, ColumnType::Text);
+        assert!(!table.nullable);
     }
 
     #[test]
@@ -1881,6 +2011,25 @@ mod tests {
     }
 
     #[test]
+    fn schema_to_sql_roundtrip_with_quoted_keyword_identifier() {
+        let sql = r#"CREATE TABLE data_entry_entries (
+    "table" TEXT NOT NULL
+);"#;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        assert!(regenerated.contains("\"table\" TEXT NOT NULL"));
+
+        let reparsed = parse_schema(&regenerated).unwrap();
+        let column = &reparsed
+            .get(&TableName::new("data_entry_entries"))
+            .unwrap()
+            .columns
+            .columns[0];
+        assert_eq!(column.name.as_str(), "table");
+    }
+
+    #[test]
     fn lens_to_sql_add_column() {
         let transform = LensTransform::with_ops(vec![LensOp::AddColumn {
             table: "users".to_string(),
@@ -1891,6 +2040,37 @@ mod tests {
 
         let sql = lens_to_sql(&transform);
         assert!(sql.contains("ALTER TABLE users ADD COLUMN age INTEGER DEFAULT 0;"));
+    }
+
+    #[test]
+    fn lens_to_sql_roundtrip_with_quoted_keyword_identifier() {
+        let transform = LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "data_entry_entries".to_string(),
+            column: "table".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Null,
+        }]);
+
+        let sql = lens_to_sql(&transform);
+        assert!(
+            sql.contains("ALTER TABLE data_entry_entries ADD COLUMN \"table\" TEXT DEFAULT NULL;")
+        );
+
+        let reparsed = parse_lens(&sql).unwrap();
+        match &reparsed.ops[0] {
+            LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            } => {
+                assert_eq!(table, "data_entry_entries");
+                assert_eq!(column, "table");
+                assert_eq!(*column_type, ColumnType::Text);
+                assert_eq!(*default, Value::Null);
+            }
+            _ => panic!("Expected AddColumn"),
+        }
     }
 
     #[test]
@@ -2570,5 +2750,60 @@ mod tests {
             }
         );
         assert!(!col.nullable);
+    }
+
+    const EXISTS_POLICY_SQL: &str = r#"
+        CREATE TABLE messages (
+            id UUID NOT NULL,
+            room_id UUID NOT NULL
+        );
+        CREATE POLICY messages_select_policy ON messages FOR SELECT
+            USING (EXISTS (SELECT FROM members WHERE member_id = @session.user_id));
+    "#;
+
+    #[test]
+    fn parse_policy_exists_subquery() {
+        // EXISTS (SELECT FROM <table> WHERE <condition>) in a USING clause
+        let schema = parse_schema(EXISTS_POLICY_SQL).unwrap();
+        let table = schema.get(&TableName::new("messages")).unwrap();
+        let using = table.policies.select.using.as_ref().unwrap();
+
+        assert!(
+            matches!(
+                using,
+                PolicyExpr::Exists { table, .. } if table == "members"
+            ),
+            "expected PolicyExpr::Exists, got {:?}",
+            using
+        );
+    }
+
+    #[test]
+    fn policy_exists_round_trip() {
+        // policy_expr_to_sql(parse(EXISTS expr)) should reproduce the original SQL
+        let sql = EXISTS_POLICY_SQL;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let original_using = schema
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+        let reparsed_using = reparsed
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(original_using, reparsed_using);
     }
 }

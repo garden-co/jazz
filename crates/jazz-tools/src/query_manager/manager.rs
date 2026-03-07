@@ -19,8 +19,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash, TableName,
-    TableSchema, Value, build_ordered_delta_with_post_ids,
+    ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash,
+    TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -690,7 +690,7 @@ impl QueryManager {
             // For single-branch subscriptions, reads from that branch
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
-            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, branches);
                 if obj.is_none() {
                     tracing::trace!(%id, "row_loader: object not found");
@@ -741,7 +741,13 @@ impl QueryManager {
                     let transformer = LensTransformer::new(schema_context, &table);
                     match transformer.transform(&content, commit_id, source_hash) {
                         Ok(result) => {
-                            return Some((result.data, commit_id));
+                            return Some(LoadedRow::new(
+                                result.data,
+                                commit_id,
+                                [(id, BranchName::new(&source_branch))]
+                                    .into_iter()
+                                    .collect(),
+                            ));
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -759,7 +765,13 @@ impl QueryManager {
                     }
                 }
 
-                Some((content, commit_id))
+                Some(LoadedRow::new(
+                    content,
+                    commit_id,
+                    [(id, BranchName::new(&source_branch))]
+                        .into_iter()
+                        .collect(),
+                ))
             };
 
             let delta = subscription.graph.settle(storage_ref, row_loader);
@@ -988,11 +1000,23 @@ impl QueryManager {
                         self.branch_schema_map.insert(branch.to_string(), full_hash);
                         full_hash
                     } else {
+                        let schema_short = composed.schema_hash.short();
+                        tracing::error!(
+                            object_id = %update.object_id,
+                            branch = %branch,
+                            schema_hash = %schema_short,
+                            "buffering row update for unknown schema hash; schema not yet known"
+                        );
                         // Schema not known yet - buffer for retry
                         self.pending_row_updates.push(update);
                         return;
                     }
                 } else {
+                    tracing::error!(
+                        object_id = %update.object_id,
+                        branch = %branch,
+                        "buffering row update for unknown branch; cannot parse schema hash"
+                    );
                     // Can't parse branch - buffer for retry
                     self.pending_row_updates.push(update);
                     return;
@@ -1020,6 +1044,12 @@ impl QueryManager {
                 None => return,
             }
         } else {
+            tracing::error!(
+                object_id = %update.object_id,
+                branch = %branch,
+                schema_hash = %schema_hash.short(),
+                "buffering row update because schema for branch is not available yet"
+            );
             // Schema not available - buffer for retry
             self.pending_row_updates.push(update);
             return;

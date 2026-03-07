@@ -46,6 +46,21 @@ describe("schemaToSql", () => {
 `);
   });
 
+  it("quotes reserved keyword identifiers", () => {
+    resetCollectedState();
+    table("data_entry_entries", {
+      table: col.string(),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toBe(`CREATE TABLE data_entry_entries (
+    "table" TEXT NOT NULL
+);
+`);
+  });
+
   it("handles all column types", () => {
     resetCollectedState();
     table("test", {

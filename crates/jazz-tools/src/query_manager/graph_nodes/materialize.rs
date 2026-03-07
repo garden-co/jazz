@@ -1,10 +1,9 @@
 use ahash::{AHashMap, AHashSet};
 use std::collections::HashSet;
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::types::{
-    Row, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, TupleElement,
+    LoadedRow, Row, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, TupleElement,
 };
 
 /// Materializes rows from IDs/tuples.
@@ -36,7 +35,7 @@ pub struct MaterializeNode {
 }
 
 /// Function type for loading row data from storage.
-pub type RowLoader = Box<dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>>;
+pub type RowLoader = Box<dyn FnMut(ObjectId) -> Option<LoadedRow>>;
 
 impl MaterializeNode {
     /// Create a new materialize node with TupleDescriptor and selective element materialization.
@@ -115,7 +114,7 @@ impl MaterializeNode {
     /// If loader returns None for any element in a tuple, that tuple is silently dropped.
     pub fn materialize_tuples<F>(&mut self, delta: TupleDelta, mut loader: F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -180,9 +179,14 @@ impl MaterializeNode {
     /// Returns None if any element that should be materialized can't be loaded.
     fn materialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Option<Tuple>
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let mut materialized_elements = Vec::with_capacity(tuple.len());
+        let mut materialized_provenance = if tuple.len() == 1 {
+            AHashSet::new()
+        } else {
+            tuple.provenance().clone()
+        };
 
         for (elem_idx, elem) in tuple.iter().enumerate() {
             // Only materialize if this element is in our list
@@ -194,13 +198,18 @@ impl MaterializeNode {
             match elem {
                 TupleElement::Id(id) => {
                     // Try to load the row data
-                    if let Some((data, commit_id)) = loader(*id) {
-                        let row = Row::new(*id, data.clone(), commit_id);
+                    if let Some(loaded) = loader(*id) {
+                        let row = Row::new(*id, loaded.data.clone(), loaded.commit_id);
                         self.rows.insert(*id, row);
+                        if tuple.len() == 1 {
+                            materialized_provenance = loaded.provenance.clone();
+                        } else {
+                            materialized_provenance.extend(loaded.provenance.iter().copied());
+                        }
                         materialized_elements.push(TupleElement::Row {
                             id: *id,
-                            content: data,
-                            commit_id,
+                            content: loaded.data,
+                            commit_id: loaded.commit_id,
                         });
                     } else {
                         // Row unavailable - drop the entire tuple
@@ -220,7 +229,10 @@ impl MaterializeNode {
             }
         }
 
-        Some(Tuple::new(materialized_elements))
+        Some(Tuple::new_with_provenance(
+            materialized_elements,
+            materialized_provenance,
+        ))
     }
 
     /// Check for deleted IDs and return removal deltas (tuple version).
@@ -252,7 +264,7 @@ impl MaterializeNode {
     /// Check for updated IDs and return update deltas (tuple version).
     pub fn check_updated_tuples<F>(&mut self, mut loader: F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
         let ids_to_check: Vec<_> = self.updated_ids.drain().collect();
@@ -285,8 +297,13 @@ impl MaterializeNode {
     /// Re-materialize a tuple, reloading row data for materialized elements.
     fn rematerialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Tuple
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
+        let mut rematerialized_provenance = if tuple.len() == 1 {
+            AHashSet::new()
+        } else {
+            tuple.provenance().clone()
+        };
         let elements: Vec<TupleElement> = tuple
             .iter()
             .enumerate()
@@ -297,13 +314,18 @@ impl MaterializeNode {
                 }
 
                 let id = elem.id();
-                if let Some((data, commit_id)) = loader(id) {
-                    let row = Row::new(id, data.clone(), commit_id);
+                if let Some(loaded) = loader(id) {
+                    let row = Row::new(id, loaded.data.clone(), loaded.commit_id);
                     self.rows.insert(id, row);
+                    if tuple.len() == 1 {
+                        rematerialized_provenance = loaded.provenance.clone();
+                    } else {
+                        rematerialized_provenance.extend(loaded.provenance.iter().copied());
+                    }
                     TupleElement::Row {
                         id,
-                        content: data,
-                        commit_id,
+                        content: loaded.data,
+                        commit_id: loaded.commit_id,
                     }
                 } else {
                     // Couldn't load - keep as-is
@@ -312,7 +334,7 @@ impl MaterializeNode {
             })
             .collect();
 
-        Tuple::new(elements)
+        Tuple::new_with_provenance(elements, rematerialized_provenance)
     }
 
     /// Get current tuples.
@@ -345,6 +367,7 @@ fn has_content_changed(old: &Tuple, new: &Tuple) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit::CommitId;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
@@ -356,6 +379,10 @@ mod tests {
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
+    }
+
+    fn make_loaded_row(data: Vec<u8>, commit_id: CommitId) -> LoadedRow {
+        LoadedRow::new(data, commit_id, Default::default())
     }
 
     fn make_tuple_delta_add(ids: &[ObjectId]) -> TupleDelta {
@@ -395,11 +422,11 @@ mod tests {
 
         let delta = make_tuple_delta_add(&[id1, id2]);
 
-        let loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+        let loader = |id: ObjectId| -> Option<LoadedRow> {
             if id == id1 {
-                Some((data1.clone(), commit1))
+                Some(make_loaded_row(data1.clone(), commit1))
             } else if id == id2 {
-                Some((data2.clone(), commit2))
+                Some(make_loaded_row(data2.clone(), commit2))
             } else {
                 None
             }
@@ -423,7 +450,7 @@ mod tests {
         // First add
         let add_delta = make_tuple_delta_add(&[id1]);
         let loader =
-            |_: ObjectId| -> Option<(Vec<u8>, CommitId)> { Some((data1.clone(), commit1)) };
+            |_: ObjectId| -> Option<LoadedRow> { Some(make_loaded_row(data1.clone(), commit1)) };
         let added = node.materialize_tuples(add_delta, loader);
         assert_eq!(added.added.len(), 1);
 
@@ -449,13 +476,14 @@ mod tests {
 
         // Add the row
         let add_delta = make_tuple_delta_add(&[id1]);
-        node.materialize_tuples(add_delta, |_| Some((data1.clone(), commit1)));
+        node.materialize_tuples(add_delta, |_| Some(make_loaded_row(data1.clone(), commit1)));
 
         // Mark for update check
         node.mark_updated(id1);
 
         // Check for update with new data
-        let update_delta = node.check_updated_tuples(|_| Some((data2.clone(), commit2)));
+        let update_delta =
+            node.check_updated_tuples(|_| Some(make_loaded_row(data2.clone(), commit2)));
 
         assert_eq!(update_delta.updated.len(), 1);
     }
@@ -470,13 +498,14 @@ mod tests {
 
         // Add the row
         let add_delta = make_tuple_delta_add(&[id1]);
-        node.materialize_tuples(add_delta, |_| Some((data1.clone(), commit1)));
+        node.materialize_tuples(add_delta, |_| Some(make_loaded_row(data1.clone(), commit1)));
 
         // Mark for update check
         node.mark_updated(id1);
 
         // Check for update with same data - should not emit update
-        let update_delta = node.check_updated_tuples(|_| Some((data1.clone(), commit1)));
+        let update_delta =
+            node.check_updated_tuples(|_| Some(make_loaded_row(data1.clone(), commit1)));
 
         assert!(update_delta.updated.is_empty());
     }
@@ -493,9 +522,9 @@ mod tests {
         let delta = make_tuple_delta_add(&[id1, id2]);
 
         // Loader only returns data for id1, not id2
-        let loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+        let loader = |id: ObjectId| -> Option<LoadedRow> {
             if id == id1 {
-                Some((data1.clone(), commit1))
+                Some(make_loaded_row(data1.clone(), commit1))
             } else {
                 None // id2 is unavailable (hard-deleted)
             }
@@ -522,7 +551,7 @@ mod tests {
 
         let delta = make_tuple_delta_add(&[id1]);
         let loader =
-            |_: ObjectId| -> Option<(Vec<u8>, CommitId)> { Some((data1.clone(), commit1)) };
+            |_: ObjectId| -> Option<LoadedRow> { Some(make_loaded_row(data1.clone(), commit1)) };
 
         let result = node.materialize_tuples(delta, loader);
 

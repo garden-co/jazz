@@ -7,7 +7,9 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
+    createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(),
+    executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     insert: vi.fn((_table, _valuesJson) => "row-1"),
@@ -93,6 +95,34 @@ describe("JazzRnRuntimeAdapter", () => {
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
+  });
+
+  it("bridges 2-phase createSubscription + executeSubscription with handle conversion", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const handle = adapter.createSubscription("{}", null, null);
+    expect(handle).toBe(9);
+    expect(binding.createSubscription).toHaveBeenCalledWith("{}", undefined, undefined);
+
+    const onUpdate = vi.fn();
+    adapter.executeSubscription(handle, onUpdate);
+
+    const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    expect(executeMock.mock.calls[0][0]).toBe(9n);
+
+    const callbackObject = executeMock.mock.calls[0][1];
+    callbackObject.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
+
+    adapter.unsubscribe(handle);
+    expect(binding.unsubscribe).toHaveBeenCalledWith(9n);
   });
 
   it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {

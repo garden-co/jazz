@@ -573,7 +573,7 @@ fn value_to_ts_literal(value: &Value) -> String {
             let elements: Vec<String> = arr.iter().map(value_to_ts_literal).collect();
             format!("[{}]", elements.join(", "))
         }
-        Value::Row(row) => {
+        Value::Row { values: row, .. } => {
             let elements: Vec<String> = row.iter().map(value_to_ts_literal).collect();
             format!("[{}]", elements.join(", "))
         }

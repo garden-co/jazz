@@ -14,7 +14,7 @@ export type Value =
   | { type: "Uuid"; value: string }
   | { type: "Bytea"; value: Uint8Array }
   | { type: "Array"; value: Value[] }
-  | { type: "Row"; value: Value[] }
+  | { type: "Row"; value: { id?: string; values: Value[] } }
   | { type: "Null" };
 
 export interface WasmRow {
@@ -130,13 +130,15 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * With synchronous in-memory storage (MemoryIoHandler), the driver
- * interface is minimal — just an optional close hook.
+ * - `persistent`: local persistence enabled (OPFS in browser, SurrealKV in backend)
+ * - `memory`: non-persistent in-memory runtime only
  */
-export interface StorageDriver {
-  /**
-   * Close the driver and release resources.
-   * Optional - not all drivers need cleanup.
-   */
-  close?(): Promise<void>;
-}
+export type StorageDriver =
+  | {
+      type: "persistent";
+      /** Browser OPFS namespace when persistence is enabled (default: appId). */
+      dbName?: string;
+    }
+  | {
+      type: "memory";
+    };
