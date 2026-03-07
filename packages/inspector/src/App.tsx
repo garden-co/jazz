@@ -1,8 +1,8 @@
 import { BrowserRouter } from "react-router";
 import { createJazzClient, JazzProvider } from "jazz-tools/react";
-import { fetchStoredWasmSchema } from "jazz-tools";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "jazz-tools";
 import { useEffect, useState } from "react";
-import { ConfigResetProvider } from "./contexts/config-reset-context.js";
+import { StandaloneProvider } from "./contexts/standalone-context.js";
 import { DevtoolsProvider } from "./contexts/devtools-context.js";
 import { InspectorRoutes } from "./routes.js";
 import { DbConfigForm, SchemaHashSelect } from "./components/db-config-form/index.js";
@@ -30,9 +30,11 @@ export default function App() {
   );
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<string[]>([]);
+  const [availableSchemaHashes, setAvailableSchemaHashes] = useState<string[]>([]);
   const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isSwitchingSchema, setIsSwitchingSchema] = useState(false);
 
   const handleFormSubmit = (values: DbConfigFormValues, hashes: string[]) => {
     setFormValues(values);
@@ -56,17 +58,39 @@ export default function App() {
     setFormValues(null);
     setSchemaHashes([]);
     setOnboardingStep(null);
-    window.location.reload();
+  };
+
+  const handleHeaderSchemaSelect = (schemaHash: string) => {
+    if (!storedConfig || storedConfig.schemaHash === schemaHash) return;
+    const nextConfig = { ...storedConfig, schemaHash };
+    setIsSwitchingSchema(true);
+    setError(null);
+    setClient((previousClient) => {
+      if (previousClient) {
+        void previousClient.shutdown();
+      }
+      return null;
+    });
+    setWasmSchema(null);
+    writeStoredConfig(nextConfig);
+    setStoredConfig(nextConfig);
   };
 
   const handleReset = () => {
     clearStoredConfig();
     setStoredConfig(null);
-    setClient(null);
+    setClient((previousClient) => {
+      if (previousClient) {
+        void previousClient.shutdown();
+      }
+      return null;
+    });
     setWasmSchema(null);
     setOnboardingStep("form");
     setFormValues(null);
     setSchemaHashes([]);
+    setAvailableSchemaHashes([]);
+    setIsSwitchingSchema(false);
   };
 
   useEffect(() => {
@@ -76,7 +100,7 @@ export default function App() {
 
     const run = async () => {
       try {
-        const [resolvedClient, { schema }] = await Promise.all([
+        const [resolvedClient, { schema }, { hashes }] = await Promise.all([
           createJazzClient({
             appId: storedConfig.appId,
             serverUrl: storedConfig.serverUrl,
@@ -91,6 +115,10 @@ export default function App() {
             schemaHash: storedConfig.schemaHash,
             pathPrefix: storedConfig.serverPathPrefix,
           }),
+          fetchSchemaHashes(storedConfig.serverUrl, {
+            adminSecret: storedConfig.adminSecret,
+            pathPrefix: storedConfig.serverPathPrefix,
+          }),
         ]);
 
         if (!active) {
@@ -98,13 +126,21 @@ export default function App() {
           return;
         }
 
-        setClient(resolvedClient);
+        setClient((previousClient) => {
+          if (previousClient) {
+            void previousClient.shutdown();
+          }
+          return resolvedClient;
+        });
         setWasmSchema(schema);
+        setAvailableSchemaHashes(hashes);
         setError(null);
+        setIsSwitchingSchema(false);
       } catch (err) {
         if (!active) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
+        setIsSwitchingSchema(false);
       }
     };
 
@@ -160,11 +196,17 @@ export default function App() {
   return (
     <JazzProvider client={client}>
       <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
-        <ConfigResetProvider onReset={handleReset}>
+        <StandaloneProvider
+          onReset={handleReset}
+          schemaHashes={availableSchemaHashes}
+          selectedSchemaHash={storedConfig?.schemaHash ?? null}
+          onSelectSchema={handleHeaderSchemaSelect}
+          isSwitchingSchema={isSwitchingSchema}
+        >
           <BrowserRouter>
             <InspectorRoutes />
           </BrowserRouter>
-        </ConfigResetProvider>
+        </StandaloneProvider>
       </DevtoolsProvider>
     </JazzProvider>
   );
