@@ -84,6 +84,22 @@ describe("toValue", () => {
     expect(() => toValue([0, 256], colType)).toThrow("Bytea arrays must contain integers");
   });
 
+  it("converts Json values", () => {
+    const colType: ColumnType = { type: "Json" };
+    expect(toValue('{"a":1}', colType)).toEqual({ type: "Text", value: '{"a":1}' });
+    expect(toValue({ a: 1, b: ["x"] }, colType)).toEqual({
+      type: "Text",
+      value: '{"a":1,"b":["x"]}',
+    });
+  });
+
+  it("rejects non-serializable Json values", () => {
+    const colType: ColumnType = { type: "Json" };
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => toValue(circular, colType)).toThrow("JSON values must be serializable");
+  });
+
   it("converts Enum values and validates variants", () => {
     const colType = { type: "Enum", variants: ["done", "todo"] } as ColumnType;
     expect(toValue("todo", colType)).toEqual({ type: "Text", value: "todo" });
@@ -117,10 +133,12 @@ describe("toValue", () => {
     };
     expect(toValue({ x: 10, y: 20 }, colType)).toEqual({
       type: "Row",
-      value: [
-        { type: "Integer", value: 10 },
-        { type: "Integer", value: 20 },
-      ],
+      value: {
+        values: [
+          { type: "Integer", value: 10 },
+          { type: "Integer", value: 20 },
+        ],
+      },
     });
   });
 
@@ -139,14 +157,12 @@ describe("toValue", () => {
 
 describe("toValueArray", () => {
   const schema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      ],
     },
   };
 
@@ -190,14 +206,12 @@ describe("toValueArray", () => {
 
 describe("toUpdateRecord", () => {
   const schema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      ],
     },
   };
 

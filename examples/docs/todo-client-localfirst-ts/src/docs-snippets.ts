@@ -16,17 +16,25 @@ export function subscribeTodos(db: Db, onCount: (count: number) => void) {
 }
 // #endregion reading-subscriptions-ts
 
-// #region reading-settled-tier-ts
-export async function readTodosSettledAtEdge(db: Db) {
-  return db.all(app.todos.where({ done: false }), "edge");
+// #region reading-durability-tier-ts
+export async function readTodosAtEdgeDurability(db: Db) {
+  return db.all(app.todos.where({ done: false }), { tier: "edge", localUpdates: "immediate" });
 }
-// #endregion reading-settled-tier-ts
+// #endregion reading-durability-tier-ts
 
 // #region reading-filters-ts
 export async function readTodosWithFilters(db: Db) {
   return db.all(app.todos.where({ done: false, title: { contains: "docs" } }));
 }
 // #endregion reading-filters-ts
+
+// #region reading-where-operators-ts
+export async function readTodosWithWhereOperators(db: Db) {
+  await db.all(app.todos.where({ done: false }));
+  await db.all(app.todos.where({ title: { contains: "milk" } }));
+  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+}
+// #endregion reading-where-operators-ts
 
 // #region reading-sorting-ts
 export async function readTodosSortedByTitle(db: Db) {
@@ -51,33 +59,43 @@ export async function readTodosWithIncludes(db: Db) {
 }
 // #endregion reading-includes-ts
 
+// #region reading-recursive-ts
+export function buildTodoLineageQuery() {
+  return app.todos.gather({
+    start: { done: false },
+    step: ({ current }) => app.todos.where({ parent: current }).hopTo("parent"),
+    maxDepth: 10,
+  });
+}
+// #endregion reading-recursive-ts
+
 // #region writing-crud-ts
-export function writeTodoCrud(db: Db, todoId: string) {
-  db.insert(app.todos, {
+export async function writeTodoCrud(db: Db, todoId: string) {
+  await db.insert(app.todos, {
     title: "Write docs",
     done: false,
     owner_id: EXAMPLE_OWNER_ID,
     project: EXAMPLE_PROJECT_ID,
   });
-  db.update(app.todos, todoId, { done: true });
-  db.deleteFrom(app.todos, todoId);
+  await db.update(app.todos, todoId, { done: true });
+  await db.deleteFrom(app.todos, todoId);
 }
 // #endregion writing-crud-ts
 
-// #region writing-ack-tier-ts
-export async function writeTodoWithAckTiers(db: Db) {
-  const id = await db.insertWithAck(
+// #region writing-durability-tier-ts
+export async function writeTodoWithDurabilityTiers(db: Db) {
+  const id = await db.insert(
     app.todos,
     {
-      title: "Write docs with ack",
+      title: "Write docs with durability tier",
       done: false,
       owner_id: EXAMPLE_OWNER_ID,
       project: EXAMPLE_PROJECT_ID,
     },
-    "edge",
+    { tier: "edge" },
   );
 
-  await db.updateWithAck(app.todos, id, { done: true }, "core");
-  await db.deleteFromWithAck(app.todos, id, "core");
+  await db.update(app.todos, id, { done: true }, { tier: "global" });
+  await db.deleteFrom(app.todos, id, { tier: "global" });
 }
-// #endregion writing-ack-tier-ts
+// #endregion writing-durability-tier-ts

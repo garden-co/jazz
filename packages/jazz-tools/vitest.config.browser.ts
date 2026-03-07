@@ -11,6 +11,9 @@ export default defineConfig({
       allow: [resolve(__dirname, "../..")],
     },
   },
+  optimizeDeps: {
+    include: ["react/jsx-dev-runtime", "react/jsx-runtime"],
+  },
   resolve: {
     alias: {
       // Needed because jazz-tools browser tests import from source (../../src/),

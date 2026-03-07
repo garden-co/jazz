@@ -105,6 +105,9 @@ enum Token {
     True,
     False,
     References,
+    Exists,
+    From,
+    Where,
     // Punctuation
     LParen,
     RParen,
@@ -285,7 +288,8 @@ impl<'a> Tokenizer<'a> {
                 self.advance();
                 Token::Gt
             }
-            '\'' | '"' => Token::StringLit(self.read_string()?),
+            '\'' => Token::StringLit(self.read_string()?),
+            '"' => Token::Ident(self.read_string()?),
             '-' if self.input[self.pos..].starts_with("-") && {
                 let next = self.input[self.pos + 1..].chars().next();
                 next.map(|c| c.is_ascii_digit()).unwrap_or(false)
@@ -330,6 +334,9 @@ impl<'a> Tokenizer<'a> {
                     "TRUE" => Token::True,
                     "FALSE" => Token::False,
                     "REFERENCES" => Token::References,
+                    "EXISTS" => Token::Exists,
+                    "FROM" => Token::From,
+                    "WHERE" => Token::Where,
                     _ => Token::Ident(ident),
                 }
             }
@@ -437,7 +444,30 @@ impl Parser {
                     "ENUM type requires at least one variant".to_string(),
                 ));
             }
-            ColumnType::Enum(variants)
+            ColumnType::Enum { variants }
+        } else if upper == "JSON" {
+            if self.peek() == Some(&Token::LParen) {
+                self.advance();
+                let raw_schema = match self.advance() {
+                    Some(Token::StringLit(value)) => value.clone(),
+                    Some(t) => {
+                        return Err(SqlParseError::Expected(format!(
+                            "JSON schema string literal, got {:?}",
+                            t
+                        )));
+                    }
+                    None => return Err(SqlParseError::UnexpectedEnd),
+                };
+                self.expect(&Token::RParen)?;
+                let parsed_schema = serde_json::from_str(&raw_schema).map_err(|err| {
+                    SqlParseError::SyntaxError(format!("Invalid JSON schema payload: {err}"))
+                })?;
+                ColumnType::Json {
+                    schema: Some(parsed_schema),
+                }
+            } else {
+                ColumnType::Json { schema: None }
+            }
         } else {
             // Skip optional size like VARCHAR(255)
             if self.peek() == Some(&Token::LParen) {
@@ -468,7 +498,9 @@ impl Parser {
         while self.peek() == Some(&Token::LBracket) {
             self.advance(); // consume '['
             self.expect(&Token::RBracket)?;
-            col_type = ColumnType::Array(Box::new(col_type));
+            col_type = ColumnType::Array {
+                element: Box::new(col_type),
+            };
         }
 
         Ok(col_type)
@@ -614,6 +646,20 @@ impl Parser {
                         max_depth: None,
                     })
                 }
+            }
+            Some(Token::Exists) => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::Select)?;
+                self.expect(&Token::From)?;
+                let table = self.expect_ident()?;
+                self.expect(&Token::Where)?;
+                let condition = self.parse_policy_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(PolicyExpr::Exists {
+                    table,
+                    condition: Box::new(condition),
+                })
             }
             Some(Token::Ident(_)) => {
                 let column = self.expect_ident()?;
@@ -1003,14 +1049,16 @@ impl Parser {
 fn is_valid_reference_column_type(column_type: &ColumnType) -> bool {
     match column_type {
         ColumnType::Uuid => true,
-        ColumnType::Array(element_type) => matches!(element_type.as_ref(), ColumnType::Uuid),
+        ColumnType::Array {
+            element: element_type,
+        } => matches!(element_type.as_ref(), ColumnType::Uuid),
         _ => false,
     }
 }
 
 fn validate_schema_references(schema: &Schema) -> Result<(), SqlParseError> {
     for (table_name, table_schema) in schema {
-        for column in &table_schema.descriptor.columns {
+        for column in &table_schema.columns.columns {
             let Some(referenced_table) = column.references else {
                 continue;
             };
@@ -1102,7 +1150,7 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
                 table_name
             ))
         })?;
-        validate_operation_policy_for_bytea(&table_schema.descriptor, &policy)?;
+        validate_operation_policy_for_bytea(&table_schema.columns, &policy)?;
 
         match operation {
             Operation::Select => table_schema.policies.select = policy,
@@ -1220,15 +1268,87 @@ pub fn schema_to_sql(schema: &Schema) -> String {
     blocks.join("\n\n")
 }
 
+fn is_bare_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first.is_alphabetic() || first == '_') {
+        return false;
+    }
+
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_reserved_keyword(identifier: &str) -> bool {
+    matches!(
+        identifier.to_ascii_uppercase().as_str(),
+        "CREATE"
+            | "TABLE"
+            | "POLICY"
+            | "ON"
+            | "FOR"
+            | "USING"
+            | "WITH"
+            | "CHECK"
+            | "SESSION"
+            | "INHERITS"
+            | "INHERIT"
+            | "VIA"
+            | "REFERENCING"
+            | "SELECT"
+            | "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "AND"
+            | "OR"
+            | "IN"
+            | "CONTAINS"
+            | "IS"
+            | "ALTER"
+            | "ADD"
+            | "DROP"
+            | "COLUMN"
+            | "RENAME"
+            | "TO"
+            | "NOT"
+            | "NULL"
+            | "DEFAULT"
+            | "TRUE"
+            | "FALSE"
+            | "REFERENCES"
+    )
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    if is_bare_identifier(identifier) && !is_reserved_keyword(identifier) {
+        return identifier.to_string();
+    }
+
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn session_path_to_sql(path: &[String]) -> String {
+    path.iter()
+        .map(|segment| quote_identifier(segment))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
     let mut columns = Vec::new();
 
-    for col in &schema.descriptor.columns {
+    for col in &schema.columns.columns {
         let col_sql = column_descriptor_to_sql(col);
         columns.push(format!("    {}", col_sql));
     }
 
-    format!("CREATE TABLE {} (\n{}\n);", table_name, columns.join(",\n"))
+    format!(
+        "CREATE TABLE {} (\n{}\n);",
+        quote_identifier(table_name),
+        columns.join(",\n")
+    )
 }
 
 fn table_policies_to_sql(table_name: &str, policies: &TablePolicies) -> Vec<String> {
@@ -1246,11 +1366,11 @@ fn table_policies_to_sql(table_name: &str, policies: &TablePolicies) -> Vec<Stri
         if clauses.is_empty() {
             continue;
         }
+        let policy_name = quote_identifier(&format!("{}_{}_policy", table_name, name));
         statements.push(format!(
-            "CREATE POLICY {}_{}_policy ON {} FOR {} {};",
-            table_name,
-            name,
-            table_name,
+            "CREATE POLICY {} ON {} FOR {} {};",
+            policy_name,
+            quote_identifier(table_name),
             sql_op,
             clauses.join(" ")
         ));
@@ -1275,23 +1395,31 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         PolicyExpr::Cmp { column, op, value } => {
             format!(
                 "{} {} {}",
-                column,
+                quote_identifier(column),
                 cmp_op_to_sql(op),
                 policy_value_to_sql(value)
             )
         }
-        PolicyExpr::IsNull { column } => format!("{} IS NULL", column),
-        PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", column),
+        PolicyExpr::IsNull { column } => format!("{} IS NULL", quote_identifier(column)),
+        PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", quote_identifier(column)),
         PolicyExpr::Contains { column, value } => {
-            format!("{} CONTAINS {}", column, policy_value_to_sql(value))
+            format!(
+                "{} CONTAINS {}",
+                quote_identifier(column),
+                policy_value_to_sql(value)
+            )
         }
         PolicyExpr::In {
             column,
             session_path,
-        } => format!("{} IN @session.{}", column, session_path.join(".")),
+        } => format!(
+            "{} IN @session.{}",
+            quote_identifier(column),
+            session_path_to_sql(session_path)
+        ),
         PolicyExpr::InList { column, values } => format!(
             "{} IN ({})",
-            column,
+            quote_identifier(column),
             values
                 .iter()
                 .map(policy_value_to_sql)
@@ -1301,7 +1429,7 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         PolicyExpr::Exists { table, condition } => {
             format!(
                 "EXISTS (SELECT FROM {} WHERE {})",
-                table,
+                quote_identifier(table),
                 policy_expr_to_sql(condition)
             )
         }
@@ -1314,13 +1442,13 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
             Some(depth) => format!(
                 "INHERITS {} VIA {} MAX DEPTH {}",
                 operation_to_sql(*operation),
-                via_column,
+                quote_identifier(via_column),
                 depth
             ),
             None => format!(
                 "INHERITS {} VIA {}",
                 operation_to_sql(*operation),
-                via_column
+                quote_identifier(via_column)
             ),
         },
         PolicyExpr::InheritsReferencing {
@@ -1331,16 +1459,16 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
         } => match max_depth {
             Some(depth) => format!(
                 "INHERITS {} REFERENCING {} VIA {} MAX DEPTH {}",
-                operation.to_string().to_uppercase(),
-                source_table,
-                via_column,
+                operation_to_sql(*operation),
+                quote_identifier(source_table),
+                quote_identifier(via_column),
                 depth
             ),
             None => format!(
                 "INHERITS {} REFERENCING {} VIA {}",
-                operation.to_string().to_uppercase(),
-                source_table,
-                via_column
+                operation_to_sql(*operation),
+                quote_identifier(source_table),
+                quote_identifier(via_column)
             ),
         },
         PolicyExpr::And(exprs) => exprs
@@ -1362,7 +1490,7 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
 fn policy_value_to_sql(value: &PolicyValue) -> String {
     match value {
         PolicyValue::Literal(value) => value_to_sql(value),
-        PolicyValue::SessionRef(path) => format!("@session.{}", path.join(".")),
+        PolicyValue::SessionRef(path) => format!("@session.{}", session_path_to_sql(path)),
     }
 }
 
@@ -1389,14 +1517,14 @@ fn operation_to_sql(operation: Operation) -> &'static str {
 fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
     let type_str = column_type_to_sql(&col.column_type);
     let ref_str = match &col.references {
-        Some(table) => format!(" REFERENCES {}", table.as_str()),
+        Some(table) => format!(" REFERENCES {}", quote_identifier(table.as_str())),
         None => String::new(),
     };
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
 
     format!(
         "{} {}{}{}",
-        col.name.as_str(),
+        quote_identifier(col.name.as_str()),
         type_str,
         ref_str,
         nullable_str
@@ -1433,11 +1561,18 @@ fn lens_op_to_sql(op: &LensOp) -> String {
             let default_str = value_to_sql(default);
             format!(
                 "ALTER TABLE {} ADD COLUMN {} {} DEFAULT {};",
-                table, column, type_str, default_str
+                quote_identifier(table),
+                quote_identifier(column),
+                type_str,
+                default_str
             )
         }
         LensOp::RemoveColumn { table, column, .. } => {
-            format!("ALTER TABLE {} DROP COLUMN {};", table, column)
+            format!(
+                "ALTER TABLE {} DROP COLUMN {};",
+                quote_identifier(table),
+                quote_identifier(column)
+            )
         }
         LensOp::RenameColumn {
             table,
@@ -1446,12 +1581,14 @@ fn lens_op_to_sql(op: &LensOp) -> String {
         } => {
             format!(
                 "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                table, old_name, new_name
+                quote_identifier(table),
+                quote_identifier(old_name),
+                quote_identifier(new_name)
             )
         }
         LensOp::AddTable { table, schema } => table_schema_to_sql(table, schema),
         LensOp::RemoveTable { table, .. } => {
-            format!("DROP TABLE {};", table)
+            format!("DROP TABLE {};", quote_identifier(table))
         }
     }
 }
@@ -1463,7 +1600,7 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         ColumnType::Double => "REAL".to_string(),
         ColumnType::Boolean => "BOOLEAN".to_string(),
         ColumnType::Text => "TEXT".to_string(),
-        ColumnType::Enum(variants) => {
+        ColumnType::Enum { variants } => {
             let variants = variants
                 .iter()
                 .map(|variant| format!("'{}'", variant.replace('\'', "''")))
@@ -1474,8 +1611,15 @@ pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
         ColumnType::Timestamp => "TIMESTAMP".to_string(),
         ColumnType::Uuid => "UUID".to_string(),
         ColumnType::Bytea => "BYTEA".to_string(),
-        ColumnType::Array(elem) => format!("{}[]", column_type_to_sql(elem)),
-        ColumnType::Row(_) => "TEXT".to_string(),
+        ColumnType::Json { schema } => {
+            if let Some(schema) = schema {
+                format!("JSON('{}')", schema.to_string().replace('\'', "''"))
+            } else {
+                "JSON".to_string()
+            }
+        }
+        ColumnType::Array { element: elem } => format!("{}[]", column_type_to_sql(elem)),
+        ColumnType::Row { columns: _ } => "TEXT".to_string(),
     }
 }
 
@@ -1494,13 +1638,14 @@ fn value_to_sql(val: &Value) -> String {
         Value::Uuid(id) => format!("'{:?}'", id),
         Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
         Value::Array(_) => "'[]'".to_string(),
-        Value::Row(_) => "'{}'".to_string(),
+        Value::Row { .. } => "'{}'".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_simple_create_table() {
@@ -1515,17 +1660,37 @@ mod tests {
         assert_eq!(schema.len(), 1);
 
         let todos = schema.get(&TableName::new("todos")).unwrap();
-        assert_eq!(todos.descriptor.columns.len(), 2);
+        assert_eq!(todos.columns.columns.len(), 2);
 
-        let title = &todos.descriptor.columns[0];
+        let title = &todos.columns.columns[0];
         assert_eq!(title.name.as_str(), "title");
         assert_eq!(title.column_type, ColumnType::Text);
         assert!(!title.nullable);
 
-        let completed = &todos.descriptor.columns[1];
+        let completed = &todos.columns.columns[1];
         assert_eq!(completed.name.as_str(), "completed");
         assert_eq!(completed.column_type, ColumnType::Boolean);
         assert!(!completed.nullable);
+    }
+
+    #[test]
+    fn parse_quoted_identifiers() {
+        let sql = r#"
+            CREATE TABLE "data_entry_entries" (
+                "table" TEXT NOT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        assert_eq!(schema.len(), 1);
+
+        let entries = schema.get(&TableName::new("data_entry_entries")).unwrap();
+        assert_eq!(entries.columns.columns.len(), 1);
+
+        let table = &entries.columns.columns[0];
+        assert_eq!(table.name.as_str(), "table");
+        assert_eq!(table.column_type, ColumnType::Text);
+        assert!(!table.nullable);
     }
 
     #[test]
@@ -1541,9 +1706,9 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let users = schema.get(&TableName::new("users")).unwrap();
 
-        assert!(!users.descriptor.columns[0].nullable); // name
-        assert!(users.descriptor.columns[1].nullable); // email
-        assert!(users.descriptor.columns[2].nullable); // age
+        assert!(!users.columns.columns[0].nullable); // name
+        assert!(users.columns.columns[1].nullable); // email
+        assert!(users.columns.columns[2].nullable); // age
     }
 
     #[test]
@@ -1790,7 +1955,7 @@ mod tests {
         match &transform.ops[0] {
             LensOp::AddTable { table, schema } => {
                 assert_eq!(table, "new_table");
-                assert_eq!(schema.descriptor.columns.len(), 2);
+                assert_eq!(schema.columns.columns.len(), 2);
             }
             _ => panic!("Expected AddTable"),
         }
@@ -1842,10 +2007,26 @@ mod tests {
         assert_eq!(schema.len(), reparsed.len());
         let todos = schema.get(&TableName::new("todos")).unwrap();
         let todos2 = reparsed.get(&TableName::new("todos")).unwrap();
-        assert_eq!(
-            todos.descriptor.columns.len(),
-            todos2.descriptor.columns.len()
-        );
+        assert_eq!(todos.columns.columns.len(), todos2.columns.columns.len());
+    }
+
+    #[test]
+    fn schema_to_sql_roundtrip_with_quoted_keyword_identifier() {
+        let sql = r#"CREATE TABLE data_entry_entries (
+    "table" TEXT NOT NULL
+);"#;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        assert!(regenerated.contains("\"table\" TEXT NOT NULL"));
+
+        let reparsed = parse_schema(&regenerated).unwrap();
+        let column = &reparsed
+            .get(&TableName::new("data_entry_entries"))
+            .unwrap()
+            .columns
+            .columns[0];
+        assert_eq!(column.name.as_str(), "table");
     }
 
     #[test]
@@ -1859,6 +2040,37 @@ mod tests {
 
         let sql = lens_to_sql(&transform);
         assert!(sql.contains("ALTER TABLE users ADD COLUMN age INTEGER DEFAULT 0;"));
+    }
+
+    #[test]
+    fn lens_to_sql_roundtrip_with_quoted_keyword_identifier() {
+        let transform = LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "data_entry_entries".to_string(),
+            column: "table".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Null,
+        }]);
+
+        let sql = lens_to_sql(&transform);
+        assert!(
+            sql.contains("ALTER TABLE data_entry_entries ADD COLUMN \"table\" TEXT DEFAULT NULL;")
+        );
+
+        let reparsed = parse_lens(&sql).unwrap();
+        match &reparsed.ops[0] {
+            LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            } => {
+                assert_eq!(table, "data_entry_entries");
+                assert_eq!(column, "table");
+                assert_eq!(*column_type, ColumnType::Text);
+                assert_eq!(*default, Value::Null);
+            }
+            _ => panic!("Expected AddColumn"),
+        }
     }
 
     #[test]
@@ -1928,16 +2140,13 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("test")).unwrap();
 
-        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Text);
-        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Integer);
-        assert_eq!(table.descriptor.columns[2].column_type, ColumnType::BigInt);
-        assert_eq!(table.descriptor.columns[3].column_type, ColumnType::Boolean);
-        assert_eq!(
-            table.descriptor.columns[4].column_type,
-            ColumnType::Timestamp
-        );
-        assert_eq!(table.descriptor.columns[5].column_type, ColumnType::Uuid);
-        assert_eq!(table.descriptor.columns[6].column_type, ColumnType::Bytea);
+        assert_eq!(table.columns.columns[0].column_type, ColumnType::Text);
+        assert_eq!(table.columns.columns[1].column_type, ColumnType::Integer);
+        assert_eq!(table.columns.columns[2].column_type, ColumnType::BigInt);
+        assert_eq!(table.columns.columns[3].column_type, ColumnType::Boolean);
+        assert_eq!(table.columns.columns[4].column_type, ColumnType::Timestamp);
+        assert_eq!(table.columns.columns[5].column_type, ColumnType::Uuid);
+        assert_eq!(table.columns.columns[6].column_type, ColumnType::Bytea);
     }
 
     #[test]
@@ -1947,12 +2156,53 @@ mod tests {
         let col = &schema
             .get(&TableName::new("chunks"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Bytea))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea)
+            }
+        );
+    }
+
+    #[test]
+    fn parse_json_column_types() {
+        let sql = r#"
+            CREATE TABLE docs (
+                payload JSON NOT NULL,
+                typed_payload JSON('{"type":"object","properties":{"name":{"type":"string"}}}') NULL
+            );
+        "#;
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("docs")).unwrap();
+
+        assert_eq!(
+            table.columns.columns[0].column_type,
+            ColumnType::Json { schema: None }
+        );
+        assert_eq!(
+            table.columns.columns[1].column_type,
+            ColumnType::Json {
+                schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }))
+            }
+        );
+        assert!(table.columns.columns[1].nullable);
+    }
+
+    #[test]
+    fn reject_invalid_json_schema_payload() {
+        let sql = "CREATE TABLE docs (payload JSON('{not-json}') NOT NULL);";
+        let err = parse_schema(sql).expect_err("invalid schema payload should fail");
+        assert!(
+            err.to_string().contains("Invalid JSON schema payload"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1963,13 +2213,15 @@ mod tests {
         let col = &schema
             .get(&TableName::new("files"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(col.name.as_str(), "parts");
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Uuid))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid)
+            }
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
@@ -2005,10 +2257,14 @@ mod tests {
     fn parse_nested_array_column_type() {
         let sql = "CREATE TABLE t (matrix INTEGER[][] NOT NULL);";
         let schema = parse_schema(sql).unwrap();
-        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        let col = &schema.get(&TableName::new("t")).unwrap().columns.columns[0];
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Array(Box::new(ColumnType::Integer))))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                }),
+            }
         );
         assert!(!col.nullable);
     }
@@ -2020,16 +2276,18 @@ mod tests {
         let col = &schema
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(
             col.column_type,
-            ColumnType::Enum(vec![
-                "todo".to_string(),
-                "in_progress".to_string(),
-                "done".to_string(),
-            ])
+            ColumnType::Enum {
+                variants: vec![
+                    "todo".to_string(),
+                    "in_progress".to_string(),
+                    "done".to_string(),
+                ]
+            }
         );
         assert!(!col.nullable);
     }
@@ -2091,7 +2349,9 @@ mod tests {
                 assert_eq!(column, "status");
                 assert_eq!(
                     *column_type,
-                    ColumnType::Enum(vec!["todo".to_string(), "done".to_string()])
+                    ColumnType::Enum {
+                        variants: vec!["todo".to_string(), "done".to_string()]
+                    }
                 );
                 assert_eq!(*default, Value::Text("todo".to_string()));
             }
@@ -2106,7 +2366,7 @@ mod tests {
         let col = &schema
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(col.name.as_str(), "owner_id");
@@ -2122,7 +2382,7 @@ mod tests {
         let col = &schema
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(col.references, Some(TableName::new("todos")));
@@ -2134,7 +2394,7 @@ mod tests {
         // Order: REFERENCES then NOT NULL
         let sql = "CREATE TABLE t (fk UUID REFERENCES other NOT NULL);";
         let schema = parse_schema(sql).unwrap();
-        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        let col = &schema.get(&TableName::new("t")).unwrap().columns.columns[0];
 
         assert_eq!(col.references, Some(TableName::new("other")));
         assert!(!col.nullable);
@@ -2145,7 +2405,7 @@ mod tests {
         // Order: NOT NULL then REFERENCES (should also work)
         let sql = "CREATE TABLE t (fk UUID NOT NULL REFERENCES other);";
         let schema = parse_schema(sql).unwrap();
-        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+        let col = &schema.get(&TableName::new("t")).unwrap().columns.columns[0];
 
         assert_eq!(col.references, Some(TableName::new("other")));
         assert!(!col.nullable);
@@ -2257,7 +2517,7 @@ mod tests {
         let col = &reparsed
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
         assert_eq!(col.references, Some(TableName::new("users")));
         assert!(!col.nullable);
@@ -2275,11 +2535,13 @@ mod tests {
         let col = &reparsed
             .get(&TableName::new("files"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Uuid))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Uuid)
+            }
         );
         assert_eq!(col.references, Some(TableName::new("file_parts")));
         assert!(!col.nullable);
@@ -2297,11 +2559,13 @@ mod tests {
         let col = &reparsed
             .get(&TableName::new("todos"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
         assert_eq!(
             col.column_type,
-            ColumnType::Enum(vec!["todo".to_string(), "done".to_string()])
+            ColumnType::Enum {
+                variants: vec!["todo".to_string(), "done".to_string()]
+            }
         );
         assert!(!col.nullable);
     }
@@ -2334,20 +2598,20 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("todos")).unwrap();
 
-        assert_eq!(table.descriptor.columns.len(), 3);
+        assert_eq!(table.columns.columns.len(), 3);
 
-        let title = &table.descriptor.columns[0];
+        let title = &table.columns.columns[0];
         assert_eq!(title.name.as_str(), "title");
         assert_eq!(title.column_type, ColumnType::Text);
         assert!(title.references.is_none());
         assert!(!title.nullable);
 
-        let parent = &table.descriptor.columns[1];
+        let parent = &table.columns.columns[1];
         assert_eq!(parent.name.as_str(), "parent_id");
         assert_eq!(parent.references, Some(TableName::new("todos")));
         assert!(parent.nullable);
 
-        let owner = &table.descriptor.columns[2];
+        let owner = &table.columns.columns[2];
         assert_eq!(owner.name.as_str(), "owner_id");
         assert_eq!(owner.references, Some(TableName::new("users")));
         assert!(!owner.nullable);
@@ -2365,14 +2629,14 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("measurements")).unwrap();
 
-        assert_eq!(table.descriptor.columns.len(), 2);
+        assert_eq!(table.columns.columns.len(), 2);
 
-        let temp = &table.descriptor.columns[0];
+        let temp = &table.columns.columns[0];
         assert_eq!(temp.name.as_str(), "temperature");
         assert_eq!(temp.column_type, ColumnType::Double);
         assert!(!temp.nullable);
 
-        let humidity = &table.descriptor.columns[1];
+        let humidity = &table.columns.columns[1];
         assert_eq!(humidity.name.as_str(), "humidity");
         assert_eq!(humidity.column_type, ColumnType::Double);
         assert!(humidity.nullable);
@@ -2390,8 +2654,8 @@ mod tests {
         let schema = parse_schema(sql).unwrap();
         let table = schema.get(&TableName::new("sensors")).unwrap();
 
-        assert_eq!(table.descriptor.columns[0].column_type, ColumnType::Double);
-        assert_eq!(table.descriptor.columns[1].column_type, ColumnType::Double);
+        assert_eq!(table.columns.columns[0].column_type, ColumnType::Double);
+        assert_eq!(table.columns.columns[1].column_type, ColumnType::Double);
     }
 
     #[test]
@@ -2408,21 +2672,18 @@ mod tests {
         let orig = schema.get(&TableName::new("measurements")).unwrap();
         let round = reparsed.get(&TableName::new("measurements")).unwrap();
 
+        assert_eq!(orig.columns.columns.len(), round.columns.columns.len());
         assert_eq!(
-            orig.descriptor.columns.len(),
-            round.descriptor.columns.len()
+            orig.columns.columns[0].column_type,
+            round.columns.columns[0].column_type
         );
         assert_eq!(
-            orig.descriptor.columns[0].column_type,
-            round.descriptor.columns[0].column_type
+            orig.columns.columns[1].column_type,
+            round.columns.columns[1].column_type
         );
         assert_eq!(
-            orig.descriptor.columns[1].column_type,
-            round.descriptor.columns[1].column_type
-        );
-        assert_eq!(
-            orig.descriptor.columns[1].nullable,
-            round.descriptor.columns[1].nullable
+            orig.columns.columns[1].nullable,
+            round.columns.columns[1].nullable
         );
     }
 
@@ -2479,13 +2740,70 @@ mod tests {
         let col = &schema
             .get(&TableName::new("timeseries"))
             .unwrap()
-            .descriptor
+            .columns
             .columns[0];
 
         assert_eq!(
             col.column_type,
-            ColumnType::Array(Box::new(ColumnType::Double))
+            ColumnType::Array {
+                element: Box::new(ColumnType::Double)
+            }
         );
         assert!(!col.nullable);
+    }
+
+    const EXISTS_POLICY_SQL: &str = r#"
+        CREATE TABLE messages (
+            id UUID NOT NULL,
+            room_id UUID NOT NULL
+        );
+        CREATE POLICY messages_select_policy ON messages FOR SELECT
+            USING (EXISTS (SELECT FROM members WHERE member_id = @session.user_id));
+    "#;
+
+    #[test]
+    fn parse_policy_exists_subquery() {
+        // EXISTS (SELECT FROM <table> WHERE <condition>) in a USING clause
+        let schema = parse_schema(EXISTS_POLICY_SQL).unwrap();
+        let table = schema.get(&TableName::new("messages")).unwrap();
+        let using = table.policies.select.using.as_ref().unwrap();
+
+        assert!(
+            matches!(
+                using,
+                PolicyExpr::Exists { table, .. } if table == "members"
+            ),
+            "expected PolicyExpr::Exists, got {:?}",
+            using
+        );
+    }
+
+    #[test]
+    fn policy_exists_round_trip() {
+        // policy_expr_to_sql(parse(EXISTS expr)) should reproduce the original SQL
+        let sql = EXISTS_POLICY_SQL;
+
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let original_using = schema
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+        let reparsed_using = reparsed
+            .get(&TableName::new("messages"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(original_using, reparsed_using);
     }
 }

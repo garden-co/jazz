@@ -6,7 +6,6 @@ use std::ops::Bound;
 use bitvec::prelude::*;
 use smallvec::SmallVec;
 
-use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
@@ -37,8 +36,8 @@ use super::relation_ir::RelExpr;
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
-    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, Row, RowDelta, RowDescriptor,
-    Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
+    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +99,8 @@ pub struct QueryGraph {
     dirty_bitmap: BitVec,
     /// The output node ID.
     pub output_node: NodeId,
+    /// The pagination node, when the query applies limit/offset.
+    pagination_node: Option<NodeId>,
     /// Table this query operates on.
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
@@ -129,6 +130,7 @@ impl QueryGraph {
             nodes: Vec::new(),
             dirty_bitmap: BitVec::new(),
             output_node: NodeId(0),
+            pagination_node: None,
             table,
             index_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
@@ -217,52 +219,62 @@ impl QueryGraph {
     /// After calling `settle()`, this method returns the (ObjectId, BranchName) pairs
     /// for all rows currently in the query result.
     pub fn contributing_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
-        // Get all ObjectIds in the final output
-        let output_ids: AHashSet<ObjectId> = self
-            .get_node(self.output_node)
-            .and_then(|node| {
-                if let GraphNode::Output(output) = node {
-                    Some(
-                        output
-                            .current_tuples()
-                            .iter()
-                            .flat_map(|t| t.ids())
-                            .collect(),
-                    )
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+        self.scope_from_tuples(&self.current_output_tuples())
+    }
 
-        // For each IndexScanNode, find which of its ObjectIds are in the output
-        // and pair them with the scan's branch
-        let mut result = HashSet::new();
-
-        for (node_id, _table, _column) in &self.index_scan_nodes {
-            if let Some(GraphNode::IndexScan(scan)) = self.get_node(*node_id) {
-                let branch = BranchName::new(&scan.branch);
-                for tuple in scan.current_tuples() {
-                    for id in tuple.ids() {
-                        if output_ids.contains(&id) {
-                            result.insert((id, branch));
-                        }
-                    }
-                }
-            }
+    /// Returns ObjectIds that must be synced for the client to reproduce the
+    /// current query result locally.
+    pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        if let Some(node_id) = self.pagination_node
+            && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
+        {
+            return self.scope_from_tuples(limit_offset.sync_input_tuples());
         }
 
-        result
+        self.contributing_object_ids()
+    }
+
+    fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
+        tuples
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .collect()
     }
 
     /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
-        Self::try_compile_with_session(query, schema, None).ok()
+        let schema_context = Self::default_schema_context(schema);
+        let mut query_with_default_branch = query.clone();
+        if query_with_default_branch.branches.is_empty() {
+            query_with_default_branch.branches.push("main".to_string());
+        }
+        Self::try_compile_with_schema_context(
+            &query_with_default_branch,
+            schema,
+            None,
+            &schema_context,
+        )
+        .ok()
     }
 
     /// Compile a query into a graph with typed errors (without policy filtering).
     pub fn try_compile(query: &Query, schema: &Schema) -> Result<Self, QueryCompileError> {
-        Self::try_compile_with_session(query, schema, None)
+        let schema_context = Self::default_schema_context(schema);
+        let mut query_with_default_branch = query.clone();
+        if query_with_default_branch.branches.is_empty() {
+            query_with_default_branch.branches.push("main".to_string());
+        }
+        Self::try_compile_with_schema_context(
+            &query_with_default_branch,
+            schema,
+            None,
+            &schema_context,
+        )
+    }
+
+    /// Legacy compile sites default to querying `main` without schema fan-out.
+    fn default_schema_context(schema: &Schema) -> SchemaContext {
+        SchemaContext::with_defaults(schema.clone(), "main")
     }
 
     /// Compile relation IR directly into a graph.
@@ -288,6 +300,12 @@ impl QueryGraph {
         session: Option<Session>,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
+        let default_branches = vec!["main".to_string()];
+        let branches: &[String] = if branches.is_empty() {
+            &default_branches
+        } else {
+            branches
+        };
         let plan = lower_relation_to_execution_plan(
             relation,
             branches,
@@ -296,7 +314,8 @@ impl QueryGraph {
             features.select_columns,
         )?;
         validate_execution_plan(&plan, schema).ok()?;
-        Self::compile_execution_plan_with_session(&plan, schema, session)
+        let schema_context = Self::default_schema_context(schema);
+        Self::compile_execution_plan_with_schema_context(&plan, schema, session, &schema_context)
     }
 
     /// Compile relation IR directly into a graph with schema context.
@@ -336,234 +355,24 @@ impl QueryGraph {
         Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
     }
 
-    fn compile_execution_plan_with_session(
-        plan: &ExecutionQueryPlan,
-        schema: &Schema,
-        session: Option<Session>,
-    ) -> Option<Self> {
-        // Get branches (default to "main" if not specified)
-        let default_branches = vec!["main".to_string()];
-        let branches: &[String] = if plan.branches.is_empty() {
-            &default_branches
-        } else {
-            &plan.branches
-        };
-
-        if !plan.joins.is_empty() {
-            return Self::compile_join_plan(plan, schema, branches, session.clone());
-        }
-
-        let table_schema = schema.get(&plan.table)?;
-        let descriptor = table_schema.descriptor.clone();
-        let select_policy = table_schema.policies.select.using.clone();
-        let mut graph = QueryGraph::new(plan.table, descriptor.clone());
-
-        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
-        // For multi-branch queries, we create scans for each branch and union them
-        let mut phase1_outputs: Vec<NodeId> = Vec::new();
-        let mut index_columns: Vec<String> = Vec::new();
-
-        for branch in branches {
-            for disjunct in &plan.disjuncts {
-                // Find best index condition for this disjunct
-                let (scan_column, scan_condition) =
-                    if let Some(cond) = disjunct.best_index_condition() {
-                        let column = cond.column().to_string();
-                        let scan_cond = condition_to_scan(cond);
-                        (column, scan_cond)
-                    } else {
-                        // No index condition, use "_id" for full scan
-                        ("_id".to_string(), ScanCondition::All)
-                    };
-
-                index_columns.push(scan_column.clone());
-                let scan_column_name = ColumnName::new(&scan_column);
-
-                let scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
-                    scan_column_name,
-                    branch,
-                    scan_condition,
-                    descriptor.clone(),
-                );
-                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((scan_id, plan.table, scan_column_name));
-                phase1_outputs.push(scan_id);
-            }
-
-            // If include_deleted is set, also scan _id_deleted index for this branch
-            if plan.include_deleted {
-                let deleted_column = ColumnName::new("_id_deleted");
-                let deleted_scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
-                    deleted_column,
-                    branch,
-                    ScanCondition::All,
-                    descriptor.clone(),
-                );
-                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((deleted_scan_id, plan.table, deleted_column));
-                phase1_outputs.push(deleted_scan_id);
-            }
-        }
-
-        // If multiple outputs, add Union node
-        let phase1_output = if phase1_outputs.len() > 1 {
-            let union_node = UnionNode::new();
-            let union_id = graph.add_node(GraphNode::Union(union_node));
-            for scan_id in &phase1_outputs {
-                graph.add_edge(union_id, *scan_id);
-            }
-            union_id
-        } else if !phase1_outputs.is_empty() {
-            phase1_outputs[0]
-        } else {
-            return None;
-        };
-
-        // Materialize node (boundary between Phase 1 and Phase 2)
-        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
-        let materialize_node = MaterializeNode::new_all(tuple_desc);
-        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
-        graph.add_edge(materialize_id, phase1_output);
-
-        let mut phase2_input = materialize_id;
-        let mut current_descriptor = descriptor.clone();
-
-        // Policy filter node (if session provided and table has SELECT policy)
-        if let (Some(session), Some(policy)) = (&session, select_policy) {
-            let branch_for_policy = branches
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
-                current_descriptor.clone(),
-                policy,
-                session.clone(),
-                schema.clone(),
-                plan.table.as_str(),
-                branch_for_policy,
-            );
-            let inherits_tables: Vec<TableName> = policy_node
-                .inherits_tables()
-                .iter()
-                .map(TableName::new)
-                .collect();
-            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
-            graph.add_edge(policy_id, phase2_input);
-            for inherits_table in inherits_tables {
-                graph.policy_filter_tables.push((policy_id, inherits_table));
-            }
-            phase2_input = policy_id;
-        }
-
-        // Array subqueries: insert ArraySubqueryNode for each array subquery
-        for subquery_spec in &plan.array_subqueries {
-            if let Some((node, new_descriptor)) =
-                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, branches)
-            {
-                let node_id = graph.add_node(GraphNode::ArraySubquery(node));
-                graph.add_edge(node_id, phase2_input);
-                graph
-                    .array_subquery_tables
-                    .push((node_id, subquery_spec.table));
-                phase2_input = node_id;
-                current_descriptor = new_descriptor;
-            }
-        }
-
-        // Phase 2: Filter node (only if there are remaining conditions not covered by index)
-        let predicate = build_remaining_predicate_from_disjuncts(
-            &plan.disjuncts,
-            &index_columns,
-            &current_descriptor,
-        );
-        if !matches!(predicate, Predicate::True) {
-            let filter_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
-            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
-            graph.add_edge(filter_id, phase2_input);
-            phase2_input = filter_id;
-        }
-
-        // Sort node (default: id ASC when order_by is omitted)
-        let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
-        if !sort_keys.is_empty() {
-            let sort_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
-            let sort_id = graph.add_node(GraphNode::Sort(sort_node));
-            graph.add_edge(sort_id, phase2_input);
-            phase2_input = sort_id;
-        }
-
-        // LimitOffset node (if limit or offset specified)
-        if plan.limit.is_some() || plan.offset > 0 {
-            let limit_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-            let limit_offset_node =
-                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
-            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
-            graph.add_edge(limit_offset_id, phase2_input);
-            phase2_input = limit_offset_id;
-        }
-
-        // Project node (if select_columns specified)
-        if let Some(columns) = &plan.select_columns {
-            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
-            let project_node = ProjectNode::new(current_descriptor.clone(), &col_refs);
-            current_descriptor = project_node.output_descriptor().clone();
-            let project_id = graph.add_node(GraphNode::Project(project_node));
-            graph.add_edge(project_id, phase2_input);
-            phase2_input = project_id;
-        }
-
-        // Recursive relation expansion (if configured).
-        if let Some(recursive_spec) = &plan.recursive
-            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
-                recursive_spec,
-                &current_descriptor,
-                schema,
-                branches,
-            )
-        {
-            let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
-            graph.add_edge(node_id, phase2_input);
-            graph.recursive_relation_tables.push((node_id, step_table));
-            phase2_input = node_id;
-            current_descriptor = new_descriptor;
-        }
-
-        // Output node
-        graph.combined_descriptor = current_descriptor.clone();
-        let output_tuple_desc =
-            TupleDescriptor::single_with_materialization("", current_descriptor, true);
-        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
-        let output_id = graph.add_node(GraphNode::Output(output_node));
-        graph.add_edge(output_id, phase2_input);
-        graph.output_node = output_id;
-
-        Some(graph)
-    }
-
     fn compile_execution_plan_with_schema_context(
         plan: &ExecutionQueryPlan,
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        // Build branch -> schema hash map for column translation
+        // Build branch -> schema hash map for column translation.
+        // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
+        // a shortened hash prefix).
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
-        for branch_name in schema_context.all_branch_names() {
-            let branch_str = branch_name.as_str().to_string();
-            if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                branch_schema_map.insert(branch_str, composed.schema_hash);
-            }
+        for schema_hash in schema_context.all_live_hashes() {
+            let branch_name = ComposedBranchName::new(
+                &schema_context.env,
+                schema_hash,
+                &schema_context.user_branch,
+            )
+            .to_branch_name();
+            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
         }
 
         // Expand branches to include all live schema branches if not specified
@@ -578,11 +387,17 @@ impl QueryGraph {
         };
 
         if !plan.joins.is_empty() {
-            return Self::compile_join_plan(plan, schema, &branches, session.clone());
+            return Self::compile_join_plan(
+                plan,
+                schema,
+                &branches,
+                session.clone(),
+                schema_context,
+            );
         }
 
         let table_schema = schema.get(&plan.table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
         let select_policy = table_schema.policies.select.using.clone();
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
@@ -715,9 +530,13 @@ impl QueryGraph {
 
         // Array subqueries: insert ArraySubqueryNode for each array subquery
         for subquery_spec in &plan.array_subqueries {
-            if let Some((node, new_descriptor)) =
-                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, &branches)
-            {
+            if let Some((node, new_descriptor)) = graph.compile_array_subquery(
+                subquery_spec,
+                &current_descriptor,
+                schema,
+                &branches,
+                schema_context,
+            ) {
                 let node_id = graph.add_node(GraphNode::ArraySubquery(node));
                 graph.add_edge(node_id, phase2_input);
                 graph
@@ -762,6 +581,7 @@ impl QueryGraph {
                 LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
+            graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 
@@ -782,6 +602,7 @@ impl QueryGraph {
                 &current_descriptor,
                 schema,
                 &branches,
+                schema_context,
             )
         {
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
@@ -801,56 +622,6 @@ impl QueryGraph {
         graph.output_node = output_id;
 
         Some(graph)
-    }
-
-    /// Compile a query into a graph with optional session-based policy filtering.
-    ///
-    /// When a session is provided and the table has a SELECT policy, a PolicyFilterNode
-    /// is inserted after materialization to filter rows based on the policy.
-    pub fn compile_with_session(
-        query: &Query,
-        schema: &Schema,
-        session: Option<Session>,
-    ) -> Option<Self> {
-        Self::try_compile_with_session(query, schema, session).ok()
-    }
-
-    /// Compile a query into a graph with optional session-based policy filtering.
-    ///
-    /// Returns a typed error instead of collapsing failures into `None`.
-    pub fn try_compile_with_session(
-        query: &Query,
-        schema: &Schema,
-        session: Option<Session>,
-    ) -> Result<Self, QueryCompileError> {
-        let default_branches = vec!["main".to_string()];
-        let branches: &[String] = if query.branches.is_empty() {
-            &default_branches
-        } else {
-            &query.branches
-        };
-        ensure_relation_tables_exist(&query.relation_ir, schema)?;
-
-        let plan = lower_relation_to_execution_plan(
-            &query.relation_ir,
-            branches,
-            query.include_deleted,
-            query.array_subqueries.clone(),
-            query.select_columns.clone(),
-        )
-        .ok_or_else(|| {
-            QueryCompileError::InvalidPlan(
-                "unsupported relation_ir shape for query graph compilation".to_string(),
-            )
-        })?;
-
-        validate_execution_plan(&plan, schema)?;
-
-        Self::compile_execution_plan_with_session(&plan, schema, session).ok_or_else(|| {
-            QueryCompileError::InvalidPlan(
-                "unsupported relation_ir shape for query graph compilation".to_string(),
-            )
-        })
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -920,9 +691,10 @@ impl QueryGraph {
         outer_descriptor: &RowDescriptor,
         schema: &Schema,
         branches: &[String],
+        schema_context: &SchemaContext,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
-        let inner_descriptor = schema.get(&spec.table)?.descriptor.clone();
+        let inner_descriptor = schema.get(&spec.table)?.columns.clone();
 
         // Find outer correlation column index
         // The outer_column may be qualified (table.column) or unqualified
@@ -975,7 +747,7 @@ impl QueryGraph {
         let mut combined_columns = inner_descriptor.columns.clone();
         for join_spec in &spec.joins {
             if let Some(joined_schema) = schema.get(&join_spec.table) {
-                combined_columns.extend(joined_schema.descriptor.columns.clone());
+                combined_columns.extend(joined_schema.columns.columns.clone());
             }
         }
 
@@ -984,7 +756,11 @@ impl QueryGraph {
             if let Some(nested_element_desc) = Self::build_nested_array_descriptor(nested, schema) {
                 combined_columns.push(ColumnDescriptor::new(
                     &nested.column_name,
-                    ColumnType::Array(Box::new(ColumnType::Row(Box::new(nested_element_desc)))),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Row {
+                            columns: Box::new(nested_element_desc),
+                        }),
+                    },
                 ));
             }
         }
@@ -1014,6 +790,7 @@ impl QueryGraph {
             spec.inner_column.clone(),
             spec.select_columns.clone().unwrap_or_default(),
             inner_output_descriptor,
+            schema_context.clone(),
         );
 
         // Create outer tuple descriptor
@@ -1043,10 +820,10 @@ impl QueryGraph {
         let inner_schema = schema.get(&spec.table)?;
 
         // Start with base table columns + joined table columns
-        let mut columns = inner_schema.descriptor.columns.clone();
+        let mut columns = inner_schema.columns.columns.clone();
         for join_spec in &spec.joins {
             if let Some(joined_schema) = schema.get(&join_spec.table) {
-                columns.extend(joined_schema.descriptor.columns.clone());
+                columns.extend(joined_schema.columns.columns.clone());
             }
         }
 
@@ -1055,21 +832,27 @@ impl QueryGraph {
             if let Some(nested_element_desc) = Self::build_nested_array_descriptor(nested, schema) {
                 columns.push(ColumnDescriptor::new(
                     &nested.column_name,
-                    ColumnType::Array(Box::new(ColumnType::Row(Box::new(nested_element_desc)))),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Row {
+                            columns: Box::new(nested_element_desc),
+                        }),
+                    },
                 ));
             }
         }
 
         // Apply select_columns if specified
-        if let Some(cols) = &spec.select_columns {
-            let selected: Vec<_> = cols
-                .iter()
+        let base_columns = if let Some(cols) = &spec.select_columns {
+            cols.iter()
                 .filter_map(|name| columns.iter().find(|c| c.name.as_str() == name).cloned())
-                .collect();
-            Some(RowDescriptor::new(selected))
+                .collect()
         } else {
-            Some(RowDescriptor::new(columns))
-        }
+            columns
+        };
+
+        // Row id is carried in Value::Row { id: Some(...), .. } rather than
+        // as a prepended column.
+        Some(RowDescriptor::new(base_columns))
     }
 
     /// Compile a recursive relation specification into a RecursiveRelationNode.
@@ -1079,9 +862,10 @@ impl QueryGraph {
         current_descriptor: &RowDescriptor,
         schema: &Schema,
         branches: &[String],
+        schema_context: &SchemaContext,
     ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
         let step_table_schema = schema.get(&spec.table)?;
-        let step_table_descriptor = step_table_schema.descriptor.clone();
+        let step_table_descriptor = step_table_schema.columns.clone();
 
         let outer_col_name = spec
             .outer_column
@@ -1129,7 +913,7 @@ impl QueryGraph {
         // Build descriptor for step output.
         let mut step_table_descriptors = vec![step_table_descriptor.clone()];
         for join_spec in &spec.joins {
-            let joined_descriptor = schema.get(&join_spec.table)?.descriptor.clone();
+            let joined_descriptor = schema.get(&join_spec.table)?.columns.clone();
             step_table_descriptors.push(joined_descriptor);
         }
         let combined_step_descriptor = RowDescriptor::combine(&step_table_descriptors);
@@ -1154,7 +938,7 @@ impl QueryGraph {
 
         let hop = if let Some(hop_spec) = &spec.hop {
             let target_schema = schema.get(&hop_spec.table)?;
-            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.descriptor) {
+            if !descriptors_compatible_by_shape(current_descriptor, &target_schema.columns) {
                 return None;
             }
 
@@ -1176,6 +960,7 @@ impl QueryGraph {
             spec.inner_column.clone(),
             spec.select_columns.clone().unwrap_or_default(),
             step_output_descriptor,
+            schema_context.clone(),
         );
 
         let input_descriptor =
@@ -1198,9 +983,10 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         session: Option<Session>,
+        schema_context: &SchemaContext,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
-        let base_descriptor = base_table_schema.descriptor.clone();
+        let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
 
         let join_branches: Vec<&str> = if branches.is_empty() {
@@ -1284,8 +1070,13 @@ impl QueryGraph {
         let mut left_descriptor = base_descriptor.clone();
 
         if let Some(recursive_spec) = &plan.recursive
-            && let Some((node, new_descriptor, step_table)) =
-                graph.compile_recursive_relation(recursive_spec, &left_descriptor, schema, branches)
+            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+                recursive_spec,
+                &left_descriptor,
+                schema,
+                branches,
+                schema_context,
+            )
         {
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
             graph.add_edge(node_id, left_id);
@@ -1307,7 +1098,7 @@ impl QueryGraph {
             let (left_col, right_col) = join_spec.on.as_ref()?;
 
             let right_table_schema = schema.get(&join_spec.table)?;
-            let right_descriptor = right_table_schema.descriptor.clone();
+            let right_descriptor = right_table_schema.columns.clone();
 
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
@@ -1472,6 +1263,7 @@ impl QueryGraph {
             );
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
+            graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 
@@ -1741,7 +1533,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
@@ -2161,25 +1953,45 @@ impl QueryGraph {
 
     /// Get current result from output node.
     pub fn current_result(&self) -> Vec<Row> {
+        self.current_output_rows_with_provenance()
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect()
+    }
+
+    /// Get the current output tuples in output order.
+    pub fn current_output_tuples(&self) -> Vec<Tuple> {
         match self.get_node(self.output_node) {
-            Some(GraphNode::Output(node)) => node.current_rows(),
+            Some(GraphNode::Output(node)) => node.ordered_tuples().to_vec(),
             _ => vec![],
         }
+    }
+
+    pub(crate) fn current_output_rows_with_provenance(
+        &self,
+    ) -> Vec<(Row, crate::query_manager::types::TupleProvenance)> {
+        self.current_output_tuples()
+            .into_iter()
+            .filter_map(|tuple| {
+                let row = if tuple.len() == 1 {
+                    tuple.to_single_row()
+                } else {
+                    tuple
+                        .flatten_with_descriptors(
+                            &self.table_descriptors,
+                            &self.combined_descriptor,
+                        )
+                        .and_then(|flattened| flattened.to_single_row())
+                }?;
+                Some((row, tuple.provenance().clone()))
+            })
+            .collect()
     }
 
     /// Returns all current output rows as a RowDelta with everything in `added`.
     /// Used for first delivery after tier-gated settlement.
     pub fn current_result_as_delta(&self) -> RowDelta {
-        let output_tuples: Vec<Tuple> = self
-            .get_node(self.output_node)
-            .and_then(|node| {
-                if let GraphNode::Output(output) = node {
-                    Some(output.ordered_tuples().to_vec())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+        let output_tuples = self.current_output_tuples();
 
         if output_tuples.is_empty() {
             return RowDelta::default();
@@ -2359,7 +2171,7 @@ fn descriptor_for_table_with_joins(
     let base = schema
         .get(&table)
         .ok_or(QueryCompileError::UnknownTable(table))?
-        .descriptor
+        .columns
         .clone();
     if joins.is_empty() {
         return Ok(base);
@@ -2370,7 +2182,7 @@ fn descriptor_for_table_with_joins(
         let joined = schema
             .get(&join.table)
             .ok_or(QueryCompileError::UnknownTable(join.table))?
-            .descriptor
+            .columns
             .clone();
         descriptors.push(joined);
     }
@@ -3327,7 +3139,12 @@ mod tests {
             TableName::new("users"),
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("name", ColumnType::Text),
-                ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+                ColumnDescriptor::new(
+                    "tags",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
             ])
             .into(),
         );

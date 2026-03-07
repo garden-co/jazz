@@ -7,6 +7,7 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
   generateClientId,
@@ -14,11 +15,16 @@ import {
   applyUserAuthHeaders,
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
+  isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
   type SyncStreamController,
+  type SyncAuth,
   type LinkExternalResponse,
+  type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
+import { resolveJwtSession } from "./client-session.js";
+import { translateQuery } from "./query-adapter.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -39,25 +45,34 @@ export interface RequestLike {
  */
 export interface Runtime {
   insert(table: string, values: any): string;
+  insertDurable(table: string, values: any, tier: string): Promise<string>;
   update(object_id: string, values: any): void;
+  updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   delete(object_id: string): void;
+  deleteDurable(object_id: string, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
   ): Promise<any>;
   subscribe(
     query_json: string,
     on_update: Function,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
   ): number;
+  createSubscription(
+    query_json: string,
+    session_json?: string | null,
+    tier?: string | null,
+    options_json?: string | null,
+  ): number;
+  executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  insertWithAck(table: string, values: any, tier: string): Promise<string>;
-  updateWithAck(object_id: string, values: any, tier: string): Promise<void>;
-  deleteWithAck(object_id: string, tier: string): Promise<void>;
-  onSyncMessageReceived(message_json: string): void;
-  onSyncMessageToSend(callback: Function): void;
+  onSyncMessageReceived(payload: Uint8Array | string): void;
+  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
   addServer(): void;
   removeServer(): void;
   addClient(): string;
@@ -65,7 +80,7 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
+  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
 }
 
 /**
@@ -73,9 +88,20 @@ export interface Runtime {
  *
  * - `worker`: Persisted in web worker / local storage
  * - `edge`: Persisted at edge server
- * - `core`: Persisted at core server
+ * - `global`: Persisted at global server
  */
-export type PersistenceTier = "worker" | "edge" | "core";
+export type DurabilityTier = "worker" | "edge" | "global";
+export type LocalUpdatesMode = "immediate" | "deferred";
+export type QueryPropagation = "full" | "local-only";
+export interface QueryExecutionOptions {
+  tier?: DurabilityTier;
+  localUpdates?: LocalUpdatesMode;
+  propagation?: QueryPropagation;
+}
+
+export interface WriteDurabilityOptions {
+  tier?: DurabilityTier;
+}
 
 /**
  * Query row result.
@@ -98,15 +124,157 @@ export interface LinkExternalIdentityOptions {
 
 export type LinkExternalIdentityResult = LinkExternalResponse;
 
+export interface ConnectSyncRuntimeOptions {
+  useBinaryEncoding?: boolean;
+}
+
 /**
  * QueryBuilder-compatible input accepted by query and subscribe APIs.
  */
 export interface QueryInput {
   _build(): string;
+  /** Optional schema metadata available on generated QueryBuilder objects. */
+  _schema?: WasmSchema;
 }
 
+type RelationIrNode = Record<string, unknown>;
+
 function resolveQueryJson(query: string | QueryInput): string {
-  return typeof query === "string" ? query : query._build();
+  if (typeof query === "string") {
+    return query;
+  }
+
+  const builtQuery = query._build();
+  const schema = query._schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return builtQuery;
+  }
+
+  // Query payloads already in runtime form include relation_ir and should pass through unchanged.
+  try {
+    const parsed = JSON.parse(builtQuery) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && "relation_ir" in parsed) {
+      return builtQuery;
+    }
+  } catch {
+    return builtQuery;
+  }
+
+  return translateQuery(builtQuery, schema);
+}
+
+function resolveRelationIrOutputTable(node: unknown): string | null {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  const relation = node as RelationIrNode;
+
+  if ("TableScan" in relation) {
+    const tableScan = relation.TableScan as { table?: unknown } | undefined;
+    return typeof tableScan?.table === "string" ? tableScan.table : null;
+  }
+
+  if ("Filter" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.Filter as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("OrderBy" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.OrderBy as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("Limit" in relation) {
+    return resolveRelationIrOutputTable((relation.Limit as { input?: unknown } | undefined)?.input);
+  }
+
+  if ("Offset" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.Offset as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("Project" in relation) {
+    return resolveRelationIrOutputTable(
+      (relation.Project as { input?: unknown } | undefined)?.input,
+    );
+  }
+
+  if ("Gather" in relation) {
+    const gather = relation.Gather as { seed?: unknown } | undefined;
+    return resolveRelationIrOutputTable(gather?.seed);
+  }
+
+  return null;
+}
+
+function resolveQueryOutputTable(queryJson: string): string | null {
+  try {
+    const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
+    if (typeof parsed.table === "string") {
+      return parsed.table;
+    }
+    return resolveRelationIrOutputTable(parsed.relation_ir);
+  } catch {
+    return null;
+  }
+}
+
+function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
+  if (!tier) return undefined;
+  if (Array.isArray(tier)) {
+    return tier[0];
+  }
+  return tier;
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function getScheduler(): (task: () => void) => void {
+  if ("scheduler" in globalThis) {
+    return (task: () => void) => {
+      // See: https://developer.mozilla.org/en-US/docs/Web/API/Scheduler/postTask
+      // @ts-ignore Scheduler is not yet provided by the dom library
+      void globalThis.scheduler.postTask(task, { priority: "user-visible" });
+    };
+  }
+
+  return queueMicrotask;
+}
+
+function resolveDefaultDurabilityTier(context: AppContext): DurabilityTier {
+  if (context.defaultDurabilityTier) {
+    return context.defaultDurabilityTier;
+  }
+
+  if (isBrowserRuntime()) {
+    return "worker";
+  }
+
+  // In non-browser environments, default to edge when connected to a server.
+  // For local/in-memory runtimes without a server, keep worker semantics.
+  return context.serverUrl ? "edge" : "worker";
+}
+
+function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
+  const payload: { propagation?: QueryPropagation; local_updates?: LocalUpdatesMode } = {};
+  if ((options.propagation ?? "full") !== "full") {
+    payload.propagation = options.propagation;
+  }
+  if ((options.localUpdates ?? "immediate") !== "immediate") {
+    payload.local_updates = options.localUpdates;
+  }
+
+  if (!payload.propagation && !payload.local_updates) {
+    return undefined;
+  }
+
+  return JSON.stringify(payload);
 }
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -281,15 +449,19 @@ export class SessionClient {
   /**
    * Query as this session's user.
    */
-  async query(query: string | QueryInput): Promise<Row[]> {
-    return this.client.queryInternal(resolveQueryJson(query), this.session);
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    return this.client.queryInternal(query, this.session, options);
   }
 
   /**
    * Subscribe to a query as this session's user.
    */
-  subscribe(query: string | QueryInput, callback: SubscriptionCallback): number {
-    return this.client.subscribeInternal(query, callback, this.session);
+  subscribe(
+    query: string | QueryInput,
+    callback: SubscriptionCallback,
+    options?: QueryExecutionOptions,
+  ): number {
+    return this.client.subscribeInternal(query, callback, this.session, options);
   }
 }
 
@@ -300,19 +472,25 @@ export class JazzClient {
   private runtime: Runtime;
   private streamController: SyncStreamController;
   private serverClientId: string = generateClientId();
-  private subscriptions = new Map<number, SubscriptionCallback>();
+  private scheduler: (task: () => void) => void;
   private context: AppContext;
+  private resolvedSession: Session | null;
+  private defaultDurabilityTier: DurabilityTier;
+  private useBackendSyncAuth = false;
 
-  private constructor(runtime: Runtime, context: AppContext) {
+  private constructor(
+    runtime: Runtime,
+    context: AppContext,
+    defaultDurabilityTier: DurabilityTier,
+  ) {
     this.runtime = runtime;
+    this.scheduler = getScheduler();
     this.context = context;
+    this.defaultDurabilityTier = defaultDurabilityTier;
+    this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
-      getAuth: () => ({
-        jwtToken: this.context.jwtToken,
-        localAuthMode: this.context.localAuthMode,
-        localAuthToken: this.context.localAuthToken,
-      }),
+      getAuth: () => this.getSyncAuth(),
       getClientId: () => this.serverClientId,
       setClientId: (clientId) => {
         this.serverClientId = clientId;
@@ -333,16 +511,20 @@ export class JazzClient {
     const wasmModule = await loadWasmModule();
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
-      resolvedContext.tier,
+      resolveNodeTier(resolvedContext.tier),
     );
 
-    const client = new JazzClient(runtime, resolvedContext);
+    const client = new JazzClient(
+      runtime,
+      resolvedContext,
+      resolveDefaultDurabilityTier(resolvedContext),
+    );
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
@@ -362,20 +544,29 @@ export class JazzClient {
    * @param context Application context with driver and schema
    * @returns Connected JazzClient instance (created synchronously)
    */
-  static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+  static connectSync(
+    wasmModule: WasmModule,
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = JSON.stringify(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       resolvedContext.appId,
       resolvedContext.env ?? "dev",
       resolvedContext.userBranch ?? "main",
-      resolvedContext.tier,
+      resolveNodeTier(resolvedContext.tier),
+      runtimeOptions?.useBinaryEncoding ?? false,
     );
 
-    const client = new JazzClient(runtime, resolvedContext);
+    const client = new JazzClient(
+      runtime,
+      resolvedContext,
+      resolveDefaultDurabilityTier(resolvedContext),
+    );
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
@@ -396,7 +587,7 @@ export class JazzClient {
    * @returns Connected JazzClient instance
    */
   static connectWithRuntime(runtime: Runtime, context: AppContext): JazzClient {
-    const client = new JazzClient(runtime, context);
+    const client = new JazzClient(runtime, context, resolveDefaultDurabilityTier(context));
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
@@ -448,88 +639,228 @@ export class JazzClient {
   }
 
   /**
-   * Insert a new row into a table (sync, fire-and-forget).
+   * Enable backend-scoped sync auth for this client.
    *
-   * @param table Table name
-   * @param values Array of column values
-   * @returns The new row's ID (UUID string)
+   * In backend mode, sync/event transport uses `X-Jazz-Backend-Secret` instead
+   * of end-user auth headers and intentionally does not send admin headers.
    */
-  create(table: string, values: Value[]): string {
-    return this.runtime.insert(table, values);
+  asBackend(): JazzClient {
+    if (!this.context.backendSecret) {
+      throw new Error("backendSecret required for backend mode");
+    }
+    if (!this.context.serverUrl) {
+      throw new Error("serverUrl required for backend mode");
+    }
+    this.useBackendSyncAuth = true;
+    this.streamController.updateAuth();
+    return this;
+  }
+
+  private getSyncAuth(): SyncAuth {
+    if (this.useBackendSyncAuth) {
+      return {
+        backendSecret: this.context.backendSecret,
+      };
+    }
+
+    return {
+      jwtToken: this.context.jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+      adminSecret: this.context.adminSecret,
+    };
+  }
+
+  private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+    return {
+      tier: options?.tier ?? this.defaultDurabilityTier,
+      localUpdates: options?.localUpdates ?? "immediate",
+      propagation: options?.propagation ?? "full",
+    };
+  }
+
+  private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
+    return options?.tier ?? this.defaultDurabilityTier;
+  }
+
+  private alignCreateValuesToRuntimeSchema(
+    table: string,
+    values: Value[],
+    runtimeSchema = this.getSchema(),
+  ): Value[] {
+    const declaredTable = this.context.schema[table];
+    const runtimeTable = runtimeSchema[table];
+
+    if (!declaredTable || !runtimeTable || values.length !== declaredTable.columns.length) {
+      return values;
+    }
+
+    const valuesByColumn = new Map<string, Value>();
+    for (let index = 0; index < declaredTable.columns.length; index += 1) {
+      const column = declaredTable.columns[index];
+      const value = values[index];
+      if (value === undefined) {
+        return values;
+      }
+      valuesByColumn.set(column.name, value);
+    }
+
+    const reorderedValues: Value[] = [];
+    for (const column of runtimeTable.columns) {
+      const value = valuesByColumn.get(column.name);
+      if (value === undefined) {
+        return values;
+      }
+      reorderedValues.push(value);
+    }
+
+    return reorderedValues;
+  }
+
+  private alignRowValuesToDeclaredSchema(
+    table: string,
+    values: Value[],
+    runtimeSchema = this.getSchema(),
+  ): Value[] {
+    const declaredTable = this.context.schema[table];
+    const runtimeTable = runtimeSchema[table];
+
+    if (!declaredTable || !runtimeTable || values.length < runtimeTable.columns.length) {
+      return values;
+    }
+
+    const valuesByColumn = new Map<string, Value>();
+    for (let index = 0; index < runtimeTable.columns.length; index += 1) {
+      const column = runtimeTable.columns[index];
+      const value = values[index];
+      if (value === undefined) {
+        return values;
+      }
+      valuesByColumn.set(column.name, value);
+    }
+
+    const reorderedValues: Value[] = [];
+    for (const column of declaredTable.columns) {
+      const value = valuesByColumn.get(column.name);
+      if (value === undefined) {
+        return values;
+      }
+      reorderedValues.push(value);
+    }
+
+    return reorderedValues.concat(values.slice(runtimeTable.columns.length));
+  }
+
+  private alignQueryRowsToDeclaredSchema(
+    queryJson: string,
+    rows: Row[],
+    runtimeSchema = this.getSchema(),
+  ): Row[] {
+    const outputTable = resolveQueryOutputTable(queryJson);
+    if (!outputTable) {
+      return rows;
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(outputTable, row.values, runtimeSchema),
+    }));
+  }
+
+  private alignSubscriptionDeltaToDeclaredSchema(
+    queryJson: string,
+    delta: RowDelta,
+    runtimeSchema = this.getSchema(),
+  ): RowDelta {
+    const outputTable = resolveQueryOutputTable(queryJson);
+    if (!outputTable || !Array.isArray(delta)) {
+      return delta;
+    }
+
+    return delta.map((change) => {
+      if ((change.kind === 0 || change.kind === 2) && change.row) {
+        return {
+          ...change,
+          row: {
+            ...change.row,
+            values: this.alignRowValuesToDeclaredSchema(
+              outputTable,
+              change.row.values as Value[],
+              runtimeSchema,
+            ),
+          },
+        };
+      }
+
+      return change;
+    });
   }
 
   /**
-   * Insert a row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table name
-   * @param values Array of column values
-   * @param tier Acknowledgement tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acknowledges
+   * Insert a new row into a table and wait for durability at the requested tier.
    */
-  async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertWithAck(table, values, tier);
+  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
+    const tier = this.resolveWriteTier(options);
+    const runtimeSchema = this.getSchema();
+    return this.runtime.insertDurable(
+      table,
+      this.alignCreateValuesToRuntimeSchema(table, values, runtimeSchema),
+      tier,
+    );
   }
 
   /**
    * Execute a query and return all matching rows.
    *
    * @param query Query builder or JSON-encoded query specification
-   * @param settledTier Optional tier to hold delivery until confirmed
+   * @param options Optional read durability options
    * @returns Array of matching rows
    */
-  async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(resolveQueryJson(query), undefined, settledTier);
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    return this.queryInternal(query, this.resolvedSession ?? undefined, options);
   }
 
   /**
-   * Internal query with optional session and settled tier.
+   * Internal query with optional session and read durability options.
    * @internal
    */
   async queryInternal(
-    queryJson: string,
+    query: string | QueryInput,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): Promise<Row[]> {
+    const normalizedOptions = this.normalizeQueryExecutionOptions(options);
+    const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
-    const results = await this.runtime.query(queryJson, sessionJson, settledTier);
-    return results as Row[];
+    const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
+    const runtimeSchema = this.getSchema();
+    const results = await this.runtime.query(
+      queryJson,
+      sessionJson,
+      normalizedOptions.tier,
+      optionsJson,
+    );
+    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
   }
 
   /**
-   * Update a row by ID (sync, fire-and-forget).
-   *
-   * @param objectId Row ID (UUID string)
-   * @param updates Object mapping column names to new values
+   * Update a row by ID and wait for durability at the requested tier.
    */
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.runtime.update(objectId, updates);
-  }
-
-  /**
-   * Update a row and wait for acknowledgement at the specified tier.
-   */
-  async updateWithAck(
+  async update(
     objectId: string,
     updates: Record<string, Value>,
-    tier: PersistenceTier,
+    options?: WriteDurabilityOptions,
   ): Promise<void> {
-    await this.runtime.updateWithAck(objectId, updates, tier);
+    const tier = this.resolveWriteTier(options);
+    await this.runtime.updateDurable(objectId, updates, tier);
   }
 
   /**
-   * Delete a row by ID (sync, fire-and-forget).
-   *
-   * @param objectId Row ID (UUID string)
+   * Delete a row by ID and wait for durability at the requested tier.
    */
-  delete(objectId: string): void {
-    this.runtime.delete(objectId);
-  }
-
-  /**
-   * Delete a row and wait for acknowledgement at the specified tier.
-   */
-  async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deleteWithAck(objectId, tier);
+  async delete(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+    const tier = this.resolveWriteTier(options);
+    await this.runtime.deleteDurable(objectId, tier);
   }
 
   /**
@@ -537,42 +868,55 @@ export class JazzClient {
    *
    * @param query Query builder or JSON-encoded query specification
    * @param callback Called with delta whenever results change
-   * @param settledTier Optional tier to hold initial delivery until confirmed
+   * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
     query: string | QueryInput,
     callback: SubscriptionCallback,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number {
-    return this.subscribeInternal(query, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, options);
   }
 
   /**
-   * Internal subscribe with optional session and settled tier.
+   * Internal subscribe with optional session and read durability options.
+   *
+   * Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
+   * a handle synchronously (zero work), then `executeSubscription` is deferred
+   * via the scheduler so compilation + first tick run outside the caller's
+   * synchronous stack (e.g. outside a React render).
+   *
    * @internal
    */
   subscribeInternal(
     query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
-    settledTier?: PersistenceTier,
+    options?: QueryExecutionOptions,
   ): number {
+    const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
-    const subId = this.runtime.subscribe(
+    const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
+    const runtimeSchema = this.getSchema();
+
+    const handle = this.runtime.createSubscription(
       queryJson,
-      (deltaJsonOrObject: RowDelta | string) => {
-        // WASM runtime passes delta as JSON string, need to parse it
+      sessionJson,
+      normalizedOptions.tier,
+      optionsJson,
+    );
+
+    this.scheduler(() => {
+      this.runtime.executeSubscription(handle, (deltaJsonOrObject: RowDelta | string) => {
         const delta: RowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
-      },
-      sessionJson,
-      settledTier,
-    );
-    this.subscriptions.set(subId, callback);
-    return subId;
+        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+      });
+    });
+
+    return handle;
   }
 
   /**
@@ -582,14 +926,13 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
-    this.subscriptions.delete(subscriptionId);
   }
 
   /**
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    return this.runtime.getSchema();
+    return normalizeRuntimeSchema(this.runtime.getSchema());
   }
 
   /**
@@ -623,7 +966,11 @@ export class JazzClient {
    * Get schema context for server requests.
    * @internal
    */
-  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+  getSchemaContext(): {
+    env: string;
+    schema_hash: string;
+    user_branch: string;
+  } {
     return {
       env: this.context.env ?? "dev",
       schema_hash: this.runtime.getSchemaHash(),
@@ -715,11 +1062,6 @@ export class JazzClient {
   async shutdown(): Promise<void> {
     this.streamController.stop();
 
-    // Close driver if it supports it
-    if (this.context.driver?.close) {
-      await this.context.driver.close();
-    }
-
     // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
     if (this.runtime.close) {
       await this.runtime.close();
@@ -730,10 +1072,15 @@ export class JazzClient {
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
-        onServerPayload: (payload) => this.sendSyncMessage(payload),
+        retryServerPayloads: true,
+        onServerPayload: (payload, isCatalogue) =>
+          this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
-          console.error("Sync POST error:", error);
-          this.streamController.notifyTransportFailure();
+          const isExpectedAbort = isExpectedFetchAbortError(error);
+          if (!isExpectedAbort) {
+            console.error("Sync POST error:", error);
+            this.streamController.notifyTransportFailure();
+          }
         },
       }),
     );
@@ -742,18 +1089,21 @@ export class JazzClient {
     this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(payload: unknown): Promise<void> {
+  private async sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
     const serverUrl = this.streamController.getServerUrl();
     if (!serverUrl) return;
 
-    await sendSyncPayload(serverUrl, payload, {
-      jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
-      adminSecret: this.context.adminSecret,
-      clientId: this.serverClientId,
-      pathPrefix: this.streamController.getPathPrefix(),
-    });
+    await sendSyncPayload(
+      serverUrl,
+      payloadJson,
+      isCatalogue,
+      {
+        ...this.getSyncAuth(),
+        clientId: this.serverClientId,
+        pathPrefix: this.streamController.getPathPrefix(),
+      },
+      "[client] ",
+    );
   }
 }
 

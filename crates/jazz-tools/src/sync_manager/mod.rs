@@ -47,18 +47,18 @@ pub struct SyncManager {
 
     pub(super) next_pending_id: u64,
 
-    /// This node's persistence tier (None = don't emit acks).
-    pub(super) my_tier: Option<PersistenceTier>,
+    /// This node's durability identities (empty = don't emit durability notifications).
+    pub(super) my_tiers: HashSet<DurabilityTier>,
     /// Tracks which clients are interested in acks for each commit.
     pub(super) commit_interest: HashMap<CommitId, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
-    pub(super) pending_query_settled: Vec<(QueryId, PersistenceTier)>,
+    pub(super) pending_query_settled: Vec<(QueryId, DurabilityTier)>,
 
     /// Acks received during inbox processing, for RuntimeCore to consume.
-    pub(super) received_acks: Vec<(CommitId, PersistenceTier)>,
+    pub(super) received_acks: Vec<(CommitId, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -79,7 +79,7 @@ impl std::fmt::Debug for SyncManager {
                 &self.pending_query_unsubscriptions,
             )
             .field("next_pending_id", &self.next_pending_id)
-            .field("my_tier", &self.my_tier)
+            .field("my_tiers", &self.my_tiers)
             .field("commit_interest", &self.commit_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
@@ -111,7 +111,7 @@ impl SyncManager {
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
             next_pending_id: 0,
-            my_tier: None,
+            my_tiers: HashSet::new(),
             commit_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
@@ -119,10 +119,38 @@ impl SyncManager {
         }
     }
 
-    /// Set this node's persistence tier (enables ack emission).
-    pub fn with_tier(mut self, tier: PersistenceTier) -> Self {
-        self.my_tier = Some(tier);
+    /// Add a durability identity for this node (enables durability notifications).
+    pub fn with_durability_tier(mut self, tier: DurabilityTier) -> Self {
+        self.my_tiers.insert(tier);
         self
+    }
+
+    /// Add multiple durability identities for this node.
+    pub fn with_durability_tiers<I>(mut self, tiers: I) -> Self
+    where
+        I: IntoIterator<Item = DurabilityTier>,
+    {
+        self.my_tiers.extend(tiers);
+        self
+    }
+
+    /// True when this runtime instance represents a durability tier identity
+    /// (worker/edge/global) rather than a top-level client.
+    pub fn has_durability_identity(&self) -> bool {
+        !self.my_tiers.is_empty()
+    }
+
+    /// True when this node can satisfy acknowledgements for the requested tier
+    /// using one of its local durability identities.
+    pub fn has_local_durability_at_least(&self, requested_tier: DurabilityTier) -> bool {
+        self.my_tiers
+            .iter()
+            .any(|local_tier| *local_tier >= requested_tier)
+    }
+
+    /// Return this node's local durability identities.
+    pub fn local_durability_tiers(&self) -> HashSet<DurabilityTier> {
+        self.my_tiers.clone()
     }
 
     // ========================================================================
@@ -344,6 +372,7 @@ impl SyncManager {
         query_id: QueryId,
         query: Query,
         session: Option<Session>,
+        propagation: QueryPropagation,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         for server_id in server_ids {
@@ -352,6 +381,7 @@ impl SyncManager {
                 query_id,
                 query.clone(),
                 session.clone(),
+                propagation,
             );
         }
     }
@@ -365,6 +395,7 @@ impl SyncManager {
         query_id: QueryId,
         query: Query,
         session: Option<Session>,
+        propagation: QueryPropagation,
     ) {
         if !self.servers.contains_key(&server_id) {
             return;
@@ -376,6 +407,7 @@ impl SyncManager {
                 query_id,
                 query: Box::new(query),
                 session,
+                propagation,
             },
         });
     }
@@ -393,13 +425,13 @@ impl SyncManager {
     }
 
     /// Take pending QuerySettled notifications for QueryManager to process.
-    pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, PersistenceTier)> {
+    pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, DurabilityTier)> {
         std::mem::take(&mut self.pending_query_settled)
     }
 
     /// Take received persistence acks since last call.
     /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
-    pub fn take_received_acks(&mut self) -> Vec<(CommitId, PersistenceTier)> {
+    pub fn take_received_acks(&mut self) -> Vec<(CommitId, DurabilityTier)> {
         std::mem::take(&mut self.received_acks)
     }
 
@@ -407,7 +439,7 @@ impl SyncManager {
     ///
     /// Called by QueryManager when a server subscription settles for the first time.
     pub fn emit_query_settled(&mut self, client_id: ClientId, query_id: QueryId) {
-        if let Some(tier) = self.my_tier {
+        for tier in self.my_tiers.iter().copied() {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(client_id),
                 payload: SyncPayload::QuerySettled {

@@ -12,6 +12,16 @@ describe("unwrapValue", () => {
     expect(unwrapValue(v)).toBe("hello");
   });
 
+  it("unwraps Json text to parsed values when column type is Json", () => {
+    const v: WasmValue = { type: "Text", value: '{"name":"Ada","active":true}' };
+    expect(unwrapValue(v, { type: "Json" })).toEqual({ name: "Ada", active: true });
+  });
+
+  it("throws on invalid stored Json text when column type is Json", () => {
+    const v: WasmValue = { type: "Text", value: "{broken" };
+    expect(() => unwrapValue(v, { type: "Json" })).toThrow("Invalid stored JSON value");
+  });
+
   it("unwraps Uuid to string", () => {
     const v: WasmValue = { type: "Uuid", value: "abc-123" };
     expect(unwrapValue(v)).toBe("abc-123");
@@ -46,6 +56,13 @@ describe("unwrapValue", () => {
     expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);
   });
 
+  it("unwraps Bytea byte arrays to Uint8Array", () => {
+    const v = { type: "Bytea", value: [0, 1, 255] } as unknown as WasmValue;
+    const unwrapped = unwrapValue(v);
+    expect(unwrapped).toBeInstanceOf(Uint8Array);
+    expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);
+  });
+
   it("unwraps Null to undefined", () => {
     const v: WasmValue = { type: "Null" };
     expect(unwrapValue(v)).toBeUndefined();
@@ -65,10 +82,12 @@ describe("unwrapValue", () => {
   it("unwraps Row recursively", () => {
     const v: WasmValue = {
       type: "Row",
-      value: [
-        { type: "Text", value: "cell1" },
-        { type: "Boolean", value: true },
-      ],
+      value: {
+        values: [
+          { type: "Text", value: "cell1" },
+          { type: "Boolean", value: true },
+        ],
+      },
     };
     expect(unwrapValue(v)).toEqual(["cell1", true]);
   });
@@ -102,36 +121,32 @@ describe("unwrapValue", () => {
 
 describe("transformRows", () => {
   const schema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      ],
     },
   };
 
   const relationSchema: WasmSchema = {
-    tables: {
-      users: {
-        columns: [
-          { name: "name", column_type: { type: "Text" }, nullable: false },
-          {
-            name: "manager_id",
-            column_type: { type: "Uuid" },
-            nullable: true,
-            references: "users",
-          },
-        ],
-      },
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "owner_id", column_type: { type: "Uuid" }, nullable: false, references: "users" },
-        ],
-      },
+    users: {
+      columns: [
+        { name: "name", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "manager_id",
+          column_type: { type: "Uuid" },
+          nullable: true,
+          references: "users",
+        },
+      ],
+    },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "owner_id", column_type: { type: "Uuid" }, nullable: false, references: "users" },
+      ],
     },
   };
 
@@ -224,10 +239,8 @@ describe("transformRows", () => {
 
   it("transforms timestamp values to Date objects", () => {
     const timestampSchema: WasmSchema = {
-      tables: {
-        events: {
-          columns: [{ name: "created_at", column_type: { type: "Timestamp" }, nullable: false }],
-        },
+      events: {
+        columns: [{ name: "created_at", column_type: { type: "Timestamp" }, nullable: false }],
       },
     };
     const ts = 1704067200000;
@@ -243,18 +256,37 @@ describe("transformRows", () => {
     expect(result[0]?.created_at.getTime()).toBe(ts);
   });
 
+  it("transforms Json columns to parsed values", () => {
+    const jsonSchema: WasmSchema = {
+      documents: {
+        columns: [{ name: "payload", column_type: { type: "Json" }, nullable: false }],
+      },
+    };
+    const rows: WasmRow[] = [
+      {
+        id: "doc-1",
+        values: [{ type: "Text", value: '{"name":"Ada"}' }],
+      },
+    ];
+
+    const result = transformRows<{ id: string; payload: { name: string } }>(
+      rows,
+      jsonSchema,
+      "documents",
+    );
+    expect(result).toEqual([{ id: "doc-1", payload: { name: "Ada" } }]);
+  });
+
   it("follows schema column order", () => {
     // Even if WASM returns values in a different order conceptually,
     // we map them based on positional index matching schema column order
     const customSchema: WasmSchema = {
-      tables: {
-        items: {
-          columns: [
-            { name: "first", column_type: { type: "Text" }, nullable: false },
-            { name: "second", column_type: { type: "Integer" }, nullable: false },
-            { name: "third", column_type: { type: "Boolean" }, nullable: false },
-          ],
-        },
+      items: {
+        columns: [
+          { name: "first", column_type: { type: "Text" }, nullable: false },
+          { name: "second", column_type: { type: "Integer" }, nullable: false },
+          { name: "third", column_type: { type: "Boolean" }, nullable: false },
+        ],
       },
     };
 
@@ -279,7 +311,7 @@ describe("transformRows", () => {
     });
   });
 
-  it("maps forward include arrays to relation names", () => {
+  it("maps forward include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {
         id: "todo-1",
@@ -291,7 +323,10 @@ describe("transformRows", () => {
             value: [
               {
                 type: "Row",
-                value: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+                value: {
+                  id: "user-1",
+                  values: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+                },
               },
             ],
           },
@@ -307,6 +342,7 @@ describe("transformRows", () => {
         title: "Buy milk",
         owner_id: "user-1",
         owner: {
+          id: "user-1",
           name: "Alice",
           manager_id: undefined,
         },
@@ -314,7 +350,7 @@ describe("transformRows", () => {
     ]);
   });
 
-  it("maps reverse include arrays to relation names", () => {
+  it("maps reverse include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {
         id: "user-1",
@@ -326,17 +362,23 @@ describe("transformRows", () => {
             value: [
               {
                 type: "Row",
-                value: [
-                  { type: "Text", value: "Buy milk" },
-                  { type: "Uuid", value: "user-1" },
-                ],
+                value: {
+                  id: "todo-1",
+                  values: [
+                    { type: "Text", value: "Buy milk" },
+                    { type: "Uuid", value: "user-1" },
+                  ],
+                },
               },
               {
                 type: "Row",
-                value: [
-                  { type: "Text", value: "Write tests" },
-                  { type: "Uuid", value: "user-1" },
-                ],
+                value: {
+                  id: "todo-2",
+                  values: [
+                    { type: "Text", value: "Write tests" },
+                    { type: "Uuid", value: "user-1" },
+                  ],
+                },
               },
             ],
           },
@@ -352,14 +394,14 @@ describe("transformRows", () => {
         name: "Alice",
         manager_id: undefined,
         todosViaOwner: [
-          { title: "Buy milk", owner_id: "user-1" },
-          { title: "Write tests", owner_id: "user-1" },
+          { id: "todo-1", title: "Buy milk", owner_id: "user-1" },
+          { id: "todo-2", title: "Write tests", owner_id: "user-1" },
         ],
       },
     ]);
   });
 
-  it("maps nested includes recursively", () => {
+  it("maps nested includes recursively with id", () => {
     const rows: WasmRow[] = [
       {
         id: "todo-1",
@@ -371,19 +413,25 @@ describe("transformRows", () => {
             value: [
               {
                 type: "Row",
-                value: [
-                  { type: "Text", value: "Alice" },
-                  { type: "Uuid", value: "user-2" },
-                  {
-                    type: "Array",
-                    value: [
-                      {
-                        type: "Row",
-                        value: [{ type: "Text", value: "Manager" }, { type: "Null" }],
-                      },
-                    ],
-                  },
-                ],
+                value: {
+                  id: "user-1",
+                  values: [
+                    { type: "Text", value: "Alice" },
+                    { type: "Uuid", value: "user-2" },
+                    {
+                      type: "Array",
+                      value: [
+                        {
+                          type: "Row",
+                          value: {
+                            id: "user-2",
+                            values: [{ type: "Text", value: "Manager" }, { type: "Null" }],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
               },
             ],
           },
@@ -401,9 +449,11 @@ describe("transformRows", () => {
         title: "Buy milk",
         owner_id: "user-1",
         owner: {
+          id: "user-1",
           name: "Alice",
           manager_id: "user-2",
           manager: {
+            id: "user-2",
             name: "Manager",
             manager_id: undefined,
           },

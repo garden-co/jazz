@@ -19,12 +19,12 @@ pub struct PolicyError {
 // ID Types
 // ============================================================================
 
-/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < CoreServer).
+/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < GlobalServer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub enum PersistenceTier {
+pub enum DurabilityTier {
     Worker,
     EdgeServer,
-    CoreServer,
+    GlobalServer,
 }
 
 /// Unique identifier for a server connection.
@@ -80,6 +80,15 @@ impl std::fmt::Display for ClientId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueryId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum QueryPropagation {
+    #[default]
+    #[serde(rename = "full")]
+    Full,
+    #[serde(rename = "local-only")]
+    LocalOnly,
+}
+
 /// Unique identifier for a pending permission check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
@@ -100,12 +109,14 @@ pub(super) type BranchSyncData = (
 ///
 /// Determines how incoming writes from a client are routed:
 /// - `User`: Requires session, ReBAC for rows, rejected for catalogue
+/// - `Backend`: Trusted backend data access (rows only, no catalogue writes)
 /// - `Admin`: Full access (catalogue + data, no ReBAC)
 /// - `Peer`: Trusted relay (server-to-server), bypasses all auth
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientRole {
     #[default]
     User,
+    Backend,
     Admin,
     Peer,
 }
@@ -225,7 +236,10 @@ pub enum SyncPayload {
     QuerySubscription {
         query_id: QueryId,
         query: Box<Query>,
+        #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
+        #[serde(default)]
+        propagation: QueryPropagation,
     },
 
     /// Unsubscribe from a query (client to server).
@@ -236,13 +250,13 @@ pub enum SyncPayload {
         object_id: ObjectId,
         branch_name: BranchName,
         confirmed_commits: HashSet<CommitId>,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     },
 
     /// Query settlement notification — a query has settled at a given persistence tier.
     QuerySettled {
         query_id: QueryId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
         /// Highest stream sequence known to be emitted before this notification.
         through_seq: u64,
     },
@@ -251,7 +265,82 @@ pub enum SyncPayload {
     Error(SyncError),
 }
 
+/// Sessions contain claims as a JSON object.
+/// postcard does not support the dynamic deserialization style it expects (deserialize_any)
+/// so we need a custom serializer/deserializer to serialize/deserialize the claims as a string.
+mod query_subscription_session_serde {
+    use super::Session;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct SessionWire {
+        user_id: String,
+        claims_json: String,
+    }
+
+    pub fn serialize<S>(value: &Option<Session>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+
+        let wire: Option<SessionWire> = value
+            .as_ref()
+            .map(|session| {
+                let claims_json =
+                    serde_json::to_string(&session.claims).map_err(serde::ser::Error::custom)?;
+                Ok(SessionWire {
+                    user_id: session.user_id.clone(),
+                    claims_json,
+                })
+            })
+            .transpose()?;
+
+        wire.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Session>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<Session>::deserialize(deserializer);
+        }
+
+        let wire = Option::<SessionWire>::deserialize(deserializer)?;
+        wire.map(|session_wire| {
+            let claims = serde_json::from_str(&session_wire.claims_json)
+                .map_err(serde::de::Error::custom)?;
+            Ok(Session {
+                user_id: session_wire.user_id,
+                claims,
+            })
+        })
+        .transpose()
+    }
+}
+
 impl SyncPayload {
+    /// Encode this payload using postcard.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
+        postcard::to_allocvec(self)
+    }
+
+    /// Decode a payload from postcard bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        postcard::from_bytes(bytes)
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
         let metadata = match self {
@@ -323,6 +412,7 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    pub propagation: QueryPropagation,
 }
 
 /// A pending query unsubscription that needs cleanup.

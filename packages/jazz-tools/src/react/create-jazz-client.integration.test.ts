@@ -16,13 +16,11 @@ type TodoInsert = {
 };
 
 const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
@@ -58,7 +56,7 @@ describe("react/create-jazz-client integration", () => {
     try {
       client = await createJazzClient({ appId: makeAppId("mutation-query") });
 
-      const id = client.db.insert(todosTable, { title: "buy milk", done: false });
+      const id = await client.db.insert(todosTable, { title: "buy milk", done: false });
       const rows = await client.db.all(allTodosQuery);
 
       expect(
@@ -95,7 +93,7 @@ describe("react/create-jazz-client integration", () => {
 
     try {
       client = await createJazzClient({ appId: makeAppId("shutdown") });
-      client.db.insert(todosTable, { title: "shutdown-check", done: false });
+      await client.db.insert(todosTable, { title: "shutdown-check", done: false });
       await client.db.all(allTodosQuery);
 
       await expect(client.shutdown()).resolves.toBeUndefined();

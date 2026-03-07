@@ -1,0 +1,46 @@
+.statePage {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: #10151d;
+}
+
+.stateCard {
+  width: min(560px, 100%);
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 20px;
+}
+
+.stateTitle {
+  margin: 0 0 10px;
+  color: #e4e9f3;
+  font-size: 20px;
+}
+
+.errorText {
+  margin: 0 0 16px;
+  color: #f48f8f;
+}
+
+.actionButton {
+  border: 1px solid #33445d;
+  border-radius: 6px;
+  background: #202b3b;
+  color: #d5dfef;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.actionButton:hover {
+  background: #273346;
+}
+
+.loadingText {
+  margin: 0;
+  color: #a6b3c8;
+  font-size: 14px;
+}

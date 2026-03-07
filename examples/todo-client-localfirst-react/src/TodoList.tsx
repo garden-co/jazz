@@ -14,9 +14,9 @@ export function TodoList() {
     todosQuery = todosQuery.where({ done: true });
   }
 
-  // #region reading-reactive-hooks-react
   const db = useDb();
-  const todos = useAll(todosQuery);
+  // #region reading-reactive-hooks-react
+  const todos = useAll(todosQuery) ?? [];
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;

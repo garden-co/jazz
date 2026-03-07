@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::DurabilityTier;
 
 use crate::query_manager::types::Value;
 
@@ -73,7 +73,7 @@ pub(super) fn load_branch_core(
 
         let ack_lookup_key = ack_key(commit.id());
         if let Some(ack_data) = get(&ack_lookup_key)? {
-            let tiers: HashSet<PersistenceTier> = decode_json(&ack_data, "ack")?;
+            let tiers: HashSet<DurabilityTier> = decode_json(&ack_data, "ack")?;
             commit.ack_state.confirmed_tiers = tiers;
         }
 
@@ -158,12 +158,12 @@ pub(super) fn set_branch_tails_core(
 
 pub(super) fn store_ack_tier_core(
     commit_id: CommitId,
-    tier: PersistenceTier,
+    tier: DurabilityTier,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let key = ack_key(commit_id);
-    let mut tiers: HashSet<PersistenceTier> = match get(&key)? {
+    let mut tiers: HashSet<DurabilityTier> = match get(&key)? {
         Some(data) => decode_json(&data, "ack")?,
         None => HashSet::new(),
     };

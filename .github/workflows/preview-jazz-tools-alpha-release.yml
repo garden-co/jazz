@@ -1,0 +1,83 @@
+name: Preview jazz-tools alpha release
+
+on:
+  push:
+    branches:
+      - changeset-release/*
+  workflow_dispatch:
+
+concurrency:
+  group: preview-jazz-tools-alpha-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  pull-requests: read
+  statuses: write
+
+jobs:
+  mark-preview-pending:
+    name: Mark release preview pending
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: startsWith(github.ref, 'refs/heads/changeset-release/')
+    steps:
+      - name: Set pending commit status
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: "pending",
+              context: "Release preview (alpha)",
+              description: "Release preview is running.",
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+  preview:
+    name: Release preview build
+    uses: ./.github/workflows/publish-jazz-tools-alpha.yml
+    with:
+      mode: dry-run
+    secrets: inherit
+
+  mark-preview-final:
+    name: Mark release preview result
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: always() && startsWith(github.ref, 'refs/heads/changeset-release/')
+    needs: [mark-preview-pending, preview]
+    steps:
+      - name: Set final commit status
+        uses: actions/github-script@v8
+        env:
+          PREVIEW_RESULT: ${{ needs.preview.result }}
+        with:
+          script: |
+            const result = process.env.PREVIEW_RESULT || "failure";
+            const stateByResult = {
+              success: "success",
+              failure: "failure",
+              cancelled: "error",
+              skipped: "error",
+            };
+            const state = stateByResult[result] || "error";
+            const descriptionByResult = {
+              success: "Release preview passed.",
+              failure: "Release preview failed.",
+              cancelled: "Release preview was cancelled.",
+              skipped: "Release preview was skipped.",
+            };
+            const description = descriptionByResult[result] || `Release preview ended with result: ${result}.`;
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state,
+              context: "Release preview (alpha)",
+              description,
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });

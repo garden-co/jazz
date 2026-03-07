@@ -178,18 +178,23 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
         ColumnType::Text => matches!(value, Value::Text(_)),
         ColumnType::Bytea => matches!(value, Value::Bytea(_)),
-        ColumnType::Enum(variants) => match value {
+        ColumnType::Json { schema: _ } => matches!(value, Value::Text(_)),
+        ColumnType::Enum { variants } => match value {
             Value::Text(s) => variants.contains(s),
             _ => false,
         },
-        ColumnType::Array(element_type) => match value {
+        ColumnType::Array {
+            element: element_type,
+        } => match value {
             Value::Array(elements) => elements.iter().all(|element| {
                 !element.is_null() && value_matches_column_type(element, element_type)
             }),
             _ => false,
         },
-        ColumnType::Row(row_descriptor) => match value {
-            Value::Row(values) if values.len() == row_descriptor.columns.len() => values
+        ColumnType::Row {
+            columns: row_descriptor,
+        } => match value {
+            Value::Row { values, .. } if values.len() == row_descriptor.columns.len() => values
                 .iter()
                 .zip(row_descriptor.columns.iter())
                 .all(|(inner_value, inner_column)| {
@@ -222,13 +227,23 @@ fn validate_value_size(
 ) -> Result<(), EncodingError> {
     match (value, column_type) {
         (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
-        (Value::Array(values), ColumnType::Array(element_type)) => {
+        (
+            Value::Array(values),
+            ColumnType::Array {
+                element: element_type,
+            },
+        ) => {
             for element in values {
                 validate_value_size(element, element_type, column)?;
             }
             Ok(())
         }
-        (Value::Row(values), ColumnType::Row(row_descriptor)) => {
+        (
+            Value::Row { values, .. },
+            ColumnType::Row {
+                columns: row_descriptor,
+            },
+        ) => {
             for (inner_value, inner_column) in values.iter().zip(row_descriptor.columns.iter()) {
                 validate_value_size(
                     inner_value,
@@ -271,7 +286,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::Text(_) => unreachable!("Text is not fixed-size"),
         Value::Bytea(_) => unreachable!("Bytea is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
-        Value::Row(_) => unreachable!("Row is not fixed-size"),
+        Value::Row { .. } => unreachable!("Row is not fixed-size"),
     }
 }
 
@@ -290,9 +305,17 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
         Value::Array(elements) => buf.extend(encode_array(elements, &col.column_type)),
-        Value::Row(values) => {
+        Value::Row { id, values } => {
             // Encode row using its descriptor from the column type
-            if let ColumnType::Row(desc) = &col.column_type {
+            if let ColumnType::Row { columns: desc } = &col.column_type {
+                // Encode optional row id: 1-byte flag + 16-byte UUID if present
+                match id {
+                    Some(obj_id) => {
+                        buf.push(1);
+                        buf.extend_from_slice(obj_id.uuid().as_bytes());
+                    }
+                    None => buf.push(0),
+                }
                 let row_bytes = encode_row(desc, values).unwrap_or_default();
                 buf.extend(row_bytes);
             }
@@ -311,6 +334,140 @@ pub fn decode_row(descriptor: &RowDescriptor, data: &[u8]) -> Result<Vec<Value>,
     }
 
     Ok(values)
+}
+
+#[derive(Copy, Clone)]
+enum DecodeValueContext {
+    Column,
+    ArrayElement,
+}
+
+impl DecodeValueContext {
+    fn too_short_message(self, value_type: &str) -> String {
+        match self {
+            DecodeValueContext::Column => format!("{value_type} too short"),
+            DecodeValueContext::ArrayElement => format!("{value_type} element too short"),
+        }
+    }
+}
+
+fn decode_text_value(data: &[u8], variants: Option<&[String]>) -> Result<Value, EncodingError> {
+    let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
+        message: format!("invalid utf8: {e}"),
+    })?;
+
+    if let Some(variants) = variants
+        && !variants.iter().any(|variant| variant == s)
+    {
+        return Err(EncodingError::MalformedData {
+            message: format!("invalid enum variant: {s}"),
+        });
+    }
+
+    Ok(Value::Text(s.to_string()))
+}
+
+fn decode_non_null_value(
+    data: &[u8],
+    column_type: &ColumnType,
+    context: DecodeValueContext,
+) -> Result<Value, EncodingError> {
+    match column_type {
+        ColumnType::Integer => {
+            if data.len() < 4 {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("integer"),
+                });
+            }
+            Ok(Value::Integer(i32::from_le_bytes(
+                data[..4].try_into().unwrap(),
+            )))
+        }
+        ColumnType::BigInt => {
+            if data.len() < 8 {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("bigint"),
+                });
+            }
+            Ok(Value::BigInt(i64::from_le_bytes(
+                data[..8].try_into().unwrap(),
+            )))
+        }
+        ColumnType::Double => {
+            if data.len() < 8 {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("double"),
+                });
+            }
+            Ok(Value::Double(f64::from_le_bytes(
+                data[..8].try_into().unwrap(),
+            )))
+        }
+        ColumnType::Boolean => {
+            if data.is_empty() {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("boolean"),
+                });
+            }
+            Ok(Value::Boolean(data[0] != 0))
+        }
+        ColumnType::Timestamp => {
+            if data.len() < 8 {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("timestamp"),
+                });
+            }
+            Ok(Value::Timestamp(u64::from_le_bytes(
+                data[..8].try_into().unwrap(),
+            )))
+        }
+        ColumnType::Uuid => {
+            if data.len() < 16 {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("uuid"),
+                });
+            }
+            let uuid =
+                uuid::Uuid::from_slice(&data[..16]).map_err(|e| EncodingError::MalformedData {
+                    message: format!("invalid uuid: {e}"),
+                })?;
+            Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
+        }
+        ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
+        ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
+        ColumnType::Enum { variants } => decode_text_value(data, Some(variants)),
+        ColumnType::Array {
+            element: element_type,
+        } => {
+            let elements = decode_array(data, element_type)?;
+            Ok(Value::Array(elements))
+        }
+        ColumnType::Row { columns: row_desc } => {
+            // Decode optional row id: 1-byte flag + 16-byte UUID if present
+            if data.is_empty() {
+                return Err(EncodingError::MalformedData {
+                    message: "row id flag missing".to_string(),
+                });
+            }
+            let (id, row_data) = if data[0] == 1 {
+                if data.len() < 17 {
+                    return Err(EncodingError::MalformedData {
+                        message: "row id too short".to_string(),
+                    });
+                }
+                let uuid = uuid::Uuid::from_slice(&data[1..17]).map_err(|e| {
+                    EncodingError::MalformedData {
+                        message: format!("invalid row id uuid: {e}"),
+                    }
+                })?;
+                (Some(ObjectId::from_uuid(uuid)), &data[17..])
+            } else {
+                (None, &data[1..])
+            };
+            let values = decode_row(row_desc, row_data)?;
+            Ok(Value::Row { id, values })
+        }
+    }
 }
 
 /// Decode a single column from binary data to Value.
@@ -336,90 +493,7 @@ pub fn decode_column(
     }
 
     // Decode based on type
-    match &col.column_type {
-        ColumnType::Integer => {
-            if bytes.len() < 4 {
-                return Err(EncodingError::MalformedData {
-                    message: "integer too short".into(),
-                });
-            }
-            let n = i32::from_le_bytes(bytes[..4].try_into().unwrap());
-            Ok(Value::Integer(n))
-        }
-        ColumnType::BigInt => {
-            if bytes.len() < 8 {
-                return Err(EncodingError::MalformedData {
-                    message: "bigint too short".into(),
-                });
-            }
-            let n = i64::from_le_bytes(bytes[..8].try_into().unwrap());
-            Ok(Value::BigInt(n))
-        }
-        ColumnType::Double => {
-            if bytes.len() < 8 {
-                return Err(EncodingError::MalformedData {
-                    message: "double too short".into(),
-                });
-            }
-            let f = f64::from_le_bytes(bytes[..8].try_into().unwrap());
-            Ok(Value::Double(f))
-        }
-        ColumnType::Boolean => {
-            if bytes.is_empty() {
-                return Err(EncodingError::MalformedData {
-                    message: "boolean too short".into(),
-                });
-            }
-            Ok(Value::Boolean(bytes[0] != 0))
-        }
-        ColumnType::Timestamp => {
-            if bytes.len() < 8 {
-                return Err(EncodingError::MalformedData {
-                    message: "timestamp too short".into(),
-                });
-            }
-            let t = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-            Ok(Value::Timestamp(t))
-        }
-        ColumnType::Uuid => {
-            if bytes.len() < 16 {
-                return Err(EncodingError::MalformedData {
-                    message: "uuid too short".into(),
-                });
-            }
-            let uuid =
-                uuid::Uuid::from_slice(&bytes[..16]).map_err(|e| EncodingError::MalformedData {
-                    message: format!("invalid uuid: {e}"),
-                })?;
-            Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
-        }
-        ColumnType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
-        ColumnType::Text => {
-            let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
-                message: format!("invalid utf8: {e}"),
-            })?;
-            Ok(Value::Text(s.to_string()))
-        }
-        ColumnType::Enum(variants) => {
-            let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
-                message: format!("invalid utf8: {e}"),
-            })?;
-            if !variants.iter().any(|variant| variant == s) {
-                return Err(EncodingError::MalformedData {
-                    message: format!("invalid enum variant: {s}"),
-                });
-            }
-            Ok(Value::Text(s.to_string()))
-        }
-        ColumnType::Array(element_type) => {
-            let elements = decode_array(bytes, element_type)?;
-            Ok(Value::Array(elements))
-        }
-        ColumnType::Row(row_desc) => {
-            let values = decode_row(row_desc, bytes)?;
-            Ok(Value::Row(values))
-        }
-    }
+    decode_non_null_value(bytes, &col.column_type, DecodeValueContext::Column)
 }
 
 /// Get byte slice for a column (O(1) for fixed, O(1) for variable with offset table).
@@ -670,7 +744,11 @@ pub fn compare_column(
             column_type: col.column_type.clone(),
             operation: "ordering".to_string(),
         }),
-        ColumnType::Text | ColumnType::Enum(_) | ColumnType::Array(_) | ColumnType::Row(_) => {
+        ColumnType::Text
+        | ColumnType::Json { schema: _ }
+        | ColumnType::Enum { variants: _ }
+        | ColumnType::Array { element: _ }
+        | ColumnType::Row { columns: _ } => {
             // Lexicographic comparison of bytes
             Ok(bytes1.cmp(bytes2))
         }
@@ -726,9 +804,10 @@ pub fn compare_column_to_value(
         }),
         ColumnType::Uuid
         | ColumnType::Text
-        | ColumnType::Enum(_)
-        | ColumnType::Array(_)
-        | ColumnType::Row(_) => Ok(bytes.cmp(value)),
+        | ColumnType::Json { schema: _ }
+        | ColumnType::Enum { variants: _ }
+        | ColumnType::Array { element: _ }
+        | ColumnType::Row { columns: _ } => Ok(bytes.cmp(value)),
     }
 }
 
@@ -771,7 +850,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
-        Value::Row(_) => panic!("Row values require a descriptor - use encode_value_with_type"),
+        Value::Row { .. } => panic!("Row values require a descriptor - use encode_value_with_type"),
         Value::Null => vec![],
     }
 }
@@ -779,8 +858,22 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
 /// Encode a Value to binary bytes with type information (needed for Row values).
 pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
     match (value, col_type) {
-        (Value::Row(values), ColumnType::Row(desc)) => encode_row(desc, values).unwrap_or_default(),
-        (Value::Array(elements), ColumnType::Array(_)) => encode_array(elements, col_type),
+        (Value::Row { id, values }, ColumnType::Row { columns: desc }) => {
+            let mut buf = Vec::new();
+            // Encode optional row id: 1-byte flag + 16-byte UUID if present
+            match id {
+                Some(obj_id) => {
+                    buf.push(1);
+                    buf.extend_from_slice(obj_id.uuid().as_bytes());
+                }
+                None => buf.push(0),
+            }
+            buf.extend(encode_row(desc, values).unwrap_or_default());
+            buf
+        }
+        (Value::Array(elements), ColumnType::Array { element: _ }) => {
+            encode_array(elements, col_type)
+        }
         // For non-Row/Array types, fall back to simple encoding
         _ => encode_value(value),
     }
@@ -844,7 +937,7 @@ pub fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
 
     // Get the element type from the array type
     let element_type = match array_type {
-        ColumnType::Array(elem_type) => elem_type.as_ref(),
+        ColumnType::Array { element: elem_type } => elem_type.as_ref(),
         _ => return result, // Not an array type
     };
 
@@ -957,96 +1050,8 @@ pub fn decode_array(data: &[u8], element_type: &ColumnType) -> Result<Vec<Value>
 
 /// Decode a single array element from bytes (no null marker - arrays don't contain nulls).
 fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value, EncodingError> {
-    match element_type {
-        ColumnType::Integer => {
-            if data.len() < 4 {
-                return Err(EncodingError::MalformedData {
-                    message: "integer element too short".into(),
-                });
-            }
-            Ok(Value::Integer(i32::from_le_bytes(
-                data[..4].try_into().unwrap(),
-            )))
-        }
-        ColumnType::BigInt => {
-            if data.len() < 8 {
-                return Err(EncodingError::MalformedData {
-                    message: "bigint element too short".into(),
-                });
-            }
-            Ok(Value::BigInt(i64::from_le_bytes(
-                data[..8].try_into().unwrap(),
-            )))
-        }
-        ColumnType::Double => {
-            if data.len() < 8 {
-                return Err(EncodingError::MalformedData {
-                    message: "double element too short".into(),
-                });
-            }
-            Ok(Value::Double(f64::from_le_bytes(
-                data[..8].try_into().unwrap(),
-            )))
-        }
-        ColumnType::Boolean => {
-            if data.is_empty() {
-                return Err(EncodingError::MalformedData {
-                    message: "boolean element too short".into(),
-                });
-            }
-            Ok(Value::Boolean(data[0] != 0))
-        }
-        ColumnType::Timestamp => {
-            if data.len() < 8 {
-                return Err(EncodingError::MalformedData {
-                    message: "timestamp element too short".into(),
-                });
-            }
-            Ok(Value::Timestamp(u64::from_le_bytes(
-                data[..8].try_into().unwrap(),
-            )))
-        }
-        ColumnType::Uuid => {
-            if data.len() < 16 {
-                return Err(EncodingError::MalformedData {
-                    message: "uuid element too short".into(),
-                });
-            }
-            let uuid =
-                uuid::Uuid::from_slice(&data[..16]).map_err(|e| EncodingError::MalformedData {
-                    message: format!("invalid uuid: {e}"),
-                })?;
-            Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
-        }
-        ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
-        ColumnType::Text => {
-            let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
-                message: format!("invalid utf8: {e}"),
-            })?;
-            Ok(Value::Text(s.to_string()))
-        }
-        ColumnType::Enum(variants) => {
-            let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
-                message: format!("invalid utf8: {e}"),
-            })?;
-            if !variants.iter().any(|variant| variant == s) {
-                return Err(EncodingError::MalformedData {
-                    message: format!("invalid enum variant: {s}"),
-                });
-            }
-            Ok(Value::Text(s.to_string()))
-        }
-        ColumnType::Array(inner_type) => {
-            let inner_values = decode_array(data, inner_type)?;
-            Ok(Value::Array(inner_values))
-        }
-        ColumnType::Row(row_desc) => {
-            let values = decode_row(row_desc, data)?;
-            Ok(Value::Row(values))
-        }
-    }
+    decode_non_null_value(data, element_type, DecodeValueContext::ArrayElement)
 }
-
 /// Project columns from a source row to create a new row (for projections).
 /// column_mapping: (src_col_index, dst_col_index)
 ///
@@ -1463,7 +1468,9 @@ mod tests {
     #[test]
     fn array_encode_decode_empty() {
         let elements: Vec<Value> = vec![];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Integer));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Integer).unwrap();
         assert_eq!(decoded, elements);
@@ -1472,7 +1479,9 @@ mod tests {
     #[test]
     fn array_encode_decode_integers() {
         let elements = vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Integer));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Integer).unwrap();
         assert_eq!(decoded, elements);
@@ -1481,7 +1490,9 @@ mod tests {
     #[test]
     fn array_encode_decode_single_integer() {
         let elements = vec![Value::Integer(42)];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Integer));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Integer).unwrap();
         assert_eq!(decoded, elements);
@@ -1494,7 +1505,9 @@ mod tests {
             Value::Text("world".into()),
             Value::Text("!".into()),
         ];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Text));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Text),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Text).unwrap();
         assert_eq!(decoded, elements);
@@ -1503,7 +1516,9 @@ mod tests {
     #[test]
     fn array_encode_decode_single_text() {
         let elements = vec![Value::Text("hello".into())];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Text));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Text),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Text).unwrap();
         assert_eq!(decoded, elements);
@@ -1516,7 +1531,9 @@ mod tests {
             Value::Boolean(false),
             Value::Boolean(true),
         ];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Boolean));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Boolean),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Boolean).unwrap();
         assert_eq!(decoded, elements);
@@ -1528,7 +1545,9 @@ mod tests {
             Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(1))),
             Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(2))),
         ];
-        let array_type = ColumnType::Array(Box::new(ColumnType::Uuid));
+        let array_type = ColumnType::Array {
+            element: Box::new(ColumnType::Uuid),
+        };
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &ColumnType::Uuid).unwrap();
         assert_eq!(decoded, elements);
@@ -1538,7 +1557,12 @@ mod tests {
     fn array_in_row_roundtrip() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ]);
 
         let values = vec![
@@ -1558,7 +1582,12 @@ mod tests {
     fn array_of_integers_in_row() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("name", ColumnType::Text),
-            ColumnDescriptor::new("scores", ColumnType::Array(Box::new(ColumnType::Integer))),
+            ColumnDescriptor::new(
+                "scores",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+            ),
         ]);
 
         let values = vec![
@@ -1579,7 +1608,12 @@ mod tests {
     fn empty_array_in_row() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ]);
 
         let values = vec![Value::Integer(1), Value::Array(vec![])];
@@ -1592,8 +1626,12 @@ mod tests {
     #[test]
     fn nested_array() {
         // Array of arrays of integers
-        let inner_type = ColumnType::Array(Box::new(ColumnType::Integer));
-        let array_type = ColumnType::Array(Box::new(inner_type.clone()));
+        let inner_type = ColumnType::Array {
+            element: Box::new(ColumnType::Integer),
+        };
+        let array_type = ColumnType::Array {
+            element: Box::new(inner_type.clone()),
+        };
         let elements = vec![
             Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
             Value::Array(vec![
@@ -1615,12 +1653,22 @@ mod tests {
             ColumnDescriptor::new("id", ColumnType::Integer),
             ColumnDescriptor::new("name", ColumnType::Text),
         ]);
-        let row_type = ColumnType::Row(Box::new(row_desc.clone()));
-        let array_type = ColumnType::Array(Box::new(row_type.clone()));
+        let row_type = ColumnType::Row {
+            columns: Box::new(row_desc.clone()),
+        };
+        let array_type = ColumnType::Array {
+            element: Box::new(row_type.clone()),
+        };
 
         let elements = vec![
-            Value::Row(vec![Value::Integer(1), Value::Text("Alice".into())]),
-            Value::Row(vec![Value::Integer(2), Value::Text("Bob".into())]),
+            Value::Row {
+                id: None,
+                values: vec![Value::Integer(1), Value::Text("Alice".into())],
+            },
+            Value::Row {
+                id: None,
+                values: vec![Value::Integer(2), Value::Text("Bob".into())],
+            },
         ];
 
         let encoded = encode_array(&elements, &array_type);
@@ -2086,7 +2134,9 @@ mod tests {
     fn encode_row_rejects_invalid_enum_variant() {
         let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
             "status",
-            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+            ColumnType::Enum {
+                variants: vec!["done".to_string(), "todo".to_string()],
+            },
         )]);
 
         let err = encode_row(&descriptor, &[Value::Text("invalid".to_string())]).unwrap_err();
@@ -2097,7 +2147,9 @@ mod tests {
     fn decode_row_rejects_invalid_enum_variant() {
         let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
             "status",
-            ColumnType::Enum(vec!["done".to_string(), "todo".to_string()]),
+            ColumnType::Enum {
+                variants: vec!["done".to_string(), "todo".to_string()],
+            },
         )]);
 
         let mut encoded = encode_row(&descriptor, &[Value::Text("todo".to_string())]).unwrap();

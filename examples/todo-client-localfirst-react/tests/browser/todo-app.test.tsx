@@ -9,7 +9,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID, ADMIN_SECRET } from "./test-constants.js";
+import type { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,11 +46,11 @@ describe("React Todo App E2E", () => {
   /** Mount the real App. Returns the container element. */
   async function mountApp(config: {
     appId?: string;
-    dbName?: string;
     serverUrl?: string;
     localAuthMode?: "anonymous" | "demo";
     localAuthToken?: string;
     adminSecret?: string;
+    driver?: DbConfig["driver"];
   }): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
@@ -99,7 +100,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("empty") });
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("empty") } });
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -111,7 +112,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a todo via the form", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("add") });
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("add") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -137,7 +138,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("toggle") });
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
 
     // Add a todo first
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -172,7 +173,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("delete") });
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("delete") } });
 
     // Add a todo
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -204,7 +205,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders multiple todos with correct state", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("multi") });
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("multi") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -235,7 +236,7 @@ describe("React Todo App E2E", () => {
     const dbName = uniqueDbName("opfs");
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ dbName });
+    const el1 = await mountApp({ driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -254,7 +255,7 @@ describe("React Todo App E2E", () => {
     await unmountApp(el1);
 
     // Second session: remount with same dbName — OPFS data should load
-    const el2 = await mountApp({ dbName });
+    const el2 = await mountApp({ driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
@@ -275,15 +276,17 @@ describe("React Todo App E2E", () => {
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("sync-a"),
+      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
+      adminSecret: ADMIN_SECRET,
       localAuthMode: "demo",
       localAuthToken: "react-sync-user-a",
     });
     const el2 = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("sync-b"),
+      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
+      adminSecret: ADMIN_SECRET,
       localAuthMode: "demo",
       localAuthToken: "react-sync-user-b",
     });
@@ -314,5 +317,60 @@ describe("React Todo App E2E", () => {
     );
 
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Server sync between two app instances with memory driver
+  // -------------------------------------------------------------------------
+
+  it("syncs a todo between two app instances through the server without local persistence", async () => {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+
+    // Mount two independent app instances connected to the same server
+    const el1 = await mountApp({
+      appId: APP_ID,
+      serverUrl,
+      localAuthMode: "demo",
+      localAuthToken: "react-memory-user-a",
+      driver: { type: "memory" },
+    });
+    const el2 = await mountApp({
+      appId: APP_ID,
+      serverUrl,
+      localAuthMode: "demo",
+      localAuthToken: "react-memory-user-b",
+      driver: { type: "memory" },
+    });
+
+    // Let both app instances finish server/event-stream setup before mutating.
+    await new Promise((r) => setTimeout(r, 750));
+
+    // Add a todo in app 1 via the form
+    const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
+    const form1 = input1.closest("form")!;
+
+    await act(async () => {
+      typeInto(input1, "Inmemory todo");
+      form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    await waitFor(
+      () =>
+        Array.from(el1.querySelectorAll("#todo-list li span").values()).some(
+          (el) => el.textContent === "Inmemory todo",
+        ),
+      3000,
+      "Todo should appear in app 1",
+    );
+
+    // Wait for it to appear in app 2 via server sync
+    await waitFor(
+      () =>
+        Array.from(el2.querySelectorAll("#todo-list li span").values()).some(
+          (el) => el.textContent === "Inmemory todo",
+        ),
+      20000,
+      "Todo should sync to app 2 through the server",
+    );
   });
 });

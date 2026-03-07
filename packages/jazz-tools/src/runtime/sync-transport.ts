@@ -11,6 +11,7 @@ export interface SyncAuth {
   jwtToken?: string;
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
+  backendSecret?: string;
   adminSecret?: string;
   clientId?: string;
   pathPrefix?: string;
@@ -39,7 +40,7 @@ export interface StreamCallbacks {
 
 export interface SyncStreamControllerOptions {
   logPrefix?: string;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
   onConnected(): void;
@@ -53,15 +54,47 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(): void;
   removeServer(): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(payload: string): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
   logPrefix?: string;
   getRuntime(): RuntimeSyncTarget | null | undefined;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && typeof error.message === "string") {
+    return error.message;
+  }
+  if (typeof error === "string") return error;
+  return String(error);
+}
+
+export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+
+  if (error && typeof error === "object") {
+    const maybeName = (error as { name?: unknown }).name;
+    if (maybeName === "AbortError") return true;
+  }
+
+  const message = errorMessage(error).toLowerCase();
+  if (message.includes("fetch request has been canceled")) return true;
+  if (message.includes("fetch request has been cancelled")) return true;
+  if (message.includes("the operation was aborted")) return true;
+
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  if (cause !== undefined) {
+    const causeMessage = errorMessage(cause).toLowerCase();
+    if (causeMessage.includes("fetch request has been canceled")) return true;
+    if (causeMessage.includes("fetch request has been cancelled")) return true;
+    if (causeMessage.includes("the operation was aborted")) return true;
+  }
+
+  return false;
 }
 
 /**
@@ -175,16 +208,17 @@ export class SyncStreamController {
     const headers: Record<string, string> = {
       Accept: "application/octet-stream",
     };
-    applyUserAuthHeaders(headers, this.options.getAuth());
+    applySyncAuthHeaders(headers, this.options.getAuth());
 
-    this.streamAbortController = new AbortController();
+    const abortController = new AbortController();
+    this.streamAbortController = abortController;
 
     try {
       const eventsUrl = buildEventsUrl(serverUrl, this.options.getClientId(), serverPathPrefix);
 
       const response = await fetch(eventsUrl, {
         headers,
-        signal: this.streamAbortController.signal,
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -216,13 +250,16 @@ export class SyncStreamController {
         this.logPrefix,
       );
     } catch (e: any) {
-      if (e?.name === "AbortError") return;
+      if (isExpectedFetchAbortError(e, abortController.signal)) return;
       console.error(`${this.logPrefix}Stream connect error:`, e);
     } finally {
+      if (this.streamAbortController === abortController) {
+        this.streamAbortController = null;
+      }
       this.streamConnecting = false;
     }
 
-    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
+    if (!abortController.signal.aborted && !this.stopped) {
       this.detachServer();
       this.scheduleReconnect();
     }
@@ -242,15 +279,71 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (json) => options.getRuntime()?.onSyncMessageReceived(json),
+    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
 }
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payload: unknown): void | Promise<void>;
-  onClientPayload?(payloadJson: string): void;
+  onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array): void;
   onServerPayloadError?(error: unknown): void;
+  retryServerPayloads?: boolean;
+}
+
+export type OutboxDestinationKind = "server" | "client";
+export type RuntimeSyncOutboxCallbackArgs =
+  | [
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payload: Uint8Array | string,
+      isCatalogue: boolean,
+    ]
+  | [
+      err: unknown,
+      destinationKind: OutboxDestinationKind,
+      destinationId: string,
+      payload: Uint8Array | string,
+      isCatalogue: boolean,
+    ];
+export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
+
+function isOutboxDestinationKind(value: unknown): value is OutboxDestinationKind {
+  return value === "server" || value === "client";
+}
+
+function isOutboxPayload(value: unknown): value is Uint8Array | string {
+  return typeof value === "string" || value instanceof Uint8Array;
+}
+
+function normalizeOutboxCallbackArgs(args: unknown[]): {
+  destinationKind: OutboxDestinationKind;
+  payload: Uint8Array | string;
+  isCatalogue: boolean;
+} | null {
+  // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[0])) {
+    const payload = args[2];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[0],
+      payload: payload,
+      isCatalogue: Boolean(args[3]),
+    };
+  }
+
+  // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue)
+  if (isOutboxDestinationKind(args[1])) {
+    const payload = args[3];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[1],
+      payload: payload,
+      isCatalogue: Boolean(args[4]),
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -258,39 +351,29 @@ export interface SyncOutboxRouterOptions {
  */
 export function createSyncOutboxRouter(
   options: SyncOutboxRouterOptions,
-): (envelope: string) => void {
+): RuntimeSyncOutboxCallback {
   const logPrefix = options.logPrefix ?? "";
 
-  return (envelope: string) => {
-    let parsed: { destination?: unknown; payload?: unknown };
-    try {
-      parsed = JSON.parse(envelope) as { destination?: unknown; payload?: unknown };
-    } catch (error) {
-      console.error(`${logPrefix}Sync envelope parse error:`, error);
+  return (...args: RuntimeSyncOutboxCallbackArgs) => {
+    const normalized = normalizeOutboxCallbackArgs(args);
+    if (!normalized) {
+      console.error(`${logPrefix}Invalid sync outbox callback arguments`, args);
       return;
     }
 
-    const destination = parsed.destination;
-    const payload = parsed.payload;
-    const isObjectDestination = destination !== null && typeof destination === "object";
+    const { destinationKind, payload, isCatalogue } = normalized;
+    if (destinationKind === "client") {
+      options.onClientPayload?.(payload as Uint8Array);
+      return;
+    }
 
-    if (isObjectDestination && "Client" in destination) {
-      const payloadJson = JSON.stringify(payload);
-      if (payloadJson !== undefined) {
-        options.onClientPayload?.(payloadJson);
+    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
+      if (options.onServerPayloadError) {
+        options.onServerPayloadError(error);
+        return;
       }
-      return;
-    }
-
-    if (isObjectDestination && "Server" in destination) {
-      Promise.resolve(options.onServerPayload(payload)).catch((error) => {
-        if (options.onServerPayloadError) {
-          options.onServerPayloadError(error);
-          return;
-        }
-        console.error(`${logPrefix}Sync POST error:`, error);
-      });
-    }
+      console.error(`${logPrefix}Sync POST error:`, error);
+    });
   };
 }
 
@@ -314,6 +397,28 @@ export function generateClientId(): string {
 }
 
 const fallbackClientId = generateClientId();
+const SYNC_FETCH_TIMEOUT_MS = 10_000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  if (typeof AbortController !== "function") {
+    return fetch(url, init);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
@@ -365,31 +470,35 @@ export function applyUserAuthHeaders(headers: Record<string, string>, auth: Sync
 }
 
 /**
- * Check if a sync payload is for a catalogue object (schema or lens).
- * Catalogue payloads use admin-secret auth instead of JWT.
+ * Apply runtime sync auth headers.
+ *
+ * Precedence:
+ * 1. Backend privileged auth (`X-Jazz-Backend-Secret`)
+ * 2. End-user auth (JWT/local)
  */
-export function isCataloguePayload(payload: any): boolean {
-  const metadata = payload?.ObjectUpdated?.metadata?.metadata;
-  if (metadata) {
-    const t = metadata["type"];
-    return t === "catalogue_schema" || t === "catalogue_lens";
+export function applySyncAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
+  if (auth.backendSecret) {
+    headers["X-Jazz-Backend-Secret"] = auth.backendSecret;
+    return;
   }
-  return false;
+
+  applyUserAuthHeaders(headers, auth);
 }
 
 /**
  * POST a sync payload to the server.
  *
- * Catalogue payloads get the admin-secret header; everything else gets JWT.
+ * User auth headers are always applied first (JWT or local auth).
+ * Catalogue payloads additionally include the admin-secret header when available.
  */
 export async function sendSyncPayload(
   serverUrl: string,
-  payload: any,
+  payloadJson: string,
+  isCatalogue: boolean,
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  const cataloguePayload = isCataloguePayload(payload);
-  if (cataloguePayload && !auth.adminSecret) {
+  if (isCatalogue && !auth.adminSecret) {
     return;
   }
 
@@ -397,27 +506,37 @@ export async function sendSyncPayload(
     "Content-Type": "application/json",
   };
 
-  if (cataloguePayload) {
+  if (isCatalogue) {
     if (auth.adminSecret) {
       headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
   } else {
-    applyUserAuthHeaders(headers, auth);
+    applySyncAuthHeaders(headers, auth);
   }
 
-  const body = JSON.stringify({
-    payload,
-    client_id: auth.clientId ?? fallbackClientId,
-  });
+  const body = `{"payload":${payloadJson},"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
 
   let response: Response;
   try {
-    response = await fetch(buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix), {
-      method: "POST",
-      headers,
-      body,
-    });
+    response = await fetchWithTimeout(
+      buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
+      {
+        method: "POST",
+        headers,
+        body,
+      },
+      SYNC_FETCH_TIMEOUT_MS,
+    );
   } catch (e) {
+    if ((e as { name?: string })?.name === "AbortError") {
+      console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+      throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+    }
+    if (isExpectedFetchAbortError(e)) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
+    }
+    console.error(`${logPrefix}Sync POST fetch error:`, e);
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
   }
@@ -448,11 +567,24 @@ export async function linkExternalIdentity(
 
   let response: Response;
   try {
-    response = await fetch(buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix), {
-      method: "POST",
-      headers,
-    });
+    response = await fetchWithTimeout(
+      buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix),
+      {
+        method: "POST",
+        headers,
+      },
+      SYNC_FETCH_TIMEOUT_MS,
+    );
   } catch (e) {
+    if ((e as { name?: string })?.name === "AbortError") {
+      console.error(`${logPrefix}Link external timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+      throw new Error(`${logPrefix}Link external failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+    }
+    if (isExpectedFetchAbortError(e)) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`${logPrefix}Link external failed: ${msg}`);
+    }
+    console.error(`${logPrefix}Link external fetch error:`, e);
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`${logPrefix}Link external failed: ${msg}`);
   }
@@ -501,15 +633,23 @@ export async function readBinaryFrames(
       if (buffer.length < 4 + len) break;
       const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
       buffer = buffer.slice(4 + len);
+
+      let event: any;
       try {
-        const event = JSON.parse(json);
+        event = JSON.parse(json);
+      } catch (error) {
+        console.error(`${logPrefix}Stream parse error:`, error);
+        continue;
+      }
+
+      try {
         if (event.type === "Connected" && event.client_id) {
           callbacks.onConnected?.(event.client_id);
         } else if (event.type === "SyncUpdate") {
           callbacks.onSyncMessage(JSON.stringify(event.payload));
         }
-      } catch (e) {
-        console.error(`${logPrefix}Stream parse error:`, e);
+      } catch (error) {
+        console.error(`${logPrefix}Stream callback error:`, error);
       }
     }
   }

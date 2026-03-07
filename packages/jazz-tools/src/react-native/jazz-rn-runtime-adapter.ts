@@ -1,5 +1,6 @@
 import type { WasmSchema } from "../drivers/types.js";
 import type { Runtime } from "../runtime/client.js";
+import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
 export interface JazzRnRuntimeBinding {
   addClient(): string;
@@ -22,22 +23,29 @@ export interface JazzRnRuntimeBinding {
   onSyncMessageToSend(
     callback:
       | {
-          onSyncMessage(messageJson: string): void;
+          onSyncMessage(
+            destinationKind: OutboxDestinationKind,
+            destinationId: string,
+            payloadJson: string,
+            isCatalogue: boolean,
+          ): void;
         }
       | undefined,
   ): void;
-  query(
-    queryJson: string,
-    sessionJson: string | undefined,
-    settledTier: string | undefined,
-  ): string;
+  query(queryJson: string, sessionJson: string | undefined, tier: string | undefined): string;
   removeServer(): void;
   setClientRole(clientId: string, role: string): void;
+  createSubscription(
+    queryJson: string,
+    sessionJson: string | undefined,
+    tier: string | undefined,
+  ): bigint;
+  executeSubscription(handle: bigint, callback: { onUpdate(deltaJson: string): void }): void;
   subscribe(
     queryJson: string,
     callback: { onUpdate(deltaJson: string): void },
     sessionJson: string | undefined,
-    settledTier: string | undefined,
+    tier: string | undefined,
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string): void;
@@ -135,35 +143,65 @@ export class JazzRnRuntimeAdapter implements Runtime {
   async query(
     query_json: string,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
   ): Promise<any> {
-    const rowsJson = this.binding.query(
+    const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
+    return JSON.parse(rowsJson);
+  }
+
+  createSubscription(
+    query_json: string,
+    session_json?: string | null,
+    tier?: string | null,
+  ): number {
+    const handle = this.binding.createSubscription(
       query_json,
       session_json ?? undefined,
-      settled_tier ?? undefined,
+      tier ?? undefined,
     );
-    return JSON.parse(rowsJson);
+
+    const numericHandle = Number(handle);
+    if (!Number.isSafeInteger(numericHandle)) {
+      throw new Error(`Subscription handle ${handle.toString()} is outside safe integer range`);
+    }
+    this.handleMap.set(numericHandle, handle);
+    return numericHandle;
+  }
+
+  executeSubscription(handle: number, on_update: Function): void {
+    const nativeHandle = this.handleMap.get(handle) ?? BigInt(handle);
+    this.binding.executeSubscription(nativeHandle, {
+      onUpdate: (deltaJson: string) => {
+        try {
+          const parsed = JSON.parse(deltaJson) as unknown;
+          on_update(parsed);
+        } catch (error) {
+          swallowCallbackError("subscription", error);
+        }
+      },
+    });
   }
 
   subscribe(
     query_json: string,
     on_update: Function,
     session_json?: string | null,
-    settled_tier?: string | null,
+    tier?: string | null,
   ): number {
     const handle = this.binding.subscribe(
       query_json,
       {
         onUpdate: (deltaJson: string) => {
           try {
-            on_update(deltaJson);
+            const parsed = JSON.parse(deltaJson) as unknown;
+            on_update(parsed);
           } catch (error) {
             swallowCallbackError("subscription", error);
           }
         },
       },
       session_json ?? undefined,
-      settled_tier ?? undefined,
+      tier ?? undefined,
     );
 
     const numericHandle = Number(handle);
@@ -180,21 +218,21 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertWithAck(table: string, values: any, tier: string): Promise<string> {
+  insertDurable(table: string, values: any, tier: string): Promise<string> {
     assertWorkerTier(tier);
     const id = this.insert(table, values);
     this.binding.flush();
     return Promise.resolve(id);
   }
 
-  updateWithAck(object_id: string, values: any, tier: string): Promise<void> {
+  updateDurable(object_id: string, values: any, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
     return Promise.resolve();
   }
 
-  deleteWithAck(object_id: string, tier: string): Promise<void> {
+  deleteDurable(object_id: string, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.delete(object_id);
     this.binding.flush();
@@ -202,14 +240,20 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   onSyncMessageReceived(message_json: string): void {
+    if (this.closed) return;
     this.binding.onSyncMessageReceived(message_json);
   }
 
   onSyncMessageToSend(callback: Function): void {
     this.binding.onSyncMessageToSend({
-      onSyncMessage: (messageJson: string) => {
+      onSyncMessage: (
+        destinationKind: OutboxDestinationKind,
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => {
         try {
-          callback(messageJson);
+          callback(destinationKind, destinationId, payloadJson, isCatalogue);
         } catch (error) {
           swallowCallbackError("sync message", error);
         }
@@ -218,10 +262,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   addServer(): void {
+    if (this.closed) return;
     this.binding.addServer();
   }
 
   removeServer(): void {
+    if (this.closed) return;
     this.binding.removeServer();
   }
 
@@ -242,6 +288,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   onSyncMessageReceivedFromClient(client_id: string, message_json: string): void {
+    if (this.closed) return;
     this.binding.onSyncMessageReceivedFromClient(client_id, message_json);
   }
 

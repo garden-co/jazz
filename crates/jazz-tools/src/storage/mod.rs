@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{SchemaHash, Value};
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
 // Storage Types
@@ -184,7 +184,7 @@ pub trait Storage {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError>;
 
     // ================================================================
@@ -268,6 +268,11 @@ pub trait Storage {
 
     /// Flush only the WAL buffer (not the snapshot). No-op for storage without WAL.
     fn flush_wal(&self) {}
+
+    /// Close and release storage resources (e.g. file locks). No-op by default.
+    fn close(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
@@ -325,7 +330,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError> {
         (**self).store_ack_tier(commit_id, tier)
     }
@@ -407,6 +412,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn flush_wal(&self) {
         (**self).flush_wal();
     }
+
+    fn close(&self) -> Result<(), StorageError> {
+        (**self).close()
+    }
 }
 
 // ============================================================================
@@ -435,7 +444,7 @@ pub struct MemoryStorage {
     indices: HashMap<IndexKey, IndexEntries>,
 
     /// Persistence ack tiers per commit.
-    ack_tiers: HashMap<CommitId, HashSet<PersistenceTier>>,
+    ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -551,7 +560,7 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             bytes
         }
 
-        Value::Row(_) => {
+        Value::Row { .. } => {
             // Rows not typically indexed; use hash for equality only
             let mut bytes = vec![0x08];
             let json = serde_json::to_string(value).unwrap_or_default();
@@ -674,7 +683,7 @@ impl Storage for MemoryStorage {
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
-        tier: PersistenceTier,
+        tier: DurabilityTier,
     ) -> Result<(), StorageError> {
         self.ack_tiers.entry(commit_id).or_default().insert(tier);
         Ok(())
@@ -1180,7 +1189,10 @@ mod tests {
     #[test]
     fn real_cross_type_ordering() {
         // Double should sort after all existing types (tag 0x09 > 0x08)
-        let row = encode_value(&Value::Row(vec![]));
+        let row = encode_value(&Value::Row {
+            id: None,
+            values: vec![],
+        });
         let double = encode_value(&Value::Double(0.0));
 
         assert!(row < double);

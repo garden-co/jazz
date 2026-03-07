@@ -1107,7 +1107,12 @@ mod tests {
     fn test_descriptor_with_array() -> RowDescriptor {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("tags", ColumnType::Array(Box::new(ColumnType::Text))),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
         ])
     }
 
@@ -1554,7 +1559,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn query_round_trip_serialization() {
+    fn query_round_trip_json_serialization() {
         let query = QueryBuilder::new("users")
             .filter_eq("org_id", Value::Integer(42))
             .filter_ge("score", Value::Integer(50))
@@ -1570,7 +1575,23 @@ mod tests {
     }
 
     #[test]
-    fn query_with_join_serialization() {
+    fn query_round_trip_binary_serialization() {
+        let query = QueryBuilder::new("users")
+            .filter_eq("org_id", Value::Integer(42))
+            .filter_ge("score", Value::Integer(50))
+            .branch("main")
+            .order_by_desc("score")
+            .limit(10)
+            .build();
+
+        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
+        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_join_json_serialization() {
         let query = QueryBuilder::new("users")
             .alias("u")
             .join("posts")
@@ -1586,7 +1607,23 @@ mod tests {
     }
 
     #[test]
-    fn query_with_array_subquery_serialization() {
+    fn query_with_join_binary_serialization() {
+        let query = QueryBuilder::new("users")
+            .alias("u")
+            .join("posts")
+            .alias("p")
+            .on("u.id", "p.author_id")
+            .branch("main")
+            .build();
+
+        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
+        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_array_subquery_json_serialization() {
         let query = QueryBuilder::new("orgs")
             .branch("main")
             .with_array("users", |b| b.from("users").correlate("id", "org_id"))
@@ -1599,7 +1636,20 @@ mod tests {
     }
 
     #[test]
-    fn query_with_recursive_serialization() {
+    fn query_with_array_subquery_binary_serialization() {
+        let query = QueryBuilder::new("orgs")
+            .branch("main")
+            .with_array("users", |b| b.from("users").correlate("id", "org_id"))
+            .build();
+
+        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
+        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_recursive_json_serialization() {
         let query = QueryBuilder::new("teams")
             .select(&["team_id"])
             .with_recursive(|r| {
@@ -1618,7 +1668,26 @@ mod tests {
     }
 
     #[test]
-    fn query_with_relation_ir_serialization() {
+    fn query_with_recursive_binary_serialization() {
+        let query = QueryBuilder::new("teams")
+            .select(&["team_id"])
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "team_id")
+                    .select(&["parent_team"])
+                    .max_depth(10)
+            })
+            .branch("main")
+            .build();
+
+        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
+        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_relation_ir_json_serialization() {
         let mut query = QueryBuilder::new("users").branch("main").build();
         query.relation_ir = crate::query_manager::relation_ir::RelExpr::TableScan {
             table: TableName::new("users"),
@@ -1635,7 +1704,20 @@ mod tests {
     }
 
     #[test]
-    fn query_disjunction_serialization() {
+    fn query_with_relation_ir_postcard_serialization() {
+        let mut query = QueryBuilder::new("users").branch("main").build();
+        query.relation_ir = crate::query_manager::relation_ir::RelExpr::TableScan {
+            table: TableName::new("users"),
+        };
+
+        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
+        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_disjunction_json_serialization() {
         let query = QueryBuilder::new("users")
             .filter_eq("status", Value::Text("active".into()))
             .or()
@@ -1645,6 +1727,22 @@ mod tests {
 
         let json = serde_json::to_string(&query).expect("serialize");
         let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(query, decoded);
+        assert_eq!(decoded.disjuncts.len(), 2);
+    }
+
+    #[test]
+    fn query_disjunction_binary_serialization() {
+        let query = QueryBuilder::new("users")
+            .filter_eq("status", Value::Text("active".into()))
+            .or()
+            .filter_eq("role", Value::Text("admin".into()))
+            .branch("main")
+            .build();
+
+        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
+        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
 
         assert_eq!(query, decoded);
         assert_eq!(decoded.disjuncts.len(), 2);

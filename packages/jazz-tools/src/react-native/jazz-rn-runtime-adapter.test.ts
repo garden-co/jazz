@@ -7,7 +7,9 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
+    createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(),
+    executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     insert: vi.fn((_table, _valuesJson) => "row-1"),
@@ -28,7 +30,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 describe("JazzRnRuntimeAdapter", () => {
   it("defers batched tick execution to avoid re-entrancy", async () => {
     const binding = createBinding();
-    new JazzRnRuntimeAdapter(binding, { tables: {} });
+    new JazzRnRuntimeAdapter(binding, {});
 
     const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
     const callbackObject = onBatchedTickNeeded.mock.calls[0][0];
@@ -42,7 +44,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("serializes mutation payloads and parses query responses", async () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const id = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
     expect(id).toBe("row-1");
@@ -65,7 +67,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
   it("bridges sync and subscription callbacks with handle conversion", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const syncHandler = vi.fn();
     adapter.onSyncMessageToSend(syncHandler);
@@ -74,8 +76,8 @@ describe("JazzRnRuntimeAdapter", () => {
 
     // Trigger callback captured by adapter wiring.
     const callbackObject = onSyncMessageToSend.mock.calls[0][0];
-    callbackObject.onSyncMessage('{"destination":{},"payload":{}}');
-    expect(syncHandler).toHaveBeenCalledWith('{"destination":{},"payload":{}}');
+    callbackObject.onSyncMessage("server", "server-1", "{}", false);
+    expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
     const onUpdate = vi.fn();
     const handle = adapter.subscribe("{}", onUpdate, null, null);
@@ -83,23 +85,56 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0][1];
-    subscriptionCallback.onUpdate("[]");
-    expect(onUpdate).toHaveBeenCalledWith("[]");
+    subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
 
     adapter.unsubscribe(handle);
     expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
   });
 
+  it("bridges 2-phase createSubscription + executeSubscription with handle conversion", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const handle = adapter.createSubscription("{}", null, null);
+    expect(handle).toBe(9);
+    expect(binding.createSubscription).toHaveBeenCalledWith("{}", undefined, undefined);
+
+    const onUpdate = vi.fn();
+    adapter.executeSubscription(handle, onUpdate);
+
+    const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    expect(executeMock.mock.calls[0][0]).toBe(9n);
+
+    const callbackObject = executeMock.mock.calls[0][1];
+    callbackObject.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
+
+    adapter.unsubscribe(handle);
+    expect(binding.unsubscribe).toHaveBeenCalledWith(9n);
+  });
+
   it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     adapter.onSyncMessageToSend(() => {
       throw new Error("sync boom");
     });
     const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
     const syncCallback = onSyncMessageToSend.mock.calls[0][0];
-    expect(() => syncCallback.onSyncMessage("{}")).not.toThrow();
+    expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");
@@ -110,18 +145,54 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
-  it("supports worker-tier persisted mutations and rejects edge/core tiers", async () => {
+  it("passes canonical subscription tuple updates through unchanged", () => {
     const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertWithAck("todos", [], "worker")).resolves.toBe("row-1");
+    const onUpdate = vi.fn();
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+
+    subscriptionCallback.onUpdate(
+      JSON.stringify({
+        added: [],
+        removed: [],
+        updated: [
+          [
+            { id: "row-u", values: [{ type: "Text", value: "before" }] },
+            { id: "row-u", values: [{ type: "Text", value: "after" }] },
+          ],
+        ],
+        pending: false,
+      }),
+    );
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [
+        [
+          { id: "row-u", values: [{ type: "Text", value: "before" }] },
+          { id: "row-u", values: [{ type: "Text", value: "after" }] },
+        ],
+      ],
+      pending: false,
+    });
+  });
+
+  it("supports worker-tier persisted mutations and rejects global tiers", async () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    await expect(adapter.insertDurable("todos", [], "worker")).resolves.toBe("row-1");
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updateWithAck("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deleteWithAck("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateDurable("row-1", {}, "worker")).resolves.toBeUndefined();
+    await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertWithAck("todos", [], "edge")).toThrow("supports only 'worker' tier");
+    expect(() => adapter.insertDurable("todos", [], "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {
@@ -139,9 +210,25 @@ describe("JazzRnRuntimeAdapter", () => {
         throw objectNotFound;
       }),
     });
-    const adapter = new JazzRnRuntimeAdapter(binding, { tables: {} });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     expect(() => adapter.update("row-1", { done: true })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
+  });
+
+  it("no-ops sync hooks after close", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.close();
+    adapter.addServer();
+    adapter.removeServer();
+    adapter.onSyncMessageReceived('{"Ping":{}}');
+    adapter.onSyncMessageReceivedFromClient("client-1", '{"Ping":{}}');
+
+    expect(binding.addServer).not.toHaveBeenCalled();
+    expect(binding.removeServer).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
+    expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
   });
 });

@@ -39,7 +39,7 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -108,6 +108,7 @@ pub struct SubscriptionHandle(pub u64);
 
 // Re-export QueryHandle from query_manager for convenience
 pub use crate::query_manager::manager::QueryHandle as QMQueryHandle;
+pub use subscriptions::ReadDurabilityOptions;
 
 /// Errors from runtime operations.
 #[derive(Debug, Clone)]
@@ -232,13 +233,15 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Reverse map for routing updates.
     subscription_reverse: HashMap<QuerySubscriptionId, SubscriptionHandle>,
     next_subscription_handle: u64,
+    /// Created-but-not-yet-executed subscriptions (2-phase subscribe).
+    pending_subscriptions: HashMap<SubscriptionHandle, subscriptions::PendingSubscription>,
 
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
     /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<CommitId, Vec<(PersistenceTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
@@ -258,6 +261,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             subscriptions: HashMap::new(),
             subscription_reverse: HashMap::new(),
             next_subscription_handle: 0,
+            pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
             tier_label: "unknown",

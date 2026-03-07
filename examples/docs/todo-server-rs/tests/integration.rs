@@ -17,7 +17,7 @@ use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz_tools::{
-    AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
+    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -727,7 +727,7 @@ async fn jwks_handler(
 /// settled, not that we've received all server data. See specs/sync_manager.md
 /// Future Work section.
 ///
-/// NOTE: The core lazy schema activation is tested in jazz's
+/// NOTE: The global-server lazy schema activation is tested in jazz's
 /// `e2e_two_clients_server_schema_sync`. This integration test verifies
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]
@@ -801,12 +801,12 @@ async fn test_server_resync() {
         };
         let client = JazzClient::connect(context).await.unwrap();
 
-        // One-shot query with EdgeServer settled tier — waits for the server's
+        // One-shot query with EdgeServer durability tier — waits for the server's
         // QuerySettled response before resolving, ensuring synced data arrives.
         let query = QueryBuilder::new("todos").build();
         let results = tokio::time::timeout(
             Duration::from_secs(10),
-            client.query(query, Some(PersistenceTier::EdgeServer)),
+            client.query(query, Some(DurabilityTier::EdgeServer)),
         )
         .await
         .expect("Query with EdgeServer tier should resolve within 10s")

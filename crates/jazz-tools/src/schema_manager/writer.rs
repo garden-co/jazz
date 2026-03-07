@@ -124,7 +124,7 @@ impl<'a> CopyOnWriteWriter<'a> {
             .current_schema
             .get(&TableName::new(&self.table))
             .ok_or_else(|| WriteError::TableNotFound(self.table.clone()))?;
-        Ok(&table_schema.descriptor)
+        Ok(&table_schema.columns)
     }
 
     /// Prepare an update for a row, handling cross-schema transformation.
@@ -334,7 +334,7 @@ mod tests {
             Value::Text("Alice".to_string()),
             Value::Null,
         ];
-        let data = encode_row(&table.descriptor, &original).unwrap();
+        let data = encode_row(&table.columns, &original).unwrap();
 
         writer.cache_row(id, &branch, data, make_commit_id(1));
 
@@ -371,7 +371,7 @@ mod tests {
         let id = ObjectId::new();
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let original = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let data = encode_row(&v1_table.descriptor, &original).unwrap();
+        let data = encode_row(&v1_table.columns, &original).unwrap();
 
         writer.cache_row(id, &v1_branch, data, make_commit_id(1));
 
@@ -392,7 +392,7 @@ mod tests {
 
         // Verify the result can be decoded with v2 schema
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let decoded = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let decoded = decode_row(&v2_table.columns, &result.data).unwrap();
         assert_eq!(decoded.len(), 3);
         assert_eq!(decoded[1], Value::Text("Alice Updated".to_string()));
         assert_eq!(decoded[2], Value::Text("alice@example.com".to_string()));

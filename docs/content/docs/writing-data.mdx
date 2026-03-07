@@ -1,15 +1,48 @@
 ---
 title: Writing Data
-description: Insert, update, and delete APIs with write acknowledgement semantics.
+description: Insert, update, and delete APIs with local-first execution, framework context hooks, and write durability tiers.
 ---
+
+import DurabilityTiersTable from "../partials/quickstarts/durability-tiers-table.mdx";
 
 ## Local-First Writes
 
 `insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
-That keeps UI latency low because your app does not wait for any network hop.
+That keeps UI latency low because local state updates do not wait for any network hop.
 
-Use this mode when you want the fastest local response and can tolerate async sync
-to higher durability tiers.
+Mutation methods return promises that resolve when the requested durability tier is reached.
+
+## Mutating from Framework Context
+
+Use the framework context binding to access the shared `Db` instance and execute mutations.
+
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Expo", "Svelte"]} persist>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#writing-use-db-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-vue/src/TodoList.vue#writing-use-db-vue
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#writing-use-db-expo
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#writing-get-db-svelte
+    </include>
+
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#writing-mutations-svelte
+    </include>
+
+  </Tab>
+</Tabs>
 
 ## Insert, Update, Delete
 
@@ -26,52 +59,135 @@ to higher durability tiers.
   </Tab>
 </Tabs>
 
-## Write Ack Tiers
+## Reset Browser Storage
+
+For browser clients, you can delete the local OPFS database for the current namespace:
+
+```ts
+await db.deleteClientStorage();
+```
+
+Notes:
+
+- Browser worker-backed `Db` only.
+- Must be called from the leader tab; otherwise it throws and you should close other tabs first.
+- Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
+- Does not clear `localStorage` auth/synthetic-user data.
+- Reopens a clean worker runtime, so the same `db` instance remains usable.
+
+## Write Durability Tiers
+
+<DurabilityTiersTable />
+
+The tier on a write controls _where the promise resolves_. Writes flow upward — from the
+local OPFS worker, to the nearest edge server, to the global core — and the tier determines
+how far the write must travel before the call returns.
+
+Data flows back down on demand. An edge server only fetches data from the global core when a
+client connected to it subscribes to that data. Edge nodes are demand-driven caches; the
+global core is the most durable tier and the point all others reconcile against. Two clients
+on different edge nodes may never share data unless one of them subscribes to data the other
+has written.
+
+### Data consistency
+
+Jazz uses last-write-wins CRDT merge strategies, so any tier may hold more recent
+unreconciled writes than the global core at a given moment. The global core represents the
+most durable snapshot, not necessarily the most current one. You can get closer to strongly
+consistent reads by using `global`-tier writes and reads exclusively, but under normal
+operation the system converges quickly.
 
 ### API Reference
 
-- `insertWithAck(table, data, tier)`
-- `updateWithAck(table, id, data, tier)`
-- `deleteFromWithAck(table, id, tier)`
-- `tier`: `"worker" | "edge" | "core"`
+- `insert(table, data, options?)`
+- `update(table, id, data, options?)`
+- `deleteFrom(table, id, options?)`
+- `options.tier`: `"worker" | "edge" | "global"`
 
-Ack tiers control when the returned promise resolves:
+Defaults:
 
-- `worker`: waits until the local worker/storage tier acknowledges the write.
-- `edge`: waits until the edge server acknowledges the write.
-- `core`: waits until the core server acknowledges the write.
+- Browser/client default tier is `worker`.
+- Backend/server-connected default tier is `edge`.
 
-Tradeoff summary:
+### Which tier to use
 
-- Lower tier: lower latency, lower durability scope.
-- Higher tier: higher latency, wider durability scope.
+**`"worker"` (default)** — the write is persisted to the local OPFS database. The promise
+resolves as soon as the WASM worker confirms it. Other tabs on the same device see the change
+immediately; remote clients do not yet.
 
-In practical terms:
+Use `worker` for:
 
-- Local-first writes (`insert`/`update`/`deleteFrom`) optimize for immediate UX.
-- Acked writes (`*WithAck`) optimize for explicit durability checkpoints.
+- Local-only state (draft text, UI prefs)
+- Any write where you do not need remote confirmation
+
+**`"edge"`** — the write has reached the nearest sync server and been acknowledged. Clients
+connected to the same edge server will see the write immediately via their subscriptions.
+Clients on other edge nodes will see it once their edge fetches the update from the global
+core, which happens when they subscribe to the relevant data.
+
+Use `edge` for:
+
+- Any write that other clients must receive (messages, shared state, user actions)
+- Writes that depend on remote acknowledgement before continuing
+
+**`"global"`** — the write has propagated to the global core and is globally durable. Any
+client that subscribes to the relevant data will receive it, regardless of which edge node
+they are connected to. Highest latency; use only when edge-level acknowledgement is not
+sufficient.
+
+Use `global` for:
+
+- Seeding default data or one-time setup that must not duplicate across concurrent clients
+- Financial or audit records
+- Actions that must survive edge server failure
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-ack-tier-ts
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
     </include>
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-ack-tier-rust
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
 
-## Combining Write Acks with Settled Reads
+### When remote clients see your writes
 
-Write ack tiers and read settled tiers are complementary knobs:
+All writes propagate upward through the infrastructure tiers and will eventually reach remote
+clients that subscribe to the relevant data. The tier only controls when the promise resolves
+and what timing guarantee you get.
 
-- Write acks define when a mutation is considered durably acknowledged.
-- Settled reads define when a query result is considered sufficiently confirmed.
+A `worker`-tier write resolves as soon as the local OPFS worker acknowledges it. The write
+will propagate to the edge and onward, but with no timing guarantee — it sits in the local
+database until the sync layer flushes it. Remote clients will see it eventually, but not
+necessarily by the time your promise resolves.
 
-See [Read Settled Tiers](/docs/reading-data#read-settled-tiers) for read-side semantics.
+An `edge`-tier write resolves only after the nearest sync server has acknowledged it. Clients
+connected to the same edge node will see the write as soon as the promise resolves. Clients on
+other edge nodes will see it once their edge fetches the update from the global core.
+
+```ts
+// Remote clients will see this eventually — no timing guarantee on delivery
+await db.update(app.tasks, id, { done: true, completedBy: userId });
+
+// Remote clients on this edge see this as soon as the promise resolves
+await db.update(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
+```
+
+If remote clients are not reacting to a write promptly, check whether the tier is `"edge"` or
+higher.
+
+## Combining Write Durability with Read Durability
+
+Write durability tiers and read durability options are complementary knobs:
+
+- Write tiers define when a mutation is considered durably acknowledged.
+- Read options define when query/subscription delivery is considered sufficiently confirmed.
+
+See [Read Durability Options](/docs/reading-data#read-durability-options) for read-side semantics.
 
 ## Backend Request Context Reminder
 

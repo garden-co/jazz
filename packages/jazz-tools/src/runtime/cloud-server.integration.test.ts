@@ -24,13 +24,11 @@ const BACKEND_SECRET = "jazz-ts-backend-secret";
 const JWT_KID = "jazz-ts-kid";
 const JWT_SECRET = "jazz-ts-jwt-secret";
 const TEST_SCHEMA: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
   },
 };
 
@@ -324,7 +322,7 @@ async function waitForRows(
   queryJson: string,
   predicate: (rows: Row[]) => boolean,
   timeoutMs = 20000,
-  settledTier: "edge" | undefined = "edge",
+  tier: "edge" | undefined = "edge",
 ): Promise<Row[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: Row[] = [];
@@ -332,7 +330,7 @@ async function waitForRows(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await client.query(queryJson, settledTier);
+      const rows = await client.query(queryJson, tier ? { tier } : undefined);
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
@@ -348,6 +346,24 @@ async function waitForRows(
   );
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function connectClient(context: AppContext): Promise<JazzClient> {
   const [clientMod, runtimeUtils] = await Promise.all([
     import("./client.js"),
@@ -358,6 +374,7 @@ async function connectClient(context: AppContext): Promise<JazzClient> {
     appId: context.appId,
     env: context.env,
     userBranch: context.userBranch,
+    tier: "worker",
   });
 
   return clientMod.JazzClient.connectWithRuntime(runtime, context);
@@ -413,54 +430,52 @@ class JwksServer {
 
 function makeSocialBaseSchema(): WasmSchema {
   return {
-    tables: {
-      profiles: {
-        columns: [
-          { name: "displayName", column_type: { type: "Text" }, nullable: false },
-          { name: "principalId", column_type: { type: "Text" }, nullable: false },
-        ],
-      },
-      people: {
-        columns: [
-          {
-            name: "profileId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "profiles",
-          },
-          {
-            name: "principalId",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-        ],
-      },
-      friendships: {
-        columns: [
-          {
-            name: "personAId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "people",
-          },
-          {
-            name: "personBId",
-            column_type: { type: "Uuid" },
-            nullable: false,
-            references: "people",
-          },
-          {
-            name: "personAPrincipal",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-          {
-            name: "personBPrincipal",
-            column_type: { type: "Text" },
-            nullable: false,
-          },
-        ],
-      },
+    profiles: {
+      columns: [
+        { name: "displayName", column_type: { type: "Text" }, nullable: false },
+        { name: "principalId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+    people: {
+      columns: [
+        {
+          name: "profileId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "profiles",
+        },
+        {
+          name: "principalId",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+      ],
+    },
+    friendships: {
+      columns: [
+        {
+          name: "personAId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+        {
+          name: "personBId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "people",
+        },
+        {
+          name: "personAPrincipal",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+        {
+          name: "personBPrincipal",
+          column_type: { type: "Text" },
+          nullable: false,
+        },
+      ],
     },
   };
 }
@@ -473,27 +488,33 @@ function asRecord(value: unknown, context: string): Record<string, unknown> {
 }
 
 function normalizeWasmLiteral(value: unknown): unknown {
-  if (value === null) return "Null";
-  if (typeof value === "boolean") return { Boolean: value };
+  if (value === null) return { type: "Null" };
+  if (typeof value === "boolean") return { type: "Boolean", value };
   if (typeof value === "number") {
     if (!Number.isInteger(value) || !Number.isFinite(value)) {
       throw new Error("relation literal numbers must be finite integers");
     }
-    if (value >= -2147483648 && value <= 2147483647) return { Integer: value };
-    return { BigInt: value };
+    if (value >= -2147483648 && value <= 2147483647) return { type: "Integer", value };
+    return { type: "BigInt", value };
   }
   if (typeof value === "string") {
     const uuidLike =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-    return uuidLike ? { Uuid: value } : { Text: value };
+    return uuidLike ? { type: "Uuid", value } : { type: "Text", value };
   }
   if (Array.isArray(value)) {
-    return { Array: value.map((entry) => normalizeWasmLiteral(entry)) };
+    return { type: "Array", value: value.map((entry) => normalizeWasmLiteral(entry)) };
   }
 
   const object = asRecord(value, "literal");
-  // Already in externally-tagged Value enum form.
-  if (Object.keys(object).length === 1) return object;
+  // Already in internally-tagged Value enum form.
+  if (typeof object.type === "string") return object;
+  // Accept legacy externally-tagged test literals and normalize them.
+  if (Object.keys(object).length === 1) {
+    const [legacyType, legacyValue] = Object.entries(object)[0]!;
+    if (legacyType === "Null") return { type: "Null" };
+    return { type: legacyType, value: legacyValue };
+  }
   throw new Error("relation literal object must use typed Value enum representation");
 }
 
@@ -580,6 +601,9 @@ function toSerdeProjectExpr(input: unknown): unknown {
 function toSerdeRelExpr(input: unknown): unknown {
   const record = asRecord(input, "relation expr");
   const type = record.type;
+  if (typeof type !== "string") {
+    return record;
+  }
   if (type === "TableScan") return { TableScan: { table: record.table } };
   if (type === "Filter") {
     return {
@@ -676,43 +700,109 @@ function toSerdeRelExpr(input: unknown): unknown {
   throw new Error(`Unsupported relation type in ExistsRel conversion: ${String(type)}`);
 }
 
+function toSerdePolicyValue(input: unknown): unknown {
+  const record = asRecord(input, "policy value");
+  const type = record.type;
+  if (type === "Literal") return { type: "Literal", value: normalizeWasmLiteral(record.value) };
+  if (type === "SessionRef") return { type: "SessionRef", path: record.path };
+  return record;
+}
+
 function normalizePolicyExprForWasm(input: unknown): unknown {
   const expr = asRecord(input, "policy expr");
   const type = expr.type;
-  if (type === "And" || type === "Or") {
-    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+  if (typeof type !== "string") return expr;
+  if (type === "Cmp") {
     return {
-      ...expr,
-      exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)),
+      type: "Cmp",
+      column: expr.column,
+      op: expr.op,
+      value: toSerdePolicyValue(expr.value),
     };
   }
-  if (type === "Not") {
+  if (type === "IsNull") return { type: "IsNull", column: expr.column };
+  if (type === "IsNotNull") return { type: "IsNotNull", column: expr.column };
+  if (type === "Contains") {
     return {
-      ...expr,
-      expr: normalizePolicyExprForWasm(expr.expr),
+      type: "Contains",
+      column: expr.column,
+      value: toSerdePolicyValue(expr.value),
+    };
+  }
+  if (type === "In") {
+    return {
+      type: "In",
+      column: expr.column,
+      session_path: expr.session_path,
+    };
+  }
+  if (type === "InList") {
+    const values = Array.isArray(expr.values) ? expr.values : [];
+    return {
+      type: "InList",
+      column: expr.column,
+      values: values.map((value) => toSerdePolicyValue(value)),
     };
   }
   if (type === "Exists") {
     return {
-      ...expr,
+      type: "Exists",
+      table: expr.table,
       condition: normalizePolicyExprForWasm(expr.condition),
     };
   }
   if (type === "ExistsRel") {
     return {
-      ...expr,
+      type: "ExistsRel",
       rel: toSerdeRelExpr(expr.rel),
     };
   }
-  return expr;
+  if (type === "Inherits") {
+    return {
+      type: "Inherits",
+      operation: expr.operation,
+      via_column: expr.via_column,
+      max_depth: expr.max_depth,
+    };
+  }
+  if (type === "InheritsReferencing") {
+    return {
+      type: "InheritsReferencing",
+      operation: expr.operation,
+      source_table: expr.source_table,
+      via_column: expr.via_column,
+      max_depth: expr.max_depth,
+    };
+  }
+  if (type === "And") {
+    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+    return { type: "And", exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
+  }
+  if (type === "Or") {
+    const exprs = Array.isArray(expr.exprs) ? expr.exprs : [];
+    return { type: "Or", exprs: exprs.map((entry) => normalizePolicyExprForWasm(entry)) };
+  }
+  if (type === "Not") {
+    return { type: "Not", expr: normalizePolicyExprForWasm(expr.expr) };
+  }
+  if (type === "True") return { type: "True" };
+  if (type === "False") return { type: "False" };
+  throw new Error(`Unsupported policy expr type in schema normalization: ${type}`);
 }
 
 function normalizePermissionsForWasm<T>(permissions: T): T {
   const out: Record<string, unknown> = {};
   for (const [tableName, tablePolicies] of Object.entries(permissions as Record<string, unknown>)) {
     const policiesRecord = asRecord(tablePolicies, `policies for ${tableName}`);
-    const normalizedTable: Record<string, unknown> = {};
-    for (const [operation, opPolicy] of Object.entries(policiesRecord)) {
+    const normalizedTable: Record<string, unknown> = {
+      select: {},
+      insert: {},
+      update: {},
+      delete: {},
+    };
+    const operations = ["select", "insert", "update", "delete"] as const;
+    for (const operation of operations) {
+      const opPolicy = policiesRecord[operation];
       if (!opPolicy) continue;
       const opPolicyRecord = asRecord(opPolicy, `${tableName}.${operation}`);
       const normalizedOperation: Record<string, unknown> = {};
@@ -802,8 +892,8 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
     }),
   );
 
-  const tables: WasmSchema["tables"] = {};
-  for (const [tableName, tableSchema] of Object.entries(schema.tables)) {
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
     const tablePolicies = permissions[tableName];
     tables[tableName] = tablePolicies
       ? ({
@@ -812,7 +902,7 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
         } as (typeof tables)[string])
       : tableSchema;
   }
-  return { tables };
+  return tables;
 }
 
 function buildAllRowsQuery(schema: WasmSchema, table: string): string {
@@ -842,77 +932,77 @@ function buildProfileByIdQuery(schema: WasmSchema, id: string): string {
 }
 
 async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
-  const aliceProfileId = await client.createWithAck(
+  const aliceProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "alice" },
       { type: "Text", value: "alice" },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const bobProfileId = await client.createWithAck(
+  const bobProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "bob" },
       { type: "Text", value: "bob" },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const carolProfileId = await client.createWithAck(
+  const carolProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "carol" },
       { type: "Text", value: "carol" },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const eveProfileId = await client.createWithAck(
+  const eveProfileId = await client.create(
     "profiles",
     [
       { type: "Text", value: "eve" },
       { type: "Text", value: "eve" },
     ],
-    "edge",
+    { tier: "edge" },
   );
   const alicePrincipal = "alice";
   const bobPrincipal = "bob";
   const carolPrincipal = "carol";
   const evePrincipal = "eve";
 
-  const alicePersonId = await client.createWithAck(
+  const alicePersonId = await client.create(
     "people",
     [
       { type: "Uuid", value: aliceProfileId },
       { type: "Text", value: alicePrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const bobPersonId = await client.createWithAck(
+  const bobPersonId = await client.create(
     "people",
     [
       { type: "Uuid", value: bobProfileId },
       { type: "Text", value: bobPrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  await client.createWithAck(
+  await client.create(
     "people",
     [
       { type: "Uuid", value: carolProfileId },
       { type: "Text", value: carolPrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  const evePersonId = await client.createWithAck(
+  const evePersonId = await client.create(
     "people",
     [
       { type: "Uuid", value: eveProfileId },
       { type: "Text", value: evePrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
 
-  await client.createWithAck(
+  await client.create(
     "friendships",
     [
       { type: "Uuid", value: alicePersonId },
@@ -920,9 +1010,9 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
       { type: "Text", value: alicePrincipal },
       { type: "Text", value: bobPrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
-  await client.createWithAck(
+  await client.create(
     "friendships",
     [
       { type: "Uuid", value: evePersonId },
@@ -930,7 +1020,7 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
       { type: "Text", value: evePrincipal },
       { type: "Text", value: alicePrincipal },
     ],
-    "edge",
+    { tier: "edge" },
   );
 
   return {
@@ -962,27 +1052,41 @@ async function runSocialReadPermissionsScenario(style: SocialPolicyStyle): Promi
 
     const aliceSession = seeder.forSession({ user_id: seeded.alicePrincipal, claims: {} });
     const carolSession = seeder.forSession({ user_id: seeded.carolPrincipal, claims: {} });
-    await seeder.shutdown();
-    seeder = null;
 
-    const aliceProfiles = await aliceSession.query(queryAllProfiles);
+    const aliceProfiles = await withTimeout(
+      aliceSession.query(queryAllProfiles),
+      10000,
+      "alice session query(all profiles) timed out",
+    );
     const visibleIds = [...new Set(aliceProfiles.map((row) => row.id))].sort();
     expect(visibleIds).toEqual([seeded.bobProfileId, seeded.eveProfileId].sort());
 
-    const bobRows = await aliceSession.query(
-      buildProfileByIdQuery(socialSchema, seeded.bobProfileId),
+    const bobRows = await withTimeout(
+      aliceSession.query(buildProfileByIdQuery(socialSchema, seeded.bobProfileId)),
+      10000,
+      "alice session query(bob profile) timed out",
     );
     expect(bobRows).toHaveLength(1);
     expect(bobRows[0]?.values[0]).toEqual({ type: "Text", value: "bob" });
 
-    const carolRowsForAlice = await aliceSession.query(
-      buildProfileByIdQuery(socialSchema, seeded.carolProfileId),
+    const carolRowsForAlice = await withTimeout(
+      aliceSession.query(buildProfileByIdQuery(socialSchema, seeded.carolProfileId)),
+      10000,
+      "alice session query(carol profile) timed out",
     );
     expect(carolRowsForAlice).toEqual([]);
 
-    const carolFriendships = await carolSession.query(queryAllFriendships);
+    const carolFriendships = await withTimeout(
+      carolSession.query(queryAllFriendships),
+      10000,
+      "carol session query(friendships) timed out",
+    );
     expect(carolFriendships).toHaveLength(2);
-    const carolProfiles = await carolSession.query(queryAllProfiles);
+    const carolProfiles = await withTimeout(
+      carolSession.query(queryAllProfiles),
+      10000,
+      "carol session query(all profiles) timed out",
+    );
     expect(carolProfiles).toEqual([]);
   } finally {
     if (seeder) await seeder.shutdown();
@@ -1037,7 +1141,8 @@ describe("cloud-server integration (Jazz TS)", () => {
 
       await sendSyncPayload(
         server.baseUrl,
-        makeSyncPayload(),
+        JSON.stringify(makeSyncPayload()),
+        false,
         { jwtToken: signJwt("valid-user", JWT_SECRET), pathPrefix },
         "[valid] ",
       );
@@ -1045,7 +1150,8 @@ describe("cloud-server integration (Jazz TS)", () => {
       await expect(
         sendSyncPayload(
           server.baseUrl,
-          makeSyncPayload(),
+          JSON.stringify(makeSyncPayload()),
+          false,
           { jwtToken: signJwt("invalid-user", "wrong-secret"), pathPrefix },
           "[invalid] ",
         ),
@@ -1149,13 +1255,13 @@ describe("cloud-server integration (Jazz TS)", () => {
         makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      const rowId = await clientA.createWithAck(
+      const rowId = await clientA.create(
         "todos",
         [
           { type: "Text", value: "shared-item" },
           { type: "Boolean", value: false },
         ],
-        "edge",
+        { tier: "edge" },
       );
 
       const rowsAfterCreate = await waitForRows(clientB, queryAllTodos, (rows) =>
@@ -1164,7 +1270,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
       expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
 
-      await clientA.updateWithAck(rowId, { done: { type: "Boolean", value: true } }, "edge");
+      await clientA.update(rowId, { done: { type: "Boolean", value: true } }, { tier: "edge" });
       const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
         const row = rows.find((r) => r.id === rowId);
         return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
@@ -1172,7 +1278,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await clientA.deleteWithAck(rowId, "edge");
+      await clientA.delete(rowId, { tier: "edge" });
       await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (clientA) await clientA.shutdown();
@@ -1216,13 +1322,13 @@ describe("cloud-server integration (Jazz TS)", () => {
         writer = await connectClient(
           makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
-        await writer.createWithAck(
+        await writer.create(
           "todos",
           [
             { type: "Text", value: "persisted-item" },
             { type: "Boolean", value: false },
           ],
-          "edge",
+          { tier: "edge" },
         );
         await waitForRows(writer, queryAllTodos, (rows) => rows.length >= 1, 15000);
         return app.app_id;
@@ -1250,4 +1356,213 @@ describe("cloud-server integration (Jazz TS)", () => {
       await jwks.stop();
     }
   }, 90000);
+});
+
+// ---------------------------------------------------------------------------
+// Policy bypass reproduction: subscription without session skips filtering
+// ---------------------------------------------------------------------------
+
+interface OwnedItem {
+  id: string;
+  title: string;
+  ownerId: string;
+}
+
+interface OwnedItemWhere {
+  id?: string;
+  title?: string;
+  ownerId?: string;
+}
+
+class OwnedItemQueryBuilder {
+  declare readonly _rowType: OwnedItem;
+  where(_input: OwnedItemWhere): OwnedItemQueryBuilder {
+    return this;
+  }
+}
+
+function buildOwnedItemsSchema(): WasmSchema {
+  const schema: WasmSchema = {
+    owned_items: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+
+  const app = {
+    owned_items: new OwnedItemQueryBuilder(),
+    wasmSchema: schema,
+  };
+
+  const permissions = normalizePermissionsForWasm(
+    definePermissions(app, ({ policy, session }) => {
+      policy.owned_items.allowRead.where({ ownerId: session.user_id });
+    }),
+  );
+
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
+    const tablePolicies = permissions[tableName];
+    tables[tableName] = tablePolicies
+      ? ({
+          ...tableSchema,
+          policies: tablePolicies as unknown as (typeof tableSchema)["policies"],
+        } as (typeof tables)[string])
+      : tableSchema;
+  }
+  return tables;
+}
+
+describe("Policy bypass: subscription without session skips PolicyFilterNode", () => {
+  beforeAll(() => {
+    assertIntegrationPrerequisites();
+  });
+
+  it("query() and subscribe() should filter by the JWT session", async () => {
+    const schema = buildOwnedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "owned_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-policy-bypass-");
+    const server = await startCloudServer({ dataRoot });
+    let seeder: JazzClient | null = null;
+    let aliceClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+
+      // Seed other users' rows via a separate client.
+      seeder = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), schema),
+      );
+
+      await seeder.create(
+        "owned_items",
+        [
+          { type: "Text", value: "bob-item" },
+          { type: "Text", value: "bob" },
+        ],
+        { tier: "edge" },
+      );
+      await seeder.create(
+        "owned_items",
+        [
+          { type: "Text", value: "carol-item" },
+          { type: "Text", value: "carol" },
+        ],
+        { tier: "edge" },
+      );
+
+      await seeder.shutdown();
+      seeder = null;
+
+      // Connect as alice and insert her own row.
+      aliceClient = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
+      );
+      await aliceClient.create(
+        "owned_items",
+        [
+          { type: "Text", value: "alice-item" },
+          { type: "Text", value: "alice" },
+        ],
+        { tier: "edge" },
+      );
+
+      // Establish sync by fetching data without session first.
+      await aliceClient.queryInternal(queryAllItems, undefined, { tier: "edge" });
+
+      // query() should only return alice's row.
+      const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length >= 1);
+      const queryTitles = queryRows
+        .map((row) => (row.values[0] as { type: "Text"; value: string }).value)
+        .sort();
+      expect(queryTitles).toEqual(["alice-item"]);
+
+      // subscribe() should also only return alice's row.
+      const subscribedRows = await new Promise<Row[]>((resolve, reject) => {
+        const collected = new Map<string, Row>();
+        const timer = setTimeout(() => {
+          resolve([...collected.values()]);
+        }, 5000);
+
+        aliceClient!.subscribe(queryAllItems, (delta) => {
+          for (const change of delta) {
+            if (change.kind === 0) {
+              collected.set(change.id, { id: change.id, values: change.row.values });
+            } else if (change.kind === 1) {
+              collected.delete(change.id);
+            }
+          }
+        });
+
+        setTimeout(() => {
+          clearTimeout(timer);
+          reject(new Error("subscribe timed out after 20s"));
+        }, 20000);
+      });
+
+      const subscribeTitles = subscribedRows
+        .map((row) => (row.values[0] as { type: "Text"; value: string }).value)
+        .sort();
+
+      expect(subscribeTitles).toEqual(["alice-item"]);
+    } finally {
+      if (seeder) await seeder.shutdown();
+      if (aliceClient) await aliceClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
+
+  // Server-side defence in depth: even when a query explicitly omits the
+  // session, the server should fall back to the connection-level session
+  // (hashed principal ID) and apply the PolicyFilterNode. Because the hashed
+  // ID won't match ownerId values written with the raw JWT sub claim, the
+  // policy filter returns zero rows — fail closed rather than fail open.
+  it("server falls back to connection-level session when query omits session (fail closed)", async () => {
+    const schema = buildOwnedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "owned_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-policy-server-fallback-");
+    const server = await startCloudServer({ dataRoot });
+    let aliceClient: JazzClient | null = null;
+    let bobClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+
+      // Alice connects and inserts her own row.
+      aliceClient = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
+      );
+      await aliceClient.create(
+        "owned_items",
+        [
+          { type: "Text", value: "alice-item" },
+          { type: "Text", value: "alice" },
+        ],
+        { tier: "edge" },
+      );
+
+      // Bob connects and queries WITHOUT a session (explicitly undefined).
+      // This sends QuerySubscription { session: None } to the server.
+      bobClient = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("bob", JWT_SECRET), schema),
+      );
+      const rows = await bobClient.queryInternal(queryAllItems, undefined, { tier: "edge" });
+
+      // Server should fall back to Bob's connection-level session.
+      // The hashed principal ID won't match Alice's ownerId, so zero rows.
+      expect(rows).toEqual([]);
+    } finally {
+      if (aliceClient) await aliceClient.shutdown();
+      if (bobClient) await bobClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
 });

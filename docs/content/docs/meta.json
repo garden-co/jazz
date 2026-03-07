@@ -2,13 +2,15 @@
   "title": "Jazz 2",
   "pages": [
     "index",
-    "react-quick-start",
+    "quickstarts",
     "setup",
     "authentication",
     "schemas",
     "reading-data",
     "writing-data",
+    "guides",
     "permissions",
-    "migrations"
+    "migrations",
+    "mcp"
   ]
 }

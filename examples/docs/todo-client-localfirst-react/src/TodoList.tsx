@@ -3,16 +3,39 @@ import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema/app.js";
 
 export function TodoList() {
+  // #region read-write-react
   // #region reading-reactive-hooks-react
   const db = useDb();
-  const todos = useAll(app.todos);
+  const todos = useAll(app.todos) ?? [];
   // #endregion reading-reactive-hooks-react
+
+  // #region reading-filtering-react
+  const _incompleteTodos = useAll(
+    app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
+  );
+  // #endregion reading-filtering-react
+
+  // #region writing-use-db-react
+  async function addTodo(todoTitle: string) {
+    await db.insert(app.todos, { title: todoTitle, done: false });
+  }
+
+  async function toggleTodo(todo: { id: string; done: boolean }) {
+    await db.update(app.todos, todo.id, { done: !todo.done });
+  }
+
+  async function removeTodo(id: string) {
+    await db.deleteFrom(app.todos, id);
+  }
+  // #endregion writing-use-db-react
+  // #endregion read-write-react
+
   const [title, setTitle] = useState("");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    db.insert(app.todos, { title: title.trim(), done: false });
+    await addTodo(title.trim());
     setTitle("");
   };
 
@@ -34,12 +57,12 @@ export function TodoList() {
             <input
               type="checkbox"
               checked={todo.done}
-              onChange={() => db.update(app.todos, todo.id, { done: !todo.done })}
+              onChange={() => void toggleTodo(todo)}
               className="toggle"
             />
             <span>{todo.title}</span>
             {todo.description && <small>{todo.description}</small>}
-            <button className="delete-btn" onClick={() => db.deleteFrom(app.todos, todo.id)}>
+            <button className="delete-btn" onClick={() => void removeTodo(todo.id)}>
               &times;
             </button>
           </li>

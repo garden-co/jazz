@@ -4,6 +4,7 @@ import { schemaToWasm } from "./schema-reader.js";
 import { generateTypes } from "./type-generator.js";
 import { generateClient, analyzeRelations } from "./index.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { z } from "zod/v4";
 
 describe("schemaToWasm", () => {
   beforeEach(() => {
@@ -15,7 +16,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "name",
       column_type: { type: "Text" },
       nullable: false,
@@ -27,7 +28,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "active",
       column_type: { type: "Boolean" },
       nullable: false,
@@ -39,7 +40,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "count",
       column_type: { type: "Integer" },
       nullable: false,
@@ -51,7 +52,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "created_at",
       column_type: { type: "Timestamp" },
       nullable: false,
@@ -63,7 +64,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "price",
       column_type: { type: "Double" },
       nullable: false,
@@ -75,7 +76,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "owner_id",
       column_type: { type: "Uuid" },
       nullable: false,
@@ -88,7 +89,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "description",
       column_type: { type: "Text" },
       nullable: true,
@@ -100,7 +101,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.todos.columns[0]).toEqual({
+    expect(wasm.todos.columns[0]).toEqual({
       name: "parent_id",
       column_type: { type: "Uuid" },
       nullable: true,
@@ -113,7 +114,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "tags",
       column_type: { type: "Array", element: { type: "Text" } },
       nullable: false,
@@ -125,7 +126,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "matrix",
       column_type: {
         type: "Array",
@@ -140,7 +141,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.items.columns[0]).toEqual({
+    expect(wasm.items.columns[0]).toEqual({
       name: "owner_ids",
       column_type: { type: "Array", element: { type: "Uuid" } },
       nullable: false,
@@ -153,11 +154,73 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.tasks.columns[0]).toEqual({
+    expect(wasm.tasks.columns[0]).toEqual({
       name: "status",
       column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
       nullable: false,
     });
+  });
+
+  it("converts JSON to Json without schema metadata", () => {
+    table("documents", { payload: col.json() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.documents.columns[0]).toEqual({
+      name: "payload",
+      column_type: { type: "Json", schema: undefined },
+      nullable: false,
+    });
+  });
+
+  it("converts JSON with plain schema object metadata", () => {
+    table("documents", {
+      payload: col.json({
+        type: "object",
+        properties: {
+          name: { type: "string" },
+        },
+        required: ["name"],
+      }),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.documents.columns[0]).toEqual({
+      name: "payload",
+      column_type: {
+        type: "Json",
+        schema: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+          },
+          required: ["name"],
+        },
+      },
+      nullable: false,
+    });
+  });
+
+  it("accepts zod v4 standard json-schema providers for JSON columns", () => {
+    const payloadSchema = z.object({
+      name: z.string(),
+      age: z.number().int().optional(),
+    });
+    table("documents", { payload: col.json(payloadSchema) });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    const column = wasm.documents.columns[0];
+    expect(column?.column_type.type).toBe("Json");
+    if (column?.column_type.type !== "Json") {
+      throw new Error("expected Json column type");
+    }
+    expect(column.column_type.schema).toBeTruthy();
+    const jsonSchema = column.column_type.schema as Record<string, unknown>;
+    expect(jsonSchema.type).toBe("object");
+    expect(jsonSchema.properties).toBeTruthy();
+    expect((jsonSchema.properties as Record<string, unknown>).name).toBeTruthy();
   });
 
   it("converts multiple tables", () => {
@@ -166,9 +229,9 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(Object.keys(wasm.tables)).toEqual(["users", "todos"]);
-    expect(wasm.tables.users.columns).toHaveLength(1);
-    expect(wasm.tables.todos.columns).toHaveLength(2);
+    expect(Object.keys(wasm)).toEqual(["users", "todos"]);
+    expect(wasm.users.columns).toHaveLength(1);
+    expect(wasm.todos.columns).toHaveLength(2);
   });
 
   it("carries table permissions into wasm schema", () => {
@@ -190,7 +253,7 @@ describe("schemaToWasm", () => {
 
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tables.todos.policies).toEqual({
+    expect(wasm.todos.policies).toEqual({
       select: {
         using: {
           type: "Cmp",
@@ -247,7 +310,7 @@ describe("schemaToWasm", () => {
     };
 
     const wasm = schemaToWasm(schema);
-    expect(wasm.tables.files.policies).toEqual({
+    expect(wasm.files.policies).toEqual({
       select: {
         using: {
           type: "InheritsReferencing",
@@ -256,6 +319,9 @@ describe("schemaToWasm", () => {
           via_column: "image",
         },
       },
+      insert: {},
+      update: {},
+      delete: {},
     });
   });
 });
@@ -402,6 +468,38 @@ describe("generateTypes", () => {
     expect(output).toContain('  status: "done" | "in_progress" | "todo";');
   });
 
+  it("maps JSON columns to JsonValue type", () => {
+    table("documents", { payload: col.json() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export type JsonValue =");
+    expect(output).toContain("  payload: JsonValue;");
+  });
+
+  it("narrows JSON columns using schema-derived type aliases", () => {
+    table("documents", {
+      payload: col.json(
+        z.object({
+          name: z.string(),
+          done: z.boolean().optional(),
+        }),
+      ),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      'import type { WasmSchema, QueryBuilder, JsonSchemaToTs } from "jazz-tools";',
+    );
+    expect(output).toContain("const __jsonSchema1 =");
+    expect(output).toContain("type __JsonType1 = JsonSchemaToTs<typeof __jsonSchema1>;");
+    expect(output).toContain("  payload: __JsonType1;");
+    expect(output).toContain("payload?: __JsonType1 | { eq?: __JsonType1; ne?: __JsonType1;");
+  });
+
   it("exports wasmSchema constant", () => {
     table("todos", { title: col.string() });
     const schema = getCollectedSchema();
@@ -409,8 +507,8 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export const wasmSchema: WasmSchema = {");
-    expect(output).toContain('"tables"');
     expect(output).toContain('"todos"');
+    expect(output).toContain('"columns"');
   });
 
   it("imports WasmSchema and QueryBuilder from jazz-tools", () => {
@@ -475,19 +573,17 @@ describe("generateClient", () => {
 describe("analyzeRelations", () => {
   it("derives forward relations from references", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        users: { columns: [] },
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
       },
+      users: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -506,19 +602,17 @@ describe("analyzeRelations", () => {
 
   it("derives reverse relations", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        users: { columns: [] },
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
       },
+      users: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -536,19 +630,17 @@ describe("analyzeRelations", () => {
 
   it("marks forward UUID[] references as array relations", () => {
     const schema: WasmSchema = {
-      tables: {
-        files: {
-          columns: [
-            {
-              name: "parts",
-              column_type: { type: "Array", element: { type: "Uuid" } },
-              nullable: false,
-              references: "file_parts",
-            },
-          ],
-        },
-        file_parts: { columns: [] },
+      files: {
+        columns: [
+          {
+            name: "parts",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: false,
+            references: "file_parts",
+          },
+        ],
       },
+      file_parts: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -566,17 +658,15 @@ describe("analyzeRelations", () => {
 
   it("handles self-referential relations", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "parent_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "todos",
-            },
-          ],
-        },
+      todos: {
+        columns: [
+          {
+            name: "parent_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "todos",
+          },
+        ],
       },
     };
 
@@ -595,25 +685,23 @@ describe("analyzeRelations", () => {
 
   it("handles multiple relations on same table", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-            {
-              name: "assignee_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "users",
-            },
-          ],
-        },
-        users: { columns: [] },
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+          {
+            name: "assignee_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "users",
+          },
+        ],
       },
+      users: { columns: [] },
     };
 
     const relations = analyzeRelations(schema);
@@ -631,19 +719,17 @@ describe("analyzeRelations", () => {
 
   it("throws error when referencing unknown table", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        // Note: "users" table is NOT defined
+      todos: {
+        columns: [
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
       },
+      // Note: "users" table is NOT defined
     };
 
     expect(() => analyzeRelations(schema)).toThrow(
@@ -653,19 +739,17 @@ describe("analyzeRelations", () => {
 
   it("throws for non-UUID references", () => {
     const schema: WasmSchema = {
-      tables: {
-        files: {
-          columns: [
-            {
-              name: "parts",
-              column_type: { type: "Array", element: { type: "Text" } },
-              nullable: false,
-              references: "file_parts",
-            },
-          ],
-        },
-        file_parts: { columns: [] },
+      files: {
+        columns: [
+          {
+            name: "parts",
+            column_type: { type: "Array", element: { type: "Text" } },
+            nullable: false,
+            references: "file_parts",
+          },
+        ],
       },
+      file_parts: { columns: [] },
     };
 
     expect(() => analyzeRelations(schema)).toThrow(
@@ -687,8 +771,8 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoInclude {");
-    // Include types now include QueryBuilder union
-    expect(output).toContain("owner?: boolean | UserInclude | UserQueryBuilder;");
+    // Include types now include QueryBuilder union and only allow `true` for flags
+    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder;");
   });
 
   it("generates Relations types", () => {
@@ -722,6 +806,52 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("export type TodoWithIncludes<I extends TodoInclude = {}>");
     expect(output).toContain("export type UserWithIncludes<I extends UserInclude = {}>");
+    expect(output).toContain('owner?: NonNullable<I["owner"]> extends infer RelationInclude');
+    expect(output).toContain("? RelationInclude extends true");
+    expect(output).toContain("? User");
+    expect(output).toContain(
+      ": RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude>",
+    );
+    expect(output).toContain("? UserWithIncludes<QueryInclude>");
+    expect(output).toContain(": RelationInclude extends UserInclude");
+    expect(output).toContain("? UserWithIncludes<RelationInclude>");
+    expect(output).toContain(
+      'todosViaOwner?: NonNullable<I["todosViaOwner"]> extends infer RelationInclude',
+    );
+    expect(output).toContain("? Todo[]");
+    expect(output).toContain(
+      ": RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>",
+    );
+    expect(output).toContain("? TodoWithIncludes<QueryInclude>[]");
+    expect(output).toContain(": RelationInclude extends TodoInclude");
+    expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
+    expect(output).not.toContain("WithIncludesFor<");
+    expect(output).not.toContain("WithIncludesArray<");
+  });
+
+  it("avoids collapsing nested array includes to never when selectors are optional", () => {
+    table("teams", { legacy_id: col.string() });
+    table("resources", { kind: col.enum("branding") });
+    table("resource_access_edges", {
+      resource: col.ref("resources"),
+      team: col.ref("teams"),
+      grant_role: col.enum("viewer", "editor", "manager"),
+    });
+    table("brandings", {
+      resource: col.ref("resources"),
+      name: col.string(),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain(
+      'resource_access_edgesViaResource?: NonNullable<I["resource_access_edgesViaResource"]> extends infer RelationInclude',
+    );
+    expect(output).toContain("? ResourceAccessEdgeWithIncludes<RelationInclude>[]");
+    expect(output).not.toContain(
+      'resource_access_edgesViaResource?: I["resource_access_edgesViaResource"] extends true',
+    );
   });
 
   it("generates Include types for self-referential tables", () => {
@@ -734,9 +864,9 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoInclude {");
-    // Include types now include QueryBuilder union
-    expect(output).toContain("parent?: boolean | TodoInclude | TodoQueryBuilder;");
-    expect(output).toContain("todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;");
+    // Include types now include QueryBuilder union and only allow `true` for flags
+    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder;");
   });
 
   it("does not generate relation types for tables without relations", () => {
@@ -847,7 +977,9 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export class TodoQueryBuilder<I extends Record<string, never> = {}>");
+    expect(output).toContain(
+      "export class TodoQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<Todo> {",
+    );
     expect(output).toContain("declare readonly _rowType: Todo;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
@@ -865,7 +997,10 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export class TodoQueryBuilder<I extends TodoInclude = {}>");
+    expect(output).toContain(
+      "export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<TodoWithIncludes<I>> {",
+    );
+    expect(output).toContain("declare readonly _rowType: TodoWithIncludes<I>;");
   });
 
   it("generates include method for tables with relations", () => {
@@ -876,6 +1011,8 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
+    expect(output).toContain("const clone = this._clone<I & NewI>();");
+    expect(output).not.toContain("as unknown as TodoQueryBuilder<I & NewI>");
   });
 
   it("generates hopTo method for tables with relations", () => {
@@ -909,7 +1046,7 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("owner?: boolean | UserInclude | UserQueryBuilder;");
+    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder;");
   });
 
   it("QueryBuilder._build() returns valid JSON structure", () => {
@@ -937,8 +1074,10 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("private _clone(): TodoQueryBuilder<I> {");
-    expect(output).toContain("const clone = new TodoQueryBuilder<I>();");
+    expect(output).toContain(
+      "private _clone<CloneI extends Record<string, never> = I>(): TodoQueryBuilder<CloneI> {",
+    );
+    expect(output).toContain("const clone = new TodoQueryBuilder<CloneI>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
     expect(output).toContain("clone._hops = [...this._hops];");
     expect(output).toContain("clone._gatherVal = this._gatherVal");
@@ -951,6 +1090,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("gather(options: {");
+    expect(output).toContain("step: (ctx: { current: string }) => QueryBuilder<unknown>;");
     expect(output).toContain("const stepOutput = options.step({ current: currentToken });");
     expect(output).toContain("if (stepHops.length !== 1) {");
     expect(output).toContain("const withStart = this.where(options.start);");
@@ -970,7 +1110,7 @@ describe("generateAppExport", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export const app = {");
+    expect(output).toContain("export const app: GeneratedApp = {");
     expect(output).toContain("todos: new TodoQueryBuilder(),");
     expect(output).toContain("users: new UserQueryBuilder(),");
     expect(output).toContain("wasmSchema,");
@@ -984,7 +1124,7 @@ describe("generateAppExport", () => {
 
     // Verify wasmSchema is defined before app and included in app
     const wasmSchemaIndex = output.indexOf("export const wasmSchema");
-    const appIndex = output.indexOf("export const app = {");
+    const appIndex = output.indexOf("export const app: GeneratedApp = {");
     expect(wasmSchemaIndex).toBeLessThan(appIndex);
     expect(output).toContain("wasmSchema,");
   });
@@ -1004,7 +1144,7 @@ describe("QueryBuilder self-referential relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("parent?: boolean | TodoInclude | TodoQueryBuilder;");
-    expect(output).toContain("todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder;");
   });
 });

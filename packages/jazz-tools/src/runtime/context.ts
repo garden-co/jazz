@@ -35,7 +35,7 @@ export interface AppContext {
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
 
-  /** Storage driver implementation (optional — storage is in-memory by default) */
+  /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
 
   /** Environment (e.g., "dev", "prod") */
@@ -82,9 +82,14 @@ export interface AppContext {
   adminSecret?: string;
 
   /**
-   * Persistence tier for this node.
-   * Set for server nodes to enable ack emission.
+   * Durability tier identity for this node (or identities for multi-role nodes).
+   * Set for server nodes to enable durability notifications.
    * Clients typically leave this undefined.
    */
-  tier?: "worker" | "edge" | "core";
+  tier?: "worker" | "edge" | "global" | Array<"worker" | "edge" | "global">;
+
+  /**
+   * Default durability tier for reads and writes when no explicit tier is provided.
+   */
+  defaultDurabilityTier?: "worker" | "edge" | "global";
 }

@@ -3,7 +3,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
+use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+use jazz_tools::schema_manager::encode_schema;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,6 +20,9 @@ const SECRET_HASH_KEY: &str = "integration-secret-hash-key";
 struct AppSummaryResponse {
     app_id: String,
     app_name: String,
+    jwks_endpoint: String,
+    allow_anonymous: bool,
+    allow_demo: bool,
     status: String,
 }
 
@@ -38,6 +44,12 @@ struct UpdateAppResponse {
     admin_secret: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManageAdminSecretResponse {
+    app_id: String,
+    admin_secret: Option<String>,
+}
+
 struct ServerProcess {
     process: Child,
     port: u16,
@@ -47,23 +59,23 @@ struct ServerProcess {
 impl ServerProcess {
     async fn start(data_root: &Path) -> Self {
         let port = get_free_port();
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--data-root",
-                data_root.to_str().expect("data root path"),
-                "--internal-api-secret",
-                INTERNAL_API_SECRET,
-                "--secret-hash-key",
-                SECRET_HASH_KEY,
-                "--worker-threads",
-                "1",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn jazz-cloud-server");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--data-root",
+            data_root.to_str().expect("data root path"),
+            "--internal-api-secret",
+            INTERNAL_API_SECRET,
+            "--secret-hash-key",
+            SECRET_HASH_KEY,
+            "--worker-threads",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+        let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
         let server = Self {
             process,
@@ -187,6 +199,47 @@ impl ServerProcess {
             .await
             .expect("sync request")
     }
+
+    async fn sync_with_admin_payload(
+        &self,
+        app_id: &str,
+        admin_secret: &str,
+        payload: Value,
+    ) -> reqwest::Response {
+        self.client
+            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .json(&payload)
+            .send()
+            .await
+            .expect("admin sync request")
+    }
+
+    async fn get_schema_by_hash(
+        &self,
+        app_id: &str,
+        admin_secret: &str,
+        schema_hash: &str,
+    ) -> reqwest::Response {
+        self.client
+            .get(format!(
+                "{}/apps/{app_id}/schema/{schema_hash}",
+                self.base_url()
+            ))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .send()
+            .await
+            .expect("schema fetch request")
+    }
+
+    async fn get_schema_hashes(&self, app_id: &str, admin_secret: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}/apps/{app_id}/schemas", self.base_url()))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .send()
+            .await
+            .expect("schema hashes fetch request")
+    }
 }
 
 impl Drop for ServerProcess {
@@ -200,6 +253,14 @@ fn encode_session(user_id: &str) -> String {
     let session = Session::new(user_id);
     let json = serde_json::to_string(&session).expect("serialize session");
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+}
+
+fn basic_auth_header(username: &str, password: &str) -> String {
+    let raw = format!("{username}:{password}");
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+    )
 }
 
 fn sync_body() -> Value {
@@ -394,4 +455,343 @@ async fn app_registry_and_auth_survive_server_restart() {
         StatusCode::UNAUTHORIZED,
         "backend secret auth should still work after restart"
     );
+}
+
+#[tokio::test]
+async fn management_routes_are_enabled_and_require_basic_auth() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+
+    let response = server
+        .client
+        .get(format!("{}/manage", server.base_url()))
+        .send()
+        .await
+        .expect("management page request");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn management_routes_require_valid_basic_auth() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+    let url = format!("{}/manage", server.base_url());
+
+    let missing_auth = server
+        .client
+        .get(&url)
+        .send()
+        .await
+        .expect("missing auth request");
+    assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+    let challenge = missing_auth
+        .headers()
+        .get("WWW-Authenticate")
+        .and_then(|v| v.to_str().ok())
+        .expect("missing WWW-Authenticate challenge header");
+    assert!(
+        challenge.starts_with("Basic "),
+        "expected basic challenge, got: {challenge}"
+    );
+
+    let wrong_auth = server
+        .client
+        .get(&url)
+        .header(
+            "Authorization",
+            basic_auth_header("admin", "wrong-password"),
+        )
+        .send()
+        .await
+        .expect("wrong auth request");
+    assert_eq!(wrong_auth.status(), StatusCode::UNAUTHORIZED);
+
+    let ok_auth = server
+        .client
+        .get(&url)
+        .header(
+            "Authorization",
+            basic_auth_header("admin", INTERNAL_API_SECRET),
+        )
+        .send()
+        .await
+        .expect("valid auth request");
+    assert_eq!(ok_auth.status(), StatusCode::OK);
+    let body = ok_auth.text().await.expect("management page body");
+    assert!(body.contains("Jazz Cloud Server Management"));
+}
+
+#[tokio::test]
+async fn management_api_create_list_and_status_update_work() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+    let auth_header = basic_auth_header("admin", INTERNAL_API_SECRET);
+
+    let create_response = server
+        .client
+        .post(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .json(&json!({
+            "app_name": "managed-app",
+            "jwks_endpoint": "http://example.invalid/jwks",
+            "allow_anonymous": false,
+            "allow_demo": true,
+            "backend_secret": "managed-backend-secret",
+            "admin_secret": "managed-admin-secret"
+        }))
+        .send()
+        .await
+        .expect("manage create app request");
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let created: CreateAppResponse = create_response
+        .json()
+        .await
+        .expect("parse manage create app response");
+    assert_eq!(created.app_name, "managed-app");
+    assert_eq!(created.status, "active");
+
+    let reveal_response = server
+        .client
+        .get(format!(
+            "{}/manage/api/apps/{}/admin-secret",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage reveal admin secret request");
+    assert_eq!(reveal_response.status(), StatusCode::OK);
+    let revealed: ManageAdminSecretResponse = reveal_response
+        .json()
+        .await
+        .expect("parse revealed admin secret response");
+    assert_eq!(revealed.app_id, created.app_id);
+    assert_eq!(
+        revealed.admin_secret.as_deref(),
+        Some("managed-admin-secret")
+    );
+
+    let auth_update_response = server
+        .client
+        .patch(format!(
+            "{}/manage/api/apps/{}/auth",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .json(&json!({
+            "allow_anonymous": true,
+            "allow_demo": false,
+            "jwks_endpoint": ""
+        }))
+        .send()
+        .await
+        .expect("manage update auth request");
+    assert_eq!(auth_update_response.status(), StatusCode::OK);
+    let auth_updated: UpdateAppResponse = auth_update_response
+        .json()
+        .await
+        .expect("parse auth update response");
+    assert_eq!(auth_updated.app_id, created.app_id);
+    assert_eq!(auth_updated.status, "active");
+    assert!(auth_updated.backend_secret.is_none());
+    assert!(auth_updated.admin_secret.is_none());
+
+    let list_response = server
+        .client
+        .get(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage list apps request");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let listed: Vec<AppSummaryResponse> = list_response.json().await.expect("parse app list");
+    let listed_created = listed
+        .iter()
+        .find(|app| app.app_id == created.app_id)
+        .expect("created app should exist in management list");
+    assert_eq!(listed_created.jwks_endpoint, "");
+    assert!(listed_created.allow_anonymous);
+    assert!(!listed_created.allow_demo);
+    assert_eq!(listed_created.status, "active");
+
+    let update_response = server
+        .client
+        .post(format!(
+            "{}/manage/api/apps/{}/status",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .json(&json!({ "status": "disabled" }))
+        .send()
+        .await
+        .expect("manage update status request");
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let updated: UpdateAppResponse = update_response
+        .json()
+        .await
+        .expect("parse update status response");
+    assert_eq!(updated.status, "disabled");
+
+    let rotate_response = server
+        .client
+        .post(format!(
+            "{}/manage/api/apps/{}/admin-secret/rotate",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage rotate admin secret request");
+    assert_eq!(rotate_response.status(), StatusCode::OK);
+    let rotated: UpdateAppResponse = rotate_response
+        .json()
+        .await
+        .expect("parse rotate admin secret response");
+    let rotated_secret = rotated
+        .admin_secret
+        .expect("rotating admin secret should return secret value");
+    assert_ne!(rotated_secret, "managed-admin-secret");
+
+    let reveal_after_rotate_response = server
+        .client
+        .get(format!(
+            "{}/manage/api/apps/{}/admin-secret",
+            server.base_url(),
+            created.app_id
+        ))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage reveal after rotate request");
+    assert_eq!(reveal_after_rotate_response.status(), StatusCode::OK);
+    let revealed_after_rotate: ManageAdminSecretResponse = reveal_after_rotate_response
+        .json()
+        .await
+        .expect("parse reveal after rotate response");
+    assert_eq!(
+        revealed_after_rotate.admin_secret.as_deref(),
+        Some(rotated_secret.as_str())
+    );
+
+    let listed_after_update = server
+        .client
+        .get(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("manage list after update request");
+    assert_eq!(listed_after_update.status(), StatusCode::OK);
+    let listed_after_update: Vec<AppSummaryResponse> = listed_after_update
+        .json()
+        .await
+        .expect("parse app list after update");
+    let updated_created = listed_after_update
+        .iter()
+        .find(|app| app.app_id == created.app_id)
+        .expect("updated app should exist in management list");
+    assert_eq!(updated_created.status, "disabled");
+}
+
+#[tokio::test]
+async fn schema_catalogue_sync_and_retrieval_round_trip() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+
+    let created = server
+        .create_app(
+            "schema-catalogue-app",
+            "http://example.invalid/jwks",
+            Some("backend-secret"),
+            Some("admin-secret"),
+        )
+        .await;
+
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build();
+
+    let schema_hash = SchemaHash::compute(&schema);
+    let encoded_schema = encode_schema(&schema);
+    let object_id = schema_hash.to_object_id().to_string();
+    let author_id = Uuid::new_v4().to_string();
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        MetadataKey::Type.as_str().to_string(),
+        ObjectType::CatalogueSchema.as_str().to_string(),
+    );
+    metadata.insert(
+        MetadataKey::AppId.as_str().to_string(),
+        created.app_id.clone(),
+    );
+    metadata.insert(
+        MetadataKey::SchemaHash.as_str().to_string(),
+        hex::encode(schema_hash.as_bytes()),
+    );
+
+    let sync_payload = json!({
+        "client_id": Uuid::new_v4().to_string(),
+        "payload": {
+            "ObjectUpdated": {
+                "object_id": object_id,
+                "metadata": {
+                    "id": object_id,
+                    "metadata": metadata
+                },
+                "branch_name": "main",
+                "commits": [
+                    {
+                        "parents": [],
+                        "content": encoded_schema,
+                        "timestamp": 1,
+                        "author": author_id,
+                        "metadata": null
+                    }
+                ]
+            }
+        }
+    });
+
+    let sync_response = server
+        .sync_with_admin_payload(&created.app_id, "admin-secret", sync_payload)
+        .await;
+    assert_eq!(
+        sync_response.status(),
+        StatusCode::OK,
+        "admin catalogue sync should succeed"
+    );
+
+    let schema_hashes_response = server
+        .get_schema_hashes(&created.app_id, "admin-secret")
+        .await;
+    assert_eq!(schema_hashes_response.status(), StatusCode::OK);
+    let schema_hashes_json: Value = schema_hashes_response
+        .json()
+        .await
+        .expect("schema hashes json");
+    let expected_hash = schema_hash.to_string();
+    assert!(
+        schema_hashes_json["hashes"]
+            .as_array()
+            .is_some_and(|hashes| hashes
+                .iter()
+                .any(|hash| hash.as_str() == Some(&expected_hash)))
+    );
+
+    let schema_response = server
+        .get_schema_by_hash(&created.app_id, "admin-secret", &expected_hash)
+        .await;
+    assert_eq!(schema_response.status(), StatusCode::OK);
+
+    let schema_json: Value = schema_response.json().await.expect("schema json");
+    let expected_schema_json = serde_json::to_value(schema.clone()).expect("expected schema json");
+    assert_eq!(schema_json, expected_schema_json);
 }

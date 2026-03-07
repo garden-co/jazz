@@ -1,4 +1,4 @@
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 
 use crate::query_manager::types::{Tuple, TupleDelta, TupleDescriptor};
 
@@ -50,11 +50,17 @@ impl TransformNode for UnionNode {
     /// Compute the union of multiple input tuple sets.
     /// For union: a tuple is present if it's in ANY input.
     fn process(&mut self, inputs: &[&AHashSet<Tuple>]) -> TupleDelta {
-        // Compute new union of tuples
-        let mut new_tuples = AHashSet::new();
+        // Compute new union of tuples, merging provenance for equal tuple IDs.
+        let mut merged_by_ids = AHashMap::<Vec<_>, Tuple>::new();
         for tuples in inputs {
-            new_tuples.extend(tuples.iter().cloned());
+            for tuple in tuples.iter() {
+                merged_by_ids
+                    .entry(tuple.ids())
+                    .and_modify(|existing| existing.merge_provenance_from(tuple))
+                    .or_insert_with(|| tuple.clone());
+            }
         }
+        let new_tuples: AHashSet<Tuple> = merged_by_ids.values().cloned().collect();
 
         // Compute delta
         let added: Vec<Tuple> = new_tuples
@@ -66,6 +72,16 @@ impl TransformNode for UnionNode {
             .difference(&new_tuples)
             .cloned()
             .collect();
+        let updated: Vec<(Tuple, Tuple)> = self
+            .current_tuples
+            .iter()
+            .filter_map(|old_tuple| {
+                new_tuples.get(old_tuple).and_then(|new_tuple| {
+                    (old_tuple.provenance() != new_tuple.provenance())
+                        .then(|| (old_tuple.clone(), new_tuple.clone()))
+                })
+            })
+            .collect();
 
         // Update state
         self.current_tuples = new_tuples;
@@ -75,7 +91,7 @@ impl TransformNode for UnionNode {
             added,
             removed,
             moved: vec![],
-            updated: vec![],
+            updated,
         }
     }
 

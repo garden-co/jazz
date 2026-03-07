@@ -1,0 +1,168 @@
+import type { DurabilityTier, QueryExecutionOptions, QueryInput, WasmSchema } from "../index.js";
+import type { DbConfig } from "../runtime/db.js";
+
+export const DEVTOOLS_BRIDGE_CHANNEL = "jazz-devtools-v1" as const;
+export const DEVTOOLS_PORT_NAME = "jazz-inspector-devtools" as const;
+
+export const DEVTOOLS_COMMANDS = {
+  BRIDGE_HANDSHAKE: "bridge.handshake",
+  ANNOUNCE: "devtools.announce",
+  CLIENT_QUERY: "client.query",
+  CLIENT_SUBSCRIBE: "client.subscribe",
+  CLIENT_UNSUBSCRIBE: "client.unsubscribe",
+} as const;
+
+export const DEVTOOLS_EVENTS = {
+  CONNECTED: "devtools.connected",
+  DISCONNECTED: "devtools.disconnected",
+  CLIENT_SUBSCRIPTION_DELTA: "client.subscription.delta",
+} as const;
+
+export type DevtoolsBridgeCommand = (typeof DEVTOOLS_COMMANDS)[keyof typeof DEVTOOLS_COMMANDS];
+
+export type DevtoolsBridgeEvent = (typeof DEVTOOLS_EVENTS)[keyof typeof DEVTOOLS_EVENTS];
+
+export type DevtoolsBridgeHandshakeRequestPayload = Record<string, never>;
+export type DevtoolsBridgeHandshakeResponsePayload = { ready: boolean };
+
+export type DevtoolsAnnounceRequestPayload = Record<string, never>;
+export type DevtoolsAnnounceResponsePayload = {
+  ready: boolean;
+  wasmSchema?: WasmSchema;
+  dbConfig?: DbConfig;
+};
+
+export type DevtoolsClientQueryRequestPayload = {
+  query: string | QueryInput;
+  options?: QueryExecutionOptions;
+  tier?: DurabilityTier;
+};
+export type DevtoolsClientQueryResponsePayload = unknown[];
+
+export type DevtoolsClientSubscribeRequestPayload = {
+  query: string | QueryInput;
+  options?: QueryExecutionOptions;
+  tier?: DurabilityTier;
+  subscriptionId: string;
+};
+export type DevtoolsClientSubscribeResponsePayload = { subscribed: true };
+
+export type DevtoolsClientUnsubscribeRequestPayload = {
+  subscriptionId: string;
+};
+export type DevtoolsClientUnsubscribeResponsePayload = { unsubscribed: true };
+
+export interface DevtoolsRequestPayloadByCommand {
+  [DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE]: DevtoolsBridgeHandshakeRequestPayload;
+  [DEVTOOLS_COMMANDS.ANNOUNCE]: DevtoolsAnnounceRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_QUERY]: DevtoolsClientQueryRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeRequestPayload;
+}
+
+export interface DevtoolsResponsePayloadByCommand {
+  [DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE]: DevtoolsBridgeHandshakeResponsePayload;
+  [DEVTOOLS_COMMANDS.ANNOUNCE]: DevtoolsAnnounceResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_QUERY]: DevtoolsClientQueryResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeResponsePayload;
+}
+
+export type DevtoolsRequestEnvelope =
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["BRIDGE_HANDSHAKE"];
+      payload: DevtoolsBridgeHandshakeRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["ANNOUNCE"];
+      payload: DevtoolsAnnounceRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_QUERY"];
+      payload: DevtoolsClientQueryRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_SUBSCRIBE"];
+      payload: DevtoolsClientSubscribeRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_UNSUBSCRIBE"];
+      payload: DevtoolsClientUnsubscribeRequestPayload;
+    };
+
+export type DevtoolsResponseEnvelope<
+  TCommand extends DevtoolsBridgeCommand = DevtoolsBridgeCommand,
+> = {
+  channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+  kind: "response";
+  requestId: string;
+  ok: boolean;
+  payload?: DevtoolsResponsePayloadByCommand[TCommand];
+  error?: { message?: string };
+};
+
+export type DevtoolsSubscriptionDeltaEventPayload = {
+  subscriptionId: string;
+  delta: unknown;
+};
+
+export interface DevtoolsEventPayloadByEvent {
+  [DEVTOOLS_EVENTS.CONNECTED]: undefined;
+  [DEVTOOLS_EVENTS.DISCONNECTED]: undefined;
+  [DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA]: DevtoolsSubscriptionDeltaEventPayload;
+}
+
+export type DevtoolsEventEnvelope<TEvent extends DevtoolsBridgeEvent = DevtoolsBridgeEvent> = {
+  channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+  kind: "event";
+  event: TEvent;
+  payload: DevtoolsEventPayloadByEvent[TEvent];
+};
+
+export interface DevToolsBootstrap {
+  wasmSchema: WasmSchema;
+  dbConfig: DbConfig;
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function isSerializableDbConfig(value: unknown): value is DbConfig {
+  if (!isRecord(value)) return false;
+  return typeof value.appId === "string";
+}
+
+export function sanitizeDbConfigForBridge(dbConfig: DbConfig | null): DbConfig | null {
+  if (!dbConfig) {
+    return null;
+  }
+
+  return {
+    appId: dbConfig.appId,
+    serverUrl: dbConfig.serverUrl,
+    serverPathPrefix: dbConfig.serverPathPrefix,
+    env: dbConfig.env,
+    userBranch: dbConfig.userBranch,
+    jwtToken: dbConfig.jwtToken,
+    localAuthMode: dbConfig.localAuthMode,
+    localAuthToken: dbConfig.localAuthToken,
+    adminSecret: dbConfig.adminSecret,
+    driver: dbConfig.driver,
+  };
+}

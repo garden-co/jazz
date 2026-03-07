@@ -1,6 +1,7 @@
 import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import type { QueryBuilder } from "./runtime/db.js";
-import type { PersistenceTier } from "./runtime/client.js";
+import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
+import type { Session } from "./runtime/context.js";
+import type { DurabilityTier } from "./runtime/client.js";
 
 type UseAllStatePending<T> = {
   status: "pending";
@@ -122,14 +123,14 @@ export function makeDeferred<T>(snapshot?: {
 
 interface QueryDefinition<T extends { id: string }> {
   query: QueryBuilder<T>;
-  tier?: PersistenceTier;
+  tier?: DurabilityTier;
   snapshot?: T[];
 }
 
 interface InternalCacheEntry<T extends { id: string }> {
   key: string;
   query: QueryBuilder<T>;
-  tier?: PersistenceTier;
+  tier?: DurabilityTier;
   state: UseAllState<T>;
   promise: TrackedPromise<T[]>;
   resolvefulfilled: (data: T[]) => void;
@@ -147,7 +148,8 @@ interface DbLike {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    settledTier?: PersistenceTier,
+    options?: QueryOptions,
+    session?: Session,
   ): () => void;
 }
 
@@ -159,6 +161,7 @@ export class SubscriptionsOrchestrator {
   constructor(
     private readonly config: { appId: string },
     private readonly db: DbLike,
+    private readonly session?: Session | null,
   ) {}
 
   async init(): Promise<void> {}
@@ -173,7 +176,7 @@ export class SubscriptionsOrchestrator {
 
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
-    tier?: PersistenceTier,
+    tier?: DurabilityTier,
     snapshot?: T[],
   ): string {
     const key = `${this.config.appId}:${tier ?? "none"}:${query._build()}`;
@@ -240,6 +243,10 @@ export class SubscriptionsOrchestrator {
           callbacks.onError?.(entry.state.error);
         }
 
+        if (entry.state.status === "fulfilled") {
+          callbacks.onfulfilled?.(entry.state.data);
+        }
+
         return () => {
           if (!entry.listeners.delete(callbacks)) {
             return;
@@ -290,7 +297,8 @@ export class SubscriptionsOrchestrator {
             this.scheduleCleanup(entry);
           }
         },
-        entry.tier,
+        entry.tier ? { tier: entry.tier } : undefined,
+        this.session ?? undefined,
       );
     } catch (error) {
       entry.state = { status: "rejected", data: undefined, error };

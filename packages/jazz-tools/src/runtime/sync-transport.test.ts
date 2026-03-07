@@ -5,15 +5,51 @@ import {
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
   generateClientId,
+  isExpectedFetchAbortError,
   linkExternalIdentity,
   normalizePathPrefix,
+  readBinaryFrames,
   sendSyncPayload,
   SyncStreamController,
+  type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 
 describe("sync-transport", () => {
   const originalFetch = globalThis.fetch;
   const textEncoder = new TextEncoder();
+  const outboxInvokers: Array<
+    [
+      name: string,
+      invoke: (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => void,
+    ]
+  > = [
+    [
+      "wasm/rn",
+      (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => router(destinationKind, destinationId, payloadJson, isCatalogue),
+    ],
+    [
+      "napi-callee-handled",
+      (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => router(null, destinationKind, destinationId, payloadJson, isCatalogue),
+    ],
+  ];
 
   function encodeFrames(events: unknown[]): Uint8Array {
     const chunks: Uint8Array[] = events.map((event) => {
@@ -65,8 +101,8 @@ describe("sync-transport", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload("http://localhost:3000", { Ping: {} }, {});
-    await sendSyncPayload("http://localhost:3000", { Pong: {} }, {});
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {});
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Pong: {} }), false, {});
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
@@ -85,11 +121,10 @@ describe("sync-transport", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const providedClientId = "11111111-2222-4333-8444-555555555555";
-    await sendSyncPayload(
-      "http://localhost:3000",
-      { Ping: {} },
-      { clientId: providedClientId, jwtToken: "token" },
-    );
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {
+      clientId: providedClientId,
+      jwtToken: "token",
+    });
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.client_id).toBe(providedClientId);
@@ -101,32 +136,50 @@ describe("sync-transport", () => {
       .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: 503 Service Unavailable",
-    );
+    await expect(
+      sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {}),
+    ).rejects.toThrow("Sync POST failed: 503 Service Unavailable");
   });
 
   it("throws when fetch rejects", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
-      "Sync POST failed: network down",
-    );
+    await expect(
+      sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {}),
+    ).rejects.toThrow("Sync POST failed: network down");
   });
 
   it("posts to path-prefixed sync route when provided", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    await sendSyncPayload(
-      "http://localhost:3000/",
-      { Ping: {} },
-      { jwtToken: "token", pathPrefix: "apps/app-123/" },
-    );
+    await sendSyncPayload("http://localhost:3000/", JSON.stringify({ Ping: {} }), false, {
+      jwtToken: "token",
+      pathPrefix: "apps/app-123/",
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
+  });
+
+  it("posts non-catalogue payloads with backend secret when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload("http://localhost:3000", JSON.stringify({ Ping: {} }), false, {
+      backendSecret: "backend-secret",
+      jwtToken: "jwt-token",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Jazz-Backend-Secret": "backend-secret",
+    });
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("skips catalogue payload sync when admin secret is missing", async () => {
@@ -135,7 +188,7 @@ describe("sync-transport", () => {
 
     await sendSyncPayload(
       "http://localhost:3000",
-      {
+      JSON.stringify({
         ObjectUpdated: {
           metadata: {
             metadata: {
@@ -143,7 +196,8 @@ describe("sync-transport", () => {
             },
           },
         },
-      },
+      }),
+      true,
       { jwtToken: "jwt-token" },
     );
 
@@ -156,7 +210,7 @@ describe("sync-transport", () => {
 
     await sendSyncPayload(
       "http://localhost:3000",
-      {
+      JSON.stringify({
         ObjectUpdated: {
           metadata: {
             metadata: {
@@ -164,7 +218,8 @@ describe("sync-transport", () => {
             },
           },
         },
-      },
+      }),
+      true,
       { adminSecret: "admin-secret", jwtToken: "jwt-token" },
     );
 
@@ -297,6 +352,101 @@ describe("sync-transport", () => {
     controller.stop();
   });
 
+  it("stream controller uses backend secret auth when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamResponse([]));
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const controller = new SyncStreamController({
+      getAuth: () => ({ backendSecret: "backend-secret" }),
+      getClientId: () => "initial-client-id",
+      setClientId: vi.fn(),
+      onConnected: vi.fn(),
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+    });
+
+    controller.start("http://localhost:3000");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      Accept: "application/octet-stream",
+      "X-Jazz-Backend-Secret": "backend-secret",
+    });
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
+
+    controller.stop();
+  });
+
+  it("classifies canceled fetch errors as expected aborts", () => {
+    expect(
+      isExpectedFetchAbortError(new Error("fetch failed: Fetch request has been canceled")),
+    ).toBe(true);
+    expect(
+      isExpectedFetchAbortError({
+        message: "outer",
+        cause: new Error("fetch failed: Fetch request has been cancelled"),
+      }),
+    ).toBe(true);
+    expect(isExpectedFetchAbortError(new Error("network down"))).toBe(false);
+  });
+
+  it("suppresses expected canceled-fetch errors when stopping an in-flight stream", async () => {
+    const fetchMock = vi.fn().mockImplementation((_url, init) => {
+      const signal = (init as RequestInit).signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            reject(new Error("fetch failed: Fetch request has been canceled"));
+          },
+          { once: true },
+        );
+      });
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const controller = new SyncStreamController({
+      getAuth: () => ({}),
+      getClientId: () => "initial-client-id",
+      setClientId: vi.fn(),
+      onConnected: vi.fn(),
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+    });
+
+    controller.start("http://localhost:3000");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    controller.stop();
+    await Promise.resolve();
+
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("Stream connect error:"),
+      expect.anything(),
+    );
+  });
+
+  it("labels callback failures separately from parse failures", async () => {
+    const response = streamResponse([{ type: "Connected", client_id: "server-client-4" }]);
+    const reader = response.body!.getReader();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await readBinaryFrames(
+      reader,
+      {
+        onSyncMessage: vi.fn(),
+        onConnected: () => {
+          throw new Error("callback blew up");
+        },
+      },
+      "[client] ",
+    );
+
+    expect(errorSpy).toHaveBeenCalledWith("[client] Stream callback error:", expect.any(Error));
+    expect(errorSpy).not.toHaveBeenCalledWith("[client] Stream parse error:", expect.any(Error));
+  });
+
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
@@ -334,20 +484,54 @@ describe("sync-transport", () => {
     controller.stop();
   });
 
-  it("sync outbox router routes server and client destinations", async () => {
-    const onServerPayload = vi.fn().mockResolvedValue(undefined);
-    const onClientPayload = vi.fn();
-    const router = createSyncOutboxRouter({
-      onServerPayload,
-      onClientPayload,
-    });
+  it.each(outboxInvokers)(
+    "sync outbox router routes server and client destinations (%s)",
+    async (_name, invoke) => {
+      const onServerPayload = vi.fn().mockResolvedValue(undefined);
+      const onClientPayload = vi.fn();
+      const router = createSyncOutboxRouter({
+        onServerPayload,
+        onClientPayload,
+      });
 
-    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
-    router(JSON.stringify({ destination: { Client: "client-1" }, payload: { Pong: {} } }));
+      invoke(router, "server", "upstream-1", JSON.stringify({ Ping: {} }), false);
+      invoke(router, "client", "client-1", JSON.stringify({ Pong: {} }), false);
 
-    await vi.waitFor(() => expect(onServerPayload).toHaveBeenCalledWith({ Ping: {} }));
-    expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
-  });
+      await vi.waitFor(() =>
+        expect(onServerPayload).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), false),
+      );
+      expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
+    },
+  );
+
+  it.each(outboxInvokers)(
+    "sync outbox router posts server payloads via sendSyncPayload (%s)",
+    async (_name, invoke) => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const router = createSyncOutboxRouter({
+        onServerPayload: (payload, isCatalogue) =>
+          sendSyncPayload("http://localhost:3000", payload as string, isCatalogue, {
+            backendSecret: "backend-secret",
+          }),
+      });
+
+      const payloadJson = JSON.stringify({ QuerySubscription: { id: "q-1" } });
+      invoke(router, "server", "upstream-1", payloadJson, false);
+
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
+        payload: unknown;
+      };
+      expect(requestBody.payload).toEqual(JSON.parse(payloadJson));
+      expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/sync");
+      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+        "X-Jazz-Backend-Secret": "backend-secret",
+      });
+    },
+  );
 
   it("sync outbox router surfaces server-send failures", async () => {
     const error = new Error("network down");
@@ -358,7 +542,7 @@ describe("sync-transport", () => {
       onServerPayloadError,
     });
 
-    router(JSON.stringify({ destination: { Server: "upstream-1" }, payload: { Ping: {} } }));
+    router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
   });

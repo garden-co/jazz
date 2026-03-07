@@ -1,6 +1,6 @@
 {
   "name": "jazz-rn",
-  "version": "0.1.0",
+  "version": "2.0.0-alpha.14",
   "description": "cojson core for react native",
   "keywords": [
     "android",
@@ -48,7 +48,9 @@
     "./package.json": "./package.json"
   },
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "alpha"
   },
   "scripts": {
     "ubrn:ios": "ubrn build ios --and-generate --release",
@@ -91,7 +93,7 @@
     "react-native-builder-bob": "^0.40.14",
     "release-it": "^19.0.4",
     "turbo": "^2.5.6",
-    "typescript": "^5.9.2"
+    "typescript": "catalog:default"
   },
   "peerDependencies": {
     "react": "*",

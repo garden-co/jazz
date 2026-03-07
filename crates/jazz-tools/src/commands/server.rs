@@ -8,10 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
+use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::SurrealKvStorage;
-use jazz_tools::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
+use jazz_tools::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
 use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
@@ -51,7 +52,8 @@ impl ExternalIdentityStore {
             )
             .build();
 
-        let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
         let schema_manager = SchemaManager::new(
             sync_manager,
             schema,
@@ -80,7 +82,7 @@ impl ExternalIdentityStore {
 
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("external identity query error: {e}"))?;
         let rows = future
             .await
@@ -105,7 +107,7 @@ impl ExternalIdentityStore {
 
         let future = self
             .runtime
-            .query(query, None, None)
+            .query(query, None, ReadDurabilityOptions::default())
             .map_err(|e| format!("external identity query error: {e}"))?;
         let mut rows = future
             .await
@@ -223,7 +225,8 @@ pub async fn run(
     std::fs::create_dir_all(data_dir)?;
 
     // Create managers (server mode - no fixed current schema)
-    let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+    let sync_manager = SyncManager::new()
+        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
     let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
     // Create broadcast channel for SSE updates

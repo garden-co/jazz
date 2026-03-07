@@ -3,10 +3,11 @@
 //! Creates minimal query graphs to evaluate policy conditions like USING and INHERITS.
 //! These graphs are throwaway - created, settled until complete, then discarded.
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 
 use crate::storage::Storage;
+
+use crate::schema_manager::SchemaContext;
 
 use super::graph::{GraphNode, QueryGraph};
 use super::graph_nodes::NodeId;
@@ -18,7 +19,7 @@ use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::ColumnName;
-use super::types::{Schema, TableName, TupleDescriptor, Value};
+use super::types::{LoadedRow, Schema, TableName, TupleDescriptor, Value};
 
 /// A one-shot graph for evaluating a policy condition.
 ///
@@ -62,7 +63,7 @@ impl PolicyGraph {
         initial_depth: usize,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         let mut graph = QueryGraph::new(*table, descriptor.clone());
 
@@ -150,7 +151,7 @@ impl PolicyGraph {
         branch: &str,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
-        let descriptor = table_schema.descriptor.clone();
+        let descriptor = table_schema.columns.clone();
 
         let mut graph = QueryGraph::new(*table, descriptor.clone());
 
@@ -208,7 +209,14 @@ impl PolicyGraph {
         branch: &str,
     ) -> Option<Self> {
         let branches = vec![branch.to_string()];
-        let mut graph = QueryGraph::compile_relation_ir(rel, schema, &branches, None)?;
+        let schema_context = SchemaContext::with_defaults(schema.clone(), "main");
+        let mut graph = QueryGraph::compile_relation_ir_with_schema_context(
+            rel,
+            schema,
+            &branches,
+            None,
+            &schema_context,
+        )?;
         let output_descriptor = match graph
             .nodes
             .get(graph.output_node.0 as usize)
@@ -238,7 +246,7 @@ impl PolicyGraph {
     pub fn settle(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> bool {
         let _delta = self.graph.settle(io, row_loader);
         true
@@ -380,7 +388,7 @@ mod tests {
         let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
-        let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };
+        let mut row_loader = |_id: ObjectId| -> Option<LoadedRow> { None };
 
         // Settle the graph
         pg.settle(&storage, &mut row_loader);

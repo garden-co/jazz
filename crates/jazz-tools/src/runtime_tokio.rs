@@ -18,15 +18,15 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{Schema, Value};
+use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
-    QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta,
-    SyncSender,
+    QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
+    SubscriptionDelta, SyncSender,
 };
 use crate::schema_manager::{QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
 
 // ============================================================================
 // TokioScheduler
@@ -301,15 +301,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // Queries
     // =========================================================================
 
-    /// Execute a one-shot query, optionally waiting for a settled tier.
+    /// Execute a one-shot query with durability options.
     pub fn query(
         &self,
         query: Query,
         session: Option<Session>,
-        settled_tier: Option<PersistenceTier>,
+        durability: ReadDurabilityOptions,
     ) -> Result<QueryFuture, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.query(query, session, settled_tier))
+        Ok(core.query_with_propagation(query, session, durability, QueryPropagation::Full))
     }
 
     // =========================================================================
@@ -424,6 +424,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Promote a client to Backend role (row access, no catalogue writes).
+    pub fn set_client_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_client_backend(client_id);
+        Ok(())
+    }
+
     // =========================================================================
     // Schema Access
     // =========================================================================
@@ -432,6 +439,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn current_schema(&self) -> Result<Schema, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.current_schema().clone())
+    }
+
+    /// Return all known schema hashes (for server mode).
+    pub fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().known_schema_hashes())
+    }
+
+    /// Get a known schema by hash from catalogue state.
+    pub fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
     /// Access the underlying storage (for flushing, etc).
@@ -501,7 +520,9 @@ mod tests {
 
         // Query
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, object_id);
@@ -527,7 +548,9 @@ mod tests {
 
         // Verify update
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results[0].1[1], Value::Text("Charlie".to_string()));
 
@@ -536,7 +559,9 @@ mod tests {
 
         // Verify deleted
         let query = Query::new("users");
-        let future = runtime.query(query, None, None).unwrap();
+        let future = runtime
+            .query(query, None, ReadDurabilityOptions::default())
+            .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);
     }
