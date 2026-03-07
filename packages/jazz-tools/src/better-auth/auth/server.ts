@@ -4,9 +4,8 @@ import {
   MiddlewareContext,
   MiddlewareOptions,
 } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
-import { createAuthMiddleware } from "better-auth/plugins";
 import type { Account, AuthCredentials, ID } from "jazz-tools";
 
 // Define a type to have user fields mapped in the better-auth instance
