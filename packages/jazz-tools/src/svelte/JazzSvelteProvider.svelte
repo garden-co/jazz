@@ -13,7 +13,7 @@
 	let { client, children, fallback }: Props = $props();
 
 	const ctx = initJazzContext();
-	let resolvedClient: JazzClient | null = null;
+	let resolvedClient = $state<JazzClient | null>(null);
 	let error = $state<Error | null>(null);
 	let cancelled = false;
 
@@ -23,11 +23,11 @@
 				void c.shutdown();
 				return;
 			}
-			resolvedClient = c;
 			// Publish session before db so child components never observe a ready db
 			// with a stale null session during the first render tick.
 			ctx.session = c.session;
 			ctx.db = c.db;
+			resolvedClient = c;
 		})
 		.catch((reason) => {
 			error = reason instanceof Error ? reason : new Error(String(reason));
@@ -44,8 +44,8 @@
 {#if error}
 	<!-- Re-throw so an error boundary can catch it -->
 	{(() => { throw error; })()}
-{:else if ctx.db}
-	{@render children({ db: ctx.db })}
+{:else if resolvedClient}
+	{@render children({ db: resolvedClient.db })}
 {:else if fallback}
 	{@render fallback()}
 {/if}
