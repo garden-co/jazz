@@ -398,6 +398,11 @@ export const docNavigationItems = [
 				],
 			},
 			{
+				name: "Deployment",
+				href: "/docs/server-side/deployment",
+				done: 100,
+			},
+			{
 				name: "Server-side rendering",
 				href: "/docs/server-side/ssr",
 				done: {
