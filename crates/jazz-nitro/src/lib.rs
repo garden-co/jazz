@@ -36,6 +36,71 @@ use groove::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
+fn align_create_values_to_runtime_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &str,
+    values: &[Value],
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(&table.into()) else {
+        return values.to_vec();
+    };
+    let Some(runtime_table) = runtime_schema.get(&table.into()) else {
+        return values.to_vec();
+    };
+    if values.len() != declared_table.columns.columns.len() {
+        return values.to_vec();
+    }
+
+    let mut values_by_column = HashMap::new();
+    for (column, value) in declared_table.columns.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name.as_str().to_string(), value.clone());
+    }
+
+    let mut reordered = Vec::with_capacity(values.len());
+    for column in &runtime_table.columns.columns {
+        let Some(value) = values_by_column.remove(column.name.as_str()) else {
+            return values.to_vec();
+        };
+        reordered.push(value);
+    }
+
+    reordered
+}
+
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &str,
+    values: &[Value],
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(&table.into()) else {
+        return values.to_vec();
+    };
+    let Some(runtime_table) = runtime_schema.get(&table.into()) else {
+        return values.to_vec();
+    };
+    if values.len() < runtime_table.columns.columns.len() {
+        return values.to_vec();
+    }
+
+    let mut values_by_column = HashMap::new();
+    for (column, value) in runtime_table.columns.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name.as_str().to_string(), value.clone());
+    }
+
+    let mut reordered = Vec::with_capacity(values.len());
+    for column in &declared_table.columns.columns {
+        let Some(value) = values_by_column.remove(column.name.as_str()) else {
+            return values.to_vec();
+        };
+        reordered.push(value);
+    }
+    reordered.extend_from_slice(&values[runtime_table.columns.columns.len()..]);
+
+    reordered
+}
+
 fn convert_values(values_json: &str) -> Result<Vec<Value>, String> {
     serde_json::from_str(values_json).map_err(|e| format!("Invalid values JSON: {e}"))
 }
@@ -314,6 +379,7 @@ fn error_json(msg: String) -> String {
 pub struct JazzRuntimeImpl {
     core: Mutex<Option<NitroCoreType>>,
     upstream_server_id: Mutex<Option<ServerId>>,
+    declared_schema: Option<Schema>,
 }
 
 impl Default for JazzRuntimeImpl {
@@ -327,6 +393,7 @@ impl JazzRuntimeImpl {
         Self {
             core: Mutex::new(None),
             upstream_server_id: Mutex::new(None),
+            declared_schema: None,
         }
     }
 
@@ -364,7 +431,7 @@ impl JazzRuntimeImpl {
 
         let app_id_obj = AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
         let schema_manager =
-            SchemaManager::new(sync_manager, schema, app_id_obj, &env, &user_branch)
+            SchemaManager::new(sync_manager, schema.clone(), app_id_obj, &env, &user_branch)
                 .map_err(|e| format!("Failed to create SchemaManager: {e}"))?;
 
         let cache_size = 64 * 1024 * 1024; // 64MB
@@ -379,6 +446,7 @@ impl JazzRuntimeImpl {
 
         let mut guard = self.core.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(core);
+        self.declared_schema = Some(schema);
         Ok(())
     }
 
@@ -418,7 +486,21 @@ impl JazzRuntimeImpl {
     fn insert_inner(&mut self, table: String, values_json: String) -> Result<String, String> {
         let values = convert_values(&values_json)?;
         self.with_core("insert", |core| {
-            core.insert(&table, values, None)
+            let runtime_schema = core.current_schema().clone();
+            let aligned_values = self
+                .declared_schema
+                .as_ref()
+                .map(|declared_schema| {
+                    align_create_values_to_runtime_schema(
+                        declared_schema,
+                        &runtime_schema,
+                        &table,
+                        &values,
+                    )
+                })
+                .unwrap_or_else(|| values.clone());
+
+            core.insert(&table, aligned_values, None)
                 .map(|id| id.uuid().to_string())
                 .map_err(|e| format!("Insert failed: {e}"))
         })?
@@ -472,6 +554,7 @@ impl JazzRuntimeImpl {
         options_json: Option<String>,
     ) -> Result<String, String> {
         let query = parse_query(&query_json)?;
+        let output_table = query.table;
         let session = parse_session(session_json)?;
         let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
 
@@ -480,13 +563,27 @@ impl JazzRuntimeImpl {
         })?;
 
         let results = block_on(fut).map_err(|e| format!("Query failed: {e}"))?;
+        let runtime_schema =
+            self.with_core("query_schema", |core| core.current_schema().clone())?;
 
         let rows_json: Vec<serde_json::Value> = results
             .into_iter()
             .map(|(id, values)| {
+                let aligned_values = self
+                    .declared_schema
+                    .as_ref()
+                    .map(|declared_schema| {
+                        align_row_values_to_declared_schema(
+                            declared_schema,
+                            &runtime_schema,
+                            output_table.as_str(),
+                            &values,
+                        )
+                    })
+                    .unwrap_or(values);
                 serde_json::json!({
                     "id": id.uuid().to_string(),
-                    "values": values,
+                    "values": aligned_values,
                 })
             })
             .collect();
@@ -591,7 +688,21 @@ impl JazzRuntimeImpl {
         let values = convert_values(&values_json)?;
 
         let (object_id, receiver) = self.with_core("insert_persisted", |core| {
-            core.insert_persisted(&table, values, None, persistence_tier)
+            let runtime_schema = core.current_schema().clone();
+            let aligned_values = self
+                .declared_schema
+                .as_ref()
+                .map(|declared_schema| {
+                    align_create_values_to_runtime_schema(
+                        declared_schema,
+                        &runtime_schema,
+                        &table,
+                        &values,
+                    )
+                })
+                .unwrap_or_else(|| values.clone());
+
+            core.insert_persisted(&table, aligned_values, None, persistence_tier)
                 .map_err(|e| format!("Insert failed: {e}"))
         })??;
 
@@ -907,6 +1018,10 @@ mod tests {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"].as_str().unwrap(), id);
+        assert_eq!(rows[0]["values"][0]["type"], "Text");
+        assert_eq!(rows[0]["values"][0]["value"], "Buy milk");
+        assert_eq!(rows[0]["values"][1]["type"], "Boolean");
+        assert_eq!(rows[0]["values"][1]["value"], false);
 
         rt.close();
     }
@@ -1159,6 +1274,8 @@ mod tests {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"].as_str().unwrap(), id);
+        assert_eq!(rows[0]["values"][0]["value"], "Walk the dog");
+        assert_eq!(rows[0]["values"][1]["value"], true);
 
         // Delete
         alice.delete_row(id.clone());
