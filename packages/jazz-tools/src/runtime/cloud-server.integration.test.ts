@@ -374,6 +374,7 @@ async function connectClient(context: AppContext): Promise<JazzClient> {
     appId: context.appId,
     env: context.env,
     userBranch: context.userBranch,
+    tier: "worker",
   });
 
   return clientMod.JazzClient.connectWithRuntime(runtime, context);

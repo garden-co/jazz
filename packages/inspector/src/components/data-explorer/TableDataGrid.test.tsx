@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
-const mockUseAll = vi.fn();
+const mockSubscribeAll = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 
 const mockWasmSchema = {
@@ -16,7 +16,9 @@ const mockWasmSchema = {
 };
 
 vi.mock("jazz-tools/react", () => ({
-  useAll: (...args: unknown[]) => mockUseAll(...args),
+  useDb: () => ({
+    subscribeAll: (...args: unknown[]) => mockSubscribeAll(...args),
+  }),
 }));
 
 vi.mock("jazz-tools", () => ({
@@ -29,7 +31,11 @@ vi.mock("jazz-tools", () => ({
 }));
 
 vi.mock("../../contexts/devtools-context.js", () => ({
-  useDevtoolsContext: () => ({ wasmSchema: mockWasmSchema }),
+  useDevtoolsContext: () => ({
+    wasmSchema: mockWasmSchema,
+    runtime: "extension",
+    queryPropagation: "local-only",
+  }),
 }));
 
 vi.mock("react-router", async () => {
@@ -51,7 +57,10 @@ describe("TableDataGrid", () => {
       { id: "row-1", title: "alpha", done: true, meta: null },
     ];
 
-    mockUseAll.mockImplementation(() => currentRows);
+    mockSubscribeAll.mockImplementation((_, callback) => {
+      callback({ all: currentRows, delta: [] });
+      return vi.fn();
+    });
   });
 
   it("renders schema-derived columns and reactive rows", () => {
@@ -79,5 +88,15 @@ describe("TableDataGrid", () => {
     const firstDataRowCells = within(firstDataRow).getAllByRole("cell");
 
     expect(firstDataRowCells[1]?.textContent).toBe("alpha");
+  });
+
+  it("subscribes with local-only propagation in extension mode", () => {
+    render(<TableDataGrid />);
+
+    expect(mockSubscribeAll).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Function),
+      expect.objectContaining({ propagation: "local-only" }),
+    );
   });
 });

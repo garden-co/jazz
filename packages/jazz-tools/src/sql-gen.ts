@@ -14,15 +14,64 @@ import type {
 } from "./schema.js";
 import { sqlTypeToString } from "./schema.js";
 
+const BARE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_KEYWORDS = new Set([
+  "CREATE",
+  "TABLE",
+  "POLICY",
+  "ON",
+  "FOR",
+  "USING",
+  "WITH",
+  "CHECK",
+  "SESSION",
+  "INHERITS",
+  "INHERIT",
+  "VIA",
+  "REFERENCING",
+  "SELECT",
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "AND",
+  "OR",
+  "IN",
+  "CONTAINS",
+  "IS",
+  "ALTER",
+  "ADD",
+  "DROP",
+  "COLUMN",
+  "RENAME",
+  "TO",
+  "NOT",
+  "NULL",
+  "DEFAULT",
+  "TRUE",
+  "FALSE",
+  "REFERENCES",
+]);
+
+function sqlIdentifier(identifier: string): string {
+  if (BARE_IDENTIFIER_RE.test(identifier) && !RESERVED_KEYWORDS.has(identifier.toUpperCase())) {
+    return identifier;
+  }
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function sessionPathToSql(path: string[]): string {
+  return path.map(sqlIdentifier).join(".");
+}
+
 function columnToSql(column: Column): string {
-  const ref = column.references ? ` REFERENCES ${column.references}` : "";
+  const ref = column.references ? ` REFERENCES ${sqlIdentifier(column.references)}` : "";
   const nullability = column.nullable ? "" : " NOT NULL";
-  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
+  return `    ${sqlIdentifier(column.name)} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
 }
 
 function tableToSql(table: Table): string {
   const columnDefs = table.columns.map(columnToSql);
-  const createTable = `CREATE TABLE ${table.name} (\n${columnDefs.join(",\n")}\n);`;
+  const createTable = `CREATE TABLE ${sqlIdentifier(table.name)} (\n${columnDefs.join(",\n")}\n);`;
   const policyStatements = tablePoliciesToSql(table.name, table.policies);
 
   if (policyStatements.length === 0) {
@@ -38,7 +87,7 @@ export function schemaToSql(schema: Schema): string {
 
 function policyValueToSql(value: PolicyValue): string {
   if (value.type === "SessionRef") {
-    return `@session.${value.path.join(".")}`;
+    return `@session.${sessionPathToSql(value.path)}`;
   }
   return formatDefaultValue(value.value);
 }
@@ -46,29 +95,29 @@ function policyValueToSql(value: PolicyValue): string {
 function policyExprToSql(expr: PolicyExpr): string {
   switch (expr.type) {
     case "Cmp":
-      return `${expr.column} ${cmpOpToSql(expr.op)} ${policyValueToSql(expr.value)}`;
+      return `${sqlIdentifier(expr.column)} ${cmpOpToSql(expr.op)} ${policyValueToSql(expr.value)}`;
     case "IsNull":
-      return `${expr.column} IS NULL`;
+      return `${sqlIdentifier(expr.column)} IS NULL`;
     case "IsNotNull":
-      return `${expr.column} IS NOT NULL`;
+      return `${sqlIdentifier(expr.column)} IS NOT NULL`;
     case "Contains":
-      return `${expr.column} CONTAINS ${policyValueToSql(expr.value)}`;
+      return `${sqlIdentifier(expr.column)} CONTAINS ${policyValueToSql(expr.value)}`;
     case "In":
-      return `${expr.column} IN @session.${expr.session_path.join(".")}`;
+      return `${sqlIdentifier(expr.column)} IN @session.${sessionPathToSql(expr.session_path)}`;
     case "InList":
-      return `${expr.column} IN (${expr.values.map(policyValueToSql).join(", ")})`;
+      return `${sqlIdentifier(expr.column)} IN (${expr.values.map(policyValueToSql).join(", ")})`;
     case "Exists":
-      return `EXISTS (SELECT FROM ${expr.table} WHERE ${policyExprToSql(expr.condition)})`;
+      return `EXISTS (SELECT FROM ${sqlIdentifier(expr.table)} WHERE ${policyExprToSql(expr.condition)})`;
     case "ExistsRel":
       return "EXISTS_REL(<relation_ir>)";
     case "Inherits":
       return expr.max_depth === undefined
-        ? `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`
-        : `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column} MAX DEPTH ${expr.max_depth}`;
+        ? `INHERITS ${expr.operation.toUpperCase()} VIA ${sqlIdentifier(expr.via_column)}`
+        : `INHERITS ${expr.operation.toUpperCase()} VIA ${sqlIdentifier(expr.via_column)} MAX DEPTH ${expr.max_depth}`;
     case "InheritsReferencing":
       return expr.max_depth === undefined
-        ? `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${expr.source_table} VIA ${expr.via_column}`
-        : `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${expr.source_table} VIA ${expr.via_column} MAX DEPTH ${expr.max_depth}`;
+        ? `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${sqlIdentifier(expr.source_table)} VIA ${sqlIdentifier(expr.via_column)}`
+        : `INHERITS ${expr.operation.toUpperCase()} REFERENCING ${sqlIdentifier(expr.source_table)} VIA ${sqlIdentifier(expr.via_column)} MAX DEPTH ${expr.max_depth}`;
     case "And":
       return expr.exprs.map((inner) => `(${policyExprToSql(inner)})`).join(" AND ");
     case "Or":
@@ -135,7 +184,7 @@ function tablePoliciesToSql(tableName: string, policies: TablePolicies | undefin
     }
 
     statements.push(
-      `CREATE POLICY ${tableName}_${key}_policy ON ${tableName} FOR ${sqlOp} ${clauses.join(" ")};`,
+      `CREATE POLICY ${sqlIdentifier(`${tableName}_${key}_policy`)} ON ${sqlIdentifier(tableName)} FOR ${sqlOp} ${clauses.join(" ")};`,
     );
   }
 
@@ -171,22 +220,22 @@ function formatDefaultValue(value: unknown): string {
 function lensOpToForwardSql(table: string, op: LensOp): string {
   switch (op.type) {
     case "introduce":
-      return `ALTER TABLE ${table} ADD COLUMN ${op.column} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
+      return `ALTER TABLE ${sqlIdentifier(table)} ADD COLUMN ${sqlIdentifier(op.column)} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
     case "drop":
-      return `ALTER TABLE ${table} DROP COLUMN ${op.column};`;
+      return `ALTER TABLE ${sqlIdentifier(table)} DROP COLUMN ${sqlIdentifier(op.column)};`;
     case "rename":
-      return `ALTER TABLE ${table} RENAME COLUMN ${op.column} TO ${op.value};`;
+      return `ALTER TABLE ${sqlIdentifier(table)} RENAME COLUMN ${sqlIdentifier(op.column)} TO ${sqlIdentifier(op.value)};`;
   }
 }
 
 function lensOpToBackwardSql(table: string, op: LensOp): string {
   switch (op.type) {
     case "introduce":
-      return `ALTER TABLE ${table} DROP COLUMN ${op.column};`;
+      return `ALTER TABLE ${sqlIdentifier(table)} DROP COLUMN ${sqlIdentifier(op.column)};`;
     case "drop":
-      return `ALTER TABLE ${table} ADD COLUMN ${op.column} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
+      return `ALTER TABLE ${sqlIdentifier(table)} ADD COLUMN ${sqlIdentifier(op.column)} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
     case "rename":
-      return `ALTER TABLE ${table} RENAME COLUMN ${op.value} TO ${op.column};`;
+      return `ALTER TABLE ${sqlIdentifier(table)} RENAME COLUMN ${sqlIdentifier(op.value)} TO ${sqlIdentifier(op.column)};`;
   }
 }
 

@@ -44,12 +44,21 @@ In browser mode, there are two runtime instances:
 - Main thread runtime: in-memory, immediate local API surface.
 - Worker runtime: persistent OPFS runtime, also owns upstream server connectivity.
 
+With `driver: { type: "memory" }`, browser apps skip worker/OPFS entirely and run only the
+main-thread in-memory runtime with direct remote sync.
+
 ## Public Entry Points
 
 `createDb(config)` in `packages/jazz-tools/src/runtime/db.ts` is the primary app entry point. It chooses mode with:
 
-- Browser path: `Db.createWithWorker(...)` when both `window` and `Worker` exist.
-- Non-browser path: `Db.create(...)` with only in-memory runtime.
+- `driver: { type: "persistent" }` (default when omitted):
+  - Browser path: `Db.createWithWorker(...)` when both `window` and `Worker` exist.
+  - Non-browser path: `Db.create(...)`.
+- `driver: { type: "memory" }`:
+  - Always `Db.create(...)` (no worker, no OPFS, no tab leader election).
+  - Requires `serverUrl` (validated at `createDb`).
+
+In memory mode, default durability tier is `edge` when `serverUrl` is configured.
 
 `JazzProvider` in `packages/jazz-tools/src/react/provider.tsx` wraps this and exposes:
 
@@ -87,7 +96,7 @@ Primary TypeScript-facing APIs:
 
 Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/src/main.ts`):
 
-1. Build a `DbConfig` (app/env/branch/auth/tier/server options).
+1. Build a `DbConfig` (app/env/branch/auth/tier/server options + optional `driver` mode).
 2. Initialize with `Promise.all([createDb(config), resolveClientSession(config)])`.
 3. Read via `db.all(...)`/`db.one(...)` or `db.subscribeAll(...)`.
 4. Mutate via async local-first APIs (`insert`, `update`, `deleteFrom`) with optional `{ tier }` overrides.

@@ -15,12 +15,22 @@ export interface BackendQuerySchemaSource {
 
 export type BackendSchemaInput = WasmSchema | BackendSchemaSource | BackendQuerySchemaSource;
 
+export type BackendDriver =
+  | {
+      type: "persistent";
+      /** Path to the SurrealKV file used by the server runtime. */
+      dataPath: string;
+    }
+  | {
+      type: "memory";
+    };
+
 export interface BackendContextConfig extends Omit<
   AppContext,
   "schema" | "driver" | "clientId" | "tier"
 > {
-  /** Path to the SurrealKV file used by the server runtime. */
-  dataPath: string;
+  /** Server runtime driver mode and storage location. */
+  driver: BackendDriver;
   /** Optional default schema source (typically generated `app` export). */
   app?: BackendSchemaSource;
   /** Optional node durability tier identity. */
@@ -30,6 +40,12 @@ export interface BackendContextConfig extends Omit<
 interface ResolvedBackendContextConfig extends BackendContextConfig {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
+}
+
+function assertValidBackendConfig(config: BackendContextConfig): void {
+  if (config.driver.type === "memory" && !config.serverUrl) {
+    throw new Error("driver.type='memory' requires serverUrl.");
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,6 +96,7 @@ export class JazzContext {
   private clientInstance?: JazzClient;
 
   constructor(config: BackendContextConfig) {
+    assertValidBackendConfig(config);
     this.config = resolveLocalAuthDefaults(config);
     this.defaultSchemaInput = config.app;
   }
@@ -99,14 +116,24 @@ export class JazzContext {
     this.initializedSchemaJson = schemaJson;
     const nodeTier = this.config.tier ?? "edge";
 
-    this.runtime = new NapiRuntime(
-      schemaJson,
-      this.config.appId,
-      this.config.env ?? "dev",
-      this.config.userBranch ?? "main",
-      this.config.dataPath,
-      nodeTier,
-    );
+    if (this.config.driver.type === "persistent") {
+      this.runtime = new NapiRuntime(
+        schemaJson,
+        this.config.appId,
+        this.config.env ?? "dev",
+        this.config.userBranch ?? "main",
+        this.config.driver.dataPath,
+        nodeTier,
+      );
+    } else {
+      this.runtime = NapiRuntime.inMemory(
+        schemaJson,
+        this.config.appId,
+        this.config.env ?? "dev",
+        this.config.userBranch ?? "main",
+        nodeTier,
+      );
+    }
 
     const context: AppContext = {
       appId: this.config.appId,
