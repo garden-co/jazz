@@ -29,6 +29,13 @@ type SyncRequestBody = {
   payload: unknown;
 };
 
+type ObjectMutationRequest = {
+  method: string;
+  pathname: string;
+  headers: IncomingMessage["headers"];
+  body: Record<string, unknown>;
+};
+
 type SyncCaptureServerHandle = {
   baseUrl: string;
   eventClientIds: string[];
@@ -36,6 +43,7 @@ type SyncCaptureServerHandle = {
     headers: IncomingMessage["headers"];
     body: SyncRequestBody;
   }>;
+  objectRequests: ObjectMutationRequest[];
   closeLatestStream(): void;
   stop(): Promise<void>;
 };
@@ -136,6 +144,7 @@ async function listen(server: HttpServer): Promise<number> {
 
 async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
   const syncRequests: SyncCaptureServerHandle["syncRequests"] = [];
+  const objectRequests: SyncCaptureServerHandle["objectRequests"] = [];
   const eventClientIds: string[] = [];
   const openStreams = new Set<ServerResponse>();
   const server = createHttpServer(async (request, response) => {
@@ -164,6 +173,29 @@ async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
       return;
     }
 
+    if (
+      (request.method === "POST" || request.method === "PUT") &&
+      (url.pathname === "/sync/object" || url.pathname === "/sync/object/delete")
+    ) {
+      const rawBody = await readRequestBody(request);
+      objectRequests.push({
+        method: request.method,
+        pathname: url.pathname,
+        headers: request.headers,
+        body: JSON.parse(rawBody) as Record<string, unknown>,
+      });
+
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify(
+          request.method === "POST" && url.pathname === "/sync/object"
+            ? { object_id: `captured-object-${objectRequests.length}` }
+            : {},
+        ),
+      );
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/health") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ status: "ok" }));
@@ -180,6 +212,7 @@ async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
     baseUrl: `http://127.0.0.1:${port}`,
     eventClientIds,
     syncRequests,
+    objectRequests,
     closeLatestStream() {
       const latest = Array.from(openStreams).at(-1);
       latest?.destroy();
@@ -247,6 +280,15 @@ function isQuerySubscriptionPayload(payloadJson: string): boolean {
   }
 }
 
+function hasPayloadKind(payloadJson: string, payloadKind: string): boolean {
+  try {
+    const payload = JSON.parse(payloadJson) as Record<string, unknown>;
+    return payloadKind in payload;
+  } catch {
+    return false;
+  }
+}
+
 function isQuerySubscriptionRequest(request: { body: SyncRequestBody }): boolean {
   return (
     typeof request.body.payload === "object" &&
@@ -257,6 +299,34 @@ function isQuerySubscriptionRequest(request: { body: SyncRequestBody }): boolean
 
 async function settleAsyncSyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+function decodeSessionHeader(headerValue: string | string[] | undefined): Record<string, unknown> {
+  const encoded = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (!encoded) {
+    throw new Error("expected X-Jazz-Session header to be present");
+  }
+  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Record<string, unknown>;
+}
+
+function toBase64Url(value: unknown): string {
+  const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
+  return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function makeJwt(payload: Record<string, unknown>): string {
+  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
+}
+
+function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
+  return JSON.stringify({
+    QuerySubscription: {
+      query_id: queryId,
+      query: JSON.parse(queryJson) as Record<string, unknown>,
+      session: null,
+      propagation: "full",
+    },
+  });
 }
 
 async function createTempDir(prefix: string): Promise<string> {
@@ -305,6 +375,64 @@ describe("NAPI integration", () => {
       expect.any(String),
       false,
     ]);
+  }, 20_000);
+
+  it("routes client-originated subscriptions back through the real nested client callback shape", async () => {
+    const runtime = await createNapiRuntime(TEST_SCHEMA, {
+      appId: `napi-client-contract-${randomUUID()}`,
+      tier: "edge",
+    });
+    const queryJson = translateQuery(allTodosQuery._build(), TEST_SCHEMA);
+    const rawCalls: unknown[][] = [];
+
+    runtime.onSyncMessageToSend((...args: unknown[]) => {
+      rawCalls.push(args);
+    });
+
+    const clientId = runtime.addClient();
+    runtime.setClientRole?.(clientId, "peer");
+    runtime.onSyncMessageReceivedFromClient?.(
+      clientId,
+      buildClientQuerySubscriptionPayload(queryJson),
+    );
+
+    await vi.waitFor(
+      () => {
+        expect(
+          rawCalls.some(
+            (call) =>
+              isNestedOutboxCall(call) &&
+              call[1][0] === "client" &&
+              call[1][1] === clientId &&
+              hasPayloadKind(call[1][2], "QuerySettled"),
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
+
+    const objectId = runtime.insert("todos", [
+      { type: "Text", value: "client-synced-item" },
+      { type: "Boolean", value: false },
+    ]);
+
+    await vi.waitFor(
+      () => {
+        expect(
+          rawCalls.some(
+            (call) =>
+              isNestedOutboxCall(call) &&
+              call[1][0] === "client" &&
+              call[1][1] === clientId &&
+              hasPayloadKind(call[1][2], "ObjectUpdated"),
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
+
+    expect(rawCalls.every((call) => isNestedOutboxCall(call))).toBe(true);
+    expect(objectId).toEqual(expect.any(String));
   }, 20_000);
 
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {
@@ -410,6 +538,175 @@ describe("NAPI integration", () => {
       await captureServer.stop();
     }
   }, 25_000);
+
+  it("sends backend impersonation headers for createJazzContext(...).forSession() mutations", async () => {
+    const captureServer = await startSyncCaptureServer();
+    let context: {
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): {
+        create(table: string, values: Array<Record<string, unknown>>): Promise<string>;
+        update(objectId: string, updates: Record<string, unknown>): Promise<void>;
+        delete(objectId: string): Promise<void>;
+      };
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: `napi-session-headers-${randomUUID()}`,
+        app: { wasmSchema: TEST_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: captureServer.baseUrl,
+        backendSecret: "napi-session-secret",
+      });
+
+      const session = {
+        user_id: "session-user",
+        claims: { role: "editor", team: "alpha" },
+      };
+      const scopedClient = context.forSession(session);
+      const createdObjectId = await scopedClient.create("todos", [
+        { type: "Text", value: "session-created-item" },
+        { type: "Boolean", value: false },
+      ]);
+
+      await scopedClient.update(createdObjectId, {
+        done: { type: "Boolean", value: true },
+      });
+      await scopedClient.delete(createdObjectId);
+
+      await vi.waitFor(() => expect(captureServer.objectRequests).toHaveLength(3), {
+        timeout: 15_000,
+      });
+
+      for (const request of captureServer.objectRequests) {
+        expect(request.headers["x-jazz-backend-secret"]).toBe("napi-session-secret");
+        expect(decodeSessionHeader(request.headers["x-jazz-session"])).toEqual(session);
+        expect(request.headers.authorization).toBeUndefined();
+        expect(request.headers["x-jazz-local-mode"]).toBeUndefined();
+        expect(request.headers["x-jazz-local-token"]).toBeUndefined();
+      }
+
+      expect(captureServer.objectRequests[0]).toMatchObject({
+        method: "POST",
+        pathname: "/sync/object",
+        body: {
+          table: "todos",
+          values: [
+            { type: "Text", value: "session-created-item" },
+            { type: "Boolean", value: false },
+          ],
+          schema_context: {
+            env: "dev",
+            user_branch: "main",
+            schema_hash: expect.any(String),
+          },
+        },
+      });
+      expect(captureServer.objectRequests[1]).toMatchObject({
+        method: "PUT",
+        pathname: "/sync/object",
+        body: {
+          object_id: createdObjectId,
+          updates: [["done", { type: "Boolean", value: true }]],
+          schema_context: {
+            env: "dev",
+            user_branch: "main",
+            schema_hash: expect.any(String),
+          },
+        },
+      });
+      expect(captureServer.objectRequests[2]).toMatchObject({
+        method: "POST",
+        pathname: "/sync/object/delete",
+        body: {
+          object_id: createdObjectId,
+          schema_context: {
+            env: "dev",
+            user_branch: "main",
+            schema_hash: expect.any(String),
+          },
+        },
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await captureServer.stop();
+    }
+  }, 20_000);
+
+  it("extracts JWT request auth and still sends backend impersonation headers for createJazzContext(...).forRequest()", async () => {
+    const captureServer = await startSyncCaptureServer();
+    let context: {
+      forRequest(request: { headers: Record<string, string> }): {
+        create(table: string, values: Array<Record<string, unknown>>): Promise<string>;
+      };
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: `napi-request-headers-${randomUUID()}`,
+        app: { wasmSchema: TEST_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: captureServer.baseUrl,
+        backendSecret: "napi-request-secret",
+      });
+
+      const jwt = makeJwt({
+        sub: "request-user",
+        claims: { role: "reviewer", tenant: "beta" },
+      });
+      const scopedClient = context.forRequest({
+        headers: {
+          authorization: `Bearer ${jwt}`,
+        },
+      });
+
+      const createdObjectId = await scopedClient.create("todos", [
+        { type: "Text", value: "request-created-item" },
+        { type: "Boolean", value: false },
+      ]);
+
+      await vi.waitFor(() => expect(captureServer.objectRequests).toHaveLength(1), {
+        timeout: 15_000,
+      });
+
+      expect(createdObjectId).toBe("captured-object-1");
+      expect(captureServer.objectRequests[0]).toMatchObject({
+        method: "POST",
+        pathname: "/sync/object",
+        body: {
+          table: "todos",
+          values: [
+            { type: "Text", value: "request-created-item" },
+            { type: "Boolean", value: false },
+          ],
+        },
+      });
+      expect(captureServer.objectRequests[0]?.headers["x-jazz-backend-secret"]).toBe(
+        "napi-request-secret",
+      );
+      expect(
+        decodeSessionHeader(captureServer.objectRequests[0]?.headers["x-jazz-session"]),
+      ).toEqual({
+        user_id: "request-user",
+        claims: { role: "reviewer", tenant: "beta" },
+      });
+      expect(captureServer.objectRequests[0]?.headers.authorization).toBeUndefined();
+      expect(captureServer.objectRequests[0]?.headers["x-jazz-local-mode"]).toBeUndefined();
+      expect(captureServer.objectRequests[0]?.headers["x-jazz-local-token"]).toBeUndefined();
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await captureServer.stop();
+    }
+  }, 20_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
     const port = await getAvailablePort();
