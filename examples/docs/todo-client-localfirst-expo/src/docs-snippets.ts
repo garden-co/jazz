@@ -110,7 +110,7 @@ export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
     { tier: "worker" },
   );
 
-  await db.update(app.todos, id, { done: true }, { tier: "worker" });
-  await db.deleteFrom(app.todos, id, { tier: "worker" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "worker" });
+  await db.deleteDurable(app.todos, id, { tier: "worker" });
 }
 // #endregion writing-durability-expo

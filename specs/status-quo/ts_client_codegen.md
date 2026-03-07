@@ -126,13 +126,16 @@ In memory mode with `serverUrl`, default durability tier is `edge`.
 - `localUpdates?: "immediate" | "deferred"` (default: `immediate`)
 - `propagation?: "full" | "local-only"` (default `full`)
 
-### Mutations (Async Local-First)
+### Mutations (Local-First + Durable Variants)
 
-- `db.insert(table, data, options?)` — applies local write immediately and resolves with new ID at durability tier
-- `db.update(table, id, data, options?)` — applies local update immediately and resolves at durability tier
-- `db.deleteFrom(table, id, options?)` — applies local delete immediately and resolves at durability tier
+- `db.insert(table, data)` — applies a local write immediately and returns the inserted row
+- `db.update(table, id, data)` — applies a local update immediately and returns `void`
+- `db.delete(table, id)` — applies a local delete immediately and returns `void`
+- `db.insertDurable(table, data, { tier })` — applies a local write immediately and resolves with the inserted row at the requested durability tier
+- `db.updateDurable(table, id, data, options?)` — applies a local update immediately and resolves at the requested durability tier
+- `db.deleteDurable(table, id, options?)` — applies a local delete immediately and resolves at the requested durability tier
 
-`options` supports:
+Durable mutation options support:
 
 - `tier?: "worker" | "edge" | "global"`
 

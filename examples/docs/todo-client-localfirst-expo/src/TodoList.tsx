@@ -37,19 +37,19 @@ export function TodoList() {
   // #endregion reading-reactive-hooks-expo
 
   // #region writing-use-db-expo
-  const addTodo = async () => {
+  const addTodo = () => {
     const trimmed = title.trim();
     if (!trimmed || !sessionUserId) return;
     db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
-  const toggleTodo = async (todo: Todo) => {
-    await db.update(app.todos, todo.id, { done: !todo.done });
+  const toggleTodo = (todo: Todo) => {
+    db.update(app.todos, todo.id, { done: !todo.done });
   };
 
-  const removeTodo = async (id: string) => {
-    await db.deleteFrom(app.todos, id);
+  const removeTodo = (id: string) => {
+    db.delete(app.todos, id);
   };
   // #endregion writing-use-db-expo
 

@@ -99,14 +99,14 @@ Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/
 1. Build a `DbConfig` (app/env/branch/auth/tier/server options + optional `driver` mode).
 2. Initialize with `Promise.all([createDb(config), resolveClientSession(config)])`.
 3. Read via `db.all(...)`/`db.one(...)` or `db.subscribeAll(...)`.
-4. Mutate via async local-first APIs (`insert`, `update`, `deleteFrom`) with optional `{ tier }` overrides.
+4. Mutate via local-first APIs (`insert`, `update`, `delete`) or durable variants (`insertDurable`, `updateDurable`, `deleteDurable`) when tiered acknowledgement matters.
 5. Tear down with `db.shutdown()`.
 
 ## Runtime Layers and Responsibilities
 
 1. `Db` (`runtime/db.ts`)
 
-- High-level typed API (`insert`, `update`, `deleteFrom`, `all`, `one`, `subscribeAll`).
+- High-level typed API (`insert`, `update`, `delete`, `insertDurable`, `updateDurable`, `deleteDurable`, `all`, `one`, `subscribeAll`).
 - Creates and memoizes `JazzClient` per schema key.
 - Creates worker + bridge in browser mode.
 - Waits for bridge init before durability-tiered mutations.
@@ -172,7 +172,7 @@ Payloads are JSON strings for sync messages (`payload: string`).
 
 ### 2. Mutation Path
 
-Durability mutation (`insert`, `update`, `deleteFrom` with optional `{ tier }`):
+Durability mutation (`insertDurable`, `updateDurable`, `deleteDurable`):
 
 1. `Db` waits for bridge init (`ensureBridgeReady()`).
 2. Call uses the main-thread `JazzClient` durable mutation API.

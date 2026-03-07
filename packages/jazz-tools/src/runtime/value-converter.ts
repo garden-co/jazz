@@ -1,8 +1,8 @@
 /**
  * Convert JS values to WasmValue types for mutations.
  *
- * Used by Db.insert()/Db.insertDurable() and Db.update() to convert typed Init objects
- * into the Value[] format expected by JazzClient.
+ * Used by Db.insert()/Db.insertDurable() and Db.update()/Db.updateDurable()
+ * to convert typed Init objects into the Value[] format expected by JazzClient.
  */
 
 import type { WasmSchema, ColumnType, Value as WasmValue } from "../drivers/types.js";

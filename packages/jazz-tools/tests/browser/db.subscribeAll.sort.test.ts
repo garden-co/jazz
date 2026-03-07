@@ -226,7 +226,7 @@ describe("db.subscribeAll sorting browser integration", () => {
           "expected initial sorted rows",
         );
 
-        await db.deleteFrom(todos, idB);
+        await db.delete(todos, idB);
 
         await waitForCondition(
           () => {
@@ -480,7 +480,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
 
         await db.update(todos, idC, { rank: 0 });
-        await db.deleteFrom(todos, idA);
+        await db.delete(todos, idA);
         const { id: idD } = await db.insert(todos, { title: "D", rank: 2, done: false });
 
         await waitForCondition(
@@ -677,7 +677,7 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
         expect(latestIds(snapshots)).toEqual([idB, idC]);
 
-        await db.deleteFrom(todos, idA);
+        await db.delete(todos, idA);
 
         await waitForCondition(
           () => {
