@@ -18,31 +18,35 @@
 	}
 </script>
 
-<form onsubmit={handleSubmit}>
-	<input
-		type="text"
-		bind:value={title}
-		placeholder="What needs to be done?"
-		required
-	/>
-	<button type="submit" disabled={!sessionUserId}>Add</button>
-</form>
-<ul id="todo-list">
-	{#each todos.current ?? [] as todo (todo.id)}
-		<li class={todo.done ? 'done' : ''}>
-			<input
-				type="checkbox"
-				checked={todo.done}
-				onchange={() => db.update(app.todos, todo.id, { done: !todo.done })}
-				class="toggle"
-			/>
-			<span>{todo.title}</span>
-			{#if todo.description}
-				<small>{todo.description}</small>
-			{/if}
-			<button class="delete-btn" onclick={() => db.deleteFrom(app.todos, todo.id)}>
-				&times;
-			</button>
-		</li>
-	{/each}
-</ul>
+{#if sessionUserId}
+	<form onsubmit={handleSubmit}>
+		<input
+			type="text"
+			bind:value={title}
+			placeholder="What needs to be done?"
+			required
+		/>
+		<button type="submit">Add</button>
+	</form>
+	<ul id="todo-list">
+		{#each todos.current ?? [] as todo (todo.id)}
+			<li class={todo.done ? 'done' : ''}>
+				<input
+					type="checkbox"
+					checked={todo.done}
+					onchange={() => db.update(app.todos, todo.id, { done: !todo.done })}
+					class="toggle"
+				/>
+				<span>{todo.title}</span>
+				{#if todo.description}
+					<small>{todo.description}</small>
+				{/if}
+				<button class="delete-btn" onclick={() => db.deleteFrom(app.todos, todo.id)}>
+					&times;
+				</button>
+			</li>
+		{/each}
+	</ul>
+{:else}
+	<p>Loading session...</p>
+{/if}
