@@ -454,12 +454,35 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = await db.insert(todos, { title: "Original", done: false });
-    await db.update(todos, id, { done: true });
+    const { id } = db.insert(todos, { title: "Original", done: false });
+    const result = db.update(todos, id, { done: true });
+    expect(result).toBeUndefined();
 
     const results = await db.all(allTodos);
     expect(results.length).toBe(1);
     expect(results[0].title).toBe("Original");
+    expect(results[0].done).toBe(true);
+  });
+
+  it("updates a row durably", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("update-durable") },
+      }),
+    );
+
+    const { id } = await db.insertDurable(
+      todos,
+      { title: "Original", done: false },
+      { tier: "worker" },
+    );
+    const pending = db.updateDurable(todos, id, { done: true }, { tier: "worker" });
+    expect(pending).toBeInstanceOf(Promise);
+    await pending;
+
+    const results = await db.all(allTodos, { tier: "worker" });
+    expect(results.length).toBe(1);
     expect(results[0].done).toBe(true);
   });
 
@@ -471,11 +494,35 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = await db.insert(todos, { title: "Ephemeral", done: false });
+    const { id } = db.insert(todos, { title: "Ephemeral", done: false });
     expect((await db.all(allTodos)).length).toBe(1);
 
-    await db.deleteFrom(todos, id);
+    const result = db.delete(todos, id);
+    expect(result).toBeUndefined();
     const results = await db.all(allTodos);
+    expect(results.length).toBe(0);
+  });
+
+  it("deletes a row durably", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("delete-durable") },
+      }),
+    );
+
+    const { id } = await db.insertDurable(
+      todos,
+      { title: "Ephemeral", done: false },
+      { tier: "worker" },
+    );
+    expect((await db.all(allTodos, { tier: "worker" })).length).toBe(1);
+
+    const pending = db.deleteDurable(todos, id, { tier: "worker" });
+    expect(pending).toBeInstanceOf(Promise);
+    await pending;
+
+    const results = await db.all(allTodos, { tier: "worker" });
     expect(results.length).toBe(0);
   });
 

@@ -938,7 +938,7 @@ Deep dive: [Reading Data](/docs/reading-data).
   };
 
   const removeTodo = async (id: string) => {
-    await db.deleteFrom(app.todos, id);
+    await db.delete(app.todos, id);
   };
 ```
 
@@ -982,7 +982,7 @@ Use base mutation APIs with `{ tier }` when you need explicit write durability a
   );
 
   await db.update(app.todos, id, { done: true }, { tier: "worker" });
-  await db.deleteFrom(app.todos, id, { tier: "worker" });
+  await db.delete(app.todos, id, { tier: "worker" });
 }
 ```
 
@@ -1331,7 +1331,7 @@ Deep dive: [Reading Data](/docs/reading-data).
   }
 
   async function removeTodo(id: string) {
-    await db.deleteFrom(app.todos, id);
+    await db.delete(app.todos, id);
   }
 ```
 
@@ -1366,7 +1366,7 @@ Use base mutation APIs with `{ tier }` to wait for specific durability tiers:
 
   const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
   await db.update(app.todos, id, { done: true }, { tier: "edge" });
-  await db.deleteFrom(app.todos, id, { tier: "global" });
+  await db.delete(app.todos, id, { tier: "global" });
 }
 ```
 
@@ -1747,13 +1747,13 @@ Deep dive: [Reading Data](/docs/reading-data).
 	}
 
 	async function removeTodo(id: string) {
-		await db.deleteFrom(app.todos, id);
+		await db.delete(app.todos, id);
 	}
 
 	async function addImportantTodo(todoTitle: string) {
 		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
 		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
-		await db.deleteFrom(app.todos, id, { tier: 'global' });
+		await db.delete(app.todos, id, { tier: 'global' });
 	}
 
 </script>
@@ -1811,7 +1811,7 @@ Use base mutation APIs with `{ tier }` when you need durability guarantees befor
 	async function addImportantTodo(todoTitle: string) {
 		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
 		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
-		await db.deleteFrom(app.todos, id, { tier: 'global' });
+		await db.delete(app.todos, id, { tier: 'global' });
 	}
 ```
 
@@ -3331,7 +3331,7 @@ DESCRIPTION:Insert, update, and delete APIs with local-first execution, framewor
 
 ## Local-First Writes
 
-`insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
+`insert`, `update`, and `delete` apply immediately in the local runtime.
 That keeps UI latency low because local state updates do not wait for any network hop.
 
 Mutation methods return promises that resolve when the requested durability tier is reached.
@@ -3350,7 +3350,7 @@ Use the framework context binding to access the shared `Db` instance and execute
   }
 
   async function removeTodo(id: string) {
-    await db.deleteFrom(app.todos, id);
+    await db.delete(app.todos, id);
   }
 ```
 
@@ -3381,7 +3381,7 @@ async function removeTodo(id: string) {
   };
 
   const removeTodo = async (id: string) => {
-    await db.deleteFrom(app.todos, id);
+    await db.delete(app.todos, id);
   };
 ```
 
@@ -3398,7 +3398,7 @@ async function removeTodo(id: string) {
 	}
 
 	async function removeTodo(id: string) {
-		await db.deleteFrom(app.todos, id);
+		await db.delete(app.todos, id);
 	}
 ```
 
@@ -3413,7 +3413,7 @@ async function removeTodo(id: string) {
     project: EXAMPLE_PROJECT_ID,
   });
   await db.update(app.todos, todoId, { done: true });
-  await db.deleteFrom(app.todos, todoId);
+  await db.delete(app.todos, todoId);
 }
 ```
 
@@ -3461,7 +3461,7 @@ Notes:
 
 - `insert(table, data, options?)`
 - `update(table, id, data, options?)`
-- `deleteFrom(table, id, options?)`
+- `delete(table, id, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
 
 Durability tiers control when the returned promise resolves:
@@ -3499,7 +3499,7 @@ In practical terms:
   );
 
   await db.update(app.todos, id, { done: true }, { tier: "global" });
-  await db.deleteFrom(app.todos, id, { tier: "global" });
+  await db.delete(app.todos, id, { tier: "global" });
 }
 ```
 

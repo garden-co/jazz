@@ -49,7 +49,7 @@ export function TodoList() {
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
-        <Pressable onPress={() => db.deleteFrom(app.todos, item.id)} style={styles.deleteButton}>
+        <Pressable onPress={() => db.delete(app.todos, item.id)} style={styles.deleteButton}>
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>

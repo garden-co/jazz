@@ -103,7 +103,7 @@ export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
     { title: todoTitle, done: false },
     { tier: "edge" },
   );
-  await db.update(app.todos, id, { done: true }, { tier: "edge" });
-  await db.deleteFrom(app.todos, id, { tier: "global" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
+  await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 // #endregion writing-durability-react
