@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
   id-token: write
   pull-requests: read
@@ -19,7 +20,7 @@ permissions:
 jobs:
   mark-preview-pending:
     name: Mark release preview pending
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: startsWith(github.ref, 'refs/heads/changeset-release/')
     steps:
       - name: Set pending commit status
@@ -45,7 +46,7 @@ jobs:
 
   mark-preview-final:
     name: Mark release preview result
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always() && startsWith(github.ref, 'refs/heads/changeset-release/')
     needs: [mark-preview-pending, preview]
     steps:
