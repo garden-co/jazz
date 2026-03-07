@@ -21,8 +21,11 @@ import {
   DEVTOOLS_EVENTS,
   DEVTOOLS_PORT_NAME,
   DevToolsBootstrap,
+  DevtoolsBridgeCommand,
   DevtoolsEventEnvelope,
-  DevtoolsRequestEnvelope,
+  DevtoolsEventPayloadByEvent,
+  DevtoolsRequestPayloadByCommand,
+  DevtoolsResponsePayloadByCommand,
   DevtoolsResponseEnvelope,
   isRecord,
   isSerializableDbConfig,
@@ -228,7 +231,12 @@ async function ensureDevtoolsPort(): Promise<any> {
       eventEnvelope.kind === "event" &&
       eventEnvelope.event === DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA
     ) {
-      const payload = isRecord(eventEnvelope.payload) ? eventEnvelope.payload : {};
+      const payload = eventEnvelope.payload as
+        | DevtoolsEventPayloadByEvent[typeof DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA]
+        | undefined;
+      if (!payload) {
+        return;
+      }
       const bridgeSubscriptionId = payload.subscriptionId;
       if (typeof bridgeSubscriptionId !== "string") {
         return;
@@ -296,14 +304,14 @@ async function ensureDevtoolsPort(): Promise<any> {
   return devtoolsPort;
 }
 
-async function sendDevtoolsRequest<TPayload>(
-  command: string,
-  payload: unknown,
+async function sendDevtoolsRequest<TCommand extends DevtoolsBridgeCommand>(
+  command: TCommand,
+  payload: DevtoolsRequestPayloadByCommand[TCommand],
   timeoutMs = REQUEST_TIMEOUT_MS,
-): Promise<TPayload> {
+): Promise<DevtoolsResponsePayloadByCommand[TCommand]> {
   const port = await ensureDevtoolsPort();
   const requestId = randomId();
-  const envelope: DevtoolsRequestEnvelope = {
+  const envelope = {
     channel: DEVTOOLS_BRIDGE_CHANNEL,
     kind: "request",
     requestId,
@@ -311,14 +319,14 @@ async function sendDevtoolsRequest<TPayload>(
     payload,
   };
 
-  return new Promise<TPayload>((resolve, reject) => {
+  return new Promise<DevtoolsResponsePayloadByCommand[TCommand]>((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
       pendingRequests.delete(requestId);
       reject(new Error(`DevTools bridge request timed out (${command}).`));
     }, timeoutMs);
 
     pendingRequests.set(requestId, {
-      resolve: (value: unknown) => resolve(value as TPayload),
+      resolve: (value: unknown) => resolve(value as DevtoolsResponsePayloadByCommand[TCommand]),
       reject,
       timeoutId,
     });
@@ -337,11 +345,11 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
   announcePromise = (async () => {
     while (true) {
       try {
-        const result = await sendDevtoolsRequest<{
-          ready?: boolean;
-          wasmSchema?: WasmSchema;
-          dbConfig?: DbConfig;
-        }>(DEVTOOLS_COMMANDS.ANNOUNCE, {}, ANNOUNCE_REQUEST_TIMEOUT_MS);
+        const result = await sendDevtoolsRequest(
+          DEVTOOLS_COMMANDS.ANNOUNCE,
+          {},
+          ANNOUNCE_REQUEST_TIMEOUT_MS,
+        );
 
         if (
           !isRecord(result) ||
@@ -444,8 +452,7 @@ class DevToolsJazzClient implements JazzClient {
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
     const payload = { query, options, tier: options?.tier };
-    const rows = await sendDevtoolsRequest<Row[]>(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload);
-    return rows;
+    return (await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload)) as Row[];
   }
   queryInternal(
     queryJson: string,
