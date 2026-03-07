@@ -970,8 +970,9 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): Promise<string> {
     const client = this.getClient(table._schema);
+    const runtimeSchema = client.getSchema();
     await this.ensureBridgeReady();
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
+    const values = toValueArray(data as Record<string, unknown>, runtimeSchema, table._table);
     return client.create(table._table, values, options);
   }
 
@@ -985,8 +986,9 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    const runtimeSchema = client.getSchema();
     await this.ensureBridgeReady();
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    const updates = toUpdateRecord(data as Record<string, unknown>, runtimeSchema, table._table);
     await client.update(id, updates, options);
   }
 
@@ -1075,15 +1077,16 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
+    const runtimeSchema = client.getSchema();
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const rows = await client.query(translateQuery(builderJson, query._schema), options);
+    const rows = await client.query(translateQuery(builderJson, runtimeSchema), options);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(runtimeSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    return transformRows<T>(rows, query._schema, outputTable, outputIncludes);
+    return transformRows<T>(rows, runtimeSchema, outputTable, outputIncludes);
   }
 
   /**
@@ -1132,17 +1135,18 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
+    const runtimeSchema = client.getSchema();
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(runtimeSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    const wasmQuery = translateQuery(builderJson, query._schema);
+    const wasmQuery = translateQuery(builderJson, runtimeSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], query._schema, outputTable, outputIncludes)[0];
+      return transformRows<T>([row], runtimeSchema, outputTable, outputIncludes)[0];
     };
 
     const subId = client.subscribeInternal(
