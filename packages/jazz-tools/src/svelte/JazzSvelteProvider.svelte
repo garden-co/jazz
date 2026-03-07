@@ -24,8 +24,10 @@
 				return;
 			}
 			resolvedClient = c;
-			ctx.db = c.db;
+			// Publish session before db so child components never observe a ready db
+			// with a stale null session during the first render tick.
 			ctx.session = c.session;
+			ctx.db = c.db;
 		})
 		.catch((reason) => {
 			error = reason instanceof Error ? reason : new Error(String(reason));
