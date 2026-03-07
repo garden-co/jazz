@@ -146,6 +146,13 @@ mod unit_tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use jazz_tools::metadata::{MetadataKey, ObjectType};
+    use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+    use jazz_tools::schema_manager::encode_schema;
+    use serde_json::Value;
+    use uuid::Uuid;
 
     const JWT_SECRET: &str = "test-jwt-secret-for-integration";
     const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
@@ -406,5 +413,91 @@ mod integration_tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_schema_hash_endpoint_returns_the_pushed_schema() {
+        let server = TestServer::start().await;
+        let app_id = "00000000-0000-0000-0000-000000000001";
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let expected_hash = schema_hash.to_string();
+        let encoded_schema = encode_schema(&schema);
+        let object_id = schema_hash.to_object_id().to_string();
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MetadataKey::Type.as_str().to_string(),
+            ObjectType::CatalogueSchema.as_str().to_string(),
+        );
+        metadata.insert(MetadataKey::AppId.as_str().to_string(), app_id.to_string());
+        metadata.insert(
+            MetadataKey::SchemaHash.as_str().to_string(),
+            hex::encode(schema_hash.as_bytes()),
+        );
+
+        let sync_payload = json!({
+            "client_id": Uuid::new_v4().to_string(),
+            "payload": {
+                "ObjectUpdated": {
+                    "object_id": object_id,
+                    "metadata": {
+                        "id": object_id,
+                        "metadata": metadata
+                    },
+                    "branch_name": "main",
+                    "commits": [
+                        {
+                            "parents": [],
+                            "content": encoded_schema,
+                            "timestamp": 1,
+                            "author": Uuid::new_v4().to_string(),
+                            "metadata": null
+                        }
+                    ]
+                }
+            }
+        });
+
+        let sync_response = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+            .json(&sync_payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sync_response.status(), StatusCode::OK);
+
+        let hashes_response = client()
+            .get(format!("{}/schemas", server.base_url()))
+            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hashes_response.status(), StatusCode::OK);
+        let hashes_json: Value = hashes_response.json().await.unwrap();
+        assert!(hashes_json["hashes"].as_array().is_some_and(|hashes| {
+            hashes
+                .iter()
+                .any(|hash| hash.as_str() == Some(expected_hash.as_str()))
+        }));
+
+        let schema_response = client()
+            .get(format!("{}/schema/{expected_hash}", server.base_url()))
+            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(schema_response.status(), StatusCode::OK);
+        let schema_json: Value = schema_response.json().await.unwrap();
+        let expected_schema_json = serde_json::to_value(schema.clone()).unwrap();
+        assert_eq!(schema_json, expected_schema_json);
     }
 }

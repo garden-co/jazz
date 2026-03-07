@@ -38,19 +38,19 @@ impl SyncManager {
                 let persisted =
                     self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
-                // Emit ack back to server if we have a tier
-                if let Some(tier) = self.my_tier
-                    && !persisted.is_empty()
-                {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Server(server_id),
-                        payload: SyncPayload::PersistenceAck {
-                            object_id,
-                            branch_name,
-                            confirmed_commits: persisted,
-                            tier,
-                        },
-                    });
+                // Emit ack back to server for each local durability identity.
+                if !persisted.is_empty() {
+                    for tier in self.my_tiers.iter().copied() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Server(server_id),
+                            payload: SyncPayload::PersistenceAck {
+                                object_id,
+                                branch_name,
+                                confirmed_commits: persisted.clone(),
+                                tier,
+                            },
+                        });
+                    }
                 }
 
                 // Forward to clients whose scope includes this object/branch
@@ -170,6 +170,19 @@ impl SyncManager {
                         // Trusted — apply directly
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
+                    ClientRole::Backend => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
                     ClientRole::User => {
                         // User requires session
                         let Some(session) = &client.session else {
@@ -241,6 +254,19 @@ impl SyncManager {
                     ClientRole::Peer | ClientRole::Admin => {
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
+                    ClientRole::Backend => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
                     ClientRole::User => {
                         let Some(session) = &client.session else {
                             self.outbox.push(OutboxEntry {
@@ -288,7 +314,24 @@ impl SyncManager {
                 query_id,
                 query,
                 session,
+                propagation,
             } => {
+                // Warn if the payload carries a session that differs from the one established
+                // during the SSE handshake — this would indicate a spoofing attempt.
+                if let (Some(payload_session), Some(client_session)) = (session, &client.session)
+                    && payload_session != client_session
+                {
+                    tracing::warn!(
+                        %client_id,
+                        "QuerySubscription payload session does not match client session; using client session"
+                    );
+                }
+                // Prefer the server-established session (set from validated auth headers
+                // during the SSE handshake) over whatever the client claims in the payload.
+                // Fall back to the payload only for anonymous/demo clients whose
+                // client.session is None.  Note: despite the name, client.session is
+                // server-owned state — not a value the client can supply directly.
+                let effective_session = client.session.clone().or_else(|| session.clone());
                 // Track origin for QuerySettled relay
                 self.query_origin
                     .entry(*query_id)
@@ -299,7 +342,8 @@ impl SyncManager {
                         client_id,
                         query_id: *query_id,
                         query: query.as_ref().clone(),
-                        session: session.clone(),
+                        session: effective_session,
+                        propagation: *propagation,
                     });
             }
             // Handle query unsubscription
@@ -403,19 +447,19 @@ impl SyncManager {
                 let persisted =
                     self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
-                // Emit ack back to client if we have a tier
-                if let Some(tier) = self.my_tier
-                    && !persisted.is_empty()
-                {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Client(client_id),
-                        payload: SyncPayload::PersistenceAck {
-                            object_id,
-                            branch_name,
-                            confirmed_commits: persisted,
-                            tier,
-                        },
-                    });
+                // Emit ack back to client for each local durability identity.
+                if !persisted.is_empty() {
+                    for tier in self.my_tiers.iter().copied() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::PersistenceAck {
+                                object_id,
+                                branch_name,
+                                confirmed_commits: persisted.clone(),
+                                tier,
+                            },
+                        });
+                    }
                 }
 
                 // Forward to servers

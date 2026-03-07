@@ -120,7 +120,7 @@ Call chain:
 
 1. `Db.subscribeAll()` -> `client.subscribe(...)`
 2. `JazzClient.subscribeInternal(...)` -> `runtime.subscribe(...)`
-3. Rust `RuntimeCore::subscribe_with_settled_tier(...)`
+3. Rust `RuntimeCore::subscribe_with_durability_and_propagation(...)`
 4. first `process()` pass compiles and settles; callback then remains registered for incremental updates
 
 > [`runtime/db.ts:582`](../../packages/jazz-tools/src/runtime/db.ts#L582)
@@ -220,9 +220,10 @@ Main-thread `row_loader` behavior during settle:
 
 Delivery semantics after settle:
 
-- if required settled tier is not achieved, graph state updates but delivery is held
+- if required durability tier is not achieved, graph state updates but delivery is held
 - first delivery is a full snapshot via `current_result_as_delta()`
 - later deliveries are incremental deltas
+- with `localUpdates/immediate`, only post-first-settlement local writes bypass tier waiting; initial snapshot remains tier-gated
 
 > [`query_manager/manager.rs:640`](../../crates/jazz-tools/src/query_manager/manager.rs#L640)
 > [`query_manager/manager.rs:651`](../../crates/jazz-tools/src/query_manager/manager.rs#L651)
@@ -242,7 +243,7 @@ self.sync_manager.send_query_subscription_to_servers(query_id, sync_query, sessi
 Wire shape:
 
 ```rust
-SyncPayload::QuerySubscription { query_id, query, session }
+SyncPayload::QuerySubscription { query_id, query, session, propagation }
 ```
 
 > [`sync_manager/types.rs:225`](../../crates/jazz-tools/src/sync_manager/types.rs#L225)
@@ -344,10 +345,10 @@ For `db.subscribeAll(...)`, callback remains active and receives later deltas.
 
 Both are implemented on top of the same reactive machinery:
 
-- one-shot query is "subscribe once, resolve on first settled snapshot, then unsubscribe"
+- one-shot query is "subscribe once, resolve on first durability-qualified snapshot, then unsubscribe"
 - live query is "subscribe and keep subscription state"
 
-That shared path is why both participate in the same tier-settlement, lens-transform, and sync-forwarding behavior.
+That shared path is why both participate in the same durability-tier gating, lens-transform, and sync-forwarding behavior.
 
 > [`src/runtime_core.rs:632`](../../crates/jazz-tools/src/runtime_core.rs#L632)
 > [`src/runtime_core.rs:656`](../../crates/jazz-tools/src/runtime_core.rs#L656)

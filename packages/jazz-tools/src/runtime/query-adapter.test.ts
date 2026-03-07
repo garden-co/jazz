@@ -5,10 +5,13 @@
 import { describe, it, expect } from "vitest";
 import { translateBuilderToRelationIr, translateQuery } from "./query-adapter.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { toLegacyRelExprForTest } from "../testing/relation-ir-test-helpers.js";
 
 describe("translateQuery", () => {
   function parseTranslatedQuery(builderJson: string, schema: WasmSchema): any {
-    return JSON.parse(translateQuery(builderJson, schema));
+    const parsed = JSON.parse(translateQuery(builderJson, schema));
+    parsed.relation_ir = toLegacyRelExprForTest(parsed.relation_ir);
+    return parsed;
   }
 
   function expectFilterPredicate(result: any): any {
@@ -20,26 +23,25 @@ describe("translateQuery", () => {
   }
 
   const basicSchema: WasmSchema = {
-    tables: {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-          { name: "priority", column_type: { type: "Integer" }, nullable: true },
-          {
-            name: "status",
-            column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
-            nullable: false,
-          },
-          { name: "project", column_type: { type: "Uuid" }, nullable: true },
-          {
-            name: "tags",
-            column_type: { type: "Array", element: { type: "Text" } },
-            nullable: false,
-          },
-          { name: "created_at", column_type: { type: "Timestamp" }, nullable: true },
-        ],
-      },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "priority", column_type: { type: "Integer" }, nullable: true },
+        {
+          name: "status",
+          column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
+          nullable: false,
+        },
+        { name: "project", column_type: { type: "Uuid" }, nullable: true },
+        {
+          name: "tags",
+          column_type: { type: "Array", element: { type: "Text" } },
+          nullable: false,
+        },
+        { name: "metadata", column_type: { type: "Json" }, nullable: true },
+        { name: "created_at", column_type: { type: "Timestamp" }, nullable: true },
+      ],
     },
   };
 
@@ -295,6 +297,51 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates eq condition with Json object value", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "metadata", op: "eq", value: { phase: "alpha", retries: 1 } }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "metadata" },
+        op: "Eq",
+        right: {
+          type: "Literal",
+          value: { Text: '{"phase":"alpha","retries":1}' },
+        },
+      });
+    });
+
+    it("translates in condition with Json values", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [
+          {
+            column: "metadata",
+            op: "in",
+            value: [{ phase: "alpha" }, { phase: "beta" }],
+          },
+        ],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "In",
+        left: { scope: "todos", column: "metadata" },
+        values: [
+          { type: "Literal", value: { Text: '{"phase":"alpha"}' } },
+          { type: "Literal", value: { Text: '{"phase":"beta"}' } },
+        ],
+      });
+    });
+
     it("translates contains condition with array element value", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -486,6 +533,28 @@ describe("translateQuery", () => {
 
       expect(() => translateQuery(builderJson, basicSchema)).toThrow("Invalid enum value");
     });
+
+    it("rejects unsupported Json comparison operators", () => {
+      const gtBuilderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "metadata", op: "gt", value: { retries: 1 } }],
+        includes: {},
+        orderBy: [],
+      });
+      expect(() => translateQuery(gtBuilderJson, basicSchema)).toThrow(
+        'JSON column "metadata" only supports eq/ne/in/isNull operators.',
+      );
+
+      const containsBuilderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "metadata", op: "contains", value: { retries: 1 } }],
+        includes: {},
+        orderBy: [],
+      });
+      expect(() => translateQuery(containsBuilderJson, basicSchema)).toThrow(
+        'JSON column "metadata" only supports eq/ne/in/isNull operators.',
+      );
+    });
   });
 
   describe("orderBy translation", () => {
@@ -537,25 +606,36 @@ describe("translateQuery", () => {
         { column: { column: "title" }, direction: "Asc" },
       ]);
     });
+
+    it("rejects Json columns in orderBy", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [["metadata", "asc"]],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow(
+        'JSON column "metadata" cannot be used in orderBy().',
+      );
+    });
   });
 
   describe("include translation", () => {
     const schemaWithRelations: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            { name: "title", column_type: { type: "Text" }, nullable: false },
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        users: {
-          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-        },
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+      users: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
       },
     };
 
@@ -613,20 +693,18 @@ describe("translateQuery", () => {
 
     it("translates UUID[] forward and reverse includes using membership columns", () => {
       const arrayFkSchema: WasmSchema = {
-        tables: {
-          files: {
-            columns: [
-              {
-                name: "parts",
-                column_type: { type: "Array", element: { type: "Uuid" } },
-                nullable: false,
-                references: "file_parts",
-              },
-            ],
-          },
-          file_parts: {
-            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-          },
+        files: {
+          columns: [
+            {
+              name: "parts",
+              column_type: { type: "Array", element: { type: "Uuid" } },
+              nullable: false,
+              references: "file_parts",
+            },
+          ],
+        },
+        file_parts: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
         },
       };
 
@@ -711,32 +789,30 @@ describe("translateQuery", () => {
 
     it("translates nested includes", () => {
       const nestedSchema: WasmSchema = {
-        tables: {
-          comments: {
-            columns: [
-              { name: "text", column_type: { type: "Text" }, nullable: false },
-              {
-                name: "todo_id",
-                column_type: { type: "Uuid" },
-                nullable: false,
-                references: "todos",
-              },
-            ],
-          },
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              {
-                name: "owner_id",
-                column_type: { type: "Uuid" },
-                nullable: false,
-                references: "users",
-              },
-            ],
-          },
-          users: {
-            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-          },
+        comments: {
+          columns: [
+            { name: "text", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "todo_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "todos",
+            },
+          ],
+        },
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        users: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
         },
       };
 
@@ -751,7 +827,7 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, nestedSchema));
+      const result = parseTranslatedQuery(builderJson, nestedSchema);
 
       expect(result.array_subqueries).toEqual([
         {
@@ -785,18 +861,16 @@ describe("translateQuery", () => {
 
   describe("self-referential relations", () => {
     const selfRefSchema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            { name: "title", column_type: { type: "Text" }, nullable: false },
-            {
-              name: "parent_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "todos",
-            },
-          ],
-        },
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          {
+            name: "parent_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "todos",
+          },
+        ],
       },
     };
 
@@ -808,7 +882,7 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, selfRefSchema));
+      const result = parseTranslatedQuery(builderJson, selfRefSchema);
 
       expect(result.array_subqueries).toEqual([
         {
@@ -834,7 +908,7 @@ describe("translateQuery", () => {
         orderBy: [],
       });
 
-      const result = JSON.parse(translateQuery(builderJson, selfRefSchema));
+      const result = parseTranslatedQuery(builderJson, selfRefSchema);
 
       expect(result.array_subqueries).toEqual([
         {
@@ -855,23 +929,21 @@ describe("translateQuery", () => {
 
   describe("full query translation", () => {
     const fullSchema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            { name: "title", column_type: { type: "Text" }, nullable: false },
-            { name: "done", column_type: { type: "Boolean" }, nullable: false },
-            { name: "priority", column_type: { type: "Integer" }, nullable: true },
-            {
-              name: "owner_id",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "users",
-            },
-          ],
-        },
-        users: {
-          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-        },
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+          { name: "priority", column_type: { type: "Integer" }, nullable: true },
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+      users: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
       },
     };
 
@@ -941,18 +1013,16 @@ describe("translateQuery", () => {
 
   it("keeps gather semantics in relation_ir payload", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            { name: "title", column_type: { type: "Text" }, nullable: false },
-            {
-              name: "parent_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "todos",
-            },
-          ],
-        },
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          {
+            name: "parent_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "todos",
+          },
+        ],
       },
     };
 
@@ -970,7 +1040,7 @@ describe("translateQuery", () => {
       },
     });
 
-    const result = JSON.parse(translateQuery(builderJson, schema));
+    const result = parseTranslatedQuery(builderJson, schema);
     expect(result.recursive).toBeUndefined();
     expect(result.joins).toBeUndefined();
     expect(result.relation_ir?.type).toBe("Gather");
@@ -978,26 +1048,24 @@ describe("translateQuery", () => {
 
   it("keeps hop semantics in relation_ir payload", () => {
     const schema: WasmSchema = {
-      tables: {
-        teams: {
-          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-        },
-        team_edges: {
-          columns: [
-            {
-              name: "child_team",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "teams",
-            },
-            {
-              name: "parent_team",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "teams",
-            },
-          ],
-        },
+      teams: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+      },
+      team_edges: {
+        columns: [
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
       },
     };
 
@@ -1011,7 +1079,7 @@ describe("translateQuery", () => {
       hops: ["parent_team"],
     });
 
-    const result = JSON.parse(translateQuery(builderJson, schema));
+    const result = parseTranslatedQuery(builderJson, schema);
     expect(result.joins).toBeUndefined();
     expect(result.result_element_index).toBeUndefined();
     expect(result.recursive).toBeUndefined();
@@ -1020,22 +1088,20 @@ describe("translateQuery", () => {
 
   it("keeps multi-hop semantics in relation_ir payload", () => {
     const schema: WasmSchema = {
-      tables: {
-        users: {
-          columns: [
-            { name: "name", column_type: { type: "Text" }, nullable: false },
-            { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-          ],
-        },
-        teams: {
-          columns: [
-            { name: "name", column_type: { type: "Text" }, nullable: false },
-            { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-          ],
-        },
-        orgs: {
-          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-        },
+      users: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+        ],
+      },
+      teams: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+        ],
+      },
+      orgs: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
       },
     };
 
@@ -1047,7 +1113,7 @@ describe("translateQuery", () => {
       hops: ["team", "org"],
     });
 
-    const result = JSON.parse(translateQuery(builderJson, schema));
+    const result = parseTranslatedQuery(builderJson, schema);
     expect(result.joins).toBeUndefined();
     expect(result.result_element_index).toBeUndefined();
     expect(result.recursive).toBeUndefined();
@@ -1056,26 +1122,24 @@ describe("translateQuery", () => {
 
   it("lowers hop metadata to relation IR join + project", () => {
     const schema: WasmSchema = {
-      tables: {
-        teams: {
-          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-        },
-        team_edges: {
-          columns: [
-            {
-              name: "child_team",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "teams",
-            },
-            {
-              name: "parent_team",
-              column_type: { type: "Uuid" },
-              nullable: false,
-              references: "teams",
-            },
-          ],
-        },
+      teams: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+      },
+      team_edges: {
+        columns: [
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
       },
     };
 
@@ -1089,7 +1153,7 @@ describe("translateQuery", () => {
       hops: ["parent_team"],
     });
 
-    const ir = translateBuilderToRelationIr(builderJson, schema);
+    const ir = toLegacyRelExprForTest(translateBuilderToRelationIr(builderJson, schema));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected project relation IR.");
@@ -1112,18 +1176,16 @@ describe("translateQuery", () => {
 
   it("lowers gather metadata to relation IR gather node", () => {
     const schema: WasmSchema = {
-      tables: {
-        todos: {
-          columns: [
-            { name: "title", column_type: { type: "Text" }, nullable: false },
-            {
-              name: "parent_id",
-              column_type: { type: "Uuid" },
-              nullable: true,
-              references: "todos",
-            },
-          ],
-        },
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          {
+            name: "parent_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "todos",
+          },
+        ],
       },
     };
 
@@ -1141,7 +1203,7 @@ describe("translateQuery", () => {
       },
     });
 
-    const ir = translateBuilderToRelationIr(builderJson, schema);
+    const ir = toLegacyRelExprForTest(translateBuilderToRelationIr(builderJson, schema));
     expect(ir.type).toBe("Gather");
     if (ir.type !== "Gather") {
       throw new Error("Expected gather relation IR.");
@@ -1192,18 +1254,16 @@ describe("translateQuery", () => {
 
     it("throws when gather step does not use a forward hop", () => {
       const schema: WasmSchema = {
-        tables: {
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              {
-                name: "parent_id",
-                column_type: { type: "Uuid" },
-                nullable: true,
-                references: "todos",
-              },
-            ],
-          },
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
         },
       };
 
@@ -1228,18 +1288,16 @@ describe("translateQuery", () => {
 
     it("throws when gather query also includes include(...)", () => {
       const schema: WasmSchema = {
-        tables: {
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              {
-                name: "parent_id",
-                column_type: { type: "Uuid" },
-                nullable: true,
-                references: "todos",
-              },
-            ],
-          },
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
         },
       };
 
@@ -1264,26 +1322,24 @@ describe("translateQuery", () => {
 
     it("lowers gather query followed by hopTo(...)", () => {
       const schema: WasmSchema = {
-        tables: {
-          teams: {
-            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-          },
-          team_edges: {
-            columns: [
-              {
-                name: "child_team",
-                column_type: { type: "Uuid" },
-                nullable: false,
-                references: "teams",
-              },
-              {
-                name: "parent_team",
-                column_type: { type: "Uuid" },
-                nullable: false,
-                references: "teams",
-              },
-            ],
-          },
+        teams: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        team_edges: {
+          columns: [
+            {
+              name: "child_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "parent_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+          ],
         },
       };
 
@@ -1302,7 +1358,7 @@ describe("translateQuery", () => {
         },
       });
 
-      const result = JSON.parse(translateQuery(builderJson, schema));
+      const result = parseTranslatedQuery(builderJson, schema);
       expect(result.relation_ir?.type).toBe("Project");
       if (result.relation_ir?.type !== "Project") {
         throw new Error("Expected projected relation IR.");
@@ -1316,26 +1372,24 @@ describe("translateQuery", () => {
 
     it("throws when hop query also includes include(...)", () => {
       const schema: WasmSchema = {
-        tables: {
-          teams: {
-            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-          },
-          team_edges: {
-            columns: [
-              {
-                name: "child_team",
-                column_type: { type: "Uuid" },
-                nullable: false,
-                references: "teams",
-              },
-              {
-                name: "parent_team",
-                column_type: { type: "Uuid" },
-                nullable: false,
-                references: "teams",
-              },
-            ],
-          },
+        teams: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        team_edges: {
+          columns: [
+            {
+              name: "child_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+            {
+              name: "parent_team",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "teams",
+            },
+          ],
         },
       };
 

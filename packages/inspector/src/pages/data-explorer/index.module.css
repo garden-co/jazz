@@ -1,0 +1,138 @@
+.layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+.sidebar {
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 14px 10px;
+  overflow: auto;
+}
+
+.sidebarTitle {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8c9ab0;
+}
+
+.sidebarHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.propagationSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #9aa6ba;
+}
+
+.propagationLabel {
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.tableList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tableRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.tableLink {
+  flex: 1 1 auto;
+  display: block;
+  text-decoration: none;
+  color: #b8c3d5;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.tableLink:hover {
+  background: #212b39;
+  color: #e2e8f0;
+}
+
+.tableLinkActive {
+  background: #233246;
+  color: #eaf0f8;
+}
+
+.schemaLink {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: #9aa6ba;
+  font-size: 11px;
+  border: 1px solid transparent;
+}
+
+.schemaLink:hover {
+  border-color: #3a4a63;
+  background: #202a39;
+  color: #d4deee;
+}
+
+.schemaIcon {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.schemaLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.content {
+  min-width: 0;
+  min-height: 0;
+}
+
+.emptyState {
+  border: 1px dashed #2f3949;
+  border-radius: 8px;
+  height: 100%;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background: #151a24;
+}
+
+.emptyTitle {
+  margin: 0;
+  color: #dbe3ee;
+  font-size: 18px;
+}
+
+.emptyText {
+  margin: 8px 0 0;
+  color: #8e9db3;
+  font-size: 13px;
+}

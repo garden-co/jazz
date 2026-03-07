@@ -1,7 +1,9 @@
 ---
 title: Reading Data
-description: Query APIs across one-shot reads, subscriptions, reactive hooks, and local-first query semantics.
+description: Query APIs across one-shot reads, subscriptions, framework hooks, and local-first delivery tiers.
 ---
+
+import WhereOperatorsTable from "../partials/quickstarts/where-operators-table.mdx";
 
 ## One-shot Queries
 
@@ -33,20 +35,89 @@ description: Query APIs across one-shot reads, subscriptions, reactive hooks, an
   </Tab>
 </Tabs>
 
+## Framework Hooks
+
+Use framework bindings immediately after subscription concepts:
+
+- React/Expo: `useAll(query)` for reactive query results.
+- Vue: `useAll(query)` for a reactive result ref.
+- Svelte: `new QuerySubscription(query)` for reactive `.current` data.
+
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Expo", "Svelte"]} persist>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-vue/src/TodoList.vue#reading-reactive-hooks-vue
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-expo/src/TodoList.tsx#reading-reactive-hooks-expo
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-reactive-svelte
+    </include>
+  </Tab>
+</Tabs>
+
+### First delivery and the undefined signal
+
+`useAll` and `QuerySubscription` return `undefined` until the subscription has received its
+first response from the server. Once the server has delivered an initial snapshot, the value
+becomes an array — empty (`[]`) if no rows match, or populated.
+
+```ts
+// undefined = still connecting to the sync server
+// []        = connected, no matching rows yet
+// [...]     = connected, rows present
+```
+
+Any initialisation that depends on a consistent remote view can check `undefined` directly:
+
+```ts
+useEffect(() => {
+  if (rows === undefined) return; // wait for server snapshot before acting
+  reconcile();
+}, [rows]);
+```
+
+### React Suspense and Transitions
+
+The docs React example app includes a Suspense-based list that keeps the previous result visible
+while a filter or page change resolves by moving the query behind a `Suspense` boundary and
+reading it with `useAllSuspense(query)`.
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/ConcurrentTodoList.tsx#reading-concurrent-rendering-react
+</include>
+
 ## Filters
 
 ### API Reference
 
 - **Behavior:** `where(...)` adds AND-combined predicates to a query.
-- **Parameters:** Pass a partial row-shaped object.
-- **TypeScript operators:** scalar equality (`done: false`) plus operator objects like `{ eq, ne, contains, in, gt, gte, lt, lte, isNull }` where supported by the column type.
+- **Parameters:** pass a partial row-shaped object.
+- **TypeScript operators:** scalar equality plus typed operator objects by column kind.
 - **Rust operators:** use explicit builder methods such as `filter_eq(...)`.
+
+<WhereOperatorsTable />
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
     </include>
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-where-operators-ts
+    </include>
+
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs">
@@ -102,67 +173,23 @@ description: Query APIs across one-shot reads, subscriptions, reactive hooks, an
 ### API Reference
 
 - **Behavior:** `include(...)` loads related rows and returns nested objects in one query result.
-- **Parameters (TypeScript):** `include({ relationName: true | nestedInclude })`.
+- **Parameters (TypeScript):** `include({ relationName: true | nestedInclude | queryBuilder })`.
 - **Nested includes:** pass nested objects to load multi-hop relations.
-- **Junction tables:** codegen does not currently synthesize implicit many-to-many shortcuts; model and query the junction table explicitly.
 
-Schema reference used by the include examples:
+Schema references used by the include examples:
 
-```ts
-import { table, col } from "jazz-tools";
-
-table("projects", {
-  name: col.string(),
-});
-
-table("users", {
-  email: col.string(),
-});
-
-table("project_members", {
-  project: col.ref("projects"),
-  user: col.ref("users"),
-  role: col.string(),
-});
-
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  project: col.ref("projects").optional(),
-  parent: col.ref("todos").optional(),
-});
-```
-
-```sql
-CREATE TABLE projects (
-    name TEXT NOT NULL
-);
-
-CREATE TABLE users (
-    email TEXT NOT NULL
-);
-
-CREATE TABLE project_members (
-    project UUID REFERENCES projects NOT NULL,
-    user UUID REFERENCES users NOT NULL,
-    role TEXT NOT NULL
-);
-
-CREATE TABLE todos (
-    title TEXT NOT NULL,
-    done BOOLEAN NOT NULL,
-    project UUID REFERENCES projects,
-    parent UUID REFERENCES todos
-);
-```
-
-```ts
-// Example schema shape:
-// project_members(project -> projects.id, user -> users.id)
-const memberships = await db.all(
-  app.projectMembers.where({ project: projectId }).include({ user: true, project: true }),
-);
-```
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-rs/schema/current.sql
+    </include>
+  </Tab>
+</Tabs>
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
@@ -179,96 +206,85 @@ const memberships = await db.all(
 
 ## Advanced: Recursive Queries
 
-Recursive queries compute bounded transitive closures from a seed row set (for example, walking team ancestry or folder hierarchies).
+Recursive queries compute bounded transitive closures from a seed row set.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
-  <Tab value="TypeScript">
-    ```ts
-    const query = app.teams.gather({
-      start: { team_id: { eq: 1 } },
-      step: ({ current }) =>
-        app.team_edges.where({ child_team: current }).hopTo("parent_team"),
-      maxDepth: 10,
-    });
-    ```
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
+</include>
 
-    `gather(...)` combines seed filtering (`start`) with recursive step traversal (`step`).
-    `hopTo(...)` is a one-hop relation traversal combinator.
-    `maxDepth` defaults to `10` when omitted.
-
-  </Tab>
-  <Tab value="Rust">
-    ```rs
-    use groove::{QueryBuilder, Value};
-
-    let query = QueryBuilder::new("teams")
-        .select(&["team_id"])
-        .filter_eq("team_id", Value::Integer(1))
-        .with_recursive(|r| {
-            r.from("team_edges")
-                .correlate("child_team", "team_id")
-                .select(&["parent_team"])
-                .max_depth(10)
-        })
-        .build();
-    ```
-
-    `with_recursive(...)` uses the current query output as the seed relation.
-    The runtime executes recursion through a dedicated `RecursiveRelationNode` that orchestrates a bounded, internally unrolled stack of step subgraphs.
-    `max_depth` defaults to `10` when omitted.
-
-  </Tab>
-</Tabs>
-
-## Read Settled Tiers
+## Read Durability Options
 
 ### API Reference
 
-- `db.all(query, settledTier?)`
-- `db.one(query, settledTier?)`
-- `db.subscribeAll(query, callback, settledTier?)`
-- `settledTier`: `"worker" | "edge" | "core"`
+- `db.all(query, options?)`
+- `db.one(query, options?)`
+- `db.subscribeAll(query, callback, options?)`
+- `options.tier`: `"worker" | "edge" | "global"`
+- `options.localUpdates`: `"immediate" | "deferred"` (default: `"immediate"`)
 
-Settled tiers control when initial query delivery is considered confirmed:
+Durability tiers control when initial query delivery is considered confirmed:
 
 - `worker`: wait for worker/local storage acknowledgement.
 - `edge`: wait for edge server acknowledgement.
-- `core`: wait for core server acknowledgement.
+- `global`: wait for global server acknowledgement.
 
-Without a `settledTier`, reads are local-first and return immediately from the
-local runtime state.
+Defaults:
+
+- Browser/client default tier is `worker`.
+- Backend/server-connected default tier is `edge`.
+- `localUpdates: "immediate"` keeps local subscription updates synchronous after the first tier-confirmed snapshot. The initial delivery remains tier-gated.
 
 Tradeoff summary:
 
-- Lower settled tier: lower latency, narrower confirmation scope.
-- Higher settled tier: higher latency, broader confirmation scope.
+- Lower tier: lower latency, narrower confirmation scope.
+- Higher tier: higher latency, broader confirmation scope.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-settled-tier-ts
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
     </include>
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-settled-tier-rust
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
 
-Read settled tiers pair naturally with write ack tiers:
+Read durability options pair naturally with write durability tiers:
 
-- Use write ack tiers to gate mutation durability checkpoints.
-- Use settled tiers to gate query/subscription delivery checkpoints.
+- Use write durability tiers to gate mutation durability checkpoints.
+- Use read durability options to gate query/subscription delivery checkpoints.
 
-See [Write Ack Tiers](/docs/writing-data#write-ack-tiers) for write-side semantics.
+See [Write Durability Tiers](/docs/writing-data#write-durability-tiers) for write-side semantics.
 
-## Reactive Hooks (React)
+### Seeding and one-time setup
 
-<Callout title="React-only section">
-  Reactive hook APIs currently map to React usage. Rust does not have a direct hooks equivalent.
-</Callout>
+For one-off setup (seeding default data, initialising a user record on first sign-in), you
+often need to ensure no other client has already done the same work before writing. Use
+`db.all` with `{ tier: "global" }` to wait until the global core has been consulted before
+reading — this prevents duplicate seeding from concurrent fresh clients.
 
-<include cwd lang="tsx">
-  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
-</include>
+```ts
+// Reads nothing until globally consistent — prevents duplicate seeding
+// from concurrent fresh clients on first visit.
+const existing = await db.all(app.settings, { tier: "global" });
+
+if (existing.length === 0) {
+  for (const seed of DEFAULT_SETTINGS) {
+    await db.insert(app.settings, seed);
+  }
+}
+```
+
+| Call                                | Waits for                 | Use when                                          |
+| ----------------------------------- | ------------------------- | ------------------------------------------------- |
+| `db.all(query)`                     | Local worker (OPFS)       | Reading cached local state                        |
+| `db.all(query, { tier: "global" })` | Global core snapshot      | Seeding or one-time setup that must not duplicate |
+| `useAll(query)`                     | Local snapshot, then live | Live UI that re-renders on every change           |
+
+For most subscriptions, omitting a tier is the right choice: Jazz delivers results from local
+storage immediately and streams in remote updates as they arrive, giving users the fastest
+possible experience. Reserve explicit tiers for the cases above where eventual consistency is
+not acceptable.

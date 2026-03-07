@@ -4,14 +4,23 @@
  * Connects QueryBuilder to JazzClient for actual query execution.
  * Handles query translation, execution, and result transformation.
  *
- * Key design: Mutations are SYNC after WASM pre-loading.
+ * Key design:
  * - createDb() is async (pre-loads WASM module)
- * - insert/update/deleteFrom are sync (operate on in-memory WASM runtime)
+ * - insert/update/deleteFrom are async (await WASM bridge readiness, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
-import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
+import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { Session } from "./context.js";
+import {
+  JazzClient,
+  loadWasmModule,
+  type WasmModule,
+  type DurabilityTier,
+  type QueryExecutionOptions,
+  type QueryPropagation,
+} from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows, type IncludeSpec } from "./row-transformer.js";
@@ -35,7 +44,7 @@ function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
 export interface DbConfig {
   /** Application identifier (used for isolation) */
   appId: string;
-  /** Storage driver implementation (optional — storage is in-memory by default) */
+  /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
@@ -68,6 +77,14 @@ export interface DbConfig {
   logLevel?: WasmLogLevel;
 }
 
+function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
+  return driver ?? { type: "persistent" };
+}
+
+function isMemoryDriver(driver?: StorageDriver): boolean {
+  return resolveStorageDriver(driver).type === "memory";
+}
+
 /**
  * Interface that QueryBuilder classes implement.
  * Generated builders expose these internal properties for Db to use.
@@ -81,6 +98,10 @@ export interface QueryBuilder<T> {
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
+}
+
+export interface QueryOptions extends QueryExecutionOptions {
+  propagation?: QueryPropagation;
 }
 
 interface BuiltQuery {
@@ -201,6 +222,14 @@ function resolveHopOutputTable(
   return currentTable;
 }
 
+function resolveSchemaWithTable(
+  preferredSchema: WasmSchema,
+  fallbackSchema: WasmSchema,
+  tableName: string,
+): WasmSchema {
+  return preferredSchema[tableName] ? preferredSchema : fallbackSchema;
+}
+
 /**
  * Interface for table proxies used with mutations.
  * Generated table constants implement this interface.
@@ -231,7 +260,7 @@ interface FollowerSyncMessage {
   fromTabId: string;
   toLeaderTabId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 interface LeaderSyncMessage {
@@ -239,7 +268,7 @@ interface LeaderSyncMessage {
   fromLeaderTabId: string;
   toTabId: string;
   term: number;
-  payload: string[];
+  payload: Uint8Array[];
 }
 
 interface FollowerCloseMessage {
@@ -257,8 +286,8 @@ function resolveBroadcastChannelCtor(): (new (name: string) => BroadcastChannelL
   return ctor as new (name: string) => BroadcastChannelLike;
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+function isBinaryPayloadArray(value: unknown): value is Uint8Array[] {
+  return Array.isArray(value) && value.every((entry) => entry instanceof Uint8Array);
 }
 
 function isTabSyncMessage(value: unknown): value is TabSyncMessage {
@@ -270,7 +299,7 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromTabId === "string" &&
       typeof message.toLeaderTabId === "string" &&
       typeof message.term === "number" &&
-      isStringArray(message.payload)
+      isBinaryPayloadArray(message.payload)
     );
   }
 
@@ -279,7 +308,7 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromLeaderTabId === "string" &&
       typeof message.toTabId === "string" &&
       typeof message.term === "number" &&
-      isStringArray(message.payload)
+      isBinaryPayloadArray(message.payload)
     );
   }
 
@@ -316,10 +345,10 @@ function isLeaderDebugEnabled(): boolean {
  * ```typescript
  * const db = await createDb({ appId: "my-app", driver });
  *
- * // Sync mutations (after WASM is pre-loaded)
- * const id = db.insert(app.todos, { title: "Buy milk", done: false });
- * db.update(app.todos, id, { done: true });
- * db.deleteFrom(app.todos, id);
+ * // Async mutations
+ * const id = await db.insert(app.todos, { title: "Buy milk", done: false });
+ * await db.update(app.todos, id, { done: true });
+ * await db.deleteFrom(app.todos, id);
  *
  * // Async queries (need storage I/O)
  * const todos = await db.all(app.todos.where({ done: false }));
@@ -400,7 +429,11 @@ export class Db {
   static async createWithWorker(config: DbConfig): Promise<Db> {
     const wasmModule = await loadWasmModule();
     const db = new Db(config, wasmModule);
-    db.primaryDbName = config.dbName ?? config.appId;
+    const persistentDriver = resolveStorageDriver(config.driver);
+    if (persistentDriver.type !== "persistent") {
+      throw new Error("Worker-backed Db requires driver.type='persistent'");
+    }
+    db.primaryDbName = persistentDriver.dbName ?? config.appId;
     db.workerDbName = db.primaryDbName;
 
     try {
@@ -459,26 +492,42 @@ export class Db {
     }
 
     // Use stringified schema as cache key
-    const key = JSON.stringify(schema);
+    const key = serializeRuntimeSchema(schema);
 
     if (!this.clients.has(key)) {
       setGlobalWasmLogLevel(this.config.logLevel);
 
       // Create in-memory runtime (works for both direct and worker mode)
-      const client = JazzClient.connectSync(this.wasmModule, {
-        appId: this.config.appId,
-        schema,
-        driver: this.config.driver,
-        // In worker mode, don't connect to server directly — worker handles it
-        serverUrl: this.worker ? undefined : this.config.serverUrl,
-        serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
-        env: this.config.env,
-        userBranch: this.config.userBranch,
-        jwtToken: this.config.jwtToken,
-        localAuthMode: this.config.localAuthMode,
-        localAuthToken: this.config.localAuthToken,
-        adminSecret: this.config.adminSecret,
-      });
+      const client = JazzClient.connectSync(
+        this.wasmModule,
+        {
+          appId: this.config.appId,
+          schema,
+          driver: this.config.driver,
+          // In worker mode, don't connect to server directly — worker handles it
+          serverUrl: this.worker ? undefined : this.config.serverUrl,
+          serverPathPrefix: this.worker ? undefined : this.config.serverPathPrefix,
+          env: this.config.env,
+          userBranch: this.config.userBranch,
+          jwtToken: this.config.jwtToken,
+          localAuthMode: this.config.localAuthMode,
+          localAuthToken: this.config.localAuthToken,
+          adminSecret: this.config.adminSecret,
+          tier: this.worker ? undefined : "worker",
+          // Keep worker-bridged browser clients on worker durability by default.
+          // For direct (non-worker) clients connected to a server, default to edge.
+          defaultDurabilityTier: this.worker
+            ? undefined
+            : this.config.serverUrl
+              ? "edge"
+              : undefined,
+        },
+        {
+          // Worker-bridged runtimes exchange postcard payloads with peers;
+          // direct browser/server routing keeps JSON payloads.
+          useBinaryEncoding: this.worker !== null,
+        },
+      );
 
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
@@ -518,12 +567,17 @@ export class Db {
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
+    const driver = resolveStorageDriver(this.config.driver);
+    if (driver.type !== "persistent") {
+      throw new Error("Worker bridge is only available for driver.type='persistent'");
+    }
+
     return {
       schemaJson,
       appId: this.config.appId,
       env: this.config.env ?? "dev",
       userBranch: this.config.userBranch ?? "main",
-      dbName: this.workerDbName ?? this.config.dbName ?? this.config.appId,
+      dbName: this.workerDbName ?? driver.dbName ?? this.config.appId,
       serverUrl: this.config.serverUrl,
       serverPathPrefix: this.config.serverPathPrefix,
       jwtToken: this.config.jwtToken,
@@ -826,6 +880,63 @@ export class Db {
     }
   }
 
+  private currentWorkerNamespace(): string {
+    const driver = resolveStorageDriver(this.config.driver);
+    if (driver.type !== "persistent") {
+      throw new Error("Worker namespace is only available for driver.type='persistent'");
+    }
+    return this.workerDbName ?? driver.dbName ?? this.config.appId;
+  }
+
+  private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
+    const currentWorker = this.worker;
+
+    if (this.workerBridge && currentWorker) {
+      try {
+        await this.workerBridge.shutdown(currentWorker);
+      } catch {
+        // Best effort: if the bridge shutdown times out, we still terminate below.
+      }
+    }
+    this.workerBridge = null;
+    this.bridgeReady = null;
+
+    for (const client of this.clients.values()) {
+      await client.shutdown();
+    }
+    this.clients.clear();
+    this.leaderPeerIds.clear();
+    this.activeRemoteLeaderTabId = null;
+
+    if (currentWorker) {
+      currentWorker.terminate();
+    }
+    this.worker = null;
+  }
+
+  private async removeOpfsNamespaceFile(namespace: string): Promise<void> {
+    const rootDirectory = await navigator.storage.getDirectory();
+    const fileName = `${namespace}.opfsbtree`;
+    try {
+      await rootDirectory.removeEntry(fileName, { recursive: false });
+    } catch (error) {
+      const name = (error as { name?: string } | undefined)?.name;
+      if (name === "NotFoundError") {
+        return;
+      }
+      if (name === "NoModificationAllowedError" || name === "InvalidStateError") {
+        throw new Error(
+          `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
+        );
+      }
+      throw new Error(
+        `Failed to delete browser storage for "${namespace}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private static resolveWorkerDbNameForSnapshot(
     primaryDbName: string,
     snapshot: LeaderSnapshot,
@@ -862,160 +973,130 @@ export class Db {
     return worker;
   }
 
+  getConfig(): DbConfig {
+    // Return a copy of the config to avoid editing the original config.
+    return structuredClone(this.config);
+  }
+
   /**
-   * Insert a new row into a table.
-   *
-   * This is a **synchronous** operation - the row is created immediately
-   * in the local WASM runtime. Sync to server happens asynchronously.
+   * Insert a new row into a table and wait for durability at the requested tier.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @returns The new row's ID (UUID string)
-   *
-   * @example
-   * ```typescript
-   * const id = db.insert(app.todos, { title: "Buy milk", done: false });
-   * ```
+   * @param options Optional durability tier override
+   * @returns Promise resolving to the new row's ID
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): string {
-    const client = this.getClient(table._schema);
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.create(table._table, values);
-  }
-
-  /**
-   * Insert a new row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param data Init object with column values
-   * @param tier Acknowledgement tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acknowledges
-   *
-   * @example
-   * ```typescript
-   * const id = await db.insertWithAck(app.todos, { title: "Buy milk", done: false }, "edge");
-   * ```
-   */
-  async insertWithAck<T, Init>(
+  async insert<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    tier: PersistenceTier,
+    options?: { tier?: DurabilityTier },
   ): Promise<string> {
     const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
     await this.ensureBridgeReady();
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.createWithAck(table._table, values, tier);
+    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    return client.create(table._table, values, options);
   }
 
   /**
-   * @deprecated Use insertWithAck().
+   * Update an existing row and wait for durability at the requested tier.
    */
-  async insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    tier: PersistenceTier,
-  ): Promise<string> {
-    return this.insertWithAck(table, data, tier);
-  }
-
-  /**
-   * Update an existing row.
-   *
-   * This is a **synchronous** operation - the row is updated immediately
-   * in the local WASM runtime. Sync to server happens asynchronously.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to update
-   * @param data Partial object with fields to update
-   *
-   * @example
-   * ```typescript
-   * db.update(app.todos, id, { done: true });
-   * ```
-   */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    const client = this.getClient(table._schema);
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.update(id, updates);
-  }
-
-  /**
-   * Update an existing row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to update
-   * @param data Partial object with fields to update
-   * @param tier Acknowledgement tier to wait for
-   */
-  async updateWithAck<T, Init>(
+  async update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    tier: PersistenceTier,
+    options?: { tier?: DurabilityTier },
+  ): Promise<void> {
+    const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
+    await this.ensureBridgeReady();
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await client.update(id, updates, options);
+  }
+
+  /**
+   * Delete a row and wait for durability at the requested tier.
+   */
+  async deleteFrom<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    await client.updateWithAck(id, updates, tier);
+    await client.delete(id, options);
   }
 
   /**
-   * @deprecated Use updateWithAck().
+   * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
+   *
+   * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
+   * localStorage-based auth or synthetic-user state.
+   *
+   * Behavior:
+   * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
+   * - Leader tab only (throws on follower tabs and asks to close other tabs)
+   * - Serializes with worker reconfigure operations
+   * - Tears down worker + clients, deletes OPFS file, respawns worker
+   * - If file deletion fails, still respawns worker and then rethrows the deletion error
    */
-  async updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.updateWithAck(table, id, data, tier);
-  }
+  async deleteClientStorage(): Promise<void> {
+    if (resolveStorageDriver(this.config.driver).type !== "persistent") {
+      throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
+    }
 
-  /**
-   * Delete a row.
-   *
-   * This is a **synchronous** operation - the row is deleted immediately
-   * in the local WASM runtime. Sync to server happens asynchronously.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to delete
-   *
-   * @example
-   * ```typescript
-   * db.deleteFrom(app.todos, id);
-   * ```
-   */
-  deleteFrom<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const client = this.getClient(table._schema);
-    client.delete(id);
-  }
+    if (!isBrowser()) {
+      console.error(
+        "deleteClientStorage() is only available on browser worker-backed Db instances.",
+      );
+      return;
+    }
 
-  /**
-   * Delete a row and wait for acknowledgement at the specified tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param id Row ID to delete
-   * @param tier Acknowledgement tier to wait for
-   */
-  async deleteFromWithAck<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    const client = this.getClient(table._schema);
-    await this.ensureBridgeReady();
-    await client.deleteWithAck(id, tier);
-  }
+    const operation = this.workerReconfigure.then(async () => {
+      if (this.tabRole !== "leader") {
+        console.error(
+          "deleteClientStorage() can only run from the leader tab. Close other tabs and retry.",
+        );
+        return;
+      }
 
-  /**
-   * @deprecated Use deleteFromWithAck().
-   */
-  async deleteFromPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    tier: PersistenceTier,
-  ): Promise<void> {
-    await this.deleteFromWithAck(table, id, tier);
+      const namespace = this.currentWorkerNamespace();
+
+      // Wait for any in-flight bridge init before we tear down worker state.
+      if (this.bridgeReady) {
+        await this.bridgeReady;
+      }
+
+      await this.shutdownWorkerAndClientsForStorageReset();
+
+      let deleteError: unknown = null;
+      try {
+        await this.removeOpfsNamespaceFile(namespace);
+      } catch (error) {
+        deleteError = error;
+      }
+
+      this.worker = await Db.spawnWorker();
+
+      if (deleteError) {
+        throw deleteError;
+      }
+    });
+
+    this.workerReconfigure = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    await operation;
   }
 
   /**
@@ -1024,28 +1105,31 @@ export class Db {
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
    * @returns Array of typed objects matching the query
    */
-  async all<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T[]> {
+  async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const rows = await client.query(translateQuery(builderJson, query._schema), settledTier);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    return transformRows<T>(rows, query._schema, outputTable, outputIncludes);
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes);
   }
 
   /**
    * Execute a query and return the first matching row, or null.
    *
    * @param query QueryBuilder instance
-   * @param settledTier Optional tier to hold delivery until confirmed
+   * @param options Optional read durability options
    * @returns First matching typed object, or null if none found
    */
-  async one<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T | null> {
-    const results = await this.all(query, settledTier);
+  async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    const results = await this.all(query, options);
     return results[0] ?? null;
   }
 
@@ -1078,30 +1162,35 @@ export class Db {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    settledTier?: PersistenceTier,
+    options?: QueryOptions,
+    session?: Session,
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    const wasmQuery = translateQuery(builderJson, query._schema);
+    const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], query._schema, outputTable, outputIncludes)[0];
+      return transformRows<T>([row], outputSchema, outputTable, outputIncludes)[0];
     };
 
-    const subId = client.subscribe(
+    const subId = client.subscribeInternal(
       wasmQuery,
       (delta) => {
         const typedDelta = manager.handleDelta(delta, transform);
         callback(typedDelta);
       },
-      settledTier,
+      session,
+      options,
     );
 
     // Return unsubscribe function
@@ -1168,7 +1257,7 @@ function isBrowser(): boolean {
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the WASM module.
- * After creation, mutations (insert/update/deleteFrom) are synchronous.
+ * After creation, mutations (insert/update/deleteFrom) are async and return Promises.
  *
  * In browser environments, automatically uses a dedicated worker for
  * OPFS persistence. In Node.js, uses in-memory storage.
@@ -1186,7 +1275,13 @@ function isBrowser(): boolean {
  */
 export async function createDb(config: DbConfig): Promise<Db> {
   const resolvedConfig = resolveLocalAuthDefaults(config);
-  if (isBrowser()) {
+  const driver = resolveStorageDriver(resolvedConfig.driver);
+
+  if (driver.type === "memory" && !resolvedConfig.serverUrl) {
+    throw new Error("driver.type='memory' requires serverUrl.");
+  }
+
+  if (isBrowser() && driver.type === "persistent") {
     return Db.createWithWorker(resolvedConfig);
   }
   return Db.create(resolvedConfig);

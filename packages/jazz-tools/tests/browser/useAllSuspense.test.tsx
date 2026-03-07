@@ -9,41 +9,39 @@ import { JazzProvider } from "../../src/react-core/provider.js";
 import { useAllSuspense } from "../../src/react-core/use-all.js";
 
 const schema: WasmSchema = {
-  tables: {
-    orgs: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
-    teams: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-        {
-          name: "parent_id",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "teams",
-        },
-      ],
-    },
-    users: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-      ],
-    },
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: false,
-        },
-      ],
-    },
+  orgs: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+    ],
   },
 };
 
@@ -320,7 +318,7 @@ describe("useAllSuspense browser integration", () => {
   beforeAll(async () => {
     conditionsClient = await createJazzClient({
       appId: uniqueId("operators"),
-      dbName: uniqueId("operators"),
+      driver: { type: "persistent", dbName: uniqueId("operators") },
     });
   });
 
@@ -339,7 +337,7 @@ describe("useAllSuspense browser integration", () => {
       const preloadBeforeRender =
         testCase.name === "contains-text" || testCase.name === "contains-text-empty";
       if (preloadBeforeRender) {
-        conditionsClient.db.insert(todos, testCase.insert);
+        await conditionsClient.db.insert(todos, testCase.insert);
       }
 
       renderSuspense(
@@ -355,7 +353,7 @@ describe("useAllSuspense browser integration", () => {
       );
 
       if (!preloadBeforeRender) {
-        conditionsClient.db.insert(todos, testCase.insert);
+        await conditionsClient.db.insert(todos, testCase.insert);
       }
 
       await waitForCondition(
@@ -370,7 +368,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("order"),
-        dbName: uniqueId("order"),
+        driver: { type: "persistent", dbName: uniqueId("order") },
       }),
     );
 
@@ -386,21 +384,27 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    client.db.insert(todos, {
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for orderBy + limit + offset",
+    );
+
+    await client.db.insert(todos, {
       title: "p1",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "p2",
       done: false,
       priority: 2,
       owner_id: undefined,
       tags: ["x"],
     });
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "p3",
       done: false,
       priority: 3,
@@ -419,7 +423,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("contains-text-miss"),
-        dbName: uniqueId("contains-text-miss"),
+        driver: { type: "persistent", dbName: uniqueId("contains-text-miss") },
       }),
     );
 
@@ -434,7 +438,7 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "completely unrelated",
       done: false,
       priority: 1,
@@ -450,7 +454,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("include"),
-        dbName: uniqueId("include"),
+        driver: { type: "persistent", dbName: uniqueId("include") },
       }),
     );
 
@@ -464,8 +468,8 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    const userId = client.db.insert(users, { name: "Owner", team_id: undefined });
-    client.db.insert(todos, {
+    const userId = await client.db.insert(users, { name: "Owner", team_id: undefined });
+    await client.db.insert(todos, {
       title: "owned-todo",
       done: false,
       priority: 1,
@@ -484,7 +488,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("hops"),
-        dbName: uniqueId("hops"),
+        driver: { type: "persistent", dbName: uniqueId("hops") },
       }),
     );
 
@@ -498,13 +502,19 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    const orgId = client.db.insert(orgs, { name: "Hop Org" });
-    const teamId = client.db.insert(teams, {
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for hop query",
+    );
+
+    const orgId = await client.db.insert(orgs, { name: "Hop Org" });
+    const teamId = await client.db.insert(teams, {
       name: "Hop Team",
       org_id: orgId,
       parent_id: undefined,
     });
-    client.db.insert(users, { name: "Hop User", team_id: teamId });
+    await client.db.insert(users, { name: "Hop User", team_id: teamId });
 
     await waitForCondition(
       () => getText("rows").includes("Hop Org"),
@@ -517,7 +527,7 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("gather"),
-        dbName: uniqueId("gather"),
+        driver: { type: "persistent", dbName: uniqueId("gather") },
       }),
     );
 
@@ -538,13 +548,23 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    const rootId = client.db.insert(teams, {
+    await waitForCondition(
+      () => hasTestId("rows"),
+      5000,
+      "expected suspense rows mount for gather query",
+    );
+
+    const rootId = await client.db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const midId = client.db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
-    client.db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const midId = await client.db.insert(teams, {
+      name: "mid",
+      org_id: undefined,
+      parent_id: rootId,
+    });
+    await client.db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
 
     await waitForCondition(
       () => {
@@ -560,18 +580,18 @@ describe("useAllSuspense browser integration", () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("query-change"),
-        dbName: uniqueId("query-change"),
+        driver: { type: "persistent", dbName: uniqueId("query-change") },
       }),
     );
 
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "open-task",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    client.db.insert(todos, {
+    await client.db.insert(todos, {
       title: "done-task",
       done: true,
       priority: 2,

@@ -1,27 +1,27 @@
 /**
- * Types for Jazz WASM runtime.
+ * Shared TS boundary types used by the Jazz runtimes.
  *
- * Types are generated from Rust via tsify and re-exported here with
- * friendlier names (without the "Wasm" prefix). This ensures compile-time
- * type safety across the Rust/TypeScript boundary.
+ * These mirror the JSON contracts used across TS, WASM, and NAPI.
  */
 
-import type {
-  WasmColumnDescriptor as JazzWasmColumnDescriptor,
-  WasmColumnType as JazzWasmColumnType,
-  WasmCmpOp as JazzWasmCmpOp,
-  WasmOperationPolicy as JazzWasmOperationPolicy,
-  WasmPolicyExpr as JazzWasmPolicyExpr,
-  WasmPolicyOperation as JazzWasmPolicyOperation,
-  WasmPolicyValue as JazzWasmPolicyValue,
-  WasmRow as JazzWasmRow,
-  WasmTableSchema as JazzWasmTableSchema,
-  WasmTablePolicies as JazzWasmTablePolicies,
-  WasmValue as JazzWasmValue,
-} from "jazz-wasm";
+export type Value =
+  | { type: "Integer"; value: number }
+  | { type: "BigInt"; value: number }
+  | { type: "Double"; value: number }
+  | { type: "Boolean"; value: boolean }
+  | { type: "Text"; value: string }
+  | { type: "Timestamp"; value: number }
+  | { type: "Uuid"; value: string }
+  | { type: "Bytea"; value: Uint8Array }
+  | { type: "Array"; value: Value[] }
+  | { type: "Row"; value: { id?: string; values: Value[] } }
+  | { type: "Null" };
 
-export type Value = JazzWasmValue;
-export type WasmRow = JazzWasmRow;
+export interface WasmRow {
+  id: string;
+  values: Value[];
+}
+
 export type RowAdded = 0;
 export type RowRemoved = 1;
 export type RowUpdated = 2;
@@ -31,7 +31,7 @@ export interface WireRowDeltaAdded {
   kind: RowAdded;
   id: string;
   index: number;
-  row: JazzWasmRow;
+  row: WasmRow;
 }
 
 export interface WireRowDeltaRemoved {
@@ -44,29 +44,84 @@ export interface WireRowDeltaUpdated {
   kind: RowUpdated;
   id: string;
   index: number;
-  row?: JazzWasmRow | null;
+  row?: WasmRow | null;
 }
 
 export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDeltaUpdated;
 
 export type RowDelta = WireRowChange[];
-export type ColumnType = JazzWasmColumnType;
-export type ColumnDescriptor = JazzWasmColumnDescriptor;
 
-export type PolicyOperation = JazzWasmPolicyOperation;
-export type PolicyCmpOp = JazzWasmCmpOp;
-export type PolicyValue = JazzWasmPolicyValue;
-export type PolicyExpr = JazzWasmPolicyExpr;
-export type OperationPolicy = JazzWasmOperationPolicy;
-export type TablePolicies = JazzWasmTablePolicies;
+export type ColumnType =
+  | { type: "Integer" }
+  | { type: "BigInt" }
+  | { type: "Double" }
+  | { type: "Boolean" }
+  | { type: "Text" }
+  | { type: "Json"; schema?: Record<string, unknown> }
+  | { type: "Enum"; variants: string[] }
+  | { type: "Timestamp" }
+  | { type: "Uuid" }
+  | { type: "Bytea" }
+  | { type: "Array"; element: ColumnType }
+  | { type: "Row"; columns: ColumnDescriptor[] };
 
-export interface TableSchema extends JazzWasmTableSchema {
+export interface ColumnDescriptor {
+  name: string;
+  column_type: ColumnType;
+  nullable: boolean;
+  references?: string;
+}
+
+export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
+export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
+
+export type PolicyValue =
+  | { type: "Literal"; value: Value }
+  | { type: "SessionRef"; path: string[] };
+
+export type PolicyExpr =
+  | { type: "Cmp"; column: string; op: PolicyCmpOp; value: PolicyValue }
+  | { type: "IsNull"; column: string }
+  | { type: "IsNotNull"; column: string }
+  | { type: "Contains"; column: string; value: PolicyValue }
+  | { type: "In"; column: string; session_path: string[] }
+  | { type: "InList"; column: string; values: PolicyValue[] }
+  | { type: "Exists"; table: string; condition: PolicyExpr }
+  | { type: "ExistsRel"; rel: unknown }
+  | { type: "Inherits"; operation: PolicyOperation; via_column: string; max_depth?: number }
+  | {
+      type: "InheritsReferencing";
+      operation: PolicyOperation;
+      source_table: string;
+      via_column: string;
+      max_depth?: number;
+    }
+  | { type: "And"; exprs: PolicyExpr[] }
+  | { type: "Or"; exprs: PolicyExpr[] }
+  | { type: "Not"; expr: PolicyExpr }
+  | { type: "True" }
+  | { type: "False" };
+
+export interface OperationPolicy {
+  using?: PolicyExpr;
+  with_check?: PolicyExpr;
+}
+
+export interface TablePolicies {
+  select?: OperationPolicy;
+  insert?: OperationPolicy;
+  update?: OperationPolicy;
+  delete?: OperationPolicy;
+}
+
+export interface TableSchema {
+  columns: ColumnDescriptor[];
   policies?: TablePolicies;
 }
 
-export interface WasmSchema {
-  tables: Record<string, TableSchema>;
-}
+export type Schema = Record<string, TableSchema>;
+
+export type WasmSchema = Schema;
 
 // ============================================================================
 // Storage Driver Interface
@@ -75,13 +130,15 @@ export interface WasmSchema {
 /**
  * Interface for storage backend implementations.
  *
- * With synchronous in-memory storage (MemoryIoHandler), the driver
- * interface is minimal — just an optional close hook.
+ * - `persistent`: local persistence enabled (OPFS in browser, SurrealKV in backend)
+ * - `memory`: non-persistent in-memory runtime only
  */
-export interface StorageDriver {
-  /**
-   * Close the driver and release resources.
-   * Optional - not all drivers need cleanup.
-   */
-  close?(): Promise<void>;
-}
+export type StorageDriver =
+  | {
+      type: "persistent";
+      /** Browser OPFS namespace when persistence is enabled (default: appId). */
+      dbName?: string;
+    }
+  | {
+      type: "memory";
+    };

@@ -14,9 +14,9 @@ type WorkerMessageHandler = (event: MessageEvent<WorkerToMainMessage>) => void;
 
 class FakeWorkerScript {
   private initialized = false;
-  private pendingSyncPayloads: string[] = [];
-  readonly receivedSyncPayloads: string[] = [];
-  readonly droppedSyncPayloads: string[] = [];
+  private pendingSyncPayloads: Uint8Array[] = [];
+  readonly receivedSyncPayloads: Uint8Array[] = [];
+  readonly droppedSyncPayloads: Uint8Array[] = [];
   initMessageCount = 0;
   shutdownMessageCount = 0;
 
@@ -107,7 +107,7 @@ class FakeWorkerScript {
     this.worker.emitToMain({ type: "error", message });
   }
 
-  emitSyncToMain(...payloads: string[]): void {
+  emitSyncToMain(...payloads: Uint8Array[]): void {
     this.worker.emitToMain({ type: "sync", payload: payloads });
   }
 }
@@ -147,14 +147,14 @@ class FakeWorker {
 }
 
 function createRuntimeHarness() {
-  let outboundHandler: ((envelope: string) => void) | null = null;
-  const receivedFromWorker: string[] = [];
+  let outboundHandler: ((...args: unknown[]) => void) | null = null;
+  const receivedFromWorker: Uint8Array[] = [];
 
   const runtime = {
-    onSyncMessageToSend(handler: (envelope: string) => void) {
+    onSyncMessageToSend(handler: (...args: unknown[]) => void) {
       outboundHandler = handler;
     },
-    onSyncMessageReceived(payload: string) {
+    onSyncMessageReceived(payload: Uint8Array) {
       receivedFromWorker.push(payload);
     },
     addServer() {},
@@ -169,10 +169,10 @@ function createRuntimeHarness() {
         throw new Error("Runtime sync handler is not installed");
       }
       outboundHandler(
-        JSON.stringify({
-          destination: { Server: {} },
-          payload,
-        }),
+        "server",
+        "server-1",
+        new TextEncoder().encode(JSON.stringify(payload)),
+        false,
       );
     },
   };
@@ -180,7 +180,7 @@ function createRuntimeHarness() {
 
 function makeBridgeOptions(): WorkerBridgeOptions {
   return {
-    schemaJson: JSON.stringify({ tables: {} }),
+    schemaJson: JSON.stringify({}),
     appId: "race-harness-app",
     env: "dev",
     userBranch: "main",
@@ -189,6 +189,8 @@ function makeBridgeOptions(): WorkerBridgeOptions {
 }
 
 describe("WorkerBridge race harness", () => {
+  const enc = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+
   it("WB-U01 queues outbound sync until init completes", async () => {
     const worker = new FakeWorker({ dropSyncBeforeInit: true });
     const { runtime, emitServerPayload } = createRuntimeHarness();
@@ -207,8 +209,8 @@ describe("WorkerBridge race harness", () => {
     expect(bridge.getWorkerClientId()).toBe("worker-client-1");
 
     expect(worker.script.receivedSyncPayloads).toEqual([
-      JSON.stringify({ kind: "sub", seq: 1 }),
-      JSON.stringify({ kind: "sub", seq: 2 }),
+      enc({ kind: "sub", seq: 1 }),
+      enc({ kind: "sub", seq: 2 }),
     ]);
   });
 
@@ -227,9 +229,9 @@ describe("WorkerBridge race harness", () => {
     await Promise.resolve();
 
     expect(worker.script.receivedSyncPayloads).toEqual([
-      JSON.stringify({ kind: "sub", seq: 1 }),
-      JSON.stringify({ kind: "sub", seq: 2 }),
-      JSON.stringify({ kind: "sub", seq: 3 }),
+      enc({ kind: "sub", seq: 1 }),
+      enc({ kind: "sub", seq: 2 }),
+      enc({ kind: "sub", seq: 3 }),
     ]);
   });
 
@@ -255,9 +257,9 @@ describe("WorkerBridge race harness", () => {
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
 
     const initPromise = bridge.init(makeBridgeOptions());
-    worker.script.emitSyncToMain(JSON.stringify({ kind: "from-worker", seq: 1 }));
+    worker.script.emitSyncToMain(enc({ kind: "from-worker", seq: 1 }));
 
-    expect(receivedFromWorker).toEqual([JSON.stringify({ kind: "from-worker", seq: 1 })]);
+    expect(receivedFromWorker).toEqual([enc({ kind: "from-worker", seq: 1 })]);
 
     worker.script.completeInit("worker-client-3");
     await initPromise;
@@ -279,7 +281,7 @@ describe("WorkerBridge race harness", () => {
     await expect(initPromiseB).resolves.toBe("worker-client-5");
   });
 
-  it("WB-U06 init failure transitions state and clears queued sync", async () => {
+  it("WB-U06 init failure transitions state and preserves queued sync", async () => {
     const worker = new FakeWorker();
     const { runtime, emitServerPayload } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
@@ -291,9 +293,33 @@ describe("WorkerBridge race harness", () => {
     worker.script.failInit("boom");
     await expect(initPromise).rejects.toThrow("Worker init failed: boom");
 
-    expect((bridge as any).initState).toBe("failed");
-    expect((bridge as any).pendingSyncPayloadsForWorker).toEqual([]);
+    expect((bridge as any).state.phase).toBe("failed");
+    expect((bridge as any).state.pendingSyncPayloadsForWorker).toEqual([
+      enc({ kind: "sub", seq: 1 }),
+      enc({ kind: "sub", seq: 2 }),
+    ]);
     expect(worker.script.receivedSyncPayloads).toEqual([]);
+  });
+
+  it("WB-U09 init times out after the bridge timeout window", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeWorker({ initAckMode: "manual" });
+      const { runtime } = createRuntimeHarness();
+      const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+      const initErrorPromise = bridge.init(makeBridgeOptions()).then(
+        () => new Error("Expected init to timeout"),
+        (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+      );
+      await vi.advanceTimersByTimeAsync(12_001);
+
+      const initError = await initErrorPromise;
+      expect(initError.message).toContain("Worker init timeout");
+      expect((bridge as any).state.phase).toBe("failed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("WB-U07 handles synchronous shutdown-ok acknowledgements", async () => {

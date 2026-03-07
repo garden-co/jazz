@@ -13,15 +13,18 @@ import {
   generateClientId,
   buildEventsUrl,
   applyUserAuthHeaders,
-  isCataloguePayload,
+  isExpectedFetchAbortError,
+  OutboxDestinationKind,
 } from "../runtime/sync-transport.js";
+import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
 declare const self: {
-  postMessage(msg: unknown): void;
+  postMessage(msg: unknown, transfer?: Transferable[]): void;
   onmessage: ((event: MessageEvent) => void) | null;
   close(): void;
+  location?: { origin?: string };
 };
 
 let runtime: any = null; // WasmRuntime instance
@@ -38,10 +41,11 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let streamConnecting = false;
 let streamAttached = false;
+const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
-let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
-let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: string[] }> = [];
-let pendingSyncPayloadsForMain: string[] = [];
+let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
+let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
+let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -50,7 +54,45 @@ let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
 
-function enqueueSyncMessageForMain(payload: string): void {
+function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
+  const origin = self.location?.origin;
+  if (!origin) return null;
+
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const match = message.match(/(\/[^"'\s]+\.wasm)/);
+  if (!match) return null;
+
+  return new URL(match[1], origin).href;
+}
+
+async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): Promise<T> {
+  const globalRef = globalThis as typeof globalThis & {
+    fetch?: typeof fetch;
+  };
+  const originalFetch = globalRef.fetch;
+  const origin = self.location?.origin;
+
+  if (typeof originalFetch !== "function" || !origin) {
+    return operation();
+  }
+
+  const patchedFetch: typeof fetch = (input, init) =>
+    originalFetch(
+      typeof input === "string" && input.startsWith("/")
+        ? new URL(input, origin).toString()
+        : input,
+      init,
+    );
+  globalRef.fetch = patchedFetch;
+
+  try {
+    return await operation();
+  } finally {
+    globalRef.fetch = originalFetch;
+  }
+}
+
+function enqueueSyncMessageForMain(payload: Uint8Array | string): void {
   pendingSyncPayloadsForMain.push(payload);
   if (syncBatchFlushQueued) return;
 
@@ -65,7 +107,21 @@ function enqueueSyncMessageForMain(payload: string): void {
 }
 
 function post(msg: WorkerToMainMessage): void {
-  self.postMessage(msg);
+  const transfer =
+    msg.type === "sync" || msg.type === "peer-sync"
+      ? collectPayloadTransferables(msg.payload)
+      : undefined;
+  self.postMessage(msg, transfer);
+}
+
+function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
+  const transferables = [];
+  for (const payload of payloads) {
+    if (payload instanceof Uint8Array) {
+      transferables.push(payload.buffer);
+    }
+  }
+  return transferables;
 }
 
 // ============================================================================
@@ -78,7 +134,15 @@ async function startup(): Promise<void> {
     // With vite-plugin-wasm, init happens at import time and default is not a function.
     // Without it, default is the init function that must be called.
     if (typeof wasmModule.default === "function") {
-      await wasmModule.default();
+      try {
+        await runWithRootRelativeFetchSupport(() => wasmModule.default());
+      } catch (error) {
+        const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error);
+        if (!absoluteWasmUrl) {
+          throw error;
+        }
+        await wasmModule.default({ module_or_path: absoluteWasmUrl });
+      }
     }
     post({ type: "ready" });
   } catch (e: any) {
@@ -94,6 +158,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;
@@ -116,12 +181,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Open persistent OPFS-backed runtime with Worker tier
     runtime = await wasmModule.WasmRuntime.openPersistent(
-      msg.schemaJson,
+      schemaJson,
       msg.appId,
       msg.env,
       msg.userBranch,
       msg.dbName,
       "worker",
+      false,
     );
 
     // Store auth
@@ -135,47 +201,54 @@ async function handleInit(msg: InitMessage): Promise<void> {
     runtime.setClientRole(mainClientId, "peer");
 
     // Set up outbox routing
-    runtime.onSyncMessageToSend((envelope: string) => {
-      const parsed = JSON.parse(envelope);
-
-      if (parsed.destination && "Client" in parsed.destination) {
-        const destinationClientId = parsed.destination.Client as string;
-        if (destinationClientId === mainClientId) {
-          // Local main-thread client-bound payload.
-          enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
-          return;
-        }
-
-        // Follower peer client-bound payload.
-        const peerId = peerIdByRuntimeClient.get(destinationClientId);
-        if (!peerId) {
-          return;
-        }
-        const term = peerTermByPeerId.get(peerId) ?? 0;
-        post({
-          type: "peer-sync",
-          peerId,
-          term,
-          payload: [JSON.stringify(parsed.payload)],
-        });
-      } else if (parsed.destination && "Server" in parsed.destination) {
-        if (bootstrapCatalogueForwarding) {
-          if (isCataloguePayload(parsed.payload)) {
-            enqueueSyncMessageForMain(JSON.stringify(parsed.payload));
+    runtime.onSyncMessageToSend(
+      (
+        destinationKind: OutboxDestinationKind,
+        destinationId: string,
+        payload: Uint8Array | string,
+        isCatalogue: boolean,
+      ) => {
+        if (destinationKind === "client") {
+          const destinationClientId = destinationId;
+          if (destinationClientId === mainClientId) {
+            // Local main-thread client-bound payload.
+            enqueueSyncMessageForMain(payload);
+            return;
           }
-          return;
-        }
 
-        // Server-bound → HTTP POST to upstream
-        if (activeServerUrl) {
-          void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
-            console.error("[worker] Sync POST error:", error);
-            detachServer();
-            scheduleReconnect();
+          // Follower peer client-bound payload.
+          const peerId = peerIdByRuntimeClient.get(destinationClientId);
+          if (!peerId) {
+            return;
+          }
+          const term = peerTermByPeerId.get(peerId) ?? 0;
+          post({
+            type: "peer-sync",
+            peerId,
+            term,
+            payload: [payload as Uint8Array],
           });
+        } else if (destinationKind === "server") {
+          if (bootstrapCatalogueForwarding) {
+            if (isCatalogue) {
+              enqueueSyncMessageForMain(payload);
+            }
+            return;
+          }
+
+          // Server-bound → HTTP POST to upstream
+          if (activeServerUrl) {
+            void sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
+              if (!isExpectedFetchAbortError(error)) {
+                console.error("[worker] Sync POST error:", error);
+              }
+              detachServer();
+              scheduleReconnect();
+            });
+          }
         }
-      }
-    });
+      },
+    );
 
     // Runtime is now fully ready to ingest client sync traffic.
     const bufferedSyncMessages = pendingSyncMessages;
@@ -225,10 +298,15 @@ async function handleInit(msg: InitMessage): Promise<void> {
 // ============================================================================
 
 /** POST a sync payload to the upstream server. */
-async function sendToServer(serverUrl: string, payload: any): Promise<void> {
+async function sendToServer(
+  serverUrl: string,
+  payloadJson: string,
+  isCatalogue: boolean,
+): Promise<void> {
   await sendSyncPayload(
     serverUrl,
-    payload,
+    payloadJson,
+    isCatalogue,
     {
       jwtToken,
       localAuthMode,
@@ -285,14 +363,23 @@ async function connectStream(): Promise<void> {
   applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
 
   streamAbortController = new AbortController();
+  let streamConnectTimedOut = false;
+  const streamConnectTimeout = setTimeout(() => {
+    if (streamAbortController && !streamAbortController.signal.aborted) {
+      streamConnectTimedOut = true;
+      streamAbortController.abort();
+    }
+  }, streamConnectTimeoutMs);
 
   try {
     const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
+    console.log("[worker] Stream connect attempt", { eventsUrl });
 
     const response = await fetch(eventsUrl, {
       headers,
       signal: streamAbortController.signal,
     });
+    clearTimeout(streamConnectTimeout);
 
     if (!response.ok) {
       console.error(`[worker] Stream connect failed: ${response.status}`);
@@ -302,13 +389,26 @@ async function connectStream(): Promise<void> {
       return;
     }
 
-    const reader = response.body!.getReader();
+    if (!response.body || typeof response.body.getReader !== "function") {
+      console.error("[worker] Stream connect failed: fetch response body stream unavailable", {
+        hasBody: Boolean(response.body),
+        bodyType: response.body ? typeof response.body : "undefined",
+        url: eventsUrl,
+      });
+      detachServer();
+      streamConnecting = false;
+      scheduleReconnect();
+      return;
+    }
+
+    const reader = response.body.getReader();
     let connected = false;
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
         onConnected: (clientId) => {
+          console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;
           if (!connected) {
             connected = true;
@@ -319,9 +419,24 @@ async function connectStream(): Promise<void> {
       "[worker] ",
     );
   } catch (e: any) {
-    if (e?.name === "AbortError") return;
+    if (e?.name === "AbortError") {
+      if (streamConnectTimedOut) {
+        console.error(`[worker] Stream connect timeout after ${streamConnectTimeoutMs}ms`);
+        const fetchBaseHint = (globalThis.fetch as { __jazzRnFetchBaseHint?: string } | undefined)
+          ?.__jazzRnFetchBaseHint;
+        if (fetchBaseHint === "whatwg-fetch/xhr") {
+          console.error(
+            "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
+          );
+        }
+        detachServer();
+        scheduleReconnect();
+      }
+      return;
+    }
     console.error("[worker] Stream connect error:", e);
   } finally {
+    clearTimeout(streamConnectTimeout);
     streamConnecting = false;
   }
 
@@ -526,7 +641,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
       try {
-        runtime.__debugSeedLiveSchema(msg.schemaJson);
+        runtime.__debugSeedLiveSchema(normalizeRuntimeSchemaJson(msg.schemaJson));
         post({ type: "debug-seed-live-schema-ok" });
       } catch (error: any) {
         post({

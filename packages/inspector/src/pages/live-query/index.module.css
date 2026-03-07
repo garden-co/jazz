@@ -1,0 +1,25 @@
+.container {
+  height: 100%;
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 24px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  color: #e4e7ee;
+}
+
+.subtitle {
+  margin: 0;
+  color: #95a2b5;
+  font-size: 14px;
+}

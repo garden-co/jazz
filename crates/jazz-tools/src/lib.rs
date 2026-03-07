@@ -7,6 +7,7 @@ pub mod runtime_core;
 pub mod schema_manager;
 pub mod storage;
 pub mod sync_manager;
+pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;
@@ -50,7 +51,7 @@ pub use schema_manager::AppId;
 #[cfg(feature = "client")]
 pub use sync_manager::ClientId;
 #[cfg(feature = "client")]
-pub use sync_manager::PersistenceTier;
+pub use sync_manager::DurabilityTier;
 #[cfg(feature = "client")]
 pub use sync_manager::ServerId;
 

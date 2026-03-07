@@ -27,9 +27,14 @@ describe("TS Query API", () => {
   });
 
   it("queries by id", async () => {
-    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-id") }));
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("query-by-id") },
+      }),
+    );
 
-    const id = db.insert(app.projects, { name: "Project A" });
+    const id = await db.insert(app.projects, { name: "Project A" });
 
     const results = await db.all(app.projects.where({ id: { eq: id } }));
     expect(results.length).toBe(1);
@@ -42,12 +47,12 @@ describe("TS Query API", () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        dbName: uniqueDbName("include-corruption"),
+        driver: { type: "persistent", dbName: uniqueDbName("include-corruption") },
       }),
     );
 
-    const projectId = db.insert(app.projects, { name: "Announcements" });
-    const todoId = db.insert(app.todos, {
+    const projectId = await db.insert(app.projects, { name: "Announcements" });
+    const todoId = await db.insert(app.todos, {
       title: "Hello world",
       done: false,
       tags: ["general"],
@@ -69,12 +74,12 @@ describe("TS Query API", () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        dbName: uniqueDbName("include-returns-entity"),
+        driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
       }),
     );
 
-    const projectId = db.insert(app.projects, { name: "Announcements" });
-    const todoId = db.insert(app.todos, {
+    const projectId = await db.insert(app.projects, { name: "Announcements" });
+    const todoId = await db.insert(app.todos, {
       title: "Write tests",
       done: false,
       tags: ["dev"],
@@ -86,12 +91,10 @@ describe("TS Query API", () => {
     );
 
     expect(results.length).toBe(1);
-    const todo = results[0] as Record<string, unknown>;
+    const todo = results[0];
     expect(todo.title).toBe("Write tests");
-
-    const project = todo.project as { name: string };
-    expect(project).toBeDefined();
-    expect(project.name).toBe("Announcements");
+    expect(todo.project).toBeDefined();
+    expect(todo.project?.name).toBe("Announcements");
   });
 
   describe("query by array column", () => {
@@ -99,23 +102,23 @@ describe("TS Query API", () => {
       const db = track(
         await createDb({
           appId: "test-app",
-          dbName: uniqueDbName("query-by-array-column-equality"),
+          driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-equality") },
         }),
       );
-      const projectId = db.insert(app.projects, { name: "Project A" });
-      const id1 = db.insert(app.todos, {
+      const projectId = await db.insert(app.projects, { name: "Project A" });
+      const id1 = await db.insert(app.todos, {
         title: "Todo 1",
         done: false,
         tags: ["tag1"],
         project: projectId,
       });
-      const _id2 = db.insert(app.todos, {
+      const _id2 = await db.insert(app.todos, {
         title: "Todo 2",
         done: false,
         tags: ["tag2"],
         project: projectId,
       });
-      const _id3 = db.insert(app.todos, {
+      const _id3 = await db.insert(app.todos, {
         title: "Todo 3",
         done: false,
         tags: ["tag1", "tag2"],
@@ -131,23 +134,23 @@ describe("TS Query API", () => {
       const db = track(
         await createDb({
           appId: "test-app",
-          dbName: uniqueDbName("query-by-array-column-contains"),
+          driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-contains") },
         }),
       );
-      const projectId = db.insert(app.projects, { name: "Project A" });
-      const id1 = db.insert(app.todos, {
+      const projectId = await db.insert(app.projects, { name: "Project A" });
+      const id1 = await db.insert(app.todos, {
         title: "Todo 1",
         done: false,
         tags: ["tag1"],
         project: projectId,
       });
-      const _id2 = db.insert(app.todos, {
+      const _id2 = await db.insert(app.todos, {
         title: "Todo 2",
         done: false,
         tags: ["tag2"],
         project: projectId,
       });
-      const id3 = db.insert(app.todos, {
+      const id3 = await db.insert(app.todos, {
         title: "Todo 3",
         done: false,
         tags: ["tag1", "tag2"],

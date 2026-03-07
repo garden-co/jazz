@@ -8,6 +8,7 @@ mod tests {
     use crate::metadata::MetadataKey;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
+    use crate::query_manager::manager::LocalUpdates;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
@@ -64,7 +65,7 @@ mod tests {
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let id = ObjectId::new();
         let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Transform to v2 using LensTransformer
         let v1_hash = SchemaHash::compute(&v1);
@@ -77,7 +78,7 @@ mod tests {
 
         // Verify result can be decoded as v2
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let v2_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(v2_values.len(), 3);
         assert_eq!(v2_values[0], Value::Uuid(id));
@@ -125,7 +126,7 @@ mod tests {
         let id = ObjectId::new();
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         // Cache the row (simulating loading from storage)
         writer.cache_row(id, &v1_branch, v1_data, make_commit_id(1));
@@ -153,7 +154,7 @@ mod tests {
 
         // Verify result
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let final_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let final_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(final_values[0], Value::Uuid(id));
         assert_eq!(final_values[1], Value::Text("Alice Updated".to_string()));
@@ -215,7 +216,7 @@ mod tests {
             Value::Uuid(id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let v1_data = encode_row(&v1_table.descriptor, &v1_values).unwrap();
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
 
         let transformer = manager.transformer("users");
         let result = transformer
@@ -226,7 +227,7 @@ mod tests {
 
         // Verify - column value should be preserved under new name
         let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let v2_values = decode_row(&v2_table.descriptor, &result.data).unwrap();
+        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
 
         assert_eq!(v2_values[0], Value::Uuid(id));
         assert_eq!(v2_values[1], Value::Text("alice@example.com".to_string()));
@@ -275,7 +276,7 @@ mod tests {
         let v1_users = v1.get(&TableName::new("users")).unwrap();
         let user_id = ObjectId::new();
         let v1_user = vec![Value::Uuid(user_id), Value::Text("Alice".to_string())];
-        let v1_user_data = encode_row(&v1_users.descriptor, &v1_user).unwrap();
+        let v1_user_data = encode_row(&v1_users.columns, &v1_user).unwrap();
 
         let user_transformer = manager.transformer("users");
         let user_result = user_transformer
@@ -291,7 +292,7 @@ mod tests {
             Value::Uuid(user_id),
             Value::Text("Hello World".to_string()),
         ];
-        let v1_post_data = encode_row(&v1_posts.descriptor, &v1_post).unwrap();
+        let v1_post_data = encode_row(&v1_posts.columns, &v1_post).unwrap();
 
         let post_transformer = manager.transformer("posts");
         let post_result = post_transformer
@@ -301,7 +302,7 @@ mod tests {
 
         // Verify post has new body column
         let v2_posts = v2.get(&TableName::new("posts")).unwrap();
-        let v2_post_values = decode_row(&v2_posts.descriptor, &post_result.data).unwrap();
+        let v2_post_values = decode_row(&v2_posts.columns, &post_result.data).unwrap();
         assert_eq!(v2_post_values.len(), 4);
         assert_eq!(v2_post_values[3], Value::Null); // body column
     }
@@ -630,7 +631,7 @@ mod tests {
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let old_row_id = ObjectId::new();
         let old_row_values = vec![Value::Uuid(old_row_id), Value::Text("Alice".to_string())];
-        let old_row_data = encode_row(&v1_table.descriptor, &old_row_values).unwrap();
+        let old_row_data = encode_row(&v1_table.columns, &old_row_values).unwrap();
         ingest_remote_row(
             &mut qm,
             &mut storage,
@@ -777,7 +778,7 @@ mod tests {
         let v1_table = v1.get(&TableName::new("users")).unwrap();
         let row1_id = ObjectId::new();
         let row1_values = vec![Value::Uuid(row1_id), Value::Text("Alice".to_string())];
-        let row1_data = encode_row(&v1_table.descriptor, &row1_values).unwrap();
+        let row1_data = encode_row(&v1_table.columns, &row1_values).unwrap();
         ingest_remote_row(
             &mut qm,
             &mut storage,
@@ -796,7 +797,7 @@ mod tests {
             Value::Text("Bob".to_string()),
             Value::Text("bob@example.com".to_string()),
         ];
-        let row2_data = encode_row(&v2_table.descriptor, &row2_values).unwrap();
+        let row2_data = encode_row(&v2_table.columns, &row2_values).unwrap();
         ingest_remote_row(
             &mut qm,
             &mut storage,
@@ -963,7 +964,7 @@ mod tests {
             Value::Uuid(row_id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
 
         let mut storage = MemoryStorage::new();
         ingest_remote_row(
@@ -1050,7 +1051,7 @@ mod tests {
             Value::Uuid(row_id),
             Value::Text("alice@example.com".to_string()),
         ];
-        let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
 
         ingest_remote_row(
             &mut qm,
@@ -2050,7 +2051,7 @@ mod tests {
     // ========================================================================
 
     use crate::sync_manager::{
-        ClientId, ClientRole, Destination, InboxEntry, PersistenceTier, QueryId, ServerId, Source,
+        ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, QueryId, ServerId, Source,
         SyncPayload,
     };
 
@@ -2789,7 +2790,7 @@ mod tests {
 
         // Build values in the correct column order (alphabetical)
         let row_values: Vec<Value> = v2_table
-            .descriptor
+            .columns
             .columns
             .iter()
             .map(|col| match col.name.as_str() {
@@ -2799,7 +2800,7 @@ mod tests {
                 _ => panic!("unexpected column"),
             })
             .collect();
-        let row_data = encode_row(&v2_table.descriptor, &row_values).unwrap();
+        let row_data = encode_row(&v2_table.columns, &row_values).unwrap();
 
         ingest_remote_row(
             client.query_manager_mut(),
@@ -2907,13 +2908,13 @@ mod tests {
         let v1_encoded_decoded = decode_schema(&encode_schema(&v1)).unwrap();
         let v1_table = v1_encoded_decoded.get(&TableName::new("users")).unwrap();
         let id_idx = v1_table
-            .descriptor
+            .columns
             .columns
             .iter()
             .position(|c| c.name.as_str() == "id")
             .unwrap();
         let name_idx = v1_table
-            .descriptor
+            .columns
             .columns
             .iter()
             .position(|c| c.name.as_str() == "name")
@@ -3001,7 +3002,7 @@ mod tests {
 
         // === Setup Server B (Worker tier) ===
         let mut server_b = SchemaManager::new(
-            SyncManager::new().with_tier(PersistenceTier::Worker),
+            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
             schema.clone(),
             test_app_id(),
             "dev",
@@ -3035,7 +3036,7 @@ mod tests {
             .build();
         let sub_id = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
             .unwrap();
         client_a.process(&mut io_a);
 
@@ -3145,7 +3146,12 @@ mod tests {
             .build();
         let sub_id = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::EdgeServer))
+            .subscribe_with_sync_with_local_updates(
+                query,
+                None,
+                Some(DurabilityTier::EdgeServer),
+                LocalUpdates::Deferred,
+            )
             .unwrap();
         client_a.process(&mut io_a);
 
@@ -3176,7 +3182,7 @@ mod tests {
                 source: Source::Server(server_b_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
@@ -3200,7 +3206,7 @@ mod tests {
                 source: Source::Server(server_b_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::EdgeServer,
+                    tier: DurabilityTier::EdgeServer,
                     through_seq: 0,
                 },
             });
@@ -3246,7 +3252,12 @@ mod tests {
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync_with_local_updates(
+                query,
+                None,
+                Some(DurabilityTier::Worker),
+                LocalUpdates::Deferred,
+            )
             .unwrap();
         client.process(&mut storage);
 
@@ -3279,7 +3290,7 @@ mod tests {
                 source: Source::Server(server_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
@@ -3335,7 +3346,7 @@ mod tests {
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
             .unwrap();
         client.process(&mut storage);
 
@@ -3360,7 +3371,7 @@ mod tests {
                 source: Source::Server(server_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });
@@ -3407,7 +3418,7 @@ mod tests {
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
             .unwrap();
         client.process(&mut storage);
 
@@ -3432,7 +3443,7 @@ mod tests {
                 source: Source::Server(server_id),
                 payload: SyncPayload::QuerySettled {
                     query_id,
-                    tier: PersistenceTier::Worker,
+                    tier: DurabilityTier::Worker,
                     through_seq: 0,
                 },
             });

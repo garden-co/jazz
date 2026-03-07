@@ -11,13 +11,20 @@ use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
-use super::types::{ComposedBranchName, RowDescriptor, Schema, TableName, TableSchema, Value};
+use super::types::{
+    ComposedBranchName, LoadedRow, RowDescriptor, Schema, TableName, TableSchema, Value,
+};
 
 impl QueryManager {
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
         self.sync_manager
             .get_client(client_id)
-            .map(|client| matches!(client.role, ClientRole::Peer | ClientRole::Admin))
+            .map(|client| {
+                matches!(
+                    client.role,
+                    ClientRole::Peer | ClientRole::Admin | ClientRole::Backend
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -107,11 +114,22 @@ impl QueryManager {
                 }
             };
 
+            // Defence in depth: if the subscription has no session (client omitted
+            // it), fall back to the connection-level session set during JWT auth
+            // on the WebSocket handshake. This ensures the PolicyFilterNode is
+            // always present — at worst it will fail closed (zero results) rather
+            // than fail open (bypass policies).
+            let session_for_policy = sub.session.clone().or_else(|| {
+                self.sync_manager
+                    .get_client(sub.client_id)
+                    .and_then(|c| c.session.clone())
+            });
+
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let graph = Self::compile_graph(
                 &sub.query,
                 &schema_for_compile,
-                sub.session.clone(),
+                session_for_policy.clone(),
                 &self.schema_context,
             );
 
@@ -151,11 +169,12 @@ impl QueryManager {
             };
 
             // Simple row loader for server-side graphs (no schema transform needed)
-            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
                 for branch_name in &branches {
-                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                    let branch_name = BranchName::new(branch_name);
+                    if let Some(branch) = obj.branches.get(&branch_name) {
                         for &tip_id in &branch.tips {
                             if let Some(commit) = branch.commits.get(&tip_id) {
                                 match &best {
@@ -164,13 +183,15 @@ impl QueryManager {
                                             commit.timestamp,
                                             commit.content.clone(),
                                             tip_id,
+                                            branch_name,
                                         ));
                                     }
-                                    Some((best_ts, _, _)) if commit.timestamp > *best_ts => {
+                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
                                         best = Some((
                                             commit.timestamp,
                                             commit.content.clone(),
                                             tip_id,
+                                            branch_name,
                                         ));
                                     }
                                     _ => {}
@@ -179,14 +200,22 @@ impl QueryManager {
                         }
                     }
                 }
-                best.filter(|(_, content, _)| !content.is_empty())
-                    .map(|(_, content, commit_id)| (content, commit_id))
+                best.filter(|(_, content, _, _)| !content.is_empty()).map(
+                    |(_, content, commit_id, branch_name)| {
+                        LoadedRow::new(
+                            content,
+                            commit_id,
+                            [(id, branch_name)].into_iter().collect(),
+                        )
+                    },
+                )
             };
 
             let _delta = graph.settle(storage_ref, row_loader);
 
-            // Query result-set scope is always synced.
-            let result_scope = graph.contributing_object_ids();
+            // Sync the rows needed for the client to reproduce the current result
+            // locally, including any ordered prefix required by pagination.
+            let result_scope = graph.sync_scope_object_ids();
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
                 Self::scope_with_policy_context_rows_from_object_manager(
@@ -204,16 +233,19 @@ impl QueryManager {
                 sub.client_id,
                 sub.query_id,
                 scope.clone(),
-                sub.session.clone(),
+                session_for_policy.clone(),
             );
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
-            self.sync_manager.send_query_subscription_to_servers(
-                sub.query_id,
-                sub.query.clone(),
-                sub.session.clone(),
-            );
+            if sub.propagation == crate::sync_manager::QueryPropagation::Full {
+                self.sync_manager.send_query_subscription_to_servers(
+                    sub.query_id,
+                    sub.query.clone(),
+                    session_for_policy.clone(),
+                    sub.propagation,
+                );
+            }
 
             // Store the server subscription for reactive updates
             self.server_subscriptions.insert(
@@ -221,11 +253,12 @@ impl QueryManager {
                 ServerQuerySubscription {
                     query: sub.query,
                     graph,
-                    session: sub.session,
+                    session: session_for_policy,
                     branches,
                     last_scope: scope,
                     needs_recompile: false,
                     settled_once: false,
+                    propagation: sub.propagation,
                 },
             );
         }
@@ -246,13 +279,17 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_unsubscriptions();
 
         for unsub in pending {
-            // Remove the server subscription
-            self.server_subscriptions
-                .remove(&(unsub.client_id, unsub.query_id));
+            let propagation = self
+                .server_subscriptions
+                .remove(&(unsub.client_id, unsub.query_id))
+                .map(|sub| sub.propagation)
+                .unwrap_or(crate::sync_manager::QueryPropagation::Full);
 
-            // Forward unsubscription to upstream servers
-            self.sync_manager
-                .send_query_unsubscription_to_servers(unsub.query_id);
+            if propagation == crate::sync_manager::QueryPropagation::Full {
+                // Forward unsubscription to upstream servers
+                self.sync_manager
+                    .send_query_unsubscription_to_servers(unsub.query_id);
+            }
         }
     }
 
@@ -276,7 +313,10 @@ impl QueryManager {
             .clients
             .iter()
             .filter_map(|(client_id, client)| {
-                if matches!(client.role, ClientRole::Peer | ClientRole::Admin) {
+                if matches!(
+                    client.role,
+                    ClientRole::Peer | ClientRole::Admin | ClientRole::Backend
+                ) {
                     Some(*client_id)
                 } else {
                     None
@@ -290,11 +330,12 @@ impl QueryManager {
             let branches = &sub.branches;
 
             // Row loader for this subscription
-            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage, branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
                 for branch_name in branches {
-                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                    let branch_name = BranchName::new(branch_name);
+                    if let Some(branch) = obj.branches.get(&branch_name) {
                         for &tip_id in &branch.tips {
                             if let Some(commit) = branch.commits.get(&tip_id) {
                                 match &best {
@@ -303,13 +344,15 @@ impl QueryManager {
                                             commit.timestamp,
                                             commit.content.clone(),
                                             tip_id,
+                                            branch_name,
                                         ));
                                     }
-                                    Some((best_ts, _, _)) if commit.timestamp > *best_ts => {
+                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
                                         best = Some((
                                             commit.timestamp,
                                             commit.content.clone(),
                                             tip_id,
+                                            branch_name,
                                         ));
                                     }
                                     _ => {}
@@ -318,8 +361,15 @@ impl QueryManager {
                         }
                     }
                 }
-                best.filter(|(_, content, _)| !content.is_empty())
-                    .map(|(_, content, commit_id)| (content, commit_id))
+                best.filter(|(_, content, _, _)| !content.is_empty()).map(
+                    |(_, content, commit_id, branch_name)| {
+                        LoadedRow::new(
+                            content,
+                            commit_id,
+                            [(id, branch_name)].into_iter().collect(),
+                        )
+                    },
+                )
             };
 
             let new_scope = {
@@ -333,7 +383,7 @@ impl QueryManager {
                 }
 
                 // Check if scope changed
-                let result_scope = sub.graph.contributing_object_ids();
+                let result_scope = sub.graph.sync_scope_object_ids();
                 if trusted_clients.contains(client_id) {
                     Self::scope_with_policy_context_rows_from_object_manager(
                         &result_scope,
@@ -422,7 +472,7 @@ impl QueryManager {
             && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 new_content,
                 &branch,
             )
@@ -480,8 +530,7 @@ impl QueryManager {
         };
 
         // Evaluate simple parts of the policy
-        let result =
-            evaluate_simple_parts(&policy, content, &table_schema.descriptor, &check.session);
+        let result = evaluate_simple_parts(&policy, content, &table_schema.columns, &check.session);
 
         if !result.passed {
             // Simple parts failed - reject immediately
@@ -556,7 +605,7 @@ impl QueryManager {
         let graphs = self.create_policy_graphs_for_complex_clauses(
             &graph_clauses,
             content,
-            &table_schema.descriptor,
+            &table_schema.columns,
             &table_name,
             &check.session,
         );
@@ -598,7 +647,7 @@ impl QueryManager {
             && let Err(err) = self.validate_foreign_keys_for_content(
                 storage,
                 &table_name,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 new_content,
                 branch,
             )
@@ -636,7 +685,7 @@ impl QueryManager {
             };
 
             let result =
-                evaluate_simple_parts(using, old_content, &table_schema.descriptor, &check.session);
+                evaluate_simple_parts(using, old_content, &table_schema.columns, &check.session);
 
             if !result.passed {
                 // USING check failed - session cannot see the old row
@@ -668,7 +717,7 @@ impl QueryManager {
             let result = evaluate_simple_parts(
                 with_check,
                 new_content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &check.session,
             );
 
@@ -754,7 +803,7 @@ impl QueryManager {
             let clause_graphs = self.create_policy_graphs_for_complex_clauses(
                 std::slice::from_ref(clause),
                 content,
-                &table_schema.descriptor,
+                &table_schema.columns,
                 &table_name,
                 &check.session,
             );
@@ -896,7 +945,7 @@ impl QueryManager {
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
-            let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
                 let branch = obj.branches.get(&BranchName::new(&current_branch))?;
                 let tip_id = branch.tips.iter().next()?;
@@ -904,7 +953,13 @@ impl QueryManager {
                 if commit.content.is_empty() {
                     return None;
                 }
-                Some((commit.content.clone(), *tip_id))
+                Some(LoadedRow::new(
+                    commit.content.clone(),
+                    *tip_id,
+                    [(id, BranchName::new(&current_branch))]
+                        .into_iter()
+                        .collect(),
+                ))
             };
 
             // Settle all graphs

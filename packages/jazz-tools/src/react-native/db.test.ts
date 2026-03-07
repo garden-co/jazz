@@ -16,10 +16,8 @@ class TestDb extends Db {
 
 function makeSchema(tableName: string): WasmSchema {
   return {
-    tables: {
-      [tableName]: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
+    [tableName]: {
+      columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
     },
   };
 }
@@ -89,6 +87,7 @@ describe("react-native Db", () => {
       localAuthToken: config.localAuthToken,
       adminSecret: config.adminSecret,
       tier: config.tier,
+      defaultDurabilityTier: "worker",
     });
   });
 

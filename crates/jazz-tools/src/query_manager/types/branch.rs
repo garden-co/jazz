@@ -54,7 +54,7 @@ impl SchemaHash {
             hasher.update(&[0]); // delimiter
 
             // Hash row descriptor (columns sorted by name)
-            hash_row_descriptor(&mut hasher, &table_schema.descriptor);
+            hash_row_descriptor(&mut hasher, &table_schema.columns);
             hash_table_policies(&mut hasher, &table_schema.policies);
         }
 
@@ -351,7 +351,7 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
-        Value::Row(values) => {
+        Value::Row { values, .. } => {
             hasher.update(&[8]);
             hasher.update(&(values.len() as u64).to_le_bytes());
             for inner in values {
@@ -440,7 +440,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Text => {
             hasher.update(&[4]);
         }
-        ColumnType::Enum(variants) => {
+        ColumnType::Enum { variants } => {
             hasher.update(&[9]);
             // Enum variant ordering is normalized for hashing.
             let mut normalized = variants.clone();
@@ -461,11 +461,28 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Bytea => {
             hasher.update(&[10]);
         }
-        ColumnType::Array(elem) => {
+        ColumnType::Json { schema } => {
+            hasher.update(&[11]);
+            match schema {
+                Some(schema) => {
+                    hasher.update(&[1]);
+                    if let Ok(encoded) = serde_json::to_vec(schema) {
+                        hasher.update(&(encoded.len() as u64).to_le_bytes());
+                        hasher.update(&encoded);
+                    } else {
+                        hasher.update(&0u64.to_le_bytes());
+                    }
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
+        ColumnType::Array { element: elem } => {
             hasher.update(&[7]);
             hash_column_type(hasher, elem);
         }
-        ColumnType::Row(desc) => {
+        ColumnType::Row { columns: desc } => {
             hasher.update(&[8]);
             hash_row_descriptor(hasher, desc);
         }

@@ -3,56 +3,54 @@ import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src
 import type { WasmSchema } from "../../src/drivers/types.js";
 
 const schema: WasmSchema = {
-  tables: {
-    orgs: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
-    teams: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-        {
-          name: "parent_id",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "teams",
-        },
-      ],
-    },
-    users: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-      ],
-    },
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "priority", column_type: { type: "Integer" }, nullable: true },
-        { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
-        {
-          name: "tags",
-          column_type: { type: "Array", element: { type: "Text" } },
-          nullable: false,
-        },
-        { name: "payload", column_type: { type: "Bytea" }, nullable: true },
-      ],
-    },
-    file_parts: {
-      columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
-    },
-    files: {
-      columns: [
-        { name: "name", column_type: { type: "Text" }, nullable: false },
-        {
-          name: "parts",
-          column_type: { type: "Array", element: { type: "Uuid" } },
-          nullable: false,
-          references: "file_parts",
-        },
-      ],
-    },
+  orgs: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+    ],
+  },
+  file_parts: {
+    columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+  },
+  files: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "parts",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+        references: "file_parts",
+      },
+    ],
   },
 };
 
@@ -250,12 +248,12 @@ describe("db.all browser integration", () => {
     return db;
   }
 
-  function seedTodosForConditions(db: Db): void {
-    const orgId = db.insert(orgs, { name: "Acme" });
-    const teamId = db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
-    const userId = db.insert(users, { name: "Alice", team_id: teamId });
+  async function seedTodosForConditions(db: Db): Promise<void> {
+    const orgId = await db.insert(orgs, { name: "Acme" });
+    const teamId = await db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
+    const userId = await db.insert(users, { name: "Alice", team_id: teamId });
 
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "alpha",
       done: false,
       priority: 1,
@@ -263,7 +261,7 @@ describe("db.all browser integration", () => {
       tags: ["work", "backend"],
       payload: new Uint8Array([1, 2, 3]),
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "beta",
       done: true,
       priority: 2,
@@ -271,7 +269,7 @@ describe("db.all browser integration", () => {
       tags: ["home"],
       payload: new Uint8Array([4, 5, 6]),
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "gamma",
       done: true,
       priority: undefined,
@@ -288,8 +286,11 @@ describe("db.all browser integration", () => {
   });
 
   beforeAll(async () => {
-    conditionsDb = await createDb({ appId: "db-all-test", dbName: uniqueDbName("ops") });
-    seedTodosForConditions(conditionsDb);
+    conditionsDb = await createDb({
+      appId: "db-all-test",
+      driver: { type: "persistent", dbName: uniqueDbName("ops") },
+    });
+    await seedTodosForConditions(conditionsDb);
   });
 
   afterAll(async () => {
@@ -308,9 +309,14 @@ describe("db.all browser integration", () => {
   }
 
   it("returns BYTEA columns as Uint8Array", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("bytea") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("bytea") },
+      }),
+    );
 
-    const id = db.insert(todos, {
+    const id = await db.insert(todos, {
       title: "has-bytes",
       done: false,
       priority: 1,
@@ -331,23 +337,28 @@ describe("db.all browser integration", () => {
   });
 
   it("supports orderBy + limit + offset", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("paginate") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("paginate") },
+      }),
+    );
 
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "p1",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "p2",
       done: false,
       priority: 2,
       owner_id: undefined,
       tags: ["x"],
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "p3",
       done: false,
       priority: 3,
@@ -369,19 +380,24 @@ describe("db.all browser integration", () => {
   });
 
   it("supports include relations", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("include") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include") },
+      }),
+    );
 
-    const orgId = db.insert(orgs, { name: "Acme" });
-    const teamId = db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
-    const ownerId = db.insert(users, { name: "Owner", team_id: teamId });
-    db.insert(todos, {
+    const orgId = await db.insert(orgs, { name: "Acme" });
+    const teamId = await db.insert(teams, { name: "Core", org_id: orgId, parent_id: undefined });
+    const ownerId = await db.insert(users, { name: "Owner", team_id: teamId });
+    await db.insert(todos, {
       title: "with-owner-1",
       done: false,
       priority: 1,
       owner_id: ownerId,
       tags: ["x"],
     });
-    db.insert(todos, {
+    await db.insert(todos, {
       title: "with-owner-2",
       done: true,
       priority: 2,
@@ -411,11 +427,16 @@ describe("db.all browser integration", () => {
   });
 
   it("supports multi-hop queries", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("hops") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("hops") },
+      }),
+    );
 
-    const orgId = db.insert(orgs, { name: "Org A" });
-    const teamId = db.insert(teams, { name: "Team A", org_id: orgId, parent_id: undefined });
-    const userId = db.insert(users, { name: "User A", team_id: teamId });
+    const orgId = await db.insert(orgs, { name: "Org A" });
+    const teamId = await db.insert(teams, { name: "Team A", org_id: orgId, parent_id: undefined });
+    const userId = await db.insert(users, { name: "User A", team_id: teamId });
 
     const rows = await db.all<Org>(
       makeQuery<Org>("users", {
@@ -429,15 +450,20 @@ describe("db.all browser integration", () => {
   });
 
   it("supports one-off all queries across scalar and UUID[] foreign-key hops", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("fk-hops") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("fk-hops") },
+      }),
+    );
 
-    const orgId = db.insert(orgs, { name: "FK Org" });
-    const teamId = db.insert(teams, { name: "FK Team", org_id: orgId, parent_id: undefined });
-    const userId = db.insert(users, { name: "FK User", team_id: teamId });
+    const orgId = await db.insert(orgs, { name: "FK Org" });
+    const teamId = await db.insert(teams, { name: "FK Team", org_id: orgId, parent_id: undefined });
+    const userId = await db.insert(users, { name: "FK User", team_id: teamId });
 
-    const partAId = db.insert(fileParts, { label: "A" });
-    const partBId = db.insert(fileParts, { label: "B" });
-    const fileId = db.insert(files, { name: "File 1", parts: [partBId, partAId] });
+    const partAId = await db.insert(fileParts, { label: "A" });
+    const partBId = await db.insert(fileParts, { label: "B" });
+    const fileId = await db.insert(files, { name: "File 1", parts: [partBId, partAId] });
 
     const teamRows = await db.all<Team>(
       makeQuery<Team>("users", {
@@ -459,11 +485,20 @@ describe("db.all browser integration", () => {
   });
 
   it("supports gather queries", async () => {
-    const db = track(await createDb({ appId: "db-all-test", dbName: uniqueDbName("gather") }));
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("gather") },
+      }),
+    );
 
-    const rootId = db.insert(teams, { name: "root", org_id: undefined, parent_id: undefined });
-    const midId = db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
-    const leafId = db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const rootId = await db.insert(teams, {
+      name: "root",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const midId = await db.insert(teams, { name: "mid", org_id: undefined, parent_id: rootId });
+    const leafId = await db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
 
     const rows = await db.all<Team>(
       makeQuery<Team>("teams", {

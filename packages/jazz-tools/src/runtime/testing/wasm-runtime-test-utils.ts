@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
+import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { onTestFinished } from "vitest";
 
 export type TestRuntime = Runtime & { free?(): void };
@@ -86,15 +87,22 @@ function loadWasmModule(): Promise<any> {
 
 export async function createWasmRuntime(
   schema: WasmSchema,
-  opts?: { appId?: string; env?: string; userBranch?: string; tier?: string },
+  opts?: {
+    appId?: string;
+    env?: string;
+    userBranch?: string;
+    tier?: string;
+    useBinaryEncoding?: boolean;
+  },
 ): Promise<TestRuntime> {
   const wasmModule = await loadWasmModule();
   const runtime = new wasmModule.WasmRuntime(
-    JSON.stringify(schema),
+    serializeRuntimeSchema(schema),
     opts?.appId ?? "test-app",
     opts?.env ?? "test",
     opts?.userBranch ?? "main",
     opts?.tier,
+    opts?.useBinaryEncoding,
   );
 
   onTestFinished(async () => {

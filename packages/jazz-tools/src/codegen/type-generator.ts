@@ -6,15 +6,76 @@ import pluralize from "pluralize-esm";
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "./relation-analyzer.js";
 import {
-  generateWhereInputTypes,
+  generateWhereInputTypesWithMapper,
   generateQueryBuilderClasses,
   generateAppExport,
 } from "./query-builder-generator.js";
 
+type JsonSchemaObject = Record<string, unknown>;
+
+interface JsonSchemaTypeBinding {
+  key: string;
+  constName: string;
+  typeName: string;
+  schema: JsonSchemaObject;
+}
+
 /**
  * Convert a WasmColumnType to TypeScript type string.
  */
-function wasmTypeToTs(colType: ColumnType): string {
+function arrayType(elementTs: string): string {
+  return elementTs.includes("|") ? `(${elementTs})[]` : `${elementTs}[]`;
+}
+
+function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function collectJsonSchemaBindings(schema: WasmSchema): JsonSchemaTypeBinding[] {
+  const bindings = new Map<string, JsonSchemaTypeBinding>();
+
+  const visit = (colType: ColumnType): void => {
+    switch (colType.type) {
+      case "Json": {
+        if (!isJsonSchemaObject(colType.schema)) {
+          return;
+        }
+        const key = JSON.stringify(colType.schema);
+        if (bindings.has(key)) {
+          return;
+        }
+        const index = bindings.size + 1;
+        bindings.set(key, {
+          key,
+          constName: `__jsonSchema${index}`,
+          typeName: `__JsonType${index}`,
+          schema: colType.schema,
+        });
+        return;
+      }
+      case "Array":
+        visit(colType.element);
+        return;
+      case "Row":
+        for (const nested of colType.columns) {
+          visit(nested.column_type);
+        }
+        return;
+      default:
+        return;
+    }
+  };
+
+  for (const table of Object.values(schema)) {
+    for (const column of table.columns) {
+      visit(column.column_type);
+    }
+  }
+
+  return [...bindings.values()];
+}
+
+function wasmTypeToTs(colType: ColumnType, jsonTypeBySchemaKey: Map<string, string>): string {
   switch (colType.type) {
     case "Text":
       return "string";
@@ -30,16 +91,26 @@ function wasmTypeToTs(colType: ColumnType): string {
       return "string";
     case "Bytea":
       return "Uint8Array";
+    case "Json": {
+      if (isJsonSchemaObject(colType.schema)) {
+        const key = JSON.stringify(colType.schema);
+        const boundType = jsonTypeBySchemaKey.get(key);
+        if (boundType) {
+          return boundType;
+        }
+      }
+      return "JsonValue";
+    }
     case "Enum":
       return colType.variants.map((variant: string) => JSON.stringify(variant)).join(" | ");
     case "Array":
-      return `${wasmTypeToTs(colType.element)}[]`;
+      return arrayType(wasmTypeToTs(colType.element, jsonTypeBySchemaKey));
     case "Row":
       // Nested row - generate inline type
       const fields = colType.columns
         .map((c: { name: string; nullable: boolean; column_type: ColumnType }) => {
           const opt = c.nullable ? "?" : "";
-          return `${c.name}${opt}: ${wasmTypeToTs(c.column_type)}`;
+          return `${c.name}${opt}: ${wasmTypeToTs(c.column_type, jsonTypeBySchemaKey)}`;
         })
         .join("; ");
       return `{ ${fields} }`;
@@ -74,8 +145,8 @@ export function tableNameToInterface(name: string): string {
  *
  * Example output:
  *   export interface TodoInclude {
- *     parent?: boolean | TodoInclude | TodoQueryBuilder;
- *     owner?: boolean | UserInclude | UserQueryBuilder;
+ *     parent?: true | TodoInclude | TodoQueryBuilder;
+ *     owner?: true | UserInclude | UserQueryBuilder;
  *   }
  */
 function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
@@ -91,7 +162,7 @@ function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
       const targetInclude = targetInterface + "Include";
       const targetQueryBuilder = targetInterface + "QueryBuilder";
       // Add QueryBuilder to union for type-safe filtered includes
-      lines.push(`  ${rel.name}?: boolean | ${targetInclude} | ${targetQueryBuilder};`);
+      lines.push(`  ${rel.name}?: true | ${targetInclude} | ${targetQueryBuilder};`);
     }
     lines.push(`}`);
     lines.push(``);
@@ -134,53 +205,55 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
  *
  * Example output:
  *   export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
- *     [K in keyof I & keyof TodoRelations]?: I[K] extends true
- *       ? TodoRelations[K]
- *       : I[K] extends object
- *         ? TodoRelations[K] extends (infer E)[]
- *           ? WithIncludesArray<E, I[K]>
- *           : TodoRelations[K] & WithIncludesFor<TodoRelations[K], I[K]>
- *         : never;
+ *     project?: NonNullable<I["project"]> extends infer RelationInclude
+ *       ? RelationInclude extends true
+ *         ? Project
+ *         : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
+ *           ? ProjectWithIncludes<QueryInclude>
+ *           : RelationInclude extends ProjectInclude
+ *             ? ProjectWithIncludes<RelationInclude>
+ *             : never
+ *       : never;
  *   };
  */
 function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
   const lines: string[] = [];
-
-  // Check if any table has relations - only emit helper types if needed
-  const hasAnyRelations = [...relations.values()].some((rels) => rels.length > 0);
-
-  if (hasAnyRelations) {
-    // Generate helper types only when there are relations that use them
-    lines.push(`// Helper types for nested includes`);
-    lines.push(`type WithIncludesFor<T, I> = T extends { id: string }`);
-    lines.push(`  ? T & { [K in keyof I & string]?: unknown }`);
-    lines.push(`  : T;`);
-    lines.push(``);
-    lines.push(`type WithIncludesArray<E, I> = E extends { id: string }`);
-    lines.push(`  ? Array<E & { [K in keyof I & string]?: unknown }>`);
-    lines.push(`  : E[];`);
-    lines.push(``);
-  }
 
   for (const [tableName, rels] of relations) {
     if (rels.length === 0) continue;
 
     const baseInterface = tableNameToInterface(tableName);
     const includeInterface = baseInterface + "Include";
-    const relationsInterface = baseInterface + "Relations";
 
     lines.push(
       `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = ${baseInterface} & {`,
     );
-    lines.push(`  [K in keyof I & keyof ${relationsInterface}]?: I[K] extends true`);
-    lines.push(`    ? ${relationsInterface}[K]`);
-    lines.push(`    : I[K] extends object`);
-    lines.push(`      ? ${relationsInterface}[K] extends (infer E)[]`);
-    lines.push(`        ? WithIncludesArray<E, I[K]>`);
-    lines.push(
-      `        : ${relationsInterface}[K] & WithIncludesFor<${relationsInterface}[K], I[K]>`,
-    );
-    lines.push(`      : never;`);
+    for (const rel of rels) {
+      const targetInterface = tableNameToInterface(rel.toTable);
+      const targetInclude = targetInterface + "Include";
+      const targetQueryBuilder = targetInterface + "QueryBuilder";
+      const targetWithIncludes = targetInterface + "WithIncludes";
+      const includeSelector = `NonNullable<I["${rel.name}"]>`;
+      const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
+      const queryBuilderType = rel.isArray
+        ? `${targetWithIncludes}<QueryInclude>[]`
+        : `${targetWithIncludes}<QueryInclude>`;
+      const nestedIncludeType = rel.isArray
+        ? `${targetWithIncludes}<RelationInclude>[]`
+        : `${targetWithIncludes}<RelationInclude>`;
+
+      lines.push(`  ${rel.name}?: ${includeSelector} extends infer RelationInclude`);
+      lines.push(`    ? RelationInclude extends true`);
+      lines.push(`      ? ${trueType}`);
+      lines.push(
+        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}>`,
+      );
+      lines.push(`        ? ${queryBuilderType}`);
+      lines.push(`        : RelationInclude extends ${targetInclude}`);
+      lines.push(`          ? ${nestedIncludeType}`);
+      lines.push(`          : never`);
+      lines.push(`    : never;`);
+    }
     lines.push(`};`);
     lines.push(``);
   }
@@ -203,39 +276,64 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
  * 9. App export with table proxies
  */
 export function generateTypes(schema: WasmSchema): string {
+  const jsonSchemaBindings = collectJsonSchemaBindings(schema);
+  const jsonTypeBySchemaKey = new Map(
+    jsonSchemaBindings.map((binding) => [binding.key, binding.typeName]),
+  );
+
+  const importNames = ["WasmSchema", "QueryBuilder"];
+  if (jsonSchemaBindings.length > 0) {
+    importNames.push("JsonSchemaToTs");
+  }
+
   const lines: string[] = [
     "// AUTO-GENERATED FILE - DO NOT EDIT",
-    'import type { WasmSchema, QueryBuilder } from "jazz-tools";',
+    `import type { ${importNames.join(", ")} } from "jazz-tools";`,
+    "export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];",
     "",
   ];
 
+  if (jsonSchemaBindings.length > 0) {
+    for (const binding of jsonSchemaBindings) {
+      lines.push(
+        `const ${binding.constName} = ${JSON.stringify(binding.schema, null, 2)} as const;`,
+      );
+      lines.push(`type ${binding.typeName} = JsonSchemaToTs<typeof ${binding.constName}>;`);
+      lines.push("");
+    }
+  }
+
   // Base types (with id)
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName);
     lines.push(`export interface ${interfaceName} {`);
     lines.push("  id: string;");
     for (const col of table.columns) {
       const opt = col.nullable ? "?" : "";
-      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type)};`);
+      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type, jsonTypeBySchemaKey)};`);
     }
     lines.push("}");
     lines.push("");
   }
 
   // Init types (without id, for inserts)
-  for (const [tableName, table] of Object.entries(schema.tables)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName) + "Init";
     lines.push(`export interface ${interfaceName} {`);
     for (const col of table.columns) {
       const opt = col.nullable ? "?" : "";
-      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type)};`);
+      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type, jsonTypeBySchemaKey)};`);
     }
     lines.push("}");
     lines.push("");
   }
 
   // WhereInput types (for type-safe filtering)
-  lines.push(...generateWhereInputTypes(schema));
+  lines.push(
+    ...generateWhereInputTypesWithMapper(schema, (columnType) =>
+      wasmTypeToTs(columnType, jsonTypeBySchemaKey),
+    ),
+  );
 
   // Analyze relations and generate relation types
   const relations = analyzeRelations(schema);

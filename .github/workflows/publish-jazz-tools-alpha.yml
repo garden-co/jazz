@@ -1,17 +1,289 @@
 name: Publish jazz-tools alpha
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - .changeset/pre.json
+  workflow_call:
+    inputs:
+      mode:
+        description: "Execution mode: publish (real release) or dry-run (build + verify only)."
+        required: false
+        type: string
+        default: publish
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Execution mode."
+        required: true
+        type: choice
+        default: publish
+        options:
+          - publish
+          - dry-run
       version:
-        description: "Optional npm version override (for example 2.0.0-alpha.1)"
+        description: "Optional exact manual version override (for example 2.0.0-alpha.6)."
         required: false
         type: string
 
 jobs:
+  release-push-gate:
+    name: Gate release push trigger
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      reason: ${{ steps.gate.outputs.reason }}
+      release_pr_number: ${{ steps.gate.outputs.release_pr_number }}
+      release_pr_head_ref: ${{ steps.gate.outputs.release_pr_head_ref }}
+      release_pr_head_sha: ${{ steps.gate.outputs.release_pr_head_sha }}
+    steps:
+      - id: gate
+        uses: actions/github-script@v8
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        with:
+          script: |
+            const eventName = process.env.EVENT_NAME;
+            const ref = process.env.REF;
+            const sha = process.env.SHA;
+            let shouldRun = "false";
+            let reason = "";
+            let releasePrNumber = "";
+            let releasePrHeadRef = "";
+            let releasePrHeadSha = "";
+
+            if (eventName !== "push") {
+              shouldRun = "true";
+              reason = `non-push invocation (${eventName})`;
+            } else if (ref !== "refs/heads/main") {
+              shouldRun = "false";
+              reason = `push is not on main (${ref})`;
+            } else {
+              let matchSource = "commit pull association";
+              const associatedPulls = await github.request(
+                "GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls",
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commit_sha: sha,
+                },
+              );
+
+              let releasePr = associatedPulls.data.find(
+                (pr) =>
+                  pr.merged_at !== null &&
+                  pr.base.ref === "main" &&
+                  pr.head.ref.startsWith("changeset-release/"),
+              );
+
+              if (!releasePr) {
+                matchSource = "recent merged PR scan by merge_commit_sha";
+                const mergedPulls = await github.paginate(github.rest.pulls.list, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: "closed",
+                  base: "main",
+                  sort: "updated",
+                  direction: "desc",
+                  per_page: 100,
+                });
+
+                releasePr = mergedPulls.find(
+                  (pr) =>
+                    pr.merged_at !== null &&
+                    pr.merge_commit_sha === sha &&
+                    pr.head.ref.startsWith("changeset-release/"),
+                );
+              }
+
+              if (releasePr) {
+                shouldRun = "true";
+                reason = `merged changeset release PR #${releasePr.number} (${matchSource})`;
+                releasePrNumber = String(releasePr.number);
+                releasePrHeadRef = releasePr.head.ref;
+                releasePrHeadSha = releasePr.head.sha;
+              } else {
+                shouldRun = "false";
+                reason = "main push is not from a merged changeset-release/* PR";
+              }
+            }
+
+            core.setOutput("should_run", shouldRun);
+            core.setOutput("reason", reason);
+            core.setOutput("release_pr_number", releasePrNumber);
+            core.setOutput("release_pr_head_ref", releasePrHeadRef);
+            core.setOutput("release_pr_head_sha", releasePrHeadSha);
+
+      - name: Show gate decision
+        run: |
+          echo "should_run=${{ steps.gate.outputs.should_run }}"
+          echo "reason=${{ steps.gate.outputs.reason }}"
+          echo "release_pr_number=${{ steps.gate.outputs.release_pr_number }}"
+          echo "release_pr_head_ref=${{ steps.gate.outputs.release_pr_head_ref }}"
+          echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
+
+  resolve-preview-artifacts:
+    name: Resolve preview artifact source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      use_preview_artifacts: ${{ steps.resolve.outputs.use_preview_artifacts }}
+      preview_run_id: ${{ steps.resolve.outputs.preview_run_id }}
+      reason: ${{ steps.resolve.outputs.reason }}
+    steps:
+      - id: resolve
+        uses: actions/github-script@v8
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
+          RELEASE_PR_NUMBER: ${{ needs.release-push-gate.outputs.release_pr_number }}
+          RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
+          RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+        with:
+          script: |
+            const eventName = process.env.EVENT_NAME;
+            const ref = process.env.REF;
+            const sha = process.env.SHA;
+            const releaseMode = process.env.RELEASE_MODE;
+            const releasePrNumber = process.env.RELEASE_PR_NUMBER;
+            const releasePrHeadRef = process.env.RELEASE_PR_HEAD_REF;
+            const releasePrHeadSha = process.env.RELEASE_PR_HEAD_SHA;
+            let usePreviewArtifacts = "false";
+            let previewRunId = "";
+            let reason = "";
+
+            if (releaseMode !== "publish") {
+              reason = `preview artifact reuse disabled for mode=${releaseMode}`;
+            } else if (eventName !== "push" || ref !== "refs/heads/main") {
+              reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
+            } else if (!releasePrNumber || !releasePrHeadRef || !releasePrHeadSha) {
+              reason = "release PR metadata unavailable for artifact reuse";
+            } else {
+              const owner = context.repo.owner;
+              const repo = context.repo.repo;
+              const [mergeCommit, previewCommit] = await Promise.all([
+                github.rest.git.getCommit({
+                  owner,
+                  repo,
+                  commit_sha: sha,
+                }),
+                github.rest.git.getCommit({
+                  owner,
+                  repo,
+                  commit_sha: releasePrHeadSha,
+                }),
+              ]);
+
+              const mergeTree = mergeCommit.data.tree.sha;
+              const previewTree = previewCommit.data.tree.sha;
+
+              if (mergeTree !== previewTree) {
+                reason = `main merge tree ${mergeTree} differs from release PR head tree ${previewTree}`;
+              } else {
+                const runs = await github.paginate(
+                  github.rest.actions.listWorkflowRuns,
+                  {
+                    owner,
+                    repo,
+                    workflow_id: "preview-jazz-tools-alpha-release.yml",
+                    branch: releasePrHeadRef,
+                    per_page: 100,
+                  },
+                  (response) => response.data.workflow_runs,
+                );
+
+                const previewRun = runs
+                  .filter(
+                    (run) =>
+                      run.head_sha === releasePrHeadSha &&
+                      run.status === "completed" &&
+                      run.conclusion === "success",
+                  )
+                  .sort(
+                    (a, b) =>
+                      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+                  )[0];
+
+                if (!previewRun) {
+                  reason = `no successful preview run found for ${releasePrHeadRef}@${releasePrHeadSha}`;
+                } else {
+                  const artifacts = await github.paginate(
+                    github.rest.actions.listWorkflowRunArtifacts,
+                    {
+                      owner,
+                      repo,
+                      run_id: previewRun.id,
+                      per_page: 100,
+                    },
+                    (response) => response.data.artifacts,
+                  );
+
+                  const requiredArtifacts = [
+                    "jazz-tools-darwin-arm64",
+                    "jazz-tools-darwin-x64",
+                    "jazz-tools-linux-arm64",
+                    "jazz-tools-linux-x64",
+                    "jazz-tools-windows-x64",
+                    "jazz-wasm-pkg",
+                    "jazz-napi-binding-darwin-arm64",
+                    "jazz-napi-binding-darwin-x64",
+                    "jazz-napi-binding-linux-x64-gnu",
+                    "jazz-napi-binding-win32-x64-msvc",
+                    "jazz-rn-ios-payload",
+                    "jazz-rn-android-payload-arm64-v8a",
+                    "jazz-rn-android-payload-armeabi-v7a",
+                    "jazz-rn-android-payload-x86",
+                    "jazz-rn-android-payload-x86_64",
+                  ];
+
+                  const availableArtifacts = new Set(
+                    artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
+                  );
+                  const missingArtifacts = requiredArtifacts.filter(
+                    (artifactName) => !availableArtifacts.has(artifactName),
+                  );
+
+                  if (missingArtifacts.length > 0) {
+                    reason = `preview run ${previewRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`;
+                  } else {
+                    usePreviewArtifacts = "true";
+                    previewRunId = String(previewRun.id);
+                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
+                  }
+                }
+              }
+            }
+
+            core.setOutput("use_preview_artifacts", usePreviewArtifacts);
+            core.setOutput("preview_run_id", previewRunId);
+            core.setOutput("reason", reason);
+
+      - name: Show artifact reuse decision
+        run: |
+          echo "use_preview_artifacts=${{ steps.resolve.outputs.use_preview_artifacts }}"
+          echo "preview_run_id=${{ steps.resolve.outputs.preview_run_id }}"
+          echo "reason=${{ steps.resolve.outputs.reason }}"
+
   build-linux:
-    name: Build Linux (${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    name: Build CLI Linux (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+    env:
+      CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +302,10 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
@@ -53,8 +329,10 @@ jobs:
           path: dist/${{ matrix.output }}
 
   build-macos:
-    name: Build macOS (${{ matrix.arch }})
+    name: Build CLI macOS (${{ matrix.arch }})
     runs-on: macos-14
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +352,10 @@ jobs:
           toolchain: 1.93.1
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Build CLI binary
         run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
 
@@ -88,8 +370,10 @@ jobs:
           path: dist/${{ matrix.output }}
 
   build-windows:
-    name: Build Windows (x64)
+    name: Build CLI Windows (x64)
     runs-on: windows-latest
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
 
     steps:
       - uses: actions/checkout@v6
@@ -98,6 +382,10 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Build CLI binary
         run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target x86_64-pc-windows-msvc
@@ -113,34 +401,110 @@ jobs:
           name: jazz-tools-windows-x64
           path: dist/jazz-tools-windows-x64.exe
 
-  build-napi:
-    name: Build jazz-napi (${{ matrix.platform }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64-msvc
-          - os: macos-14
-            target: x86_64-apple-darwin
-            platform: darwin-x64
-          - os: macos-14
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
+  build-wasm:
+    name: Build jazz-wasm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
 
     steps:
       - uses: actions/checkout@v6
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: release-wasm-sccache-${{ github.repository_id }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Build jazz-wasm npm package
+        run: pnpm --filter jazz-wasm build
+
+      - name: Verify built jazz-wasm publish artifacts
+        run: |
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          if-no-files-found: error
+
+  build-napi:
+    name: Build jazz-napi (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64-gnu
+            use_sccache: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64-msvc
+            use_sccache: false
+          - os: macos-14
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            use_sccache: false
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            use_sccache: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
       - run: pnpm install --frozen-lockfile
 
       - uses: dtolnay/rust-toolchain@stable
@@ -148,7 +512,32 @@ jobs:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
 
-      - name: Build jazz-napi binding
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - if: ${{ matrix.use_sccache }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - if: ${{ matrix.use_sccache }}
+        name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: release-napi-sccache-${{ github.repository_id }}-${{ matrix.platform }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Build jazz-napi binding (Linux)
+        if: ${{ matrix.use_sccache }}
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_DIR: /home/runner/.cache/sccache
+          SCCACHE_CACHE_SIZE: 8G
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Build jazz-napi binding (macOS/Windows)
+        if: ${{ !matrix.use_sccache }}
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
@@ -157,49 +546,293 @@ jobs:
           path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
           if-no-files-found: error
 
-  publish-npm:
-    name: Publish npm alpha
-    runs-on: ubuntu-latest
-    needs: [build-linux, build-macos, build-windows, build-napi]
-    permissions:
-      contents: read
-      id-token: write
+  build-rn-ios:
+    name: Build jazz-rn iOS payload
+    runs-on: macos-14
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
 
     steps:
       - uses: actions/checkout@v6
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
-          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install/build React Native iOS prerequisites
+        env:
+          JAZZ_RN_PLATFORM: ios
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build jazz-rn iOS native payload
+        run: pnpm --filter jazz-rn build:rn:ios
+
+      - name: Verify built jazz-rn iOS native payload
+        run: |
+          test -d crates/jazz-rn/JazzRnFramework.xcframework
+          test -f crates/jazz-rn/JazzRnFramework.xcframework/Info.plist
+
+      - name: Stage jazz-rn iOS payload artifact
+        run: |
+          mkdir -p dist/rn-ios
+          cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-rn-ios-payload
+          path: dist/rn-ios
+          if-no-files-found: error
+
+  build-rn-android:
+    name: Build jazz-rn Android payload (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
+    needs: [release-push-gate, resolve-preview-artifacts]
+    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+          - target: i686-linux-android
+            abi: x86
+          - target: x86_64-linux-android
+            abi: x86_64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: cargo-ndk
 
-      - uses: actions/download-artifact@v4
+      - name: Install/build React Native Android prerequisites
+        env:
+          JAZZ_RN_PLATFORM: android
+          JAZZ_RN_ANDROID_TARGETS: ${{ matrix.target }}
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build jazz-rn Android native payload
+        run: pnpm --filter jazz-rn exec ubrn build android --targets ${{ matrix.target }} --and-generate --release
+
+      - name: Verify built jazz-rn Android native payload
+        run: test -f crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}/libjazz_rn.a
+
+      - name: Stage jazz-rn Android payload artifact
+        run: |
+          mkdir -p dist/rn-android/jniLibs
+          cp -R crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }} dist/rn-android/jniLibs/
+
+      - uses: actions/upload-artifact@v4
         with:
+          name: jazz-rn-android-payload-${{ matrix.abi }}
+          path: dist/rn-android
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish npm alpha
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - release-push-gate
+      - resolve-preview-artifacts
+      - build-linux
+      - build-macos
+      - build-windows
+      - build-wasm
+      - build-napi
+      - build-rn-ios
+      - build-rn-android
+    if: >-
+      always() &&
+      needs.release-push-gate.outputs.should_run == 'true' &&
+      (
+        needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' ||
+        (
+          needs.build-linux.result == 'success' &&
+          needs.build-macos.result == 'success' &&
+          needs.build-windows.result == 'success' &&
+          needs.build-wasm.result == 'success' &&
+          needs.build-napi.result == 'success' &&
+          needs.build-rn-ios.result == 'success' &&
+          needs.build-rn-android.result == 'success'
+        )
+      )
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Show artifact source
+        run: |
+          if [ "${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}" = "true" ]; then
+            echo "Artifact source: preview run ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}"
+          else
+            echo "Artifact source: current workflow run"
+          fi
+          echo "Artifact decision reason: ${{ needs.resolve-preview-artifacts.outputs.reason }}"
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          pattern: jazz-tools-*
           path: dist
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
 
-      - name: Build jazz-wasm npm package
-        run: pnpm --filter jazz-wasm build
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          name: jazz-rn-ios-payload
+          path: dist/rn-ios
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          pattern: jazz-rn-android-payload-*
+          path: dist/rn-android
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-tools-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-napi-binding-*
+          path: crates/jazz-napi/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          name: jazz-rn-ios-payload
+          path: dist/rn-ios
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-rn-android-payload-*
+          path: dist/rn-android
+          merge-multiple: true
+
+      - name: Stage jazz-rn native payload into npm package sources
+        run: |
+          rm -rf crates/jazz-rn/JazzRnFramework.xcframework
+          rm -rf crates/jazz-rn/android/src/main/jniLibs
+          mkdir -p crates/jazz-rn/android/src/main
+          cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
+          cp -R dist/rn-android/jniLibs crates/jazz-rn/android/src/main/
+
+      - name: Show release mode
+        run: |
+          case "${RELEASE_MODE}" in
+            publish|dry-run) ;;
+            *)
+              echo "Unsupported RELEASE_MODE='${RELEASE_MODE}'"
+              exit 1
+              ;;
+          esac
+          echo "Release mode: ${RELEASE_MODE}"
 
       - name: Verify jazz-wasm publish artifacts
         run: |
@@ -210,8 +843,9 @@ jobs:
       - name: Stage jazz-napi platform package artifacts
         run: |
           cd crates/jazz-napi
-          pnpm exec napi create-npm-dir -t .
-          pnpm exec napi artifacts -d artifacts --dist npm
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts -d artifacts --npm-dir npm
+          node -e 'const fs=require("fs");for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const path=`npm/${entry.name}/package.json`;const p=JSON.parse(fs.readFileSync(path,"utf8"));p.name=`@garden-co/${p.name}`;fs.writeFileSync(path,`${JSON.stringify(p,null,2)}\n`);}'
 
       - name: Verify staged jazz-napi platform artifacts
         run: |
@@ -235,27 +869,55 @@ jobs:
         run: |
           mkdir -p packages/jazz-tools/bin/native
           cp dist/jazz-tools-* packages/jazz-tools/bin/native/
-          chmod +x packages/jazz-tools/bin/native/jazz-tools-darwin-* packages/jazz-tools/bin/native/jazz-tools-linux-* || true
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64 \
+            jazz-tools-windows-x64.exe; do
+            FILE="packages/jazz-tools/bin/native/${bin}"
+            test -f "${FILE}" || { echo "Missing staged native binary ${bin}"; exit 1; }
+          done
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
+          ls -l packages/jazz-tools/bin/native
 
-      - name: Apply optional version override
-        if: ${{ inputs.version != '' }}
-        run: npm --prefix packages/jazz-tools version "${{ inputs.version }}" --no-git-tag-version
-
-      - name: Lock-step npm package versions
+      - name: Resolve lock-stepped npm package versions
         run: |
-          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
-          npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
-          npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+          if [ "${RELEASE_MODE}" = "dry-run" ]; then
+            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version || '' }}"
+            if [ -n "${VERSION}" ]; then
+              npm --prefix packages/jazz-tools version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-rn version "${VERSION}" --no-git-tag-version
+            else
+              pnpm release:version
+              VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+              npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
+              npm --prefix crates/jazz-rn version "${VERSION}" --no-git-tag-version
+            fi
+          else
+            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          fi
+
+          echo "Resolved publish version: ${VERSION}"
 
       - name: Sync jazz-napi platform package versions and optional deps
         run: |
           cd crates/jazz-napi
-          pnpm exec napi version -p npm
-          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const dirs=fs.readdirSync("npm",{withFileTypes:true}).filter((d)=>d.isDirectory()).map((d)=>d.name).sort();pkg.optionalDependencies=Object.fromEntries(dirs.map((d)=>[`jazz-napi-${d}`,pkg.version]));fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+          pnpm exec napi version --npm-dir npm
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
 
-      - name: Verify lock-stepped prerelease versions
+      - name: Guard alpha-only lock-stepped publish versions
         run: |
-          node -e 'const fs=require("fs");const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(tools.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${tools.version}`);}if(!(tools.version===wasm.version&&tools.version===napi.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}console.log(`Publishing lock-stepped versions at ${tools.version}`);'
+          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="alpha"){throw new Error(`${pkg.name} publishConfig.tag must be alpha, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&napi.version===rn.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
 
       - name: Verify packed jazz-wasm payload
         run: |
@@ -273,7 +935,7 @@ jobs:
           TARBALL=$(ls "${TMP_DIR}"/jazz-napi-*.tgz | head -n 1)
           tar -tf "${TARBALL}" | grep -q "package/index.js"
           tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
-          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["jazz-napi-linux-x64-gnu","jazz-napi-win32-x64-msvc","jazz-napi-darwin-x64","jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-win32-x64-msvc","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
 
       - name: Verify packed jazz-tools manifest
         run: |
@@ -282,7 +944,67 @@ jobs:
           TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
 
+      - name: Verify packed jazz-tools native binaries and runtime bootstrap
+        run: |
+          TMP_DIR=$(mktemp -d)
+          EXTRACT_DIR=$(mktemp -d)
+          pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
+          tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64; do
+            FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
+            test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
+          done
+
+          case "$(uname -m)" in
+            x86_64) HOST_LINUX_BIN="jazz-tools-linux-x64" ;;
+            aarch64|arm64) HOST_LINUX_BIN="jazz-tools-linux-arm64" ;;
+            *)
+              echo "Unsupported linux runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --help >/dev/null
+          test -x "${EXTRACT_DIR}/package/bin/native/${HOST_LINUX_BIN}" || {
+            echo "Packed native binary ${HOST_LINUX_BIN} is not executable after runtime bootstrap."
+            exit 1
+          }
+
+      - name: Verify packed jazz-rn manifest
+        run: |
+          TMP_DIR=$(mktemp -d)
+          npm_config_ignore_scripts=true pnpm --filter jazz-rn pack --pack-destination "${TMP_DIR}"
+          TARBALL=$(ls "${TMP_DIR}"/jazz-rn-*.tgz | head -n 1)
+          LISTING=$(mktemp)
+          tar -tf "${TARBALL}" > "${LISTING}"
+
+          # Ensure iOS payload is present for CocoaPods (Expo/RN iOS consumers).
+          grep -q '^package/JazzRnFramework.xcframework/' "${LISTING}" || {
+            echo "Missing JazzRnFramework.xcframework in packed jazz-rn tarball."
+            exit 1
+          }
+          grep -q '^package/JazzRnFramework.xcframework/Info.plist$' "${LISTING}" || {
+            echo "Missing JazzRnFramework.xcframework/Info.plist in packed jazz-rn tarball."
+            exit 1
+          }
+
+          # Ensure Android native slices are present for Expo/RN Android consumers.
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            grep -q "^package/android/src/main/jniLibs/${abi}/libjazz_rn\\.a$" "${LISTING}" || {
+              echo "Missing Android native library for ABI ${abi} in packed jazz-rn tarball."
+              exit 1
+            }
+          done
+
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}if(!(p.publishConfig&&p.publishConfig.tag==="alpha")){throw new Error(`Expected publishConfig.tag=alpha for ${p.name}, got ${(p.publishConfig||{}).tag}`);}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+
       - name: Publish jazz-wasm (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
         run: |
           WASM_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-wasm/package.json","utf8")).version')
           if npm view "jazz-wasm@${WASM_VERSION}" version >/dev/null 2>&1; then
@@ -292,6 +1014,7 @@ jobs:
           fi
 
       - name: Publish jazz-napi (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
         run: |
           NAPI_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-napi/package.json","utf8")).version')
           for pkg_dir in crates/jazz-napi/npm/*; do
@@ -309,5 +1032,22 @@ jobs:
             pnpm --filter jazz-napi publish --tag alpha --access public --no-git-checks
           fi
 
+      - name: Publish jazz-rn (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          RN_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-rn/package.json","utf8")).version')
+          if npm view "jazz-rn@${RN_VERSION}" version >/dev/null 2>&1; then
+            echo "jazz-rn@${RN_VERSION} already exists on npm; skipping publish."
+          else
+            npm_config_ignore_scripts=true pnpm --filter jazz-rn publish --tag alpha --access public --no-git-checks
+          fi
+
       - name: Publish jazz-tools (alpha tag)
-        run: pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          TOOLS_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          if npm view "jazz-tools@${TOOLS_VERSION}" version >/dev/null 2>&1; then
+            echo "jazz-tools@${TOOLS_VERSION} already exists on npm; skipping publish."
+          else
+            pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
+          fi

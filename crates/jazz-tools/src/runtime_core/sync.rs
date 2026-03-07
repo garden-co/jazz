@@ -77,6 +77,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .set_client_role(client_id, ClientRole::Admin);
     }
 
+    /// Promote a client to Backend role (row access, no catalogue writes).
+    pub fn set_client_backend(&mut self, client_id: ClientId) {
+        use crate::sync_manager::ClientRole;
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(client_id, ClientRole::Backend);
+    }
+
     /// Set a client's role.
     pub fn set_client_role_by_name(
         &mut self,

@@ -665,6 +665,117 @@ fn admin_writes_row_directly() {
 }
 
 #[test]
+fn backend_writes_row_directly() {
+    // Backend role can write row objects directly without ReBAC.
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Backend);
+    sm.take_outbox();
+
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"updated".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn backend_catalogue_writes_are_denied() {
+    // Backend role should not be able to write catalogue objects.
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Backend);
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"schema data".to_vec(),
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| {
+        matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied { object_id, .. }),
+            } if *id == client_id && *object_id == obj_id
+        )
+    }));
+    assert!(sm.object_manager.get(obj_id).is_none());
+}
+
+#[test]
 fn user_with_session_goes_to_permission_check() {
     // User with session sends row data → queued for ReBAC
     let mut sm = SyncManager::new();
@@ -1779,7 +1890,12 @@ fn send_query_subscription_includes_session() {
     let query = QueryBuilder::new("users").branch("main").build();
     let session = Session::new("alice");
 
-    sm.send_query_subscription_to_servers(QueryId(1), query.clone(), Some(session.clone()));
+    sm.send_query_subscription_to_servers(
+        QueryId(1),
+        query.clone(),
+        Some(session.clone()),
+        QueryPropagation::Full,
+    );
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
@@ -1792,11 +1908,13 @@ fn send_query_subscription_includes_session() {
                     query_id,
                     query: sent_query,
                     session: sent_session,
+                    propagation,
                 },
         } => {
             assert_eq!(*id, server_id);
             assert_eq!(*query_id, QueryId(1));
             assert_eq!(sent_query.table, query.table);
+            assert_eq!(*propagation, QueryPropagation::Full);
             let sent_session = sent_session
                 .as_ref()
                 .expect("QuerySubscription payload should include session");
@@ -1905,8 +2023,8 @@ fn setup_3tier() -> ThreeTierSetup {
     let c_server_for_b = ServerId::new();
 
     let a = SyncManager::new();
-    let mut b = SyncManager::new().with_tier(PersistenceTier::Worker);
-    let mut c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+    let mut b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut c = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
 
     // A connects to B as server
     b.add_client(a_client_of_b);
@@ -1983,7 +2101,7 @@ fn persistence_ack_direct() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::Worker),
+            .contains(&DurabilityTier::Worker),
         "A should have received Worker ack from B"
     );
 }
@@ -2024,7 +2142,7 @@ fn persistence_ack_relay() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::EdgeServer),
+            .contains(&DurabilityTier::EdgeServer),
         "A should have received EdgeServer ack relayed through B"
     );
 }
@@ -2063,14 +2181,14 @@ fn persistence_ack_both_tiers() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::Worker),
+            .contains(&DurabilityTier::Worker),
         "Should have Worker ack from B"
     );
     assert!(
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::EdgeServer),
+            .contains(&DurabilityTier::EdgeServer),
         "Should have EdgeServer ack from C"
     );
 }
@@ -2127,7 +2245,7 @@ fn persistence_ack_idempotent() {
         a_commit
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::Worker)
+            .contains(&DurabilityTier::Worker)
     );
 }
 
@@ -2210,7 +2328,7 @@ fn persistence_ack_survives_reload() {
     io.append_commit(obj_id, &"main".into(), commit).unwrap();
 
     // Store ack tier
-    io.store_ack_tier(commit_id, PersistenceTier::EdgeServer)
+    io.store_ack_tier(commit_id, DurabilityTier::EdgeServer)
         .unwrap();
 
     // Load branch and verify ack_state is populated
@@ -2224,7 +2342,7 @@ fn persistence_ack_survives_reload() {
         loaded.commits[0]
             .ack_state
             .confirmed_tiers
-            .contains(&PersistenceTier::EdgeServer),
+            .contains(&DurabilityTier::EdgeServer),
         "Loaded commit should have EdgeServer ack"
     );
 }
@@ -2236,11 +2354,131 @@ fn ack_state_does_not_affect_commit_id_sync() {
     let mut ack_state = crate::commit::CommitAckState::default();
     ack_state
         .confirmed_tiers
-        .insert(PersistenceTier::CoreServer);
+        .insert(DurabilityTier::GlobalServer);
 
     let commit1 = make_test_commit(b"same-content", vec![]);
     let mut commit2 = make_test_commit(b"same-content", vec![]);
     commit2.ack_state = ack_state;
 
     assert_eq!(commit1.id(), commit2.id());
+}
+
+// ========================================================================
+// QuerySubscription session fallback (inbox.rs fix)
+// ========================================================================
+
+/// Helper: push a QuerySubscription from a client and drain pending subs.
+fn push_query_subscription(
+    sm: &mut SyncManager,
+    client_id: ClientId,
+    payload_session: Option<Session>,
+) -> Vec<PendingQuerySubscription> {
+    use crate::query_manager::query::QueryBuilder;
+    let query = QueryBuilder::new("messages").branch("main").build();
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: payload_session,
+            propagation: QueryPropagation::Full,
+        },
+    });
+    sm.process_inbox(&mut MemoryStorage::new());
+    sm.take_pending_query_subscriptions()
+}
+
+#[test]
+fn query_subscription_falls_back_to_client_session_when_payload_omits_it() {
+    // Demo/anonymous clients send session: None in the payload.
+    // The server established a session during the SSE handshake; that should be used.
+    //
+    //   client.session = Some("alice")   (server-established)
+    //   payload session = None           (client sent nothing)
+    //   → effective session = Some("alice")
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let pending = push_query_subscription(&mut sm, client_id, None);
+
+    assert_eq!(pending.len(), 1);
+    let session = pending[0]
+        .session
+        .as_ref()
+        .expect("should fall back to server-established session");
+    assert_eq!(session.user_id, "alice");
+}
+
+#[test]
+fn query_subscription_uses_client_session_when_payload_supplies_one() {
+    // Authenticated client sends a matching session in the payload.
+    // server session wins regardless (same value in the honest case).
+    //
+    //   client.session = Some("alice")
+    //   payload session = Some("alice")
+    //   → effective session = Some("alice")
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let pending = push_query_subscription(&mut sm, client_id, Some(Session::new("alice")));
+
+    assert_eq!(pending.len(), 1);
+    let session = pending[0]
+        .session
+        .as_ref()
+        .expect("session should be present");
+    assert_eq!(session.user_id, "alice");
+}
+
+#[test]
+fn query_subscription_ignores_spoofed_payload_session() {
+    // A client with an established server session sends a different session
+    // in the payload — the server-established one must win.
+    //
+    //   client.session = Some("alice")
+    //   payload session = Some("mallory")   ← spoofed
+    //   → effective session = Some("alice")
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let pending = push_query_subscription(&mut sm, client_id, Some(Session::new("mallory")));
+
+    assert_eq!(pending.len(), 1);
+    let session = pending[0]
+        .session
+        .as_ref()
+        .expect("session should be present");
+    assert_eq!(
+        session.user_id, "alice",
+        "spoofed payload session must be ignored"
+    );
+}
+
+#[test]
+fn query_subscription_demo_client_no_server_session_no_payload_session() {
+    // Fully anonymous/demo client: no server session, no payload session.
+    // Queries should proceed with session: None (the query layer handles
+    // the open-access policy for demo mode).
+    //
+    //   client.session = None
+    //   payload session = None
+    //   → effective session = None
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    // No set_client_session call — client is fully anonymous.
+
+    let pending = push_query_subscription(&mut sm, client_id, None);
+
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0].session.is_none(),
+        "anonymous client should produce session: None"
+    );
 }
