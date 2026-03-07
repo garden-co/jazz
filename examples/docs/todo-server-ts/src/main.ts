@@ -275,7 +275,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      await client.update(id, updates);
+      await client.updateDurable(id, updates);
 
       // Fetch updated todo
       const rows = await client.query(schemaApp.todos.where({ id }));
@@ -301,7 +301,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      await client.delete(id);
+      await client.deleteDurable(id);
       res.status(204).send();
 
       // Notify SSE connections

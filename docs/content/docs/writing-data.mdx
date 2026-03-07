@@ -5,10 +5,11 @@ description: Insert, update, and delete APIs with local-first execution, framewo
 
 ## Local-First Writes
 
-`insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
+`insert`, `update`, and `delete` apply immediately in the local runtime.
 That keeps UI latency low because local state updates do not wait for any network hop.
 
-Mutation methods return promises that resolve when the requested durability tier is reached.
+`insertDurable`, `updateDurable`, and `deleteDurable` return promises that
+resolve when the requested durability tier is reached.
 
 ## Mutating from Framework Context
 
@@ -72,9 +73,12 @@ Notes:
 
 ### API Reference
 
-- `insert(table, data, options?)`
-- `update(table, id, data, options?)`
-- `deleteFrom(table, id, options?)`
+- `insert(table, data)`
+- `update(table, id, data)`
+- `delete(table, id)`
+- `insertDurable(table, data, { tier })`
+- `updateDurable(table, id, data, options?)`
+- `deleteDurable(table, id, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
 
 Durability tiers control when the returned promise resolves:
@@ -96,7 +100,7 @@ Tradeoff summary:
 In practical terms:
 
 - Local-first updates remain immediate for UI/subscription state.
-- Mutation promises resolve at the selected durability checkpoint.
+- Durable mutation promises resolve at the selected durability checkpoint.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">

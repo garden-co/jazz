@@ -71,7 +71,7 @@ export function TodoList() {
             />
             <span>{todo.title}</span>
             {todo.description && <small>{todo.description}</small>}
-            <button className="delete-btn" onClick={() => db.deleteFrom(app.todos, todo.id)}>
+            <button className="delete-btn" onClick={() => db.delete(app.todos, todo.id)}>
               &times;
             </button>
           </li>

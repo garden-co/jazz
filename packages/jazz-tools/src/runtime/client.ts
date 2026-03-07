@@ -674,9 +674,16 @@ export class JazzClient {
   }
 
   /**
+   * Update a row by ID without waiting for durability.
+   */
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.runtime.update(objectId, updates);
+  }
+
+  /**
    * Update a row by ID and wait for durability at the requested tier.
    */
-  async update(
+  async updateDurable(
     objectId: string,
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
@@ -686,9 +693,16 @@ export class JazzClient {
   }
 
   /**
+   * Delete a row by ID without waiting for durability.
+   */
+  delete(objectId: string): void {
+    this.runtime.delete(objectId);
+  }
+
+  /**
    * Delete a row by ID and wait for durability at the requested tier.
    */
-  async delete(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+  async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
     const tier = this.resolveWriteTier(options);
     await this.runtime.deleteDurable(objectId, tier);
   }

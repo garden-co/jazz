@@ -219,7 +219,7 @@ function toggleBeat(index: number) {
   const existing = beats.find((b) => b.beat_index === index);
 
   if (existing) {
-    db.deleteFrom(app.beats, existing.id); // remove
+    db.delete(app.beats, existing.id); // remove
   } else {
     db.insert(app.beats, {
       jam: jamId,
@@ -326,12 +326,12 @@ Because `QuerySubscription` watches `app.instruments`, every client's grid grows
 
 ## Jazz API surface — used in Wequencer
 
-| API                                         | Notes                                                                 |
-| ------------------------------------------- | --------------------------------------------------------------------- |
-| `createJazzClient`                          | Initialises WASM worker + OPFS database, begins syncing               |
-| `JazzSvelteProvider`                        | Provides `db` to every component — no prop drilling                   |
-| `getDb()`                                   | Db singleton — callable from any component in the tree                |
-| `getSession()`                              | Current user identity (`user_id`)                                     |
-| `new QuerySubscription(query)`              | **Svelte-specific** — reactive live query, re-renders on every change |
-| `db.insert` / `db.update` / `db.deleteFrom` | Synchronous local writes — sync to edge happens in the background     |
-| `db.all(query, { settledTier: 'edge' })`    | Async read that waits for edge server confirmation before resolving   |
+| API                                      | Notes                                                                 |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| `createJazzClient`                       | Initialises WASM worker + OPFS database, begins syncing               |
+| `JazzSvelteProvider`                     | Provides `db` to every component — no prop drilling                   |
+| `getDb()`                                | Db singleton — callable from any component in the tree                |
+| `getSession()`                           | Current user identity (`user_id`)                                     |
+| `new QuerySubscription(query)`           | **Svelte-specific** — reactive live query, re-renders on every change |
+| `db.insert` / `db.update` / `db.delete`  | Synchronous local writes — sync to edge happens in the background     |
+| `db.all(query, { settledTier: 'edge' })` | Async read that waits for edge server confirmation before resolving   |
