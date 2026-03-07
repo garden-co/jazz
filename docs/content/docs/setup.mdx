@@ -45,10 +45,19 @@ For backend examples, set `JAZZ_SERVER_URL` to your server URL and keep `JAZZ_AP
 Use `JAZZ_APP_ID` as the app ID configuration key across environments.
 For auth modes and upgrade/link flow, see [Authentication](/docs/authentication).
 
-<Tabs groupId="jazz-framework" items={["React Client", "Svelte Client", "TS Client"]} persist>
+<Tabs
+  groupId="jazz-framework"
+  items={["React Client", "Vue Client", "Svelte Client", "TS Client"]}
+  persist
+>
   <Tab value="React Client">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
+    </include>
+  </Tab>
+  <Tab value="Vue Client">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/App.vue
     </include>
   </Tab>
   <Tab value="Svelte Client">

@@ -26,6 +26,23 @@ const anonymousAuthClient = createJazzClient({
 }
 ```
 
+    ```vue
+<script setup lang="ts">
+
+const client = createJazzClient({
+  appId: "my-app",
+  serverUrl: "http://127.0.0.1:4200",
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
     ```svelte
 
 <script lang="ts">
@@ -66,6 +83,24 @@ const anonymousAuthWithTokenClient = createJazzClient({
 
   );
 }
+```
+
+    ```vue
+<script setup lang="ts">
+
+const client = createJazzClient({
+  appId: "my-app",
+  localAuthMode: "anonymous",
+  localAuthToken: "device-token-123",
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
 ```
 
     ```svelte
@@ -116,6 +151,34 @@ const demoAuthClient = createJazzClient({
     </>
   );
 }
+```
+
+    ```vue
+<script setup lang="ts">
+
+  createJazzClient,
+  getActiveSyntheticAuth,
+  JazzProvider,
+  SyntheticUserSwitcher,
+} from "jazz-tools/vue";
+
+const appId = "my-app";
+const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+const client = createJazzClient({
+  appId,
+  serverUrl: "http://127.0.0.1:4200",
+  localAuthMode: active.localAuthMode,
+  localAuthToken: active.localAuthToken,
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
 ```
 
     ```svelte
@@ -207,6 +270,46 @@ const externalAuthJwtClient = createJazzClient({
 
   );
 }
+```
+
+    ```vue
+<script setup lang="ts">
+
+const appId = "my-app";
+const serverUrl = "http://127.0.0.1:4200";
+const providerJwt = "<provider-jwt>";
+const hasJwt = ref(false);
+
+const linkExternalIdentity = useLinkExternalIdentity({
+  appId,
+  serverUrl,
+  defaultMode: "anonymous",
+});
+
+const localClient = createJazzClient({
+  appId,
+  serverUrl,
+});
+
+const jwtClient = createJazzClient({
+  appId,
+  serverUrl,
+  jwtToken: providerJwt,
+});
+
+async function onSignedIn() {
+  await linkExternalIdentity({ jwtToken: providerJwt });
+  hasJwt.value = true;
+}
+</script>
+
+<template>
+
+    <button type="button" @click="onSignedIn">Sign in</button>
+    <slot />
+
+</template>
+
 ```
 
     ```svelte
@@ -313,6 +416,20 @@ const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
 }
 ```
 
+    ```vue
+<script setup lang="ts">
+
+const client = createJazzClient({ appId: "my-app" });
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
     ```svelte
 
 <script lang="ts">
@@ -339,11 +456,97 @@ DESCRIPTION:The database that syncs.
 
 Jazz is a local-first relational database: your app reads and writes against a local replica first, then syncs with a server.
 
-You can use Jazz from React, Expo/React Native, and Svelte clients, plus backend/server contexts in TypeScript and Rust.
+You can use Jazz from React, Vue, Expo/React Native, and Svelte clients, plus backend/server contexts in TypeScript and Rust.
 
 ## Quickstarts
 
 ## Reference
+
+===PAGE:mcp===
+TITLE:MCP Server
+DESCRIPTION:Give your AI assistant direct access to Jazz documentation via the Model Context Protocol.
+
+The `jazz-tools` package ships a built-in [MCP](https://modelcontextprotocol.io) server that
+exposes the Jazz docs as tools any MCP-compatible AI assistant can call during a conversation.
+Once registered, your assistant can search, browse, and retrieve full page content without
+leaving the session.
+
+The docs served are always matched to the version of `jazz-tools` you install — so your
+assistant is reading documentation for the exact API you have available. To use a different
+version's docs, add an `@` with any valid version number (e.g. `npx jazz-tools@1.2.0 mcp`).
+
+  Node 22.13 or later is recommended for the best search results. Earlier versions fall back to
+  basic keyword search.
+
+## Installation
+
+    ```bash
+#!/usr/bin/env bash
+
+claude mcp add jazz-docs -- npx jazz-tools@alpha mcp
+
+gemini mcp add jazz-docs npx jazz-tools@alpha mcp
+
+codex mcp add jazz-docs -- npx jazz-tools@alpha mcp
+
+```
+
+    ```bash
+#!/usr/bin/env bash
+
+claude mcp add jazz-docs -- npx jazz-tools@alpha mcp
+
+gemini mcp add jazz-docs npx jazz-tools@alpha mcp
+
+codex mcp add jazz-docs -- npx jazz-tools@alpha mcp
+
+```
+
+    ```bash
+#!/usr/bin/env bash
+
+claude mcp add jazz-docs -- npx jazz-tools@alpha mcp
+
+gemini mcp add jazz-docs npx jazz-tools@alpha mcp
+
+codex mcp add jazz-docs -- npx jazz-tools@alpha mcp
+
+```
+
+Restart your assistant after running the command. The server starts automatically on launch.
+
+  To ensure your assistant reaches for the Jazz docs proactively, add a line to your project context file (e.g. `CLAUDE.md`):
+
+> Jazz docs are available via the `jazz-docs` MCP server. Use `search_docs` and `get_doc` to look up APIs before answering Jazz questions.
+
+## Tools
+
+### `list_pages`
+
+Returns a list of all documentation pages with their title, slug, and description.
+Useful for orientation — ask your assistant to list pages when you want an overview of what's covered.
+
+### `search_docs`
+
+Full-text search across all pages and sections.
+
+```
+search_docs(query: string, limit?: number)
+```
+
+Accepts plain keywords or FTS5 query syntax (`AND`, `OR`, `"exact phrase"`, `prefix*`).
+Results are ranked by relevance and include a snippet of the matching section.
+
+### `get_doc`
+
+Retrieves the full content of a single page by slug.
+
+```
+get_doc(slug: string)
+```
+
+Slugs match the URL path under `/docs/` — for example `schemas`, `reading-data`, or
+`quickstarts/react`. Use `list_pages` to discover available slugs.
 
 ===PAGE:migrations===
 TITLE:Migrations
@@ -2086,6 +2289,410 @@ Define row-level policies in `schema/permissions.ts`:
 
 For advanced policy patterns, see [Permissions](/docs/permissions).
 
+===PAGE:quickstarts/vue===
+TITLE:Vue
+DESCRIPTION:Build a local-first Vue app with Jazz. Schema, provider, reactive queries, and mutations.
+
+## Install
+
+Install the runtime package:
+
+`pnpm add jazz-tools`
+
+For full environment and server setup options, see [Setup](/docs/setup).
+
+## Define your schema
+
+Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+
+```ts
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  description: col.string().optional(),
+  parent: col.ref("todos").optional(),
+  project: col.ref("projects").optional(),
+});
+```
+
+### Run codegen
+
+Deep dive: [Schemas](/docs/schemas).
+
+## Create a client and wrap your app
+
+`JazzProvider` initializes the Jazz runtime and makes the database available to descendant components via Vue's provide/inject composables.
+
+```vue
+<script setup lang="ts">
+
+const client = createJazzClient({
+  appId: "todo-vue-example",
+  serverUrl: "http://127.0.0.1:1625",
+  localAuthMode: "anonymous",
+  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
+});
+</script>
+
+<template>
+
+    <h1>Todos</h1>
+
+    <template #fallback>
+      <p>Loading...</p>
+    </template>
+
+</template>
+
+```
+
+- `appId` identifies the app namespace for storage and sync.
+- `serverUrl` enables sync; omit it for offline-only mode.
+- `localAuthMode` is the local synthetic auth path (`"anonymous"` / `"demo"`).
+- `jwtToken` is the external auth path and should be used instead of `localAuthMode`.
+
+`createJazzClient` is typically called once at the top level. If you need to reinitialize (for example after login), remount the provider with a changing `:key`.
+
+For all other options (`dbName`, `adminSecret`, `env`, `userBranch`, `localAuthToken`), see [Setup: createJazzClient reference](/docs/setup#createjazzclient-reference).
+
+## Read data with `useAll`
+
+`useAll` subscribes to a query and returns a Vue ref with live results.
+
+```ts
+const db = useDb();
+const todos = useAll(app.todos);
+```
+
+### Filtering, sorting, pagination
+
+Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit()`, and `.offset()` to shape queries.
+
+```ts
+const incompleteTodos = useAll(app.todos.where({ done: false }).orderBy("title", "asc").limit(50));
+```
+
+By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
+
+Deep dive: [Reading Data](/docs/reading-data).
+
+## Write data with `useDb`
+
+`useDb` returns the shared `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
+
+```ts
+async function addTodo(todoTitle: string) {
+  await db.insert(app.todos, { title: todoTitle, done: false });
+}
+
+async function toggleTodo(todo: { id: string; done: boolean }) {
+  await db.update(app.todos, todo.id, { done: !todo.done });
+}
+
+async function removeTodo(id: string) {
+  await db.deleteFrom(app.todos, id);
+}
+```
+
+Because writes hit the local runtime first, subscriptions update immediately with local-first UX. For tier-gated reads, the first callback still waits for the requested tier.
+
+Mutation API details: [Writing Data](/docs/writing-data).
+
+## Durability tiers
+
+  `worker` is the right default for most UI interactions. Use `edge` when you need to confirm data
+  has synced to the nearest server. Use `global` when you need the broadest server-side durability
+  acknowledgement.
+
+### Reading with a durability tier
+
+Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-gated delivery.
+
+```ts
+
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length), {
+    tier: "edge",
+    localUpdates: "immediate",
+  });
+}
+```
+
+### Writing with a durability tier
+
+Use base mutation APIs with `{ tier }` to wait for specific durability tiers:
+
+```ts
+
+  const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
+  await db.update(app.todos, id, { done: true }, { tier: "edge" });
+  await db.deleteFrom(app.todos, id, { tier: "global" });
+}
+```
+
+Tier semantics in depth: [Reading Data](/docs/reading-data#read-durability-options) and [Writing Data](/docs/writing-data#write-durability-tiers).
+
+## Querying in depth
+
+The examples above use `useAll` for reactive queries in components. Jazz also exposes imperative query methods on `db` for usage outside the component lifecycle.
+
+### One-shot queries
+
+```ts
+
+  const todos = await db.all(app.todos.where({ done: false }));
+  const todo = await db.one(app.todos.where({ id: EXAMPLE_TODO_ID }));
+  return { todos, todo };
+}
+```
+
+Outside components (or when you need deltas), use `db.subscribeAll` directly:
+
+```ts
+
+  const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
+    onUpdate(all);
+  });
+
+  return unsubscribe;
+}
+```
+
+### Relations with include
+
+If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+
+```ts
+
+  const todos = await db.all(app.todos.include({ project: true, parent: true }));
+  const projects = await db.all(app.projects.include({ todosViaProject: true }));
+  const nested = await db.all(
+    app.todos.include({
+      project: {
+        todosViaProject: true,
+      },
+    }),
+  );
+  const filtered = await db.all(
+    app.todos.include({
+      todosViaParent: app.todos.where({ done: false }),
+    }),
+  );
+
+  return { todos, projects, nested, filtered };
+}
+```
+
+### Chaining multiple where calls
+
+`.where()` calls are additive. Multiple calls produce AND semantics.
+
+```ts
+
+  return db.all(app.todos.where({ done: false }).where({ title: { contains: "docs" } }));
+}
+```
+
+### Combining everything
+
+```ts
+
+  return db.all(
+    app.todos
+      .where({ done: false, title: { contains: "docs" } })
+      .include({ project: true, parent: true })
+      .orderBy("title", "asc")
+      .limit(20)
+      .offset(0),
+  );
+}
+```
+
+More query patterns: [Reading Data](/docs/reading-data).
+
+## Authentication
+
+For browser clients, `anonymous` is the default when no external JWT/local auth override is supplied.
+
+### 1. Anonymous auth (default)
+
+If you provide no `jwtToken` or explicit local auth fields, Jazz auto-generates an anonymous token on first load and persists it in local storage.
+
+```vue
+<script setup lang="ts">
+
+const client = createJazzClient({
+  appId: "my-app",
+  serverUrl: "http://127.0.0.1:4200",
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
+If needed, you can explicitly override the local token:
+
+```vue
+<script setup lang="ts">
+
+const client = createJazzClient({
+  appId: "my-app",
+  localAuthMode: "anonymous",
+  localAuthToken: "device-token-123",
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
+### 2. Demo auth (local multi-user testing)
+
+Use synthetic user profiles for local multi-user testing:
+
+```vue
+<script setup lang="ts">
+
+  createJazzClient,
+  getActiveSyntheticAuth,
+  JazzProvider,
+  SyntheticUserSwitcher,
+} from "jazz-tools/vue";
+
+const appId = "my-app";
+const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+const client = createJazzClient({
+  appId,
+  serverUrl: "http://127.0.0.1:4200",
+  localAuthMode: active.localAuthMode,
+  localAuthToken: active.localAuthToken,
+});
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
+### 3. External auth and upgrade from anonymous/demo
+
+After provider sign-in, link the current local identity so existing local data stays attached when you switch to external JWT sessions:
+
+```vue
+<script setup lang="ts">
+
+const appId = "my-app";
+const serverUrl = "http://127.0.0.1:4200";
+const providerJwt = "<provider-jwt>";
+const hasJwt = ref(false);
+
+const linkExternalIdentity = useLinkExternalIdentity({
+  appId,
+  serverUrl,
+  defaultMode: "anonymous",
+});
+
+const localClient = createJazzClient({
+  appId,
+  serverUrl,
+});
+
+const jwtClient = createJazzClient({
+  appId,
+  serverUrl,
+  jwtToken: providerJwt,
+});
+
+async function onSignedIn() {
+  await linkExternalIdentity({ jwtToken: providerJwt });
+  hasJwt.value = true;
+}
+</script>
+
+<template>
+
+    <button type="button" @click="onSignedIn">Sign in</button>
+    <slot />
+
+</template>
+
+```
+
+### Server auth config (`jazz-tools server`)
+
+```bash
+# Start a local server with external auth enabled.
+
+NODE_ENV=production \
+jazz-tools server "$JAZZ_APP_ID" \
+  --port 1625 \
+  --data-dir ./data \
+  --allow-demo \
+  --jwks-url https://auth.example.com/.well-known/jwks.json \
+  --backend-secret "$JAZZ_BACKEND_SECRET" \
+  --admin-secret "$JAZZ_ADMIN_SECRET"
+
+```
+
+### Offline-only mode
+
+Omit `serverUrl` to keep all data local:
+
+```vue
+<script setup lang="ts">
+
+const client = createJazzClient({ appId: "my-app" });
+</script>
+
+<template>
+
+    <slot />
+
+</template>
+
+```
+
+Full auth flows and server behavior: [Authentication](/docs/authentication).
+
+## Permissions
+
+Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+
+```ts
+
+  policy.todos.allowRead.where({}),
+  policy.todos.allowInsert.where({ done: false }),
+  policy.todos.allowUpdate.whereOld({ done: false }).whereNew({}),
+  policy.todos.allowDelete.where({ done: false }),
+]);
+```
+
+Think about permissions in four checks:
+
+- Who can read a row?
+- Who can insert a row?
+- Which old/new row states are allowed on update?
+- Who can delete a row?
+
+For advanced policy patterns and Rust parity, see [Permissions](/docs/permissions).
+
 ===PAGE:react-quick-start===
 TITLE:React Quick Start (Moved)
 DESCRIPTION:This quick start moved to the new Quickstarts section.
@@ -2134,11 +2741,17 @@ pub async fn subscribe_todos(
 Use framework bindings immediately after subscription concepts:
 
 - React/Expo: `useAll(query)` for reactive query results.
+- Vue: `useAll(query)` for a reactive result ref.
 - Svelte: `new QuerySubscription(query)` for reactive `.current` data.
 
     ```tsx
   const db = useDb();
   const todos = useAll(app.todos) ?? [];
+```
+
+    ```ts
+const db = useDb();
+const todos = useAll(app.todos);
 ```
 
     ```tsx
@@ -2577,6 +3190,29 @@ const client = createJazzClient({
 }
 ```
 
+    ```vue
+<script setup lang="ts">
+
+const client = createJazzClient({
+  appId: "todo-vue-example",
+  serverUrl: "http://127.0.0.1:1625",
+  localAuthMode: "anonymous",
+  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
+});
+</script>
+
+<template>
+
+    <h1>Todos</h1>
+
+    <template #fallback>
+      <p>Loading...</p>
+    </template>
+
+</template>
+
+```
+
     ```svelte
 
 <script lang="ts">
@@ -2683,6 +3319,12 @@ DESCRIPTION:This quick start moved to the new Quickstarts section.
 
 This page moved to [Svelte Quick Start](/docs/quickstarts/svelte).
 
+===PAGE:vue-quick-start===
+TITLE:Vue Quick Start (Moved)
+DESCRIPTION:This quick start moved to the new Quickstarts section.
+
+This page moved to [Vue Quick Start](/docs/quickstarts/vue).
+
 ===PAGE:writing-data===
 TITLE:Writing Data
 DESCRIPTION:Insert, update, and delete APIs with local-first execution, framework context hooks, and write durability tiers.
@@ -2710,6 +3352,20 @@ Use the framework context binding to access the shared `Db` instance and execute
   async function removeTodo(id: string) {
     await db.deleteFrom(app.todos, id);
   }
+```
+
+    ```ts
+async function addTodo(todoTitle: string) {
+  await db.insert(app.todos, { title: todoTitle, done: false });
+}
+
+async function toggleTodo(todo: { id: string; done: boolean }) {
+  await db.update(app.todos, todo.id, { done: !todo.done });
+}
+
+async function removeTodo(id: string) {
+  await db.deleteFrom(app.todos, id);
+}
 ```
 
     ```tsx

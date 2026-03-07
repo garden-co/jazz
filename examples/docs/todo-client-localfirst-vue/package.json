@@ -1,0 +1,20 @@
+{
+  "name": "todo-client-localfirst-vue-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js build && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "vue": "^3.5.22"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "catalog:default",
+    "vite": "^6.0.0"
+  }
+}
