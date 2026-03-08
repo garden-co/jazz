@@ -18,6 +18,7 @@ use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::graph_nodes::limit_offset::LimitOffsetNode;
+use super::graph_nodes::magic_columns::{MagicColumnRequest, MagicColumnsNode};
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::policy_filter::PolicyFilterNode;
@@ -31,6 +32,7 @@ use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
+use super::magic_columns::{MagicColumnKind, magic_column_kind};
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
@@ -67,6 +69,7 @@ pub enum GraphNode {
     Alias(AliasNode),
     Join(JoinNode),
     Materialize(MaterializeNode),
+    MagicColumns(MagicColumnsNode),
     Project(ProjectNode),
     SelectElement(SelectElementNode),
     RecursiveRelation(RecursiveRelationNode),
@@ -109,6 +112,8 @@ pub struct QueryGraph {
     pub array_subquery_tables: Vec<(NodeId, TableName)>, // (node_id, inner_table)
     /// PolicyFilter nodes and their INHERITS-referenced tables (for marking dirty on table updates).
     pub policy_filter_tables: Vec<(NodeId, TableName)>, // (node_id, inherits_table)
+    /// MagicColumns nodes and their policy dependency tables (for reactive re-evaluation).
+    pub magic_column_tables: Vec<(NodeId, TableName)>, // (node_id, dependency_table)
     /// RecursiveRelation nodes and their step dependency tables (for marking dirty on table updates).
     pub recursive_relation_tables: Vec<(NodeId, TableName)>, // (node_id, step_table)
     /// Per-table descriptors in join order (for flattening multi-element tuples).
@@ -173,6 +178,143 @@ fn natural_row_projection_element_index(
     None
 }
 
+fn push_unique_magic_ref(
+    refs: &mut Vec<(Option<String>, MagicColumnKind)>,
+    scope: Option<&str>,
+    kind: MagicColumnKind,
+) {
+    let candidate = (scope.map(ToOwned::to_owned), kind);
+    if !refs.contains(&candidate) {
+        refs.push(candidate);
+    }
+}
+
+fn collect_magic_refs_from_disjuncts(
+    disjuncts: &[Conjunction],
+) -> Vec<(Option<String>, MagicColumnKind)> {
+    let mut refs = Vec::new();
+    for disjunct in disjuncts {
+        for condition in &disjunct.conditions {
+            if let Some(kind) = magic_column_kind(condition.column()) {
+                push_unique_magic_ref(&mut refs, condition.column_scope(), kind);
+            }
+        }
+    }
+    refs
+}
+
+fn collect_magic_refs_from_project_columns(
+    columns: Option<&[ProjectColumn]>,
+) -> Vec<(Option<String>, MagicColumnKind)> {
+    let mut refs = Vec::new();
+    let Some(columns) = columns else {
+        return refs;
+    };
+
+    for column in columns {
+        let ProjectExpr::Column(column_ref) = &column.expr else {
+            continue;
+        };
+        let Some(kind) = magic_column_kind(&column_ref.column) else {
+            continue;
+        };
+        push_unique_magic_ref(&mut refs, column_ref.scope.as_deref(), kind);
+    }
+
+    refs
+}
+
+fn collect_magic_refs_from_order_by(
+    order_by: &[(String, SortDirection)],
+) -> Vec<(Option<String>, MagicColumnKind)> {
+    let mut refs = Vec::new();
+    for (column, _direction) in order_by {
+        let (scope, name) = column
+            .rsplit_once('.')
+            .map(|(scope, name)| (Some(scope), name))
+            .unwrap_or((None, column.as_str()));
+        let Some(kind) = magic_column_kind(name) else {
+            continue;
+        };
+        push_unique_magic_ref(&mut refs, scope, kind);
+    }
+    refs
+}
+
+fn resolve_magic_column_requests(
+    tuple_descriptor: &TupleDescriptor,
+    scope_table_map: &HashMap<String, TableName>,
+    refs: &[(Option<String>, MagicColumnKind)],
+) -> Vec<MagicColumnRequest> {
+    let mut requests = Vec::new();
+    for (scope, kind) in refs {
+        let resolved = if let Some(scope) = scope.as_deref() {
+            let element_index = (0..tuple_descriptor.element_count()).find(|&index| {
+                tuple_descriptor
+                    .element(index)
+                    .is_some_and(|e| e.table == scope)
+            });
+            let table_name = scope_table_map.get(scope).copied();
+            element_index.zip(table_name)
+        } else {
+            let element_index = (tuple_descriptor.element_count() > 0).then_some(0);
+            let table_name = tuple_descriptor
+                .element(0)
+                .and_then(|element| scope_table_map.get(&element.table).copied())
+                .or_else(|| {
+                    tuple_descriptor
+                        .element(0)
+                        .map(|element| TableName::new(&element.table))
+                });
+            element_index.zip(table_name)
+        };
+
+        let Some((element_index, table_name)) = resolved else {
+            continue;
+        };
+
+        let candidate = MagicColumnRequest {
+            element_index,
+            table_name,
+            kind: *kind,
+        };
+        if !requests.contains(&candidate) {
+            requests.push(candidate);
+        }
+    }
+    requests
+}
+
+fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> Vec<ProjectColumn> {
+    let single_unscoped = tuple_descriptor.element_count() == 1
+        && tuple_descriptor
+            .element(0)
+            .is_some_and(|element| element.table.is_empty());
+
+    tuple_descriptor
+        .iter()
+        .flat_map(|element| {
+            element
+                .descriptor
+                .columns
+                .iter()
+                .map(|column| ProjectColumn {
+                    alias: column.name.as_str().to_string(),
+                    expr: if single_unscoped {
+                        ProjectExpr::Column(super::relation_ir::ColumnRef::unscoped(
+                            column.name.as_str(),
+                        ))
+                    } else {
+                        ProjectExpr::Column(super::relation_ir::ColumnRef::scoped(
+                            element.table.as_str(),
+                            column.name.as_str(),
+                        ))
+                    },
+                })
+        })
+        .collect()
+}
+
 impl QueryGraph {
     pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
@@ -184,6 +326,7 @@ impl QueryGraph {
             index_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
             policy_filter_tables: Vec::new(),
+            magic_column_tables: Vec::new(),
             recursive_relation_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
@@ -549,6 +692,12 @@ impl QueryGraph {
 
         let mut phase2_input = materialize_id;
         let mut current_descriptor = descriptor.clone();
+        let mut current_tuple_descriptor = TupleDescriptor::single_with_materialization(
+            plan.base_scope.as_str(),
+            current_descriptor.clone(),
+            true,
+        );
+        let scope_table_map = HashMap::from([(plan.base_scope.clone(), plan.table)]);
 
         // Policy filter node (if session provided and table has SELECT policy)
         if let (Some(session), Some(policy)) = (&session, select_policy) {
@@ -593,6 +742,65 @@ impl QueryGraph {
                     .push((node_id, subquery_spec.table));
                 phase2_input = node_id;
                 current_descriptor = new_descriptor;
+                current_tuple_descriptor = TupleDescriptor::single_with_materialization(
+                    plan.base_scope.as_str(),
+                    current_descriptor.clone(),
+                    true,
+                );
+            }
+        }
+
+        let filter_magic_refs = collect_magic_refs_from_disjuncts(&plan.disjuncts);
+        let order_magic_refs = collect_magic_refs_from_order_by(&plan.order_by);
+        let project_magic_refs =
+            collect_magic_refs_from_project_columns(plan.project_columns.as_deref());
+        let needs_magic_before_filter =
+            !filter_magic_refs.is_empty() || !order_magic_refs.is_empty();
+        let mut restore_tuple_descriptor = None;
+
+        if needs_magic_before_filter {
+            let mut all_magic_refs = filter_magic_refs.clone();
+            for magic_ref in &order_magic_refs {
+                if !all_magic_refs.contains(magic_ref) {
+                    all_magic_refs.push(magic_ref.clone());
+                }
+            }
+            for magic_ref in &project_magic_refs {
+                if !all_magic_refs.contains(magic_ref) {
+                    all_magic_refs.push(magic_ref.clone());
+                }
+            }
+
+            let requests = resolve_magic_column_requests(
+                &current_tuple_descriptor,
+                &scope_table_map,
+                &all_magic_refs,
+            );
+            if !requests.is_empty() {
+                restore_tuple_descriptor = Some(current_tuple_descriptor.clone());
+                let magic_node = MagicColumnsNode::new(
+                    current_tuple_descriptor.clone(),
+                    &requests,
+                    session.clone(),
+                    schema.clone(),
+                    branches
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "main".to_string()),
+                )?;
+                let dependency_tables: Vec<TableName> = magic_node
+                    .dependency_tables()
+                    .iter()
+                    .map(TableName::new)
+                    .collect();
+                current_descriptor = magic_node.output_descriptor().clone();
+                current_tuple_descriptor = magic_node.output_tuple_descriptor().clone();
+                let magic_id = graph.add_node(GraphNode::MagicColumns(magic_node));
+                graph.add_edge(magic_id, phase2_input);
+                for table in dependency_tables {
+                    graph.magic_column_tables.push((magic_id, table));
+                }
+                phase2_input = magic_id;
             }
         }
 
@@ -600,19 +808,11 @@ impl QueryGraph {
         let predicate = build_remaining_predicate_from_disjuncts(
             &plan.disjuncts,
             &index_columns,
-            &TupleDescriptor::single_with_materialization(
-                plan.base_scope.as_str(),
-                current_descriptor.clone(),
-                true,
-            ),
+            &current_tuple_descriptor,
         );
         if !matches!(predicate, Predicate::True) {
-            let filter_tuple_desc = TupleDescriptor::single_with_materialization(
-                plan.base_scope.as_str(),
-                current_descriptor.clone(),
-                true,
-            );
-            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
+            let filter_node =
+                FilterNode::with_tuple_descriptor(current_tuple_descriptor.clone(), predicate);
             let filter_id = graph.add_node(GraphNode::Filter(filter_node));
             graph.add_edge(filter_id, phase2_input);
             phase2_input = filter_id;
@@ -621,12 +821,8 @@ impl QueryGraph {
         // Sort node (default: id ASC when order_by is omitted)
         let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
         if !sort_keys.is_empty() {
-            let sort_tuple_desc = TupleDescriptor::single_with_materialization(
-                plan.base_scope.as_str(),
-                current_descriptor.clone(),
-                true,
-            );
-            let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
+            let sort_node =
+                SortNode::with_tuple_descriptor(current_tuple_descriptor.clone(), sort_keys);
             let sort_id = graph.add_node(GraphNode::Sort(sort_node));
             graph.add_edge(sort_id, phase2_input);
             phase2_input = sort_id;
@@ -634,31 +830,68 @@ impl QueryGraph {
 
         // LimitOffset node (if limit or offset specified)
         if plan.limit.is_some() || plan.offset > 0 {
-            let limit_tuple_desc = TupleDescriptor::single_with_materialization(
-                plan.base_scope.as_str(),
-                current_descriptor.clone(),
-                true,
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                current_tuple_descriptor.clone(),
+                plan.limit,
+                plan.offset,
             );
-            let limit_offset_node =
-                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
             graph.pagination_node = Some(limit_offset_id);
             phase2_input = limit_offset_id;
         }
 
+        if !needs_magic_before_filter && !project_magic_refs.is_empty() {
+            let requests = resolve_magic_column_requests(
+                &current_tuple_descriptor,
+                &scope_table_map,
+                &project_magic_refs,
+            );
+            if !requests.is_empty() {
+                let magic_node = MagicColumnsNode::new(
+                    current_tuple_descriptor.clone(),
+                    &requests,
+                    session.clone(),
+                    schema.clone(),
+                    branches
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "main".to_string()),
+                )?;
+                let dependency_tables: Vec<TableName> = magic_node
+                    .dependency_tables()
+                    .iter()
+                    .map(TableName::new)
+                    .collect();
+                current_descriptor = magic_node.output_descriptor().clone();
+                current_tuple_descriptor = magic_node.output_tuple_descriptor().clone();
+                let magic_id = graph.add_node(GraphNode::MagicColumns(magic_node));
+                graph.add_edge(magic_id, phase2_input);
+                for table in dependency_tables {
+                    graph.magic_column_tables.push((magic_id, table));
+                }
+                phase2_input = magic_id;
+            }
+        }
+
         // Project node (if projection specified)
         if let Some(columns) = &plan.project_columns {
-            let project_input = TupleDescriptor::single_with_materialization(
-                plan.base_scope.as_str(),
-                current_descriptor.clone(),
-                true,
-            );
-            let project_node = ProjectNode::with_project_columns(project_input, columns)?;
+            let project_node =
+                ProjectNode::with_project_columns(current_tuple_descriptor.clone(), columns)?;
             current_descriptor = project_node.output_descriptor().clone();
             let project_id = graph.add_node(GraphNode::Project(project_node));
             graph.add_edge(project_id, phase2_input);
             phase2_input = project_id;
+        } else if let Some(restore_tuple_descriptor) = restore_tuple_descriptor {
+            let restore_columns = project_columns_for_tuple_descriptor(&restore_tuple_descriptor);
+            let restore_node = ProjectNode::with_project_columns(
+                current_tuple_descriptor.clone(),
+                &restore_columns,
+            )?;
+            current_descriptor = restore_node.output_descriptor().clone();
+            let restore_id = graph.add_node(GraphNode::Project(restore_node));
+            graph.add_edge(restore_id, phase2_input);
+            phase2_input = restore_id;
         }
 
         // Recursive relation expansion (if configured).
@@ -1288,24 +1521,83 @@ impl QueryGraph {
         graph.table_descriptors = table_descriptors;
         let mut output_descriptor = combined_descriptor.clone();
         let mut output_tuple_descriptor = tuple_descriptor.clone();
+        let mut scope_table_map = HashMap::from([(plan.base_scope.clone(), plan.table)]);
+        for join in &plan.joins {
+            scope_table_map.insert(join.effective_name().to_string(), join.table);
+        }
 
         let mut phase2_input = left_id;
 
+        let filter_magic_refs = collect_magic_refs_from_disjuncts(&plan.disjuncts);
+        let order_magic_refs = collect_magic_refs_from_order_by(&plan.order_by);
+        let project_magic_refs =
+            collect_magic_refs_from_project_columns(plan.project_columns.as_deref());
+        let needs_magic_before_filter =
+            !filter_magic_refs.is_empty() || !order_magic_refs.is_empty();
+        let mut restore_tuple_descriptor_after_magic = None;
+
+        if needs_magic_before_filter {
+            let mut all_magic_refs = filter_magic_refs.clone();
+            for magic_ref in &order_magic_refs {
+                if !all_magic_refs.contains(magic_ref) {
+                    all_magic_refs.push(magic_ref.clone());
+                }
+            }
+            for magic_ref in &project_magic_refs {
+                if !all_magic_refs.contains(magic_ref) {
+                    all_magic_refs.push(magic_ref.clone());
+                }
+            }
+
+            let requests = resolve_magic_column_requests(
+                &output_tuple_descriptor,
+                &scope_table_map,
+                &all_magic_refs,
+            );
+            if !requests.is_empty() {
+                restore_tuple_descriptor_after_magic = Some(output_tuple_descriptor.clone());
+                let magic_node = MagicColumnsNode::new(
+                    output_tuple_descriptor.clone(),
+                    &requests,
+                    session.clone(),
+                    schema.clone(),
+                    branches
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "main".to_string()),
+                )?;
+                let dependency_tables: Vec<TableName> = magic_node
+                    .dependency_tables()
+                    .iter()
+                    .map(TableName::new)
+                    .collect();
+                output_descriptor = magic_node.output_descriptor().clone();
+                output_tuple_descriptor = magic_node.output_tuple_descriptor().clone();
+                let magic_id = graph.add_node(GraphNode::MagicColumns(magic_node));
+                graph.add_edge(magic_id, phase2_input);
+                for table in dependency_tables {
+                    graph.magic_column_tables.push((magic_id, table));
+                }
+                phase2_input = magic_id;
+            }
+        }
+
         // Filter node (if conditions exist)
         // Use TupleDescriptor to enable filtering on columns from any joined table
-        let predicate = disjuncts_to_predicate(&plan.disjuncts, &tuple_descriptor);
+        let predicate = disjuncts_to_predicate(&plan.disjuncts, &output_tuple_descriptor);
         if !matches!(predicate, Predicate::True) {
             let filter_node =
-                FilterNode::with_tuple_descriptor(tuple_descriptor.clone(), predicate);
+                FilterNode::with_tuple_descriptor(output_tuple_descriptor.clone(), predicate);
             let filter_id = graph.add_node(GraphNode::Filter(filter_node));
             graph.add_edge(filter_id, phase2_input);
             phase2_input = filter_id;
         }
 
         // Sort node (default: id ASC when order_by is omitted)
-        let sort_keys = sort_keys_from_order_by(&plan.order_by, &combined_descriptor);
+        let sort_keys = sort_keys_from_order_by(&plan.order_by, &output_descriptor);
         if !sort_keys.is_empty() {
-            let sort_node = SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
+            let sort_node =
+                SortNode::with_tuple_descriptor(output_tuple_descriptor.clone(), sort_keys);
             let sort_id = graph.add_node(GraphNode::Sort(sort_node));
             graph.add_edge(sort_id, phase2_input);
             phase2_input = sort_id;
@@ -1314,7 +1606,7 @@ impl QueryGraph {
         // LimitOffset node (if limit or offset specified)
         if plan.limit.is_some() || plan.offset > 0 {
             let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
-                tuple_descriptor.clone(),
+                output_tuple_descriptor.clone(),
                 plan.limit,
                 plan.offset,
             );
@@ -1324,15 +1616,51 @@ impl QueryGraph {
             phase2_input = limit_offset_id;
         }
 
+        if !needs_magic_before_filter && !project_magic_refs.is_empty() {
+            let requests = resolve_magic_column_requests(
+                &output_tuple_descriptor,
+                &scope_table_map,
+                &project_magic_refs,
+            );
+            if !requests.is_empty() {
+                let magic_node = MagicColumnsNode::new(
+                    output_tuple_descriptor.clone(),
+                    &requests,
+                    session.clone(),
+                    schema.clone(),
+                    branches
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "main".to_string()),
+                )?;
+                let dependency_tables: Vec<TableName> = magic_node
+                    .dependency_tables()
+                    .iter()
+                    .map(TableName::new)
+                    .collect();
+                output_descriptor = magic_node.output_descriptor().clone();
+                output_tuple_descriptor = magic_node.output_tuple_descriptor().clone();
+                let magic_id = graph.add_node(GraphNode::MagicColumns(magic_node));
+                graph.add_edge(magic_id, phase2_input);
+                for table in dependency_tables {
+                    graph.magic_column_tables.push((magic_id, table));
+                }
+                phase2_input = magic_id;
+            }
+        }
+
+        let projection_shape_tuple_descriptor = restore_tuple_descriptor_after_magic
+            .clone()
+            .unwrap_or_else(|| output_tuple_descriptor.clone());
         let natural_projection_element_index = plan.project_columns.as_ref().and_then(|columns| {
-            natural_row_projection_element_index(&output_tuple_descriptor, columns)
+            natural_row_projection_element_index(&projection_shape_tuple_descriptor, columns)
         });
+        let selected_element_index = plan
+            .result_element_index
+            .or(natural_projection_element_index);
 
         // Optional output projection to a specific joined element.
-        if let Some(element_index) = plan
-            .result_element_index
-            .or(natural_projection_element_index)
-        {
+        if let Some(element_index) = selected_element_index {
             let select_input_descriptor = output_tuple_descriptor.clone();
             let select_node = SelectElementNode::new(select_input_descriptor, element_index)?;
             output_descriptor = select_node.output_descriptor().clone();
@@ -1354,6 +1682,33 @@ impl QueryGraph {
             let project_id = graph.add_node(GraphNode::Project(project_node));
             graph.add_edge(project_id, phase2_input);
             phase2_input = project_id;
+        }
+
+        if let Some(restore_tuple_descriptor) = restore_tuple_descriptor_after_magic
+            && (plan.project_columns.is_none() || natural_projection_element_index.is_some())
+        {
+            let desired_restore_descriptor = if let Some(element_index) = selected_element_index {
+                TupleDescriptor::single_with_materialization(
+                    "",
+                    restore_tuple_descriptor
+                        .element(element_index)?
+                        .descriptor
+                        .clone(),
+                    true,
+                )
+            } else {
+                restore_tuple_descriptor
+            };
+            let restore_columns = project_columns_for_tuple_descriptor(&desired_restore_descriptor);
+            let restore_node = ProjectNode::with_project_columns(
+                output_tuple_descriptor.clone(),
+                &restore_columns,
+            )?;
+            output_descriptor = restore_node.output_descriptor().clone();
+            output_tuple_descriptor = restore_node.output_tuple_descriptor().clone();
+            let restore_id = graph.add_node(GraphNode::Project(restore_node));
+            graph.add_edge(restore_id, phase2_input);
+            phase2_input = restore_id;
         }
 
         // Output node
@@ -1452,6 +1807,26 @@ impl QueryGraph {
             self.mark_downstream_dirty(node_id);
         }
 
+        let affected_magic_columns: Vec<NodeId> = self
+            .magic_column_tables
+            .iter()
+            .filter_map(|(node_id, dependency_table)| {
+                if dependency_table.as_str() == table {
+                    Some(*node_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for node_id in affected_magic_columns {
+            self.mark_dirty(node_id);
+            if let Some(GraphNode::MagicColumns(node)) = self.get_node_mut(node_id) {
+                node.mark_dependency_dirty();
+            }
+            self.mark_downstream_dirty(node_id);
+        }
+
         // Mark RecursiveRelation nodes whose step table changed
         let affected_recursive_relations: Vec<NodeId> = self
             .recursive_relation_tables
@@ -1485,6 +1860,10 @@ impl QueryGraph {
                 .any(|(_, t)| t.as_str() == table)
             || self
                 .policy_filter_tables
+                .iter()
+                .any(|(_, t)| t.as_str() == table)
+            || self
+                .magic_column_tables
                 .iter()
                 .any(|(_, t)| t.as_str() == table)
             || self
@@ -1619,6 +1998,7 @@ impl QueryGraph {
                 Some(GraphNode::Union(_)) => "Union",
                 Some(GraphNode::Alias(_)) => "Alias",
                 Some(GraphNode::Join(_)) => "Join",
+                Some(GraphNode::MagicColumns(_)) => "MagicColumns",
                 Some(GraphNode::Project(_)) => "Project",
                 Some(GraphNode::SelectElement(_)) => "SelectElement",
                 Some(GraphNode::RecursiveRelation(_)) => "RecursiveRelation",
@@ -1806,6 +2186,28 @@ impl QueryGraph {
                             "graph node evaluated"
                         );
                         tuple_deltas.insert(node_id, merged);
+                    }
+                }
+                Some(GraphNode::MagicColumns(_)) => {
+                    let input_delta = self
+                        .get_inputs(node_id)
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
+                        let delta =
+                            magic_node.process_with_context(input_delta, storage, &mut |id| {
+                                row_loader(id)
+                            });
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Filter(_)) => {
