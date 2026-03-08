@@ -1,17 +1,24 @@
 config:
   jazz-cloud2:region: us-east-2
-  jazz-cloud2:awsPrimaryProfile: jazz2:staging
-  jazz-cloud2:awsDnsProfile: jazz2:shared
   jazz-cloud2:allowedAccountId: "739068833263"
   jazz-cloud2:domainName: cloud2.aws.cloud.jazz.tools
   jazz-cloud2:containerImageRepository: 739068833263.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server
   jazz-cloud2:containerImageTag: latest
-  # Alternative to awsDnsProfile:
+  # Pulumi Cloud Deployments should provide AWS credentials via OIDC or env vars.
+  # Optional local-only settings; avoid committing them in shared stack files:
+  # jazz-cloud2:awsPrimaryProfile: jazz2:staging
+  # jazz-cloud2:awsDnsProfile: jazz2:shared
+  # Provide secrets via stack config or deployment env vars:
+  # JAZZ_CLOUD2_INTERNAL_API_SECRET
+  # JAZZ_CLOUD2_SECRET_HASH_KEY
+  # Prefer this for cross-account DNS in Pulumi Cloud:
   # jazz-cloud2:route53DelegationRoleArn: arn:aws:iam::851454408348:role/jazz-route53-delegation-staging
+  # If the deployment runner cannot read the shared-services stack reference:
+  # jazz-cloud2:rootZoneId: Z1234567890ABC
   # Alternatively:
   # jazz-cloud2:containerImage: 739068833263.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server:latest
   jazz-cloud2:dataVolumeSizeGiB: "100"
   jazz-cloud2:instanceType: t3.large
-  # Set as secrets with `pulumi config set --secret`
+  # Optional stack-config secret source:
   # jazz-cloud2:internalApiSecret: ...
   # jazz-cloud2:secretHashKey: ...
