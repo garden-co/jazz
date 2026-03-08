@@ -273,8 +273,6 @@ pulumi config set region "${AWS_REGION}"
 pulumi config set allowedAccountId "${ALLOWED_ACCOUNT_ID}"
 pulumi config set domainName "${DOMAIN_NAME}"
 pulumi config set containerImage "${IMAGE_URI}"
-pulumi config set --secret internalApiSecret "${INTERNAL_API_SECRET}"
-pulumi config set --secret secretHashKey "${SECRET_HASH_KEY}"
 
 if [[ -n "${NAME_PREFIX}" ]]; then
   pulumi config set namePrefix "${NAME_PREFIX}"
@@ -297,7 +295,9 @@ echo "Image: ${IMAGE_URI}"
 echo "Domain: ${DOMAIN_NAME}"
 echo
 
-pulumi up "${PULUMI_ARGS[@]}"
+JAZZ_CLOUD2_INTERNAL_API_SECRET="${INTERNAL_API_SECRET}" \
+JAZZ_CLOUD2_SECRET_HASH_KEY="${SECRET_HASH_KEY}" \
+  pulumi up "${PULUMI_ARGS[@]}"
 
 echo
 echo "Done."
