@@ -92,6 +92,19 @@ fn align_values_to_declared_schema(
         .unwrap_or(values)
 }
 
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+) -> Vec<Value> {
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+
+    align_values_to_declared_schema(declared_schema, table, &runtime_table.columns, values)
+}
+
 fn align_query_rows_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
@@ -573,6 +586,12 @@ impl NapiRuntime {
         let (object_id, row_values) = core
             .insert(&table, groove_values, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            core.current_schema(),
+            &TableName::new(table.clone()),
+            row_values,
+        );
 
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
@@ -819,8 +838,16 @@ impl NapiRuntime {
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.insert_persisted(&table, groove_values, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?
+            let ((object_id, row_values), receiver) = core
+                .insert_persisted(&table, groove_values, None, persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            ((object_id, row_values), receiver)
         };
 
         let _ = receiver.await;

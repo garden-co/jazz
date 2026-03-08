@@ -474,10 +474,25 @@ impl JazzRuntimeImpl {
 
     fn insert_inner(&mut self, table: String, values_json: String) -> Result<String, String> {
         let values = convert_values(&values_json)?;
+        let declared_schema = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         self.with_core("insert", |core| {
             core.insert(&table, values, None)
                 .map_err(|e| format!("Insert failed: {e}"))
                 .and_then(|(id, values)| {
+                    let values = if let Some(schema) = declared_schema.as_ref() {
+                        align_row_values_to_declared_schema(
+                            schema,
+                            core.current_schema(),
+                            &TableName::new(table.clone()),
+                            values,
+                        )
+                    } else {
+                        values
+                    };
                     serde_json::to_string(&serde_json::json!({
                         "id": id.uuid().to_string(),
                         "values": values,
@@ -683,11 +698,29 @@ impl JazzRuntimeImpl {
     ) -> Result<String, String> {
         let persistence_tier = parse_tier(&tier)?;
         let values = convert_values(&values_json)?;
+        let declared_schema = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         let ((object_id, row_values), receiver) =
             self.with_core("insert_persisted", |core| {
                 core.insert_persisted(&table, values, None, persistence_tier)
                     .map_err(|e| format!("Insert failed: {e}"))
+                    .map(|((object_id, row_values), receiver)| {
+                        let row_values = if let Some(schema) = declared_schema.as_ref() {
+                            align_row_values_to_declared_schema(
+                                schema,
+                                core.current_schema(),
+                                &TableName::new(table.clone()),
+                                row_values,
+                            )
+                        } else {
+                            row_values
+                        };
+                        ((object_id, row_values), receiver)
+                    })
             })??;
 
         let _ = block_on(receiver);

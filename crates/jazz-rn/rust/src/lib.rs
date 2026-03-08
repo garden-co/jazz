@@ -16,7 +16,7 @@ use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::query_manager::types::{RowDescriptor, Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
     SyncSender,
@@ -98,6 +98,47 @@ fn convert_values(values_json: &str) -> Result<Vec<Value>, JazzRnError> {
 fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, JazzRnError> {
     let partial: HashMap<String, Value> = serde_json::from_str(values_json).map_err(json_err)?;
     Ok(partial.into_iter().collect())
+}
+
+fn reorder_values_by_column_name(
+    source_descriptor: &RowDescriptor,
+    target_descriptor: &RowDescriptor,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if values.len() != source_descriptor.columns.len()
+        || source_descriptor.columns.len() != target_descriptor.columns.len()
+    {
+        return None;
+    }
+
+    let mut values_by_column = HashMap::with_capacity(values.len());
+    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name, value.clone());
+    }
+
+    let mut reordered_values = Vec::with_capacity(values.len());
+    for column in &target_descriptor.columns {
+        reordered_values.push(values_by_column.remove(&column.name)?);
+    }
+
+    Some(reordered_values)
+}
+
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(table) else {
+        return values;
+    };
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+
+    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
+        .unwrap_or(values)
 }
 
 fn parse_query(query_json: &str) -> Result<Query, JazzRnError> {
@@ -333,6 +374,7 @@ type RnCoreType = RuntimeCore<SurrealKvStorage, RnScheduler, RnSyncSender>;
 pub struct RnRuntime {
     core: Mutex<RnCoreType>,
     upstream_server_id: Mutex<Option<ServerId>>,
+    declared_schema: Schema,
 }
 
 #[uniffi::export]
@@ -348,6 +390,7 @@ impl RnRuntime {
     ) -> Result<Arc<Self>, JazzRnError> {
         with_panic_boundary("new", || {
             let schema: Schema = serde_json::from_str(&schema_json).map_err(json_err)?;
+            let declared_schema = schema.clone();
 
             let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
 
@@ -398,6 +441,7 @@ impl RnRuntime {
             Ok(Arc::new(Self {
                 core: Mutex::new(core),
                 upstream_server_id: Mutex::new(None),
+                declared_schema,
             }))
         })
     }
@@ -453,6 +497,12 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
             let (id, row_values) = core.insert(&table, values, None).map_err(runtime_err)?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,

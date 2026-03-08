@@ -879,7 +879,11 @@ export class JazzClient {
    */
   async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<Row> {
     const tier = this.resolveWriteTier(options);
-    return this.runtime.insertDurable(table, values, tier);
+    const row = await this.runtime.insertDurable(table, values, tier);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+    };
   }
 
   /**
