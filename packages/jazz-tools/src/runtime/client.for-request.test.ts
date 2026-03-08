@@ -447,7 +447,7 @@ describe("JazzClient.forRequest", () => {
 });
 
 describe("JazzClient schema order", () => {
-  it("reorders create values to the runtime schema order", async () => {
+  it("passes create values through in the declared schema order", async () => {
     const insertDurable = vi.fn(async () => "todo-1");
     const runtime: Runtime = {
       insert: () => "todo-1",
@@ -516,8 +516,8 @@ describe("JazzClient schema order", () => {
     expect(insertDurable).toHaveBeenCalledWith(
       "todos",
       [
-        { type: "Boolean", value: false },
         { type: "Text", value: "Buy milk" },
+        { type: "Boolean", value: false },
       ],
       "worker",
     );

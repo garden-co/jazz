@@ -743,40 +743,6 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
-  private alignCreateValuesToRuntimeSchema(
-    table: string,
-    values: Value[],
-    runtimeSchema = this.getSchema(),
-  ): Value[] {
-    const declaredTable = this.context.schema[table];
-    const runtimeTable = runtimeSchema[table];
-
-    if (!declaredTable || !runtimeTable || values.length !== declaredTable.columns.length) {
-      return values;
-    }
-
-    const valuesByColumn = new Map<string, Value>();
-    for (let index = 0; index < declaredTable.columns.length; index += 1) {
-      const column = declaredTable.columns[index];
-      const value = values[index];
-      if (value === undefined) {
-        return values;
-      }
-      valuesByColumn.set(column.name, value);
-    }
-
-    const reorderedValues: Value[] = [];
-    for (const column of runtimeTable.columns) {
-      const value = valuesByColumn.get(column.name);
-      if (value === undefined) {
-        return values;
-      }
-      reorderedValues.push(value);
-    }
-
-    return reorderedValues;
-  }
-
   private alignRowValuesToDeclaredSchema(
     table: string,
     values: Value[],
@@ -913,12 +879,7 @@ export class JazzClient {
    */
   async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
     const tier = this.resolveWriteTier(options);
-    const runtimeSchema = this.getSchema();
-    return this.runtime.insertDurable(
-      table,
-      this.alignCreateValuesToRuntimeSchema(table, values, runtimeSchema),
-      tier,
-    );
+    return this.runtime.insertDurable(table, values, tier);
   }
 
   /**
