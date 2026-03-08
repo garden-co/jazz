@@ -211,7 +211,7 @@ Schema references used by the include examples:
 - **Availability:** generated TypeScript query builders.
 - **Behavior:** `select(...)` narrows the root row to `id` plus the columns you pick.
 - **With includes:** `include(...)` still works after `select(...)`.
-- **Projecting included rows:** pass a query builder inside `include(...)`, for example `include({ project: app.projects.select("name") })`.
+- **Selecting in included rows:** pass a query builder inside `include(...)`, for example `include({ project: app.projects.select("name") })`.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
