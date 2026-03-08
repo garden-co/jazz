@@ -17,7 +17,6 @@ import type { QueryBuilder } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
-import { wasmSchema as TODO_SERVER_WASM_SCHEMA } from "../../../../examples/todo-server-ts/schema/app.ts";
 
 type Todo = {
   id: string;
@@ -58,6 +57,87 @@ const TEST_SCHEMA: WasmSchema = {
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
     ],
+  },
+};
+
+const TODO_SERVER_WASM_SCHEMA: WasmSchema = {
+  projects: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "description", column_type: { type: "Text" }, nullable: true },
+      {
+        name: "parent",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "todos",
+      },
+      {
+        name: "project",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "projects",
+      },
+      { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["user_id"],
+          },
+        },
+      },
+    },
   },
 };
 
@@ -496,7 +576,7 @@ describe("NAPI integration", () => {
       { timeout: 15_000 },
     );
 
-    const objectId = runtime.insert("todos", [
+    const insertedRow = runtime.insert("todos", [
       { type: "Text", value: "client-synced-item" },
       { type: "Boolean", value: false },
     ]);
@@ -517,7 +597,7 @@ describe("NAPI integration", () => {
     );
 
     expect(rawCalls.every((call) => isNestedOutboxCall(call))).toBe(true);
-    expect(objectId).toEqual(expect.any(String));
+    expect(insertedRow.id).toEqual(expect.any(String));
   }, 20_000);
 
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {
@@ -908,7 +988,7 @@ describe("NAPI integration", () => {
       const aliceWriter = aliceContext.client();
 
       await withTimeout(
-        bobWriter.create(
+        bobWriter.createDurable(
           "todos",
           [
             { type: "Text", value: "bob-item" },
@@ -924,7 +1004,7 @@ describe("NAPI integration", () => {
         "bob writer create timed out",
       );
       await withTimeout(
-        carolWriter.create(
+        carolWriter.createDurable(
           "todos",
           [
             { type: "Text", value: "carol-item" },
@@ -940,7 +1020,7 @@ describe("NAPI integration", () => {
         "carol writer create timed out",
       );
       await withTimeout(
-        aliceWriter.create(
+        aliceWriter.createDurable(
           "todos",
           [
             { type: "Text", value: "alice-item" },
@@ -1080,7 +1160,7 @@ describe("NAPI integration", () => {
 
       await waitForRows(reader, (rows) => rows.length === 0);
 
-      const rowId = await writer.create(
+      const createdRow = await writer.createDurable(
         "todos",
         [
           { type: "Text", value: "napi-shared-item" },
@@ -1088,15 +1168,20 @@ describe("NAPI integration", () => {
         ],
         { tier: "edge" },
       );
+      const rowId = createdRow.id;
 
       const rowsAfterCreate = await waitForRows(reader, (rows) =>
         rows.some((row) => row.id === rowId),
       );
-      const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
-      expect(createdRow?.values[0]).toEqual({ type: "Text", value: "napi-shared-item" });
-      expect(createdRow?.values[1]).toEqual({ type: "Boolean", value: false });
+      const replicatedRow = rowsAfterCreate.find((row) => row.id === rowId);
+      expect(replicatedRow?.values[0]).toEqual({ type: "Text", value: "napi-shared-item" });
+      expect(replicatedRow?.values[1]).toEqual({ type: "Boolean", value: false });
 
-      await writer.update(rowId, { done: { type: "Boolean", value: true } }, { tier: "edge" });
+      await writer.updateDurable(
+        rowId,
+        { done: { type: "Boolean", value: true } },
+        { tier: "edge" },
+      );
 
       const rowsAfterUpdate = await waitForRows(reader, (rows) => {
         const row = rows.find((entry) => entry.id === rowId);
@@ -1105,7 +1190,7 @@ describe("NAPI integration", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await writer.delete(rowId, { tier: "edge" });
+      await writer.deleteDurable(rowId, { tier: "edge" });
       await waitForRows(reader, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (writerContext) {
@@ -1142,7 +1227,7 @@ describe("NAPI integration", () => {
       });
 
       const writer = writerContext.client();
-      const rowId = await writer.create(
+      const createdRow = await writer.createDurable(
         "todos",
         [
           { type: "Text", value: "persisted-local-item" },
@@ -1150,6 +1235,7 @@ describe("NAPI integration", () => {
         ],
         { tier: "worker" },
       );
+      const rowId = createdRow.id;
 
       await waitForRows(writer, (rows) => rows.some((row) => row.id === rowId), 10_000, {
         tier: "worker",
