@@ -3761,6 +3761,86 @@ fn join_filter_on_joined_table_column() {
 }
 
 #[test]
+fn join_filter_on_scoped_alias_columns() {
+    let sync_manager = SyncManager::new();
+    let schema = join_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    let bob_handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(2), Value::Text("Bob".into())],
+        )
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Hello World".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(101),
+            Value::Text("Learning Rust".into()),
+            Value::Integer(2),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .alias("u")
+        .join("posts")
+        .alias("p")
+        .on("u.id", "p.author_id")
+        .filter_eq("u.name", Value::Text("Bob".into()))
+        .filter_eq("p.title", Value::Text("Learning Rust".into()))
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have updates");
+
+    assert_eq!(
+        delta.added.len(),
+        1,
+        "Scoped alias filters should resolve against the correct joined columns"
+    );
+    let row = &delta.added[0];
+    assert_eq!(row.id, bob_handle.row_id);
+    assert!(
+        row.data
+            .windows("Bob".len())
+            .any(|window| window == "Bob".as_bytes()),
+        "Joined row should include the filtered base alias value"
+    );
+    assert!(
+        row.data
+            .windows("Learning Rust".len())
+            .any(|window| window == "Learning Rust".as_bytes()),
+        "Joined row should include the filtered joined alias value"
+    );
+}
+
+#[test]
 fn join_subscription_can_project_joined_element_output() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();

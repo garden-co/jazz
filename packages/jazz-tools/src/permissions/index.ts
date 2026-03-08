@@ -89,6 +89,7 @@ interface RelationJoinSpec {
 interface RelationFilterEntry {
   column: string;
   raw: unknown;
+  scope: string;
 }
 
 interface RelationExprState {
@@ -132,7 +133,10 @@ class PermissionRelationBuilder implements PermissionRelation {
 
   where(input: unknown): PermissionRelation {
     const where = resolveRelationWhereInput(input);
-    const filters = [...this.state.filters, ...extractRelationFilters(where)];
+    const filters = [
+      ...this.state.filters,
+      ...extractRelationFilters(where, currentRelationScope(this.state)),
+    ];
     return new PermissionRelationBuilder(
       {
         ...this.state,
@@ -253,7 +257,10 @@ class PermissionRelationBuilder implements PermissionRelation {
     }
 
     const startWhere = resolveRelationWhereInput(options.start);
-    const startFilters = [...this.state.filters, ...extractRelationFilters(startWhere)];
+    const startFilters = [
+      ...this.state.filters,
+      ...extractRelationFilters(startWhere, currentRelationScope(this.state)),
+    ];
 
     const currentToken: RecursiveCurrentValue = {
       __jazzPermissionKind: "recursive-current",
@@ -287,13 +294,11 @@ class PermissionRelationBuilder implements PermissionRelation {
       );
     }
 
-    const seedPredicates = startFilters.flatMap((filter) =>
-      relationFilterToPredicates(filter, this.state.initialScope),
-    );
+    const seedPredicates = startFilters.flatMap((filter) => relationFilterToPredicates(filter));
     const seed = applyRelFilter(this.state.base, seedPredicates);
 
     const stepPredicates = [
-      ...stepFilters.flatMap((filter) => relationFilterToPredicates(filter, stepState.outputTable)),
+      ...stepFilters.flatMap((filter) => relationFilterToPredicates(filter)),
       {
         Cmp: {
           left: {
@@ -744,13 +749,29 @@ function resolveRelationWhereInput(input: unknown): Record<string, unknown> {
   return normalizeWhereObject(input);
 }
 
-function extractRelationFilters(where: Record<string, unknown>): RelationFilterEntry[] {
+function currentRelationScope(state: RelationExprState): string {
+  if (state.joins.length === 0) {
+    return state.initialScope;
+  }
+
+  const joinIndex = state.joins.length - 1;
+  const join = state.joins[joinIndex]!;
+  if (state.kind === "recursive") {
+    return `__recursive_join_${joinIndex}`;
+  }
+  return join.viaHop ? `__hop_${joinIndex}` : `__join_${joinIndex}`;
+}
+
+function extractRelationFilters(
+  where: Record<string, unknown>,
+  scope: string,
+): RelationFilterEntry[] {
   const filters: RelationFilterEntry[] = [];
   for (const [column, raw] of Object.entries(where)) {
     if (raw === undefined) {
       continue;
     }
-    filters.push({ column, raw });
+    filters.push({ column, raw, scope });
   }
   return filters;
 }
@@ -824,11 +845,8 @@ function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelV
   return { Literal: value };
 }
 
-function relationFilterToPredicates(
-  filter: RelationFilterEntry,
-  defaultScope: string,
-): RelPredicateExpr[] {
-  const left = relationColumnRef(filter.column, defaultScope);
+function relationFilterToPredicates(filter: RelationFilterEntry): RelPredicateExpr[] {
+  const left = relationColumnRef(filter.column, filter.scope);
   const raw = filter.raw;
 
   if (raw === null) {
@@ -1034,9 +1052,7 @@ function applyRelationTail(options: {
     hasHopJoin ||= Boolean(join.viaHop);
   }
 
-  const predicates = options.filters.flatMap((filter) =>
-    relationFilterToPredicates(filter, defaultScope),
-  );
+  const predicates = options.filters.flatMap((filter) => relationFilterToPredicates(filter));
   relation = applyRelFilter(relation, predicates);
 
   if (options.selectMap && Object.keys(options.selectMap).length > 0) {
