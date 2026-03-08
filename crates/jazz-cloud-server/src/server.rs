@@ -1069,7 +1069,9 @@ struct MetaExternalIdentityRow {
 struct MetaStore {
     runtime: TokioRuntime<SurrealKvStorage>,
     secret_hash_key: String,
+    apps_insert_descriptor: RowDescriptor,
     apps_descriptor: RowDescriptor,
+    external_identities_insert_descriptor: RowDescriptor,
     external_identities_descriptor: RowDescriptor,
 }
 
@@ -1121,18 +1123,20 @@ impl MetaStore {
             )
             .build();
 
-        let mut apps_descriptor = meta_schema
+        let apps_insert_descriptor = meta_schema
             .get(&TableName::new("apps"))
             .ok_or_else(|| "meta schema missing apps table".to_string())?
             .columns
             .clone();
+        let mut apps_descriptor = apps_insert_descriptor.clone();
         normalize_row_descriptor(&mut apps_descriptor);
 
-        let mut external_identities_descriptor = meta_schema
+        let external_identities_insert_descriptor = meta_schema
             .get(&TableName::new("external_identities"))
             .ok_or_else(|| "meta schema missing external_identities table".to_string())?
             .columns
             .clone();
+        let mut external_identities_descriptor = external_identities_insert_descriptor.clone();
         normalize_row_descriptor(&mut external_identities_descriptor);
 
         let sync_manager = SyncManager::new().with_durability_tiers(vec![
@@ -1158,7 +1162,9 @@ impl MetaStore {
         Ok(Self {
             runtime,
             secret_hash_key,
+            apps_insert_descriptor,
             apps_descriptor,
+            external_identities_insert_descriptor,
             external_identities_descriptor,
         })
     }
@@ -1226,7 +1232,7 @@ impl MetaStore {
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
         let values: Vec<Value> = self
-            .apps_descriptor
+            .apps_insert_descriptor
             .columns
             .iter()
             .map(|column| match column.name.as_str() {
@@ -1248,7 +1254,7 @@ impl MetaStore {
             })
             .collect();
 
-        let object_id = self
+        let (object_id, _row_values) = self
             .runtime
             .insert("apps", values, None)
             .map_err(|e| format!("failed to insert meta app record: {e}"))?;
@@ -1364,7 +1370,7 @@ impl MetaStore {
     ) -> Result<MetaExternalIdentityRow, String> {
         let now = now_timestamp_us();
         let values: Vec<Value> = self
-            .external_identities_descriptor
+            .external_identities_insert_descriptor
             .columns
             .iter()
             .map(|column| match column.name.as_str() {
@@ -3945,6 +3951,7 @@ async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn fair_app_queue_round_robins_apps_with_quantum_one() {
@@ -3980,5 +3987,66 @@ mod tests {
         assert_eq!(queue.pop_batch(2), Some(vec![9, 10]));
         assert_eq!(queue.pop_batch(2), Some(vec![3]));
         assert_eq!(queue.pop_batch(2), None);
+    }
+
+    #[tokio::test]
+    async fn meta_store_create_app_uses_declared_schema_order() {
+        let data_root = tempdir().unwrap();
+        let store = MetaStore::new(data_root.path(), "meta-store-test-key".to_string()).unwrap();
+        let app_id = AppId::from_name("meta-store-app");
+
+        let created = store
+            .create_app(
+                app_id,
+                "Meta Store App".to_string(),
+                "https://issuer.example/jwks".to_string(),
+                true,
+                false,
+                "backend-secret-hash".to_string(),
+                "admin-secret-hash".to_string(),
+                AppStatus::Active,
+                Some("admin-secret".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.app_id, app_id);
+        assert_eq!(created.app_name, "Meta Store App");
+        assert_eq!(created.admin_secret.as_deref(), Some("admin-secret"));
+
+        let loaded = store.get_by_app_id(app_id).await.unwrap().unwrap();
+        assert_eq!(loaded.app_id, app_id);
+        assert_eq!(loaded.app_name, "Meta Store App");
+        assert_eq!(loaded.jwks_endpoint, "https://issuer.example/jwks");
+        assert!(loaded.allow_anonymous);
+        assert!(!loaded.allow_demo);
+        assert_eq!(loaded.backend_secret_hash, "backend-secret-hash");
+        assert_eq!(loaded.admin_secret_hash, "admin-secret-hash");
+        assert_eq!(loaded.status, AppStatus::Active);
+        assert_eq!(loaded.admin_secret.as_deref(), Some("admin-secret"));
+    }
+
+    #[tokio::test]
+    async fn meta_store_create_external_identity_uses_declared_schema_order() {
+        let data_root = tempdir().unwrap();
+        let store = MetaStore::new(data_root.path(), "meta-store-test-key".to_string()).unwrap();
+        let app_id = AppId::from_name("meta-store-app");
+
+        store
+            .create_external_identity(
+                app_id,
+                "https://issuer.example",
+                "subject-123",
+                "principal-456",
+            )
+            .await
+            .unwrap();
+
+        let loaded = store
+            .get_external_identity(app_id, "https://issuer.example", "subject-123")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.principal_id, "principal-456");
     }
 }

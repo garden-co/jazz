@@ -30,7 +30,7 @@
   function toggleBeat(index: number) {
     const existing = beatAt(index);
     if (existing) {
-      db.deleteFrom(app.beats, existing.id);
+      db.delete(app.beats, existing.id);
     } else {
       db.insert(app.beats, {
         jam: jamId,

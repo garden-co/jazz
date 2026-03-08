@@ -932,60 +932,72 @@ function buildProfileByIdQuery(schema: WasmSchema, id: string): string {
 }
 
 async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
-  const aliceProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "alice" },
-      { type: "Text", value: "alice" },
-    ],
-    { tier: "edge" },
-  );
-  const bobProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "bob" },
-      { type: "Text", value: "bob" },
-    ],
-    { tier: "edge" },
-  );
-  const carolProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "carol" },
-      { type: "Text", value: "carol" },
-    ],
-    { tier: "edge" },
-  );
-  const eveProfileId = await client.create(
-    "profiles",
-    [
-      { type: "Text", value: "eve" },
-      { type: "Text", value: "eve" },
-    ],
-    { tier: "edge" },
-  );
+  const aliceProfileId = (
+    await client.createDurable(
+      "profiles",
+      [
+        { type: "Text", value: "alice" },
+        { type: "Text", value: "alice" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const bobProfileId = (
+    await client.createDurable(
+      "profiles",
+      [
+        { type: "Text", value: "bob" },
+        { type: "Text", value: "bob" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const carolProfileId = (
+    await client.createDurable(
+      "profiles",
+      [
+        { type: "Text", value: "carol" },
+        { type: "Text", value: "carol" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const eveProfileId = (
+    await client.createDurable(
+      "profiles",
+      [
+        { type: "Text", value: "eve" },
+        { type: "Text", value: "eve" },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
   const alicePrincipal = "alice";
   const bobPrincipal = "bob";
   const carolPrincipal = "carol";
   const evePrincipal = "eve";
 
-  const alicePersonId = await client.create(
-    "people",
-    [
-      { type: "Uuid", value: aliceProfileId },
-      { type: "Text", value: alicePrincipal },
-    ],
-    { tier: "edge" },
-  );
-  const bobPersonId = await client.create(
-    "people",
-    [
-      { type: "Uuid", value: bobProfileId },
-      { type: "Text", value: bobPrincipal },
-    ],
-    { tier: "edge" },
-  );
-  await client.create(
+  const alicePersonId = (
+    await client.createDurable(
+      "people",
+      [
+        { type: "Uuid", value: aliceProfileId },
+        { type: "Text", value: alicePrincipal },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  const bobPersonId = (
+    await client.createDurable(
+      "people",
+      [
+        { type: "Uuid", value: bobProfileId },
+        { type: "Text", value: bobPrincipal },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
+  await client.createDurable(
     "people",
     [
       { type: "Uuid", value: carolProfileId },
@@ -993,16 +1005,18 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
     ],
     { tier: "edge" },
   );
-  const evePersonId = await client.create(
-    "people",
-    [
-      { type: "Uuid", value: eveProfileId },
-      { type: "Text", value: evePrincipal },
-    ],
-    { tier: "edge" },
-  );
+  const evePersonId = (
+    await client.createDurable(
+      "people",
+      [
+        { type: "Uuid", value: eveProfileId },
+        { type: "Text", value: evePrincipal },
+      ],
+      { tier: "edge" },
+    )
+  ).id;
 
-  await client.create(
+  await client.createDurable(
     "friendships",
     [
       { type: "Uuid", value: alicePersonId },
@@ -1012,7 +1026,7 @@ async function seedSocialGraph(client: JazzClient): Promise<SocialSeed> {
     ],
     { tier: "edge" },
   );
-  await client.create(
+  await client.createDurable(
     "friendships",
     [
       { type: "Uuid", value: evePersonId },
@@ -1255,14 +1269,16 @@ describe("cloud-server integration (Jazz TS)", () => {
         makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      const rowId = await clientA.create(
-        "todos",
-        [
-          { type: "Text", value: "shared-item" },
-          { type: "Boolean", value: false },
-        ],
-        { tier: "edge" },
-      );
+      const rowId = (
+        await clientA.createDurable(
+          "todos",
+          [
+            { type: "Text", value: "shared-item" },
+            { type: "Boolean", value: false },
+          ],
+          { tier: "edge" },
+        )
+      ).id;
 
       const rowsAfterCreate = await waitForRows(clientB, queryAllTodos, (rows) =>
         rows.some((row) => row.id === rowId),
@@ -1270,7 +1286,11 @@ describe("cloud-server integration (Jazz TS)", () => {
       const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
       expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
 
-      await clientA.update(rowId, { done: { type: "Boolean", value: true } }, { tier: "edge" });
+      await clientA.updateDurable(
+        rowId,
+        { done: { type: "Boolean", value: true } },
+        { tier: "edge" },
+      );
       const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
         const row = rows.find((r) => r.id === rowId);
         return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
@@ -1278,7 +1298,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await clientA.delete(rowId, { tier: "edge" });
+      await clientA.deleteDurable(rowId, { tier: "edge" });
       await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (clientA) await clientA.shutdown();
@@ -1322,7 +1342,7 @@ describe("cloud-server integration (Jazz TS)", () => {
         writer = await connectClient(
           makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
-        await writer.create(
+        await writer.createDurable(
           "todos",
           [
             { type: "Text", value: "persisted-item" },
@@ -1438,7 +1458,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
         makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), schema),
       );
 
-      await seeder.create(
+      await seeder.createDurable(
         "owned_items",
         [
           { type: "Text", value: "bob-item" },
@@ -1446,7 +1466,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
         ],
         { tier: "edge" },
       );
-      await seeder.create(
+      await seeder.createDurable(
         "owned_items",
         [
           { type: "Text", value: "carol-item" },
@@ -1462,7 +1482,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       aliceClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
       );
-      await aliceClient.create(
+      await aliceClient.createDurable(
         "owned_items",
         [
           { type: "Text", value: "alice-item" },
@@ -1539,7 +1559,7 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
       aliceClient = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
       );
-      await aliceClient.create(
+      await aliceClient.createDurable(
         "owned_items",
         [
           { type: "Text", value: "alice-item" },

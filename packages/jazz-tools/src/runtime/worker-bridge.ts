@@ -29,6 +29,7 @@ export interface WorkerBridgeOptions {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
   adminSecret?: string;
+  logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
 export interface PeerSyncBatch {
@@ -150,6 +151,7 @@ export class WorkerBridge {
       localAuthMode: options.localAuthMode,
       localAuthToken: options.localAuthToken,
       adminSecret: options.adminSecret,
+      logLevel: options.logLevel,
       clientId: "", // Worker generates its own client ID for main thread
     };
 
