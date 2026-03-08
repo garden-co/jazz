@@ -1,0 +1,11 @@
+{
+  "id": "B5",
+  "name": "server_permission_recursive",
+  "seed": 20260226,
+  "folders": 80,
+  "documents": 240,
+  "read_request_count": 80,
+  "update_attempt_count": 60,
+  "allow_fraction": 0.7,
+  "recursive_depth": 6
+}

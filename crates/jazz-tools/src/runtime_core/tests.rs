@@ -65,8 +65,9 @@ fn test_runtime_core_insert_query() {
         Value::Uuid(ObjectId::new()),
         Value::Text("Alice".to_string()),
     ];
-    let object_id = core.insert("users", values.clone(), None).unwrap();
+    let (object_id, row_values) = core.insert("users", values.clone(), None).unwrap();
     assert!(!object_id.0.is_nil());
+    assert_eq!(row_values, values);
 
     core.immediate_tick();
     core.batched_tick();
@@ -75,6 +76,7 @@ fn test_runtime_core_insert_query() {
     let results = execute_query(&mut core, query);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, object_id);
+    assert_eq!(results[0].1, row_values);
 }
 
 #[test]
@@ -154,7 +156,7 @@ fn test_runtime_core_update_delete() {
 
     let id = ObjectId::new();
     let values = vec![Value::Uuid(id), Value::Text("Charlie".to_string())];
-    let object_id = core.insert("users", values, None).unwrap();
+    let (object_id, _row_values) = core.insert("users", values, None).unwrap();
     core.immediate_tick();
     core.batched_tick();
 
@@ -651,20 +653,22 @@ fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
 fn rc_insert_returns_immediately() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, row_values) = s.a.insert("users", values.clone(), None).unwrap();
     assert!(!id.0.is_nil());
+    assert_eq!(row_values, values);
 
     let query = Query::new("users");
     let results = execute_query(&mut s.a, query);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, id);
+    assert_eq!(results[0].1, row_values);
 }
 
 #[test]
 fn rc_insert_data_syncs_to_server() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
 
     pump_a_to_b(&mut s);
 
@@ -678,7 +682,7 @@ fn rc_insert_data_syncs_to_server() {
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
     pump_a_to_b(&mut s);
 
     s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
@@ -695,7 +699,7 @@ fn rc_update_sync() {
 fn rc_delete_sync() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
     pump_a_to_b(&mut s);
 
     s.a.delete(id, None).unwrap();
@@ -710,10 +714,11 @@ fn rc_delete_sync() {
 fn rc_insert_persisted_resolves_on_worker_ack() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, mut receiver) =
-        s.a.insert_persisted("users", values, None, DurabilityTier::Worker)
+    let ((id, row_values), mut receiver) =
+        s.a.insert_persisted("users", values.clone(), None, DurabilityTier::Worker)
             .unwrap();
     assert!(!id.0.is_nil());
+    assert_eq!(row_values, values);
 
     assert!(
         receiver.try_recv().is_err() || receiver.try_recv() == Ok(None),
@@ -778,7 +783,7 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
     pump_a_to_b(&mut s);
 
     let mut receiver =
@@ -808,7 +813,7 @@ fn rc_update_persisted_resolves_on_ack() {
 fn rc_delete_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
     pump_a_to_b(&mut s);
 
     let mut receiver =
@@ -862,7 +867,7 @@ fn rc_query_no_settled_tier_immediate() {
     let mut s = create_3tier_rc();
 
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
 
     let mut future = s.a.query(Query::new("users"), None);
 
@@ -883,7 +888,7 @@ fn rc_query_settled_tier_holds() {
     let mut s = create_3tier_rc();
 
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
 
     let mut future = s.a.query_with_propagation(
         Query::new("users"),
@@ -962,7 +967,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         Value::Uuid(ObjectId::new()),
         Value::Text("upstream-row".into()),
     ];
-    let row_id = s.b.insert("users", values, None).unwrap();
+    let (row_id, _row_values) = s.b.insert("users", values, None).unwrap();
     s.b.immediate_tick();
     s.b.batched_tick();
     s.b.sync_sender().take();
@@ -1096,7 +1101,7 @@ fn rc_subscribe_settled_tier() {
         .unwrap();
 
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let id = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
     s.a.immediate_tick();
 
     assert!(
@@ -1154,7 +1159,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         Value::Uuid(ObjectId::new()),
         Value::Text("local-first".into()),
     ];
-    let first_id = s.a.insert("users", values, None).unwrap();
+    let (first_id, _row_values) = s.a.insert("users", values, None).unwrap();
     s.a.immediate_tick();
 
     let calls = received.lock().unwrap();
@@ -1195,7 +1200,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         Value::Uuid(ObjectId::new()),
         Value::Text("local-second".into()),
     ];
-    let second_id = s.a.insert("users", second_values, None).unwrap();
+    let (second_id, _row_values) = s.a.insert("users", second_values, None).unwrap();
     s.a.immediate_tick();
 
     let calls = received.lock().unwrap();

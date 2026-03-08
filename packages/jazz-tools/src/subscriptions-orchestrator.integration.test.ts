@@ -89,16 +89,16 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
           observedSnapshots.push(delta.all);
         },
       });
-      const insertedId = await db.insert(todosTable, { title: "first", done: false });
+      const inserted = await db.insert(todosTable, { title: "first", done: false });
 
       await waitForCondition(
-        () => observedSnapshots.some((snapshot) => snapshot.some((row) => row.id === insertedId)),
+        () => observedSnapshots.some((snapshot) => snapshot.some((row) => row.id === inserted.id)),
         5_000,
         "SO-I01 expected snapshot to include inserted row",
       );
 
       const latest = observedSnapshots[observedSnapshots.length - 1];
-      expect(latest.some((row) => row.id === insertedId)).toBe(true);
+      expect(latest.some((row) => row.id === inserted.id)).toBe(true);
       expect(latest.some((row) => row.title === "first")).toBe(true);
       expect(entry.status).toBe("fulfilled");
 
@@ -186,7 +186,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         },
       });
 
-      const insertedId = await db.insert(todosTable, { title: "shared", done: false });
+      const { id: insertedId } = await db.insert(todosTable, { title: "shared", done: false });
       await waitForCondition(
         () => listenerA.length > 0 && listenerB.length > 0,
         5_000,

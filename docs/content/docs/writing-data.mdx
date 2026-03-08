@@ -3,12 +3,15 @@ title: Writing Data
 description: Insert, update, and delete APIs with local-first execution, framework context hooks, and write durability tiers.
 ---
 
+import DurabilityTiersTable from "../partials/quickstarts/durability-tiers-table.mdx";
+
 ## Local-First Writes
 
-`insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
+`insert`, `update`, and `delete` apply immediately in the local runtime.
 That keeps UI latency low because local state updates do not wait for any network hop.
 
-Mutation methods return promises that resolve when the requested durability tier is reached.
+`insertDurable`, `updateDurable`, and `deleteDurable` return promises that
+resolve when the requested durability tier is reached.
 
 ## Mutating from Framework Context
 
@@ -75,33 +78,72 @@ Notes:
 
 ## Write Durability Tiers
 
+<DurabilityTiersTable />
+
+The tier on a write controls _where the promise resolves_. Writes flow upward — from the
+local OPFS worker, to the nearest edge server, to the global core — and the tier determines
+how far the write must travel before the call returns.
+
+Data flows back down on demand. An edge server only fetches data from the global core when a
+client connected to it subscribes to that data. Edge nodes are demand-driven caches; the
+global core is the most durable tier and the point all others reconcile against. Two clients
+on different edge nodes may never share data unless one of them subscribes to data the other
+has written.
+
+### Data consistency
+
+Jazz uses last-write-wins CRDT merge strategies, so any tier may hold more recent
+unreconciled writes than the global core at a given moment. The global core represents the
+most durable snapshot, not necessarily the most current one. You can get closer to strongly
+consistent reads by using `global`-tier writes and reads exclusively, but under normal
+operation the system converges quickly.
+
 ### API Reference
 
-- `insert(table, data, options?)`
-- `update(table, id, data, options?)`
-- `deleteFrom(table, id, options?)`
+- `insert(table, data)`
+- `update(table, id, data)`
+- `delete(table, id)`
+- `insertDurable(table, data, { tier })`
+- `updateDurable(table, id, data, options?)`
+- `deleteDurable(table, id, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
-
-Durability tiers control when the returned promise resolves:
-
-- `worker`: waits until the local worker/storage tier acknowledges the write.
-- `edge`: waits until the edge server acknowledges the write.
-- `global`: waits until the global server acknowledges the write.
 
 Defaults:
 
 - Browser/client default tier is `worker`.
 - Backend/server-connected default tier is `edge`.
 
-Tradeoff summary:
+### Which tier to use
 
-- Lower tier: lower latency, lower durability scope.
-- Higher tier: higher latency, wider durability scope.
+**`"worker"` (default)** — the write is persisted to the local OPFS database. The promise
+resolves as soon as the WASM worker confirms it. Other tabs on the same device see the change
+immediately; remote clients do not yet.
 
-In practical terms:
+Use `worker` for:
 
-- Local-first updates remain immediate for UI/subscription state.
-- Mutation promises resolve at the selected durability checkpoint.
+- Local-only state (draft text, UI prefs)
+- Any write where you do not need remote confirmation
+
+**`"edge"`** — the write has reached the nearest sync server and been acknowledged. Clients
+connected to the same edge server will see the write immediately via their subscriptions.
+Clients on other edge nodes will see it once their edge fetches the update from the global
+core, which happens when they subscribe to the relevant data.
+
+Use `edge` for:
+
+- Any write that other clients must receive (messages, shared state, user actions)
+- Writes that depend on remote acknowledgement before continuing
+
+**`"global"`** — the write has propagated to the global core and is globally durable. Any
+client that subscribes to the relevant data will receive it, regardless of which edge node
+they are connected to. Highest latency; use only when edge-level acknowledgement is not
+sufficient.
+
+Use `global` for:
+
+- Seeding default data or one-time setup that must not duplicate across concurrent clients
+- Financial or audit records
+- Actions that must survive edge server failure
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
@@ -115,6 +157,32 @@ In practical terms:
     </include>
   </Tab>
 </Tabs>
+
+### When remote clients see your writes
+
+All writes propagate upward through the infrastructure tiers and will eventually reach remote
+clients that subscribe to the relevant data. The tier only controls when the promise resolves
+and what timing guarantee you get.
+
+A `worker`-tier write resolves as soon as the local OPFS worker acknowledges it. The write
+will propagate to the edge and onward, but with no timing guarantee — it sits in the local
+database until the sync layer flushes it. Remote clients will see it eventually, but not
+necessarily by the time your promise resolves.
+
+An `edge`-tier write resolves only after the nearest sync server has acknowledged it. Clients
+connected to the same edge node will see the write as soon as the promise resolves. Clients on
+other edge nodes will see it once their edge fetches the update from the global core.
+
+```ts
+// Remote clients will see this eventually — no timing guarantee on delivery
+db.update(app.tasks, id, { done: true, completedBy: userId });
+
+// Remote clients on this edge see this as soon as the promise resolves
+await db.updateDurable(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
+```
+
+If remote clients are not reacting to a write promptly, check whether the tier is `"edge"` or
+higher.
 
 ## Combining Write Durability with Read Durability
 

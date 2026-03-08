@@ -1,0 +1,8 @@
+{
+  "id": "W3",
+  "name": "offline_queue_reconnect",
+  "seed": 777,
+  "mode": "offline_reconnect",
+  "offline_write_count": 400,
+  "timeout_seconds": 60
+}

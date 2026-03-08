@@ -186,7 +186,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
         Value::Null,
     ];
 
-    let _new_id = client.create("todos", values).await?;
+    let _new_row = client.create("todos", values).await?;
     client
         .update(
             existing_id,
@@ -202,7 +202,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 pub async fn write_todo_with_default_durability(
     client: &JazzClient,
 ) -> jazz_tools::Result<ObjectId> {
-    let id = client
+    let (id, _row_values) = client
         .create(
             "todos",
             vec![

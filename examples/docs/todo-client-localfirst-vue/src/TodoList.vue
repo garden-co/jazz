@@ -13,36 +13,40 @@ const incompleteTodos = useAll(app.todos.where({ done: false }).orderBy("title",
 // #endregion reading-filtering-vue
 
 // #region writing-use-db-vue
-async function addTodo(todoTitle: string) {
-  await db.insert(app.todos, { title: todoTitle, done: false });
+function addTodo(todoTitle: string) {
+  db.insert(app.todos, { title: todoTitle, done: false });
 }
 
-async function toggleTodo(todo: { id: string; done: boolean }) {
-  await db.update(app.todos, todo.id, { done: !todo.done });
+function toggleTodo(todo: { id: string; done: boolean }) {
+  db.update(app.todos, todo.id, { done: !todo.done });
 }
 
-async function removeTodo(id: string) {
-  await db.deleteFrom(app.todos, id);
+function removeTodo(id: string) {
+  db.delete(app.todos, id);
 }
 // #endregion writing-use-db-vue
 
 // #region writing-durability-vue
 async function addImportantTodo(todoTitle: string) {
-  const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
-  await db.update(app.todos, id, { done: true }, { tier: "edge" });
-  await db.deleteFrom(app.todos, id, { tier: "global" });
+  const { id } = await db.insertDurable(
+    app.todos,
+    { title: todoTitle, done: false },
+    { tier: "edge" },
+  );
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
+  await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 // #endregion writing-durability-vue
 
 const title = ref("");
 
-async function handleSubmit(event: SubmitEvent) {
+function handleSubmit(event: SubmitEvent) {
   event.preventDefault();
   if (!title.value.trim()) {
     return;
   }
 
-  await addTodo(title.value.trim());
+  addTodo(title.value.trim());
   title.value = "";
 }
 </script>

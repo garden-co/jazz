@@ -66,6 +66,27 @@ Use framework bindings immediately after subscription concepts:
   </Tab>
 </Tabs>
 
+### First delivery and the undefined signal
+
+`useAll` and `QuerySubscription` return `undefined` until the subscription has received its
+first response from the server. Once the server has delivered an initial snapshot, the value
+becomes an array — empty (`[]`) if no rows match, or populated.
+
+```ts
+// undefined = still connecting to the sync server
+// []        = connected, no matching rows yet
+// [...]     = connected, rows present
+```
+
+Any initialisation that depends on a consistent remote view can check `undefined` directly:
+
+```ts
+useEffect(() => {
+  if (rows === undefined) return; // wait for server snapshot before acting
+  reconcile();
+}, [rows]);
+```
+
 ### React Suspense and Transitions
 
 The docs React example app includes a Suspense-based list that keeps the previous result visible
@@ -237,3 +258,33 @@ Read durability options pair naturally with write durability tiers:
 - Use read durability options to gate query/subscription delivery checkpoints.
 
 See [Write Durability Tiers](/docs/writing-data#write-durability-tiers) for write-side semantics.
+
+### Seeding and one-time setup
+
+For one-off setup (seeding default data, initialising a user record on first sign-in), you
+often need to ensure no other client has already done the same work before writing. Use
+`db.all` with `{ tier: "global" }` to wait until the global core has been consulted before
+reading — this prevents duplicate seeding from concurrent fresh clients.
+
+```ts
+// Reads nothing until globally consistent — prevents duplicate seeding
+// from concurrent fresh clients on first visit.
+const existing = await db.all(app.settings, { tier: "global" });
+
+if (existing.length === 0) {
+  for (const seed of DEFAULT_SETTINGS) {
+    await db.insert(app.settings, seed);
+  }
+}
+```
+
+| Call                                | Waits for                 | Use when                                          |
+| ----------------------------------- | ------------------------- | ------------------------------------------------- |
+| `db.all(query)`                     | Local worker (OPFS)       | Reading cached local state                        |
+| `db.all(query, { tier: "global" })` | Global core snapshot      | Seeding or one-time setup that must not duplicate |
+| `useAll(query)`                     | Local snapshot, then live | Live UI that re-renders on every change           |
+
+For most subscriptions, omitting a tier is the right choice: Jazz delivers results from local
+storage immediately and streams in remote updates as they arrive, giving users the fastest
+possible experience. Reserve explicit tiers for the cases above where eventual consistency is
+not acceptable.

@@ -6,12 +6,13 @@
  *
  * Key design:
  * - createDb() is async (pre-loads WASM module)
- * - insert/update/deleteFrom are async (await WASM bridge readiness, return Promises)
+ * - insert/update/delete are sync (local-first immediate writes, no durability wait)
+ * - insertDurable/updateDurable/deleteDurable are async (durability-aware, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { Session } from "./context.js";
 import {
   JazzClient,
@@ -23,13 +24,20 @@ import {
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
-import { transformRows, type IncludeSpec } from "./row-transformer.js";
+import { transformRow, transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
+
+type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
+const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
+
+function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
+  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
+}
 
 /**
  * Configuration for creating a Db instance.
@@ -64,6 +72,10 @@ export interface DbConfig {
   localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
+  /** Database name for OPFS persistence (browser only, default: appId) */
+  dbName?: string;
+  /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
+  logLevel?: WasmLogLevel;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -211,6 +223,14 @@ function resolveHopOutputTable(
   return currentTable;
 }
 
+function resolveSchemaWithTable(
+  preferredSchema: WasmSchema,
+  fallbackSchema: WasmSchema,
+  tableName: string,
+): WasmSchema {
+  return preferredSchema[tableName] ? preferredSchema : fallbackSchema;
+}
+
 /**
  * Interface for table proxies used with mutations.
  * Generated table constants implement this interface.
@@ -326,14 +346,14 @@ function isLeaderDebugEnabled(): boolean {
  * ```typescript
  * const db = await createDb({ appId: "my-app", driver });
  *
- * // Async mutations
- * const id = await db.insert(app.todos, { title: "Buy milk", done: false });
- * await db.update(app.todos, id, { done: true });
- * await db.deleteFrom(app.todos, id);
+ * // Mutations
+ * const inserted = db.insert(app.todos, { title: "Buy milk", done: false });
+ * db.update(app.todos, inserted.id, { done: true });
+ * db.delete(app.todos, inserted.id);
  *
  * // Async queries (need storage I/O)
  * const todos = await db.all(app.todos.where({ done: false }));
- * const todo = await db.one(app.todos.where({ id }));
+ * const todo = await db.one(app.todos.where({ id: inserted.id }));
  *
  * // Subscriptions
  * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
@@ -476,6 +496,8 @@ export class Db {
     const key = serializeRuntimeSchema(schema);
 
     if (!this.clients.has(key)) {
+      setGlobalWasmLogLevel(this.config.logLevel);
+
       // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(
         this.wasmModule,
@@ -563,6 +585,7 @@ export class Db {
       localAuthMode: this.config.localAuthMode,
       localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
+      logLevel: this.config.logLevel,
     };
   }
 
@@ -957,50 +980,94 @@ export class Db {
   }
 
   /**
+   * Insert a new row into a table without waiting for durability.
+   *
+   * @param table Table proxy from generated app module
+   * @param data Init object with column values
+   * @returns Inserted row
+   */
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+    const client = this.getClient(table._schema);
+    // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
+    // If the bridge fails to initialize, the insert will be lost on restart.
+    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
+    const row = client.create(table._table, values);
+    return transformRow(row, table._schema, table._table);
+  }
+
+  /**
    * Insert a new row into a table and wait for durability at the requested tier.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @param options Optional durability tier override
-   * @returns Promise resolving to the new row's ID
+   * @param options Durability tier
+   * @returns Promise resolving to the inserted row
    */
-  async insert<T, Init>(
+  async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options?: { tier?: DurabilityTier },
-  ): Promise<string> {
+    options: { tier: DurabilityTier },
+  ): Promise<T> {
     const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
     await this.ensureBridgeReady();
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
-    return client.create(table._table, values, options);
+    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const row = await client.createDurable(table._table, values, options);
+    return transformRow(row, table._schema, table._table);
+  }
+
+  /**
+   * Update an existing row without waiting for durability.
+   */
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+    const client = this.getClient(table._schema);
+    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    client.update(id, updates);
   }
 
   /**
    * Update an existing row and wait for durability at the requested tier.
    */
-  async update<T, Init>(
+  async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
     await this.ensureBridgeReady();
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    await client.update(id, updates, options);
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await client.updateDurable(id, updates, options);
+  }
+
+  /**
+   * Delete a row without waiting for durability.
+   */
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+    const client = this.getClient(table._schema);
+    client.delete(id);
   }
 
   /**
    * Delete a row and wait for durability at the requested tier.
    */
-  async deleteFrom<T, Init>(
+  async deleteDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
-    await client.delete(id, options);
+    await client.deleteDurable(id, options);
   }
 
   /**
@@ -1075,15 +1142,18 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
-    const rows = await client.query(translateQuery(builderJson, query._schema), options);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    return transformRows<T>(rows, query._schema, outputTable, outputIncludes);
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes);
   }
 
   /**
@@ -1132,17 +1202,20 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
-        ? resolveHopOutputTable(query._schema, builtQuery.table, builtQuery.hops)
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    const wasmQuery = translateQuery(builderJson, query._schema);
+    const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], query._schema, outputTable, outputIncludes)[0];
+      return transformRows<T>([row], outputSchema, outputTable, outputIncludes)[0];
     };
 
     const subId = client.subscribeInternal(
@@ -1219,7 +1292,8 @@ function isBrowser(): boolean {
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the WASM module.
- * After creation, mutations (insert/update/deleteFrom) are async and return Promises.
+ * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
+ * Use the `*Durable` variants when you need a Promise that resolves at a durability tier.
  *
  * In browser environments, automatically uses a dedicated worker for
  * OPFS persistence. In Node.js, uses in-memory storage.

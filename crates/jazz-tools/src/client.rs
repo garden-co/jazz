@@ -10,7 +10,7 @@ use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, Value};
+use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::SchemaManager;
 use crate::storage::{Storage, StorageError, SurrealKvStorage};
@@ -28,6 +28,8 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 ///
 /// Combines local persistence with server sync.
 pub struct JazzClient {
+    /// Schema as declared by the client/app code.
+    declared_schema: Schema,
     /// Handle to the local runtime.
     runtime: TokioRuntime<SurrealKvStorage>,
     /// Connection to the server (shared for event processor).
@@ -54,6 +56,7 @@ impl JazzClient {
     /// 3. Connect to the server (if URL provided)
     /// 4. Start syncing
     pub async fn connect(context: AppContext) -> Result<Self> {
+        let declared_schema = context.schema.clone();
         // Create data directory if needed
         std::fs::create_dir_all(&context.data_dir)?;
 
@@ -312,6 +315,7 @@ impl JazzClient {
         }
 
         Ok(Self {
+            declared_schema,
             runtime,
             server_connection,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -376,6 +380,7 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        let query_for_alignment = query.clone();
         let future = self
             .runtime
             .query(
@@ -389,14 +394,26 @@ impl JazzClient {
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
+            .map(|rows| self.align_query_rows_to_declared_schema(&query_for_alignment, rows))
             .map_err(|e| JazzError::Query(format!("{:?}", e)))
     }
 
     /// Create a new row in a table.
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        self.runtime
+    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values) = self
+            .runtime
             .insert(table, values, None)
-            .map_err(|e| JazzError::Write(e.to_string()))
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        Ok((object_id, row_values))
     }
 
     /// Update a row.
@@ -463,6 +480,35 @@ impl JazzClient {
 
         Ok(())
     }
+
+    fn align_query_rows_to_declared_schema(
+        &self,
+        query: &Query,
+        rows: Vec<(ObjectId, Vec<Value>)>,
+    ) -> Vec<(ObjectId, Vec<Value>)> {
+        if !query_rows_can_be_schema_aligned(query) {
+            return rows;
+        }
+
+        let runtime_schema = match self.runtime.current_schema() {
+            Ok(schema) => schema,
+            Err(_) => return rows,
+        };
+
+        rows.into_iter()
+            .map(|(id, values)| {
+                (
+                    id,
+                    align_row_values_to_declared_schema(
+                        &self.declared_schema,
+                        &runtime_schema,
+                        &query.table,
+                        values,
+                    ),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Session-scoped client for backend operations.
@@ -472,11 +518,22 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        self.client
+    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values) = self
+            .client
             .runtime
             .insert(table, values, Some(&self.session))
-            .map_err(|e| JazzError::Write(e.to_string()))
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.client.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.client.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        Ok((object_id, row_values))
     }
 
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
@@ -498,6 +555,7 @@ impl<'a> SessionClient<'a> {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        let query_for_alignment = query.clone();
         let future = self
             .client
             .runtime
@@ -512,6 +570,10 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
+            .map(|rows| {
+                self.client
+                    .align_query_rows_to_declared_schema(&query_for_alignment, rows)
+            })
             .map_err(|e| JazzError::Query(format!("{:?}", e)))
     }
 
@@ -519,6 +581,134 @@ impl<'a> SessionClient<'a> {
         self.client
             .subscribe_internal(query, Some(self.session.clone()))
             .await
+    }
+}
+
+fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
+    query.joins.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.recursive.is_none()
+        && query.select_columns.is_none()
+        && query.result_element_index.is_none()
+}
+
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(table) else {
+        return values;
+    };
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+
+    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
+        .unwrap_or(values)
+}
+
+fn reorder_values_by_column_name(
+    source_descriptor: &RowDescriptor,
+    target_descriptor: &RowDescriptor,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if values.len() != source_descriptor.columns.len()
+        || source_descriptor.columns.len() != target_descriptor.columns.len()
+    {
+        return None;
+    }
+
+    let mut values_by_column = HashMap::with_capacity(values.len());
+    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name, value.clone());
+    }
+
+    let mut reordered_values = Vec::with_capacity(values.len());
+    for column in &target_descriptor.columns {
+        reordered_values.push(values_by_column.remove(&column.name)?);
+    }
+
+    Some(reordered_values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
+
+    fn declared_todo_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean),
+            )
+            .build()
+    }
+
+    fn runtime_todo_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("completed", ColumnType::Boolean)
+                    .column("title", ColumnType::Text),
+            )
+            .build()
+    }
+
+    #[test]
+    fn query_rows_are_reordered_back_to_declared_schema() {
+        let aligned = align_row_values_to_declared_schema(
+            &declared_todo_schema(),
+            &runtime_todo_schema(),
+            &TableName::new("todos"),
+            vec![Value::Boolean(true), Value::Text("done".to_string())],
+        );
+
+        assert_eq!(
+            aligned,
+            vec![Value::Text("done".to_string()), Value::Boolean(true)]
+        );
+    }
+
+    #[test]
+    fn simple_queries_are_schema_alignable() {
+        let query = Query::new("todos");
+        assert!(query_rows_can_be_schema_aligned(&query));
+    }
+
+    #[test]
+    fn join_queries_are_not_schema_alignable() {
+        let mut query = Query::new("todos");
+        query.joins.push(crate::query_manager::query::JoinSpec {
+            table: TableName::new("projects"),
+            alias: None,
+            on: Some(("project_id".to_string(), "id".to_string())),
+        });
+
+        assert!(!query_rows_can_be_schema_aligned(&query));
+    }
+
+    #[test]
+    fn query_alignment_preserves_row_identity() {
+        let object_id = ObjectId::new();
+        let aligned = vec![(
+            object_id,
+            align_row_values_to_declared_schema(
+                &declared_todo_schema(),
+                &runtime_todo_schema(),
+                &TableName::new("todos"),
+                vec![Value::Boolean(false), Value::Text("keep-id".to_string())],
+            ),
+        )];
+
+        assert_eq!(aligned[0].0, object_id);
+        assert_eq!(
+            aligned[0].1,
+            vec![Value::Text("keep-id".to_string()), Value::Boolean(false)]
+        );
     }
 }
 
