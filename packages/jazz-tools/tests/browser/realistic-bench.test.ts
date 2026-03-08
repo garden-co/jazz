@@ -1443,7 +1443,7 @@ async function seedPermissionDataset(
   const allowedFolders: string[] = [];
   const deniedFolders: string[] = [];
   const ts = nowMicros();
-  const { id: allowedRootId } = await db.insert(
+  const { id: allowedRootId } = await db.insertDurable(
     folderTable,
     {
       parent_id: null,
@@ -1453,7 +1453,7 @@ async function seedPermissionDataset(
     },
     durabilityOptions(tier),
   );
-  const { id: deniedRootId } = await db.insert(
+  const { id: deniedRootId } = await db.insertDurable(
     folderTable,
     {
       parent_id: null,
@@ -1472,7 +1472,7 @@ async function seedPermissionDataset(
     const parent = allowedChain
       ? allowedFolders[allowedFolders.length - 1]
       : deniedFolders[deniedFolders.length - 1];
-    const { id } = await db.insert(
+    const { id } = await db.insertDurable(
       folderTable,
       {
         parent_id: parent,
@@ -1507,7 +1507,7 @@ async function seedPermissionDataset(
         ? owners.allowedOwnerId
         : owners.intermediateOwnerId
       : owners.deniedOwnerId;
-    const { id } = await db.insert(
+    const { id } = await db.insertDurable(
       documentTable,
       {
         folder_id: folderId,
