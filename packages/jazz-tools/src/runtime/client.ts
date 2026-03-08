@@ -875,9 +875,24 @@ export class JazzClient {
   }
 
   /**
+   * Insert a new row into a table without waiting for durability.
+   */
+  create(table: string, values: Value[]): Row {
+    const row = this.runtime.insert(table, values);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+    };
+  }
+
+  /**
    * Insert a new row into a table and wait for durability at the requested tier.
    */
-  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<Row> {
+  async createDurable(
+    table: string,
+    values: Value[],
+    options?: WriteDurabilityOptions,
+  ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
     const row = await this.runtime.insertDurable(table, values, tier);
     return {

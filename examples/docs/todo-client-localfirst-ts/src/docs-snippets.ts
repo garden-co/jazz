@@ -71,7 +71,7 @@ export function buildTodoLineageQuery() {
 
 // #region writing-crud-ts
 export async function writeTodoCrud(db: Db, todoId: string) {
-  await db.insert(app.todos, {
+  db.insert(app.todos, {
     title: "Write docs",
     done: false,
     owner_id: EXAMPLE_OWNER_ID,
@@ -84,7 +84,7 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 
 // #region writing-durability-tier-ts
 export async function writeTodoWithDurabilityTiers(db: Db) {
-  const { id } = await db.insert(
+  const { id } = await db.insertDurable(
     app.todos,
     {
       title: "Write docs with durability tier",

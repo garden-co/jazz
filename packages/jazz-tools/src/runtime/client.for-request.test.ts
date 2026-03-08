@@ -452,9 +452,10 @@ describe("JazzClient.forRequest", () => {
 
 describe("JazzClient schema order", () => {
   it("passes create values through in the declared schema order", async () => {
+    const insert = vi.fn(() => mockRow());
     const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
-      insert: () => mockRow(),
+      insert,
       update: () => {},
       delete: () => {},
       query: async () => [],
@@ -517,14 +518,11 @@ describe("JazzClient schema order", () => {
       { type: "Boolean", value: false },
     ]);
 
-    expect(insertDurable).toHaveBeenCalledWith(
-      "todos",
-      [
-        { type: "Text", value: "Buy milk" },
-        { type: "Boolean", value: false },
-      ],
-      "worker",
-    );
+    expect(insert).toHaveBeenCalledWith("todos", [
+      { type: "Text", value: "Buy milk" },
+      { type: "Boolean", value: false },
+    ]);
+    expect(insertDurable).not.toHaveBeenCalled();
   });
 
   it("uses the local auth session for direct queries and subscriptions", async () => {

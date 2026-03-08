@@ -31,15 +31,13 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, Value[], { tier?: string }?]) => Promise<Row>>(
-      async () => ({
-        id: "todo-1",
-        values: [
-          { type: "Text", value: "Buy milk" },
-          { type: "Boolean", value: false },
-        ],
-      }),
-    );
+    const create = vi.fn<(...args: [string, Value[]]) => Row>(() => ({
+      id: "todo-1",
+      values: [
+        { type: "Text", value: "Buy milk" },
+        { type: "Boolean", value: false },
+      ],
+    }));
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
       create,
@@ -55,16 +53,12 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    const row = await db.insert(table, { title: "Buy milk", done: false });
+    const row = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith(
-      "todos",
-      [
-        { type: "Text", value: "Buy milk" },
-        { type: "Boolean", value: false },
-      ],
-      undefined,
-    );
+    expect(create).toHaveBeenCalledWith("todos", [
+      { type: "Text", value: "Buy milk" },
+      { type: "Boolean", value: false },
+    ]);
     expect(row).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -136,15 +130,13 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, Value[], { tier?: string }?]) => Promise<Row>>(
-      async () => ({
-        id: "todo-1",
-        values: [
-          { type: "Text", value: "Buy milk" },
-          { type: "Boolean", value: false },
-        ],
-      }),
-    );
+    const create = vi.fn<(...args: [string, Value[]]) => Row>(() => ({
+      id: "todo-1",
+      values: [
+        { type: "Text", value: "Buy milk" },
+        { type: "Boolean", value: false },
+      ],
+    }));
     const client = {
       getSchema: () => new Map(),
       create,
@@ -160,16 +152,12 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    const row = await db.insert(table, { title: "Buy milk", done: false });
+    const row = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith(
-      "todos",
-      [
-        { type: "Text", value: "Buy milk" },
-        { type: "Boolean", value: false },
-      ],
-      undefined,
-    );
+    expect(create).toHaveBeenCalledWith("todos", [
+      { type: "Text", value: "Buy milk" },
+      { type: "Boolean", value: false },
+    ]);
     expect(row).toEqual({
       id: "todo-1",
       title: "Buy milk",
