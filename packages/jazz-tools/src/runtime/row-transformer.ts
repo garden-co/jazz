@@ -5,17 +5,47 @@
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 
 export type { WasmValue };
 
 export interface IncludeSpec {
-  [relationName: string]: boolean | IncludeSpec;
+  [relationName: string]: unknown;
 }
 
 type IncludePlan = {
   relation: Relation;
   nested: IncludePlan[];
+  projection?: readonly string[];
 };
+
+function resolveBaseColumns(
+  tableName: string,
+  schema: WasmSchema,
+  projection?: readonly string[],
+): Array<{ name: string; columnType: ColumnType }> {
+  const table = schema[tableName];
+  if (!table) {
+    throw new Error(`Unknown table "${tableName}" in schema`);
+  }
+
+  if (!projection || projection.length === 0) {
+    return table.columns.map((column) => ({
+      name: column.name,
+      columnType: column.column_type,
+    }));
+  }
+
+  return projection
+    .filter(
+      (columnName): columnName is string => typeof columnName === "string" && columnName !== "id",
+    )
+    .map((columnName) => {
+      const column = table.columns.find((candidate) => candidate.name === columnName);
+      return column ? { name: column.name, columnType: column.column_type } : null;
+    })
+    .filter((column): column is { name: string; columnType: ColumnType } => column !== null);
+}
 
 function toByteArray(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) {
@@ -41,26 +71,25 @@ function toByteArray(value: unknown): Uint8Array {
 
 function buildIncludePlans(
   tableName: string,
-  includes: IncludeSpec,
+  includes: NormalizedIncludeSpec,
   relationsByTable: Map<string, Relation[]>,
 ): IncludePlan[] {
   const relations = relationsByTable.get(tableName) || [];
   const plans: IncludePlan[] = [];
 
   for (const [relationName, spec] of Object.entries(includes)) {
-    if (!spec) continue;
-
     const relation = relations.find((candidate) => candidate.name === relationName);
     if (!relation) {
       throw new Error(`Unknown relation "${relationName}" on table "${tableName}"`);
     }
 
-    const nested =
-      typeof spec === "object"
-        ? buildIncludePlans(relation.toTable, spec as IncludeSpec, relationsByTable)
-        : [];
+    const nested = buildIncludePlans(relation.toTable, spec.includes, relationsByTable);
 
-    plans.push({ relation, nested });
+    plans.push({
+      relation,
+      nested,
+      projection: spec.select.length > 0 ? spec.select : undefined,
+    });
   }
 
   return plans;
@@ -78,7 +107,14 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
     // Row id is carried in the struct's `id` field
     const rowId = entry.value.id;
     const columnValues = entry.value.values;
-    return transformRowValues(columnValues, schema, plan.relation.toTable, plan.nested, rowId);
+    return transformRowValues(
+      columnValues,
+      schema,
+      plan.relation.toTable,
+      plan.nested,
+      rowId,
+      plan.projection,
+    );
   });
 
   return plan.relation.isArray ? rows : rows[0];
@@ -90,6 +126,7 @@ function transformRowValues(
   tableName: string,
   includePlans: IncludePlan[],
   rowId?: string,
+  projection?: readonly string[],
 ): Record<string, unknown> {
   const table = schema[tableName];
   if (!table) {
@@ -101,16 +138,18 @@ function transformRowValues(
     obj.id = rowId;
   }
 
-  for (let i = 0; i < table.columns.length; i++) {
-    const col = table.columns[i];
+  const baseColumns = resolveBaseColumns(tableName, schema, projection);
+
+  for (let i = 0; i < baseColumns.length; i++) {
+    const col = baseColumns[i];
     const value = values[i];
     if (value !== undefined) {
-      obj[col.name] = unwrapValue(value, col.column_type);
+      obj[col.name] = unwrapValue(value, col.columnType);
     }
   }
 
   for (let i = 0; i < includePlans.length; i++) {
-    const value = values[table.columns.length + i];
+    const value = values[baseColumns.length + i];
     if (value === undefined) continue;
     const plan = includePlans[i];
     obj[plan.relation.name] = transformIncludedValue(value, plan, schema);
@@ -175,6 +214,7 @@ export function transformRows<T>(
   schema: WasmSchema,
   tableName: string,
   includes: IncludeSpec = {},
+  projection?: readonly string[],
 ): T[] {
   if (!schema[tableName]) {
     throw new Error(`Unknown table "${tableName}" in schema`);
@@ -183,7 +223,7 @@ export function transformRows<T>(
   const includePlans =
     Object.keys(includes).length === 0
       ? []
-      : buildIncludePlans(tableName, includes, analyzeRelations(schema));
+      : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
 
   return rows.map((row) => {
     return transformRowValues(
@@ -192,6 +232,7 @@ export function transformRows<T>(
       tableName,
       includePlans,
       row.id,
+      projection,
     ) as T;
   });
 }
@@ -201,6 +242,7 @@ export function transformRow<T>(
   schema: WasmSchema,
   tableName: string,
   includes: IncludeSpec = {},
+  projection?: readonly string[],
 ): T {
-  return transformRows<T>([row], schema, tableName, includes)[0];
+  return transformRows<T>([row], schema, tableName, includes, projection)[0];
 }

@@ -158,8 +158,11 @@ export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Instrumen
   beatsViaInstrument?: NonNullable<I["beatsViaInstrument"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Beat[]
-      : RelationInclude extends BeatQueryBuilder<infer QueryInclude extends BeatInclude>
-        ? BeatWithIncludes<QueryInclude>[]
+      : RelationInclude extends BeatQueryBuilder<
+            infer QueryInclude extends BeatInclude,
+            infer QuerySelect extends keyof Beat
+          >
+        ? BeatSelectedWithIncludes<QueryInclude, QuerySelect>[]
         : RelationInclude extends BeatInclude
           ? BeatWithIncludes<RelationInclude>[]
           : never
@@ -170,8 +173,11 @@ export type JamWithIncludes<I extends JamInclude = {}> = Jam & {
   beatsViaJam?: NonNullable<I["beatsViaJam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Beat[]
-      : RelationInclude extends BeatQueryBuilder<infer QueryInclude extends BeatInclude>
-        ? BeatWithIncludes<QueryInclude>[]
+      : RelationInclude extends BeatQueryBuilder<
+            infer QueryInclude extends BeatInclude,
+            infer QuerySelect extends keyof Beat
+          >
+        ? BeatSelectedWithIncludes<QueryInclude, QuerySelect>[]
         : RelationInclude extends BeatInclude
           ? BeatWithIncludes<RelationInclude>[]
           : never
@@ -180,9 +186,10 @@ export type JamWithIncludes<I extends JamInclude = {}> = Jam & {
     ? RelationInclude extends true
       ? Participant[]
       : RelationInclude extends ParticipantQueryBuilder<
-            infer QueryInclude extends ParticipantInclude
+            infer QueryInclude extends ParticipantInclude,
+            infer QuerySelect extends keyof Participant
           >
-        ? ParticipantWithIncludes<QueryInclude>[]
+        ? ParticipantSelectedWithIncludes<QueryInclude, QuerySelect>[]
         : RelationInclude extends ParticipantInclude
           ? ParticipantWithIncludes<RelationInclude>[]
           : never
@@ -193,8 +200,11 @@ export type BeatWithIncludes<I extends BeatInclude = {}> = Beat & {
   jam?: NonNullable<I["jam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Jam
-      : RelationInclude extends JamQueryBuilder<infer QueryInclude extends JamInclude>
-        ? JamWithIncludes<QueryInclude>
+      : RelationInclude extends JamQueryBuilder<
+            infer QueryInclude extends JamInclude,
+            infer QuerySelect extends keyof Jam
+          >
+        ? JamSelectedWithIncludes<QueryInclude, QuerySelect>
         : RelationInclude extends JamInclude
           ? JamWithIncludes<RelationInclude>
           : never
@@ -202,8 +212,11 @@ export type BeatWithIncludes<I extends BeatInclude = {}> = Beat & {
   instrument?: NonNullable<I["instrument"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Instrument
-      : RelationInclude extends InstrumentQueryBuilder<infer QueryInclude extends InstrumentInclude>
-        ? InstrumentWithIncludes<QueryInclude>
+      : RelationInclude extends InstrumentQueryBuilder<
+            infer QueryInclude extends InstrumentInclude,
+            infer QuerySelect extends keyof Instrument
+          >
+        ? InstrumentSelectedWithIncludes<QueryInclude, QuerySelect>
         : RelationInclude extends InstrumentInclude
           ? InstrumentWithIncludes<RelationInclude>
           : never
@@ -214,13 +227,53 @@ export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Partici
   jam?: NonNullable<I["jam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Jam
-      : RelationInclude extends JamQueryBuilder<infer QueryInclude extends JamInclude>
-        ? JamWithIncludes<QueryInclude>
+      : RelationInclude extends JamQueryBuilder<
+            infer QueryInclude extends JamInclude,
+            infer QuerySelect extends keyof Jam
+          >
+        ? JamSelectedWithIncludes<QueryInclude, QuerySelect>
         : RelationInclude extends JamInclude
           ? JamWithIncludes<RelationInclude>
           : never
     : never;
 };
+
+export type InstrumentSelected<S extends keyof Instrument = keyof Instrument> = Pick<
+  Instrument,
+  Extract<S | "id", keyof Instrument>
+>;
+
+export type InstrumentSelectedWithIncludes<
+  I extends InstrumentInclude = {},
+  S extends keyof Instrument = keyof Instrument,
+> = InstrumentSelected<S> & Omit<InstrumentWithIncludes<I>, keyof Instrument>;
+
+export type JamSelected<S extends keyof Jam = keyof Jam> = Pick<Jam, Extract<S | "id", keyof Jam>>;
+
+export type JamSelectedWithIncludes<
+  I extends JamInclude = {},
+  S extends keyof Jam = keyof Jam,
+> = JamSelected<S> & Omit<JamWithIncludes<I>, keyof Jam>;
+
+export type BeatSelected<S extends keyof Beat = keyof Beat> = Pick<
+  Beat,
+  Extract<S | "id", keyof Beat>
+>;
+
+export type BeatSelectedWithIncludes<
+  I extends BeatInclude = {},
+  S extends keyof Beat = keyof Beat,
+> = BeatSelected<S> & Omit<BeatWithIncludes<I>, keyof Beat>;
+
+export type ParticipantSelected<S extends keyof Participant = keyof Participant> = Pick<
+  Participant,
+  Extract<S | "id", keyof Participant>
+>;
+
+export type ParticipantSelectedWithIncludes<
+  I extends ParticipantInclude = {},
+  S extends keyof Participant = keyof Participant,
+> = ParticipantSelected<S> & Omit<ParticipantWithIncludes<I>, keyof Participant>;
 
 export const wasmSchema: WasmSchema = {
   instruments: {
@@ -342,15 +395,17 @@ export const wasmSchema: WasmSchema = {
   },
 };
 
-export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements QueryBuilder<
-  InstrumentWithIncludes<I>
-> {
+export class InstrumentQueryBuilder<
+  I extends InstrumentInclude = {},
+  S extends keyof Instrument = keyof Instrument,
+> implements QueryBuilder<InstrumentSelectedWithIncludes<I, S>> {
   readonly _table = "instruments";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: InstrumentWithIncludes<I>;
+  declare readonly _rowType: InstrumentSelectedWithIncludes<I, S>;
   declare readonly _initType: InstrumentInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<InstrumentInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -363,7 +418,7 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
     step_hops: string[];
   };
 
-  where(conditions: InstrumentWhereInput): InstrumentQueryBuilder<I> {
+  where(conditions: InstrumentWhereInput): InstrumentQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -380,31 +435,42 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
     return clone;
   }
 
-  include<NewI extends InstrumentInclude>(relations: NewI): InstrumentQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Instrument>(
+    ...columns: [NewS, ...NewS[]]
+  ): InstrumentQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends InstrumentInclude>(relations: NewI): InstrumentQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Instrument, direction: "asc" | "desc" = "asc"): InstrumentQueryBuilder<I> {
+  orderBy(
+    column: keyof Instrument,
+    direction: "asc" | "desc" = "asc",
+  ): InstrumentQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): InstrumentQueryBuilder<I> {
+  limit(n: number): InstrumentQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): InstrumentQueryBuilder<I> {
+  offset(n: number): InstrumentQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "beatsViaInstrument"): InstrumentQueryBuilder<I> {
+  hopTo(relation: "beatsViaInstrument"): InstrumentQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -414,7 +480,7 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
     start: InstrumentWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): InstrumentQueryBuilder<I> {
+  }): InstrumentQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -496,6 +562,7 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -504,10 +571,14 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
     });
   }
 
-  private _clone<CloneI extends InstrumentInclude = I>(): InstrumentQueryBuilder<CloneI> {
-    const clone = new InstrumentQueryBuilder<CloneI>();
+  private _clone<
+    CloneI extends InstrumentInclude = I,
+    CloneS extends keyof Instrument = S,
+  >(): InstrumentQueryBuilder<CloneI, CloneS> {
+    const clone = new InstrumentQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -523,15 +594,17 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}> implements
   }
 }
 
-export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
-  JamWithIncludes<I>
-> {
+export class JamQueryBuilder<
+  I extends JamInclude = {},
+  S extends keyof Jam = keyof Jam,
+> implements QueryBuilder<JamSelectedWithIncludes<I, S>> {
   readonly _table = "jams";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: JamWithIncludes<I>;
+  declare readonly _rowType: JamSelectedWithIncludes<I, S>;
   declare readonly _initType: JamInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<JamInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -544,7 +617,7 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: JamWhereInput): JamQueryBuilder<I> {
+  where(conditions: JamWhereInput): JamQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -561,31 +634,37 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
     return clone;
   }
 
-  include<NewI extends JamInclude>(relations: NewI): JamQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Jam>(...columns: [NewS, ...NewS[]]): JamQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends JamInclude>(relations: NewI): JamQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Jam, direction: "asc" | "desc" = "asc"): JamQueryBuilder<I> {
+  orderBy(column: keyof Jam, direction: "asc" | "desc" = "asc"): JamQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): JamQueryBuilder<I> {
+  limit(n: number): JamQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): JamQueryBuilder<I> {
+  offset(n: number): JamQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "beatsViaJam" | "participantsViaJam"): JamQueryBuilder<I> {
+  hopTo(relation: "beatsViaJam" | "participantsViaJam"): JamQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -595,7 +674,7 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
     start: JamWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): JamQueryBuilder<I> {
+  }): JamQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -677,6 +756,7 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -685,10 +765,14 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
     });
   }
 
-  private _clone<CloneI extends JamInclude = I>(): JamQueryBuilder<CloneI> {
-    const clone = new JamQueryBuilder<CloneI>();
+  private _clone<CloneI extends JamInclude = I, CloneS extends keyof Jam = S>(): JamQueryBuilder<
+    CloneI,
+    CloneS
+  > {
+    const clone = new JamQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -704,15 +788,17 @@ export class JamQueryBuilder<I extends JamInclude = {}> implements QueryBuilder<
   }
 }
 
-export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilder<
-  BeatWithIncludes<I>
-> {
+export class BeatQueryBuilder<
+  I extends BeatInclude = {},
+  S extends keyof Beat = keyof Beat,
+> implements QueryBuilder<BeatSelectedWithIncludes<I, S>> {
   readonly _table = "beats";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: BeatWithIncludes<I>;
+  declare readonly _rowType: BeatSelectedWithIncludes<I, S>;
   declare readonly _initType: BeatInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<BeatInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -725,7 +811,7 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
     step_hops: string[];
   };
 
-  where(conditions: BeatWhereInput): BeatQueryBuilder<I> {
+  where(conditions: BeatWhereInput): BeatQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -742,31 +828,37 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
     return clone;
   }
 
-  include<NewI extends BeatInclude>(relations: NewI): BeatQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Beat>(...columns: [NewS, ...NewS[]]): BeatQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends BeatInclude>(relations: NewI): BeatQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Beat, direction: "asc" | "desc" = "asc"): BeatQueryBuilder<I> {
+  orderBy(column: keyof Beat, direction: "asc" | "desc" = "asc"): BeatQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): BeatQueryBuilder<I> {
+  limit(n: number): BeatQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): BeatQueryBuilder<I> {
+  offset(n: number): BeatQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "jam" | "instrument"): BeatQueryBuilder<I> {
+  hopTo(relation: "jam" | "instrument"): BeatQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -776,7 +868,7 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
     start: BeatWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): BeatQueryBuilder<I> {
+  }): BeatQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -858,6 +950,7 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -866,10 +959,14 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
     });
   }
 
-  private _clone<CloneI extends BeatInclude = I>(): BeatQueryBuilder<CloneI> {
-    const clone = new BeatQueryBuilder<CloneI>();
+  private _clone<CloneI extends BeatInclude = I, CloneS extends keyof Beat = S>(): BeatQueryBuilder<
+    CloneI,
+    CloneS
+  > {
+    const clone = new BeatQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -885,15 +982,17 @@ export class BeatQueryBuilder<I extends BeatInclude = {}> implements QueryBuilde
   }
 }
 
-export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implements QueryBuilder<
-  ParticipantWithIncludes<I>
-> {
+export class ParticipantQueryBuilder<
+  I extends ParticipantInclude = {},
+  S extends keyof Participant = keyof Participant,
+> implements QueryBuilder<ParticipantSelectedWithIncludes<I, S>> {
   readonly _table = "participants";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ParticipantWithIncludes<I>;
+  declare readonly _rowType: ParticipantSelectedWithIncludes<I, S>;
   declare readonly _initType: ParticipantInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ParticipantInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -906,7 +1005,7 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
     step_hops: string[];
   };
 
-  where(conditions: ParticipantWhereInput): ParticipantQueryBuilder<I> {
+  where(conditions: ParticipantWhereInput): ParticipantQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -923,8 +1022,16 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
     return clone;
   }
 
-  include<NewI extends ParticipantInclude>(relations: NewI): ParticipantQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Participant>(
+    ...columns: [NewS, ...NewS[]]
+  ): ParticipantQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends ParticipantInclude>(relations: NewI): ParticipantQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
@@ -932,25 +1039,25 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
   orderBy(
     column: keyof Participant,
     direction: "asc" | "desc" = "asc",
-  ): ParticipantQueryBuilder<I> {
+  ): ParticipantQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ParticipantQueryBuilder<I> {
+  limit(n: number): ParticipantQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ParticipantQueryBuilder<I> {
+  offset(n: number): ParticipantQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "jam"): ParticipantQueryBuilder<I> {
+  hopTo(relation: "jam"): ParticipantQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -960,7 +1067,7 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
     start: ParticipantWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ParticipantQueryBuilder<I> {
+  }): ParticipantQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -1042,6 +1149,7 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -1050,10 +1158,14 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}> implemen
     });
   }
 
-  private _clone<CloneI extends ParticipantInclude = I>(): ParticipantQueryBuilder<CloneI> {
-    const clone = new ParticipantQueryBuilder<CloneI>();
+  private _clone<
+    CloneI extends ParticipantInclude = I,
+    CloneS extends keyof Participant = S,
+  >(): ParticipantQueryBuilder<CloneI, CloneS> {
+    const clone = new ParticipantQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;

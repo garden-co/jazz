@@ -140,6 +140,7 @@ export interface QueryInput {
 type RelationIrNode = Record<string, unknown>;
 type ArraySubqueryPlan = {
   table: string;
+  selectColumns: string[];
   nested: ArraySubqueryPlan[];
 };
 
@@ -239,6 +240,7 @@ function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
     }
     const plan = entry as {
       table?: unknown;
+      select_columns?: unknown;
       nested_arrays?: unknown;
     };
     if (typeof plan.table !== "string") {
@@ -246,6 +248,9 @@ function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
     }
     plans.push({
       table: plan.table,
+      selectColumns: Array.isArray(plan.select_columns)
+        ? plan.select_columns.filter((column): column is string => typeof column === "string")
+        : [],
       nested: parseArraySubqueryPlans(plan.nested_arrays),
     });
   }
@@ -256,12 +261,14 @@ function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
 function resolveQueryAlignmentPlan(queryJson: string): {
   outputTable: string | null;
   arraySubqueries: ArraySubqueryPlan[];
+  selectColumns: string[];
 } {
   try {
     const parsed = JSON.parse(queryJson) as {
       table?: unknown;
       relation_ir?: unknown;
       array_subqueries?: unknown;
+      select_columns?: unknown;
     };
     return {
       outputTable:
@@ -269,11 +276,15 @@ function resolveQueryAlignmentPlan(queryJson: string): {
           ? parsed.table
           : resolveRelationIrOutputTable(parsed.relation_ir),
       arraySubqueries: parseArraySubqueryPlans(parsed.array_subqueries),
+      selectColumns: Array.isArray(parsed.select_columns)
+        ? parsed.select_columns.filter((column): column is string => typeof column === "string")
+        : [],
     };
   } catch {
     return {
       outputTable: null,
       arraySubqueries: [],
+      selectColumns: [],
     };
   }
 }
@@ -761,11 +772,45 @@ export class JazzClient {
     values: Value[],
     runtimeSchema = this.getSchema(),
     arraySubqueries: ArraySubqueryPlan[] = [],
+    selectColumns: string[] = [],
   ): Value[] {
     const declaredTable = this.context.schema[table];
     const runtimeTable = runtimeSchema[table];
 
-    if (!declaredTable || !runtimeTable || values.length < runtimeTable.columns.length) {
+    if (!declaredTable || !runtimeTable) {
+      return values;
+    }
+
+    const projectedBaseColumnCount =
+      selectColumns.length > 0
+        ? selectColumns.filter((columnName) =>
+            declaredTable.columns.some((column) => column.name === columnName),
+          ).length
+        : 0;
+
+    if (projectedBaseColumnCount > 0) {
+      if (values.length < projectedBaseColumnCount) {
+        return values;
+      }
+
+      const projectedValues = values.slice(0, projectedBaseColumnCount);
+      const trailingValues = values.slice(projectedBaseColumnCount);
+      if (arraySubqueries.length === 0) {
+        return projectedValues.concat(trailingValues);
+      }
+
+      const alignedTrailingValues = trailingValues.map((value, index) => {
+        const plan = arraySubqueries[index];
+        if (!plan) {
+          return value;
+        }
+        return this.alignIncludedValueToDeclaredSchema(value, plan, runtimeSchema);
+      });
+
+      return projectedValues.concat(alignedTrailingValues);
+    }
+
+    if (values.length < runtimeTable.columns.length) {
       return values;
     }
 
@@ -829,6 +874,7 @@ export class JazzClient {
               entry.value.values,
               runtimeSchema,
               plan.nested,
+              plan.selectColumns,
             ),
           },
         };
@@ -841,7 +887,7 @@ export class JazzClient {
     rows: Row[],
     runtimeSchema = this.getSchema(),
   ): Row[] {
-    const { outputTable, arraySubqueries } = resolveQueryAlignmentPlan(queryJson);
+    const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable) {
       return rows;
     }
@@ -853,6 +899,7 @@ export class JazzClient {
         row.values,
         runtimeSchema,
         arraySubqueries,
+        selectColumns,
       ),
     }));
   }
@@ -862,7 +909,7 @@ export class JazzClient {
     delta: RowDelta,
     runtimeSchema = this.getSchema(),
   ): RowDelta {
-    const { outputTable, arraySubqueries } = resolveQueryAlignmentPlan(queryJson);
+    const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable || !Array.isArray(delta)) {
       return delta;
     }
@@ -878,6 +925,7 @@ export class JazzClient {
               change.row.values as Value[],
               runtimeSchema,
               arraySubqueries,
+              selectColumns,
             ),
           },
         };
