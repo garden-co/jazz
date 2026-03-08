@@ -263,6 +263,10 @@ function summarizeBenchmark(benchmark, status, durationMs, extra = {}) {
   };
 }
 
+function stripAnsi(value) {
+  return String(value ?? "").replace(/\x1B\[[0-9;]*m/g, "");
+}
+
 async function runNativeBenchmark(benchmark, args) {
   const logFile = path.resolve(args.outDir, benchmark.log_path);
 
@@ -412,10 +416,13 @@ async function runNativeBenchmark(benchmark, args) {
 }
 
 function parseBrowserReport(lines) {
+  const marker = "[realistic-bench]";
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i]?.trim();
-    if (!line || !line.startsWith("[realistic-bench]")) continue;
-    const payload = line.slice("[realistic-bench]".length).trim();
+    const line = stripAnsi(lines[i]).trim();
+    if (!line) continue;
+    const markerIndex = line.indexOf(marker);
+    if (markerIndex === -1) continue;
+    const payload = line.slice(markerIndex + marker.length).trim();
     return JSON.parse(payload);
   }
   return null;
