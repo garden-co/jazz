@@ -1,7 +1,7 @@
 {
   "name": "jazz-cloud2-pulumi",
   "private": true,
-  "packageManager": "pnpm@10.14.0",
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",

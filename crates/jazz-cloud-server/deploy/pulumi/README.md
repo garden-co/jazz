@@ -64,7 +64,7 @@ The GitHub workflows in this repo are designed around that model:
 
 ```bash
 cd crates/jazz-cloud-server/deploy/pulumi
-pnpm install --ignore-workspace
+npm install
 ```
 
 ### Step 2: configure AWS SSO
