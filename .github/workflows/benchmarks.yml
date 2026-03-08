@@ -29,6 +29,7 @@ env:
   BENCH_BRANCH: ${{ github.head_ref || github.ref_name }}
   BENCH_REF: ${{ github.ref }}
   BENCH_SHA: ${{ github.sha }}
+  BENCH_TIMEOUT_SECONDS: "60"
 
 permissions:
   contents: read
@@ -91,37 +92,39 @@ jobs:
           cargo build --release -p jazz-tools --features client --example realistic_bench
           cargo bench -p jazz-tools --features surrealkv --bench realistic_phase1 --no-run
 
-      - name: Run W1 (interactive)
+      - name: Run native benchmark suite
         run: |
           set -euo pipefail
-          RUST_LOG=warn cargo run --release -p jazz-tools --features client --example realistic_bench -- \
-            --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
-            --scenario benchmarks/realistic/scenarios/w1_interactive.json \
-            > bench-out/native/w1_interactive.json
-
-      - name: Run W4 (cold start)
-        run: |
-          set -euo pipefail
-          RUST_LOG=warn cargo run --release -p jazz-tools --features client --example realistic_bench -- \
-            --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
-            --scenario benchmarks/realistic/scenarios/w4_cold_start.json \
-            > bench-out/native/w4_cold_start.json
-
-      - name: Run realistic Criterion suite
-        run: |
-          set -euo pipefail
-          cargo bench -p jazz-tools --features surrealkv --bench realistic_phase1
+          node benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite native \
+            --out-dir bench-out/native \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set benchmarks/realistic/ci_skip_set.json \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
       - name: Export Criterion artifacts
         run: |
           set -euo pipefail
           node benchmarks/realistic/export_criterion.mjs \
+            --allow-empty \
             --out bench-out/native/criterion_realistic_phase1.json \
             --summary-md bench-out/native/criterion_realistic_phase1.md
+
+      - name: Publish native execution summary
+        run: |
+          set -euo pipefail
+          cat bench-out/native/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build native manifest
         run: |
           set -euo pipefail
+          file_sha() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              printf ''
+            fi
+          }
           jq -n \
             --arg workflow "${GITHUB_WORKFLOW}" \
             --arg run_id "${GITHUB_RUN_ID}" \
@@ -132,11 +135,15 @@ jobs:
             --arg branch "${BENCH_BRANCH}" \
             --arg profile "${BENCH_PROFILE}" \
             --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg w1_sha256 "$(sha256sum bench-out/native/w1_interactive.json | awk '{print $1}')" \
-            --arg w4_sha256 "$(sha256sum bench-out/native/w4_cold_start.json | awk '{print $1}')" \
-            --arg criterion_json_sha256 "$(sha256sum bench-out/native/criterion_realistic_phase1.json | awk '{print $1}')" \
-            --arg criterion_md_sha256 "$(sha256sum bench-out/native/criterion_realistic_phase1.md | awk '{print $1}')" \
-            '{
+            --arg w1_sha256 "$(file_sha bench-out/native/w1_interactive.json)" \
+            --arg w4_sha256 "$(file_sha bench-out/native/w4_cold_start.json)" \
+            --arg status_sha256 "$(file_sha bench-out/native/suite_status.json)" \
+            --arg summary_sha256 "$(file_sha bench-out/native/summary.md)" \
+            --arg skip_candidates_sha256 "$(file_sha bench-out/native/skip_candidates.json)" \
+            --arg criterion_json_sha256 "$(file_sha bench-out/native/criterion_realistic_phase1.json)" \
+            --arg criterion_md_sha256 "$(file_sha bench-out/native/criterion_realistic_phase1.md)" \
+            'def nullable($value): if $value == "" then null else $value end;
+            {
               kind: "realistic-bench-native",
               generated_at: $generated_at,
               workflow: $workflow,
@@ -152,10 +159,13 @@ jobs:
                 { path: "rustc.txt" },
                 { path: "uname.txt" },
                 { path: "lscpu.txt" },
-                { path: "w1_interactive.json", sha256: $w1_sha256 },
-                { path: "w4_cold_start.json", sha256: $w4_sha256 },
-                { path: "criterion_realistic_phase1.json", sha256: $criterion_json_sha256 },
-                { path: "criterion_realistic_phase1.md", sha256: $criterion_md_sha256 }
+                { path: "suite_status.json", sha256: nullable($status_sha256) },
+                { path: "summary.md", sha256: nullable($summary_sha256) },
+                { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                { path: "w1_interactive.json", sha256: nullable($w1_sha256) },
+                { path: "w4_cold_start.json", sha256: nullable($w4_sha256) },
+                { path: "criterion_realistic_phase1.json", sha256: nullable($criterion_json_sha256) },
+                { path: "criterion_realistic_phase1.md", sha256: nullable($criterion_md_sha256) }
               ]
             }' > bench-out/native/manifest.json
 
@@ -171,7 +181,13 @@ jobs:
     if: >-
       ${{
         (github.event_name != 'push' || github.actor != 'github-actions[bot]')
-        && github.event_name != 'pull_request'
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
         && (
           github.event_name != 'workflow_dispatch'
           || inputs.include_browser
@@ -228,17 +244,28 @@ jobs:
       - name: Run browser benchmark suite
         run: |
           set -euo pipefail
-          pnpm --dir packages/jazz-tools run bench:realistic:browser | tee bench-out/browser/realistic.log
+          node benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite browser \
+            --out-dir bench-out/browser \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set benchmarks/realistic/ci_skip_set.json \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
-      - name: Extract benchmark JSON line
+      - name: Publish browser execution summary
         run: |
           set -euo pipefail
-          grep '^\[realistic-bench\]' bench-out/browser/realistic.log | tail -n1 | sed 's/^\[realistic-bench\] //' > bench-out/browser/realistic.json
-          test -s bench-out/browser/realistic.json
+          cat bench-out/browser/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build browser manifest
         run: |
           set -euo pipefail
+          file_sha() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              printf ''
+            fi
+          }
           jq -n \
             --arg workflow "${GITHUB_WORKFLOW}" \
             --arg run_id "${GITHUB_RUN_ID}" \
@@ -249,9 +276,12 @@ jobs:
             --arg branch "${BENCH_BRANCH}" \
             --arg profile "${BENCH_PROFILE}" \
             --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg realistic_sha256 "$(sha256sum bench-out/browser/realistic.json | awk '{print $1}')" \
-            --arg log_sha256 "$(sha256sum bench-out/browser/realistic.log | awk '{print $1}')" \
-            '{
+            --arg realistic_sha256 "$(file_sha bench-out/browser/realistic.json)" \
+            --arg status_sha256 "$(file_sha bench-out/browser/suite_status.json)" \
+            --arg summary_sha256 "$(file_sha bench-out/browser/summary.md)" \
+            --arg skip_candidates_sha256 "$(file_sha bench-out/browser/skip_candidates.json)" \
+            'def nullable($value): if $value == "" then null else $value end;
+            {
               kind: "realistic-bench-browser",
               generated_at: $generated_at,
               workflow: $workflow,
@@ -268,8 +298,10 @@ jobs:
                 { path: "pnpm.txt" },
                 { path: "rustc.txt" },
                 { path: "uname.txt" },
-                { path: "realistic.json", sha256: $realistic_sha256 },
-                { path: "realistic.log", sha256: $log_sha256 }
+                { path: "suite_status.json", sha256: nullable($status_sha256) },
+                { path: "summary.md", sha256: nullable($summary_sha256) },
+                { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                { path: "realistic.json", sha256: nullable($realistic_sha256) }
               ]
             }' > bench-out/browser/manifest.json
 
@@ -330,6 +362,18 @@ jobs:
           fi
           node benchmarks/realistic/update_history.mjs "${args[@]}"
 
+      - name: Update benchmark skip set
+        run: |
+          set -euo pipefail
+          args=(
+            --skip-set benchmarks/realistic/ci_skip_set.json
+            --status site-input/native/suite_status.json
+          )
+          if [ -f site-input/browser/suite_status.json ]; then
+            args+=(--status site-input/browser/suite_status.json)
+          fi
+          node benchmarks/realistic/update_skip_set.mjs "${args[@]}"
+
       - name: Build static benchmark site
         run: |
           set -euo pipefail
@@ -342,11 +386,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p bench-out
+          : > bench-out/pr-report.md
+          for summary in site-input/native/summary.md site-input/browser/summary.md; do
+            if [ -f "$summary" ]; then
+              cat "$summary" >> bench-out/pr-report.md
+              printf '\n' >> bench-out/pr-report.md
+            fi
+          done
           node benchmarks/realistic/render_history_report.mjs \
             --history benchmarks/realistic/history/bench_history.json \
             --base-branch main \
             --head-branch "${BENCH_BRANCH}" \
-            --out bench-out/pr-report.md
+            --out bench-out/history-report.md
+          cat bench-out/history-report.md >> bench-out/pr-report.md
           cat bench-out/pr-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload site artifacts
@@ -402,7 +454,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/site
+          git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/ci_skip_set.json benchmarks/realistic/site
           if git diff --cached --quiet; then
             echo "No benchmark history/site changes to commit."
             exit 0
