@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,34 +78,30 @@ const other = true;
 // #endregion another-region
 `;
 
-// ---------------------------------------------------------------------------
-// Test setup
-// ---------------------------------------------------------------------------
-
-let tmpDir: string;
-
-beforeEach(async () => {
-  tmpDir = await mkdtemp(join(tmpdir(), "build-index-test-"));
-
+async function createFixtureTree(): Promise<string> {
+  const fixtureDir = await mkdtemp(join(tmpdir(), "build-index-test-"));
   // content/docs/
-  await mkdir(join(tmpDir, "content", "docs", "quickstarts"), {
+  await mkdir(join(fixtureDir, "content", "docs", "quickstarts"), {
     recursive: true,
   });
   // examples/ (for <include> resolution)
-  await mkdir(join(tmpDir, "examples"), { recursive: true });
+  await mkdir(join(fixtureDir, "examples"), { recursive: true });
 
-  await writeFile(join(tmpDir, "content", "docs", "getting-started.mdx"), GETTING_STARTED_MDX);
-  await writeFile(join(tmpDir, "content", "docs", "api-reference.mdx"), API_REFERENCE_MDX);
+  await writeFile(join(fixtureDir, "content", "docs", "getting-started.mdx"), GETTING_STARTED_MDX);
+  await writeFile(join(fixtureDir, "content", "docs", "api-reference.mdx"), API_REFERENCE_MDX);
   await writeFile(
-    join(tmpDir, "content", "docs", "quickstarts", "react.mdx"),
+    join(fixtureDir, "content", "docs", "quickstarts", "react.mdx"),
     REACT_QUICKSTART_MDX,
   );
-  await writeFile(join(tmpDir, "examples", "snippets.ts"), SNIPPETS_TS);
-});
+  await writeFile(join(fixtureDir, "examples", "snippets.ts"), SNIPPETS_TS);
 
-afterEach(async () => {
-  await rm(tmpDir, { recursive: true, force: true });
-});
+  return fixtureDir;
+}
+
+async function cleanupFixtureTree(fixtureDir: string | undefined): Promise<void> {
+  if (!fixtureDir) return;
+  await rm(fixtureDir, { recursive: true, force: true });
+}
 
 // ---------------------------------------------------------------------------
 // Unit tests — pure helpers
@@ -158,6 +154,16 @@ describe("extractDescription", () => {
 });
 
 describe("resolveIncludes", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await createFixtureTree();
+  });
+
+  afterEach(async () => {
+    await cleanupFixtureTree(tmpDir);
+  });
+
   it("replaces an include directive with a fenced code block", async () => {
     const mdxFilePath = join(tmpDir, "content", "docs", "api-reference.mdx");
     const content = `<include cwd lang="ts">
@@ -239,27 +245,32 @@ describe("splitIntoSections", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildIndex", () => {
+  let tmpDir: string;
   const outputDir = () => join(tmpDir, "output");
+  const contentDir = () => join(tmpDir, "content", "docs");
 
-  beforeEach(() => mkdir(join(tmpDir, "output"), { recursive: true }));
-
-  it("produces docs-index.db and docs-index.txt", async () => {
+  // Build once for the read-only assertions below; repeatedly rebuilding the
+  // index in each test was slow enough to trip CI timeouts under load.
+  beforeAll(async () => {
+    tmpDir = await createFixtureTree();
+    await mkdir(outputDir(), { recursive: true });
     await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
+      contentDir: contentDir(),
       outputDir: outputDir(),
     });
+  }, 10_000);
 
+  afterAll(async () => {
+    await cleanupFixtureTree(tmpDir);
+  });
+
+  it("produces docs-index.db and docs-index.txt", async () => {
     const { existsSync } = await import("node:fs");
     expect(existsSync(join(outputDir(), "docs-index.db"))).toBe(true);
     expect(existsSync(join(outputDir(), "docs-index.txt"))).toBe(true);
   });
 
   it("pages table has correct schema", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row = db.prepare("SELECT title, slug, description, body FROM pages LIMIT 1").get();
     expect(row).toBeDefined();
@@ -267,11 +278,6 @@ describe("buildIndex", () => {
   });
 
   it("every MDX file produces a page row", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const rows = db.prepare("SELECT slug FROM pages ORDER BY slug").all();
     const slugs = rows.map((r: any) => r.slug);
@@ -283,11 +289,6 @@ describe("buildIndex", () => {
   });
 
   it("slug is path relative to contentDir without .mdx extension", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row: any = db.prepare("SELECT slug FROM pages WHERE slug = 'quickstarts/react'").get();
     expect(row).toBeDefined();
@@ -295,11 +296,6 @@ describe("buildIndex", () => {
   });
 
   it("title comes from MDX frontmatter", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row: any = db.prepare("SELECT title FROM pages WHERE slug = 'getting-started'").get();
     expect(row.title).toBe("Getting Started");
@@ -307,11 +303,6 @@ describe("buildIndex", () => {
   });
 
   it("description comes from frontmatter when present", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row: any = db
       .prepare("SELECT description FROM pages WHERE slug = 'getting-started'")
@@ -321,11 +312,6 @@ describe("buildIndex", () => {
   });
 
   it("description falls back to first three sentences when no frontmatter description", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row: any = db.prepare("SELECT description FROM pages WHERE slug = 'api-reference'").get();
     // First three sentences from the body
@@ -336,11 +322,6 @@ describe("buildIndex", () => {
   });
 
   it("resolves <include> directives: body contains code, not include tag", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row: any = db.prepare("SELECT body FROM pages WHERE slug = 'api-reference'").get();
     expect(row.body).not.toContain("<include");
@@ -349,11 +330,6 @@ describe("buildIndex", () => {
   });
 
   it("strips JSX component tags from body, preserving text and code content", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const row: any = db.prepare("SELECT body FROM pages WHERE slug = 'api-reference'").get();
     expect(row.body).not.toContain("<Tabs");
@@ -364,11 +340,6 @@ describe("buildIndex", () => {
   });
 
   it("each ## heading produces a sections_fts row", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const rows = db
       .prepare(
@@ -382,11 +353,6 @@ describe("buildIndex", () => {
   });
 
   it("sections_fts is queryable via FTS5 MATCH", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const db = new DatabaseSync(join(outputDir(), "docs-index.db"));
     const rows = db
       .prepare(
@@ -400,11 +366,6 @@ describe("buildIndex", () => {
   });
 
   it("docs-index.txt contains ===PAGE:slug=== markers for all pages", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const txt = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
     expect(txt).toContain("===PAGE:getting-started===");
     expect(txt).toContain("===PAGE:api-reference===");
@@ -412,32 +373,34 @@ describe("buildIndex", () => {
   });
 
   it("docs-index.txt includes TITLE and DESCRIPTION lines per page", async () => {
-    await buildIndex({
-      contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
-    });
-
     const txt = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
     expect(txt).toContain("TITLE:Getting Started");
     expect(txt).toContain("DESCRIPTION:Learn how to get started with Jazz.");
   });
 
   it("is deterministic: running twice produces identical output", async () => {
+    const tmpDir = await createFixtureTree();
+    const outputDir = join(tmpDir, "output");
     const opts = {
       contentDir: join(tmpDir, "content", "docs"),
-      outputDir: outputDir(),
+      outputDir,
     };
 
-    await buildIndex(opts);
-    const txt1 = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
+    try {
+      await mkdir(outputDir, { recursive: true });
+      await buildIndex(opts);
+      const txt1 = await readFile(join(outputDir, "docs-index.txt"), "utf8");
 
-    // Remove db and txt, rebuild
-    await rm(join(outputDir(), "docs-index.db"));
-    await rm(join(outputDir(), "docs-index.txt"));
+      // Remove db and txt, rebuild
+      await rm(join(outputDir, "docs-index.db"));
+      await rm(join(outputDir, "docs-index.txt"));
 
-    await buildIndex(opts);
-    const txt2 = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
+      await buildIndex(opts);
+      const txt2 = await readFile(join(outputDir, "docs-index.txt"), "utf8");
 
-    expect(txt1).toBe(txt2);
-  });
+      expect(txt1).toBe(txt2);
+    } finally {
+      await cleanupFixtureTree(tmpDir);
+    }
+  }, 10_000);
 });

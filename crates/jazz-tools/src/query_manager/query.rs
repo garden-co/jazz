@@ -4,9 +4,10 @@ use std::fmt;
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
-use crate::query_manager::types::{RowDescriptor, TableName, Value};
+use crate::query_manager::types::{RowDescriptor, TableName, TupleDescriptor, Value};
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
+use super::relation_ir::ColumnRef;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryBuildError {
@@ -27,6 +28,39 @@ impl fmt::Display for QueryBuildError {
 }
 
 impl std::error::Error for QueryBuildError {}
+
+fn parse_condition_column(column: &str) -> Option<(Option<&str>, &str)> {
+    let trimmed = column.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((scope, name)) = trimmed.rsplit_once('.') {
+        let scope = scope.trim();
+        let name = name.trim();
+        if !scope.is_empty() && !name.is_empty() {
+            return Some((Some(scope), name));
+        }
+    }
+
+    Some((None, trimmed))
+}
+
+fn condition_column_ref(column: &str) -> Option<ColumnRef> {
+    let (scope, name) = parse_condition_column(column)?;
+    Some(match scope {
+        Some(scope) => ColumnRef::scoped(scope, name),
+        None => ColumnRef::unscoped(name),
+    })
+}
+
+fn tuple_condition_column_index(tuple_descriptor: &TupleDescriptor, column: &str) -> Option<usize> {
+    let (scope, name) = parse_condition_column(column)?;
+    match scope {
+        Some(scope) => tuple_descriptor.qualified_column_index(scope, name),
+        None => tuple_descriptor.column_index(name),
+    }
+}
 
 /// A join specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,8 +111,8 @@ pub enum Condition {
 }
 
 impl Condition {
-    /// Get the column name this condition applies to.
-    pub fn column(&self) -> &str {
+    /// Get the raw column selector string.
+    pub fn raw_column(&self) -> &str {
         match self {
             Condition::Eq { column, .. } => column,
             Condition::Ne { column, .. } => column,
@@ -91,6 +125,22 @@ impl Condition {
             Condition::IsNull { column } => column,
             Condition::IsNotNull { column } => column,
         }
+    }
+
+    /// Get the column name this condition applies to.
+    pub fn column(&self) -> &str {
+        parse_condition_column(self.raw_column())
+            .map(|(_, column)| column)
+            .unwrap_or_else(|| self.raw_column())
+    }
+
+    /// Get the optional scope/alias for this condition's column reference.
+    pub fn column_scope(&self) -> Option<&str> {
+        parse_condition_column(self.raw_column()).and_then(|(scope, _)| scope)
+    }
+
+    pub(crate) fn column_ref(&self) -> Option<ColumnRef> {
+        condition_column_ref(self.raw_column())
     }
 
     /// Check if this condition can be used for an index scan.
@@ -110,6 +160,56 @@ impl Condition {
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Option<Predicate> {
         let col_index = descriptor.column_index(self.column())?;
         let col_type = &descriptor.columns[col_index].column_type;
+
+        Some(match self {
+            Condition::Eq { value, .. } => Predicate::Eq {
+                col_index,
+                value: encode_value_with_type(value, col_type),
+            },
+            Condition::Ne { value, .. } => Predicate::Ne {
+                col_index,
+                value: encode_value_with_type(value, col_type),
+            },
+            Condition::Lt { value, .. } => Predicate::Lt {
+                col_index,
+                value: encode_value_with_type(value, col_type),
+            },
+            Condition::Le { value, .. } => Predicate::Le {
+                col_index,
+                value: encode_value_with_type(value, col_type),
+            },
+            Condition::Gt { value, .. } => Predicate::Gt {
+                col_index,
+                value: encode_value_with_type(value, col_type),
+            },
+            Condition::Ge { value, .. } => Predicate::Ge {
+                col_index,
+                value: encode_value_with_type(value, col_type),
+            },
+            Condition::Between { min, max, .. } => Predicate::And(vec![
+                Predicate::Ge {
+                    col_index,
+                    value: encode_value_with_type(min, col_type),
+                },
+                Predicate::Le {
+                    col_index,
+                    value: encode_value_with_type(max, col_type),
+                },
+            ]),
+            Condition::Contains { value, .. } => Predicate::Contains {
+                col_index,
+                value: value.clone(),
+            },
+            Condition::IsNull { .. } => Predicate::IsNull { col_index },
+            Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
+        })
+    }
+
+    /// Convert to a Predicate using a TupleDescriptor so scoped join refs can resolve.
+    pub fn to_tuple_predicate(&self, tuple_descriptor: &TupleDescriptor) -> Option<Predicate> {
+        let col_index = tuple_condition_column_index(tuple_descriptor, self.raw_column())?;
+        let combined_descriptor = tuple_descriptor.combined_descriptor();
+        let col_type = &combined_descriptor.columns[col_index].column_type;
 
         Some(match self {
             Condition::Eq { value, .. } => Predicate::Eq {
@@ -240,6 +340,46 @@ impl Conjunction {
             predicates.into_iter().next().unwrap()
         } else {
             Predicate::And(predicates)
+        }
+    }
+
+    /// Convert to a Predicate using a TupleDescriptor for scoped join refs.
+    pub fn to_tuple_predicate(&self, tuple_descriptor: &TupleDescriptor) -> Predicate {
+        if self.conditions.is_empty() {
+            return Predicate::True;
+        }
+
+        let predicates: Vec<_> = self
+            .conditions
+            .iter()
+            .filter_map(|c| c.to_tuple_predicate(tuple_descriptor))
+            .collect();
+
+        if predicates.len() == 1 {
+            predicates.into_iter().next().unwrap()
+        } else {
+            Predicate::And(predicates)
+        }
+    }
+
+    /// Convert remaining (non-indexed) conditions to a Predicate using a TupleDescriptor.
+    pub fn remaining_tuple_predicate(
+        &self,
+        index_column: &str,
+        tuple_descriptor: &TupleDescriptor,
+    ) -> Predicate {
+        let remaining: Vec<_> = self
+            .remaining_conditions(index_column)
+            .into_iter()
+            .filter_map(|c| c.to_tuple_predicate(tuple_descriptor))
+            .collect();
+
+        if remaining.is_empty() {
+            Predicate::True
+        } else if remaining.len() == 1 {
+            remaining.into_iter().next().unwrap()
+        } else {
+            Predicate::And(remaining)
         }
     }
 }
