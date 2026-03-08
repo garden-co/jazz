@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 #[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
 use std::path::Path;
@@ -1341,8 +1342,7 @@ fn realistic_r1_crud(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/crud_sustained");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1370,8 +1370,7 @@ fn realistic_r1_crud_single_hop(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1400,8 +1399,7 @@ fn realistic_r2_reads(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/reads_sustained");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1430,8 +1428,7 @@ fn realistic_r2_reads_single_hop(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1461,8 +1458,7 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1492,8 +1488,7 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/cold_load_surrealkv");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(1));
 
     group.bench_with_input(
@@ -1541,11 +1536,13 @@ fn realistic_r3_cold_load_surrealkv(_c: &mut Criterion) {}
 
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r4_scenario("benchmarks/realistic/scenarios/r4_fanout_updates.json");
+    let scenario = load_r4_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+    ));
 
     let mut group = c.benchmark_group("realistic_phase1/fanout_updates");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     for fanout_clients in scenario.fanout_clients.iter().copied() {
@@ -1584,8 +1581,7 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
 fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &str) {
     let scenario = load_r5_scenario(scenario_path);
     let mut group = c.benchmark_group(group_name);
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     for recursive_depth in scenario.recursive_depths.iter().copied() {
@@ -1620,7 +1616,10 @@ fn realistic_r6_permission_write_heavy(c: &mut Criterion) {
     run_permission_scenario(
         c,
         "realistic_phase1/permission_write_heavy",
-        "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+        select_ci_path(
+            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+        ),
     );
 }
 
@@ -1635,8 +1634,7 @@ fn realistic_r7_hotspot_history(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/hotspot_history");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1766,6 +1764,57 @@ fn load_r7_scenario(path: &str) -> R7Scenario {
         operation_count: raw.operation_count,
         hot_task_count: raw.hot_task_count,
     }
+}
+
+fn ci_variant_enabled() -> bool {
+    matches!(
+        env::var("JAZZ_REALISTIC_VARIANT"),
+        Ok(value) if value.eq_ignore_ascii_case("ci")
+    )
+}
+
+fn select_ci_path<'a>(default_path: &'a str, ci_path: &'a str) -> &'a str {
+    if ci_variant_enabled() {
+        ci_path
+    } else {
+        default_path
+    }
+}
+
+fn configured_sample_size(default_size: usize) -> usize {
+    if ci_variant_enabled() {
+        10
+    } else {
+        default_size
+    }
+}
+
+fn configured_measurement_time(default_seconds: u64) -> Duration {
+    if ci_variant_enabled() {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(default_seconds)
+    }
+}
+
+fn configured_warm_up_time() -> Duration {
+    if ci_variant_enabled() {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(3)
+    }
+}
+
+fn configure_group<M>(
+    group: &mut criterion::BenchmarkGroup<'_, M>,
+    sample_size: usize,
+    measurement_seconds: u64,
+) where
+    M: criterion::measurement::Measurement,
+{
+    group.sample_size(configured_sample_size(sample_size));
+    group.measurement_time(configured_measurement_time(measurement_seconds));
+    group.warm_up_time(configured_warm_up_time());
 }
 
 fn load_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {

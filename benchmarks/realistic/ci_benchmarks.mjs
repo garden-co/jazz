@@ -10,7 +10,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "native-example",
     output_path: "w1_interactive.json",
     log_path: "logs/w1_interactive.log",
-    scenario_path: "benchmarks/realistic/scenarios/w1_interactive.json",
+    scenario_path: "benchmarks/realistic/ci/scenarios/w1_interactive.json",
+    profile_path: "benchmarks/realistic/ci/profiles/s.json",
+    prepare_seed: true,
   },
   {
     id: "native:w4_cold_start",
@@ -19,7 +21,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "native-example",
     output_path: "w4_cold_start.json",
     log_path: "logs/w4_cold_start.log",
-    scenario_path: "benchmarks/realistic/scenarios/w4_cold_start.json",
+    scenario_path: "benchmarks/realistic/ci/scenarios/w4_cold_start.json",
+    profile_path: "benchmarks/realistic/ci/profiles/s.json",
+    prepare_seed: true,
   },
   {
     id: "native-criterion:r1_crud_sustained",
@@ -27,7 +31,10 @@ export const NATIVE_BENCHMARKS = [
     label: "Criterion R1 CRUD sustained",
     kind: "criterion",
     log_path: "logs/criterion_r1_crud_sustained.log",
-    criterion_filter: "realistic_phase1/crud_sustained",
+    criterion_filter: "realistic_phase1/crud_sustained/r1_s",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r1_crud_sustained_single_hop",
@@ -36,6 +43,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r1_crud_sustained_single_hop.log",
     criterion_filter: "realistic_phase1/crud_sustained_single_hop",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r2_reads_sustained",
@@ -43,7 +53,10 @@ export const NATIVE_BENCHMARKS = [
     label: "Criterion R2 reads sustained",
     kind: "criterion",
     log_path: "logs/criterion_r2_reads_sustained.log",
-    criterion_filter: "realistic_phase1/reads_sustained",
+    criterion_filter: "realistic_phase1/reads_sustained/r2_s",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r2_reads_sustained_single_hop",
@@ -52,6 +65,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r2_reads_sustained_single_hop.log",
     criterion_filter: "realistic_phase1/reads_sustained_single_hop",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r2_reads_with_write_churn",
@@ -60,6 +76,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r2_reads_with_write_churn.log",
     criterion_filter: "realistic_phase1/reads_sustained_with_write_churn",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r3_cold_load_surrealkv",
@@ -68,6 +87,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r3_cold_load_surrealkv.log",
     criterion_filter: "realistic_phase1/cold_load_surrealkv",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r4_fanout_updates",
@@ -76,6 +98,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r4_fanout_updates.log",
     criterion_filter: "realistic_phase1/fanout_updates",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r5_permission_recursive",
@@ -84,6 +109,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r5_permission_recursive.log",
     criterion_filter: "realistic_phase1/permission_recursive",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r6_permission_write_heavy",
@@ -92,6 +120,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r6_permission_write_heavy.log",
     criterion_filter: "realistic_phase1/permission_write_heavy",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
   {
     id: "native-criterion:r7_hotspot_history",
@@ -100,6 +131,9 @@ export const NATIVE_BENCHMARKS = [
     kind: "criterion",
     log_path: "logs/criterion_r7_hotspot_history.log",
     criterion_filter: "realistic_phase1/hotspot_history",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
   },
 ];
 

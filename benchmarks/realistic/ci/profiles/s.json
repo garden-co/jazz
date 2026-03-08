@@ -1,0 +1,12 @@
+{
+  "id": "S",
+  "seed": 1337,
+  "users": 1,
+  "organizations": 1,
+  "projects": 1,
+  "tasks": 1,
+  "comments": 0,
+  "watchers_per_task": 0,
+  "activity_events": 0,
+  "hot_project_fraction": 1.0
+}
