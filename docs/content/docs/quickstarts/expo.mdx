@@ -105,7 +105,7 @@ Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-ga
 
 ### Writing with a durability tier
 
-Use base mutation APIs with `{ tier }` when you need explicit write durability acknowledgement before proceeding:
+Use durable mutation APIs with `{ tier }` when you need explicit write durability acknowledgement before proceeding:
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#writing-durability-expo
