@@ -596,6 +596,12 @@ describe("permissions DSL", () => {
         throw new Error("Expected ExistsRel relation to be Filter.");
       }
       expect(rel.input.type).toBe("Join");
+      expect(rel.predicate.type).toBe("And");
+      if (rel.predicate.type !== "And") {
+        throw new Error("Expected joined relation predicate to be And.");
+      }
+      const predicateScopes = rel.predicate.exprs.map((expr: any) => expr.left?.scope);
+      expect(predicateScopes).toEqual(expect.arrayContaining(["people", "__join_0"]));
       expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
     }
   });
@@ -640,6 +646,12 @@ describe("permissions DSL", () => {
       if (rel.input.type !== "Filter") {
         throw new Error("Expected hop relation filter.");
       }
+      expect(rel.input.predicate.type).toBe("And");
+      if (rel.input.predicate.type !== "And") {
+        throw new Error("Expected hop relation predicate to be And.");
+      }
+      const predicateScopes = rel.input.predicate.exprs.map((expr: any) => expr.left?.scope);
+      expect(predicateScopes).toEqual(expect.arrayContaining(["people", "__hop_0"]));
       expect(rel.input.input.type).toBe("Join");
       expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
     }
