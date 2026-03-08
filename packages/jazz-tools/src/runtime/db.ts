@@ -24,13 +24,14 @@ import {
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
-import { transformRow, transformRows, type IncludeSpec } from "./row-transformer.js";
+import { transformRow, transformRows } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
+import { normalizeBuiltQuery } from "./query-builder-shape.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
@@ -82,10 +83,6 @@ function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
 }
 
-function isMemoryDriver(driver?: StorageDriver): boolean {
-  return resolveStorageDriver(driver).type === "memory";
-}
-
 /**
  * Interface that QueryBuilder classes implement.
  * Generated builders expose these internal properties for Db to use.
@@ -103,103 +100,6 @@ export interface QueryBuilder<T> {
 
 export interface QueryOptions extends QueryExecutionOptions {
   propagation?: QueryPropagation;
-}
-
-interface BuiltQuery {
-  table?: string;
-  conditions?: Array<{ column: string; op: string; value: unknown }>;
-  includes?: IncludeSpec;
-  orderBy?: Array<[string, "asc" | "desc"]>;
-  limit?: number;
-  offset?: number;
-  hops?: string[];
-  gather?: {
-    max_depth: number;
-    step_table: string;
-    step_current_column: string;
-    step_conditions: Array<{ column: string; op: string; value: unknown }>;
-    step_hops: string[];
-  };
-}
-
-type NormalizedBuiltQuery = {
-  table: string;
-  conditions: Array<{ column: string; op: string; value: unknown }>;
-  includes: IncludeSpec;
-  orderBy: Array<[string, "asc" | "desc"]>;
-  limit?: number;
-  offset?: number;
-  hops: string[];
-  gather?:
-    | {
-        max_depth: number;
-        step_table: string;
-        step_current_column: string;
-        step_conditions: Array<{ column: string; op: string; value: unknown }>;
-        step_hops: string[];
-      }
-    | undefined;
-};
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function normalizeBuiltQuery(raw: BuiltQuery, fallbackTable: string): NormalizedBuiltQuery {
-  const table = typeof raw.table === "string" ? raw.table : fallbackTable;
-  const conditions = Array.isArray(raw.conditions)
-    ? raw.conditions.filter(
-        (condition): condition is { column: string; op: string; value: unknown } =>
-          isPlainObject(condition) &&
-          typeof condition.column === "string" &&
-          typeof condition.op === "string",
-      )
-    : [];
-  const includes = isPlainObject(raw.includes) ? (raw.includes as IncludeSpec) : {};
-  const orderBy = Array.isArray(raw.orderBy)
-    ? raw.orderBy.filter(
-        (entry): entry is [string, "asc" | "desc"] =>
-          Array.isArray(entry) &&
-          entry.length === 2 &&
-          typeof entry[0] === "string" &&
-          (entry[1] === "asc" || entry[1] === "desc"),
-      )
-    : [];
-  const hops = Array.isArray(raw.hops)
-    ? raw.hops.filter((hop): hop is string => typeof hop === "string")
-    : [];
-  const gather =
-    isPlainObject(raw.gather) &&
-    Number.isInteger(raw.gather.max_depth) &&
-    raw.gather.max_depth > 0 &&
-    typeof raw.gather.step_table === "string" &&
-    typeof raw.gather.step_current_column === "string" &&
-    Array.isArray(raw.gather.step_conditions) &&
-    Array.isArray(raw.gather.step_hops)
-      ? {
-          max_depth: raw.gather.max_depth,
-          step_table: raw.gather.step_table,
-          step_current_column: raw.gather.step_current_column,
-          step_conditions: raw.gather.step_conditions.filter(
-            (condition): condition is { column: string; op: string; value: unknown } =>
-              isPlainObject(condition) &&
-              typeof condition.column === "string" &&
-              typeof condition.op === "string",
-          ),
-          step_hops: raw.gather.step_hops.filter((hop): hop is string => typeof hop === "string"),
-        }
-      : undefined;
-
-  return {
-    table,
-    conditions,
-    includes,
-    orderBy,
-    limit: typeof raw.limit === "number" ? raw.limit : undefined,
-    offset: typeof raw.offset === "number" ? raw.offset : undefined,
-    hops,
-    gather,
-  };
 }
 
 function resolveHopOutputTable(
@@ -1144,7 +1044,7 @@ export class Db {
     const client = this.getClient(query._schema);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
@@ -1153,7 +1053,7 @@ export class Db {
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
-    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes);
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
   /**
@@ -1204,7 +1104,7 @@ export class Db {
     const client = this.getClient(query._schema);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson) as BuiltQuery, query._table);
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable =
       builtQuery.hops.length > 0
@@ -1215,7 +1115,13 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], outputSchema, outputTable, outputIncludes)[0];
+      return transformRows<T>(
+        [row],
+        outputSchema,
+        outputTable,
+        outputIncludes,
+        builtQuery.select,
+      )[0];
     };
 
     const subId = client.subscribeInternal(

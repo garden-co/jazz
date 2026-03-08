@@ -311,6 +311,25 @@ describe("transformRows", () => {
     });
   });
 
+  it("applies root select projections while preserving id", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "uuid-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+          { type: "Integer", value: 5 },
+        ],
+      },
+    ];
+
+    const result = transformRows<{ id: string; title: string }>(rows, schema, "todos", {}, [
+      "title",
+    ]);
+
+    expect(result).toEqual([{ id: "uuid-1", title: "Buy milk" }]);
+  });
+
   it("maps forward include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {
@@ -345,6 +364,89 @@ describe("transformRows", () => {
           id: "user-1",
           name: "Alice",
           manager_id: undefined,
+        },
+      },
+    ]);
+  });
+
+  it("keeps included relations when applying root select projections", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "user-1",
+                  values: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows(rows, relationSchema, "todos", { owner: true }, ["title"]);
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner: {
+          id: "user-1",
+          name: "Alice",
+          manager_id: undefined,
+        },
+      },
+    ]);
+  });
+
+  it("applies nested include projections to related rows", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Uuid", value: "user-1" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "user-1",
+                  values: [{ type: "Text", value: "Alice" }],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows(rows, relationSchema, "todos", {
+      owner: {
+        conditions: [],
+        includes: {},
+        select: ["name"],
+        orderBy: [],
+        hops: [],
+      },
+    });
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner_id: "user-1",
+        owner: {
+          id: "user-1",
+          name: "Alice",
         },
       },
     ]);

@@ -91,6 +91,36 @@ describe("translateQuery", () => {
       }
       expect(result.relation_ir.input.offset).toBe(5);
     });
+
+    it("pushes select columns into the runtime query payload", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["title", "done"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toEqual(["title", "done"]);
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
+
+    it('treats select(["*"]) as selecting all columns', () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["*"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toBeUndefined();
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
   });
 
   describe("condition translation", () => {
@@ -665,6 +695,34 @@ describe("translateQuery", () => {
       ]);
     });
 
+    it("hides top-level include column names when projecting selected columns", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: { owner: true },
+        select: ["title"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, schemaWithRelations);
+
+      expect(result.select_columns).toEqual(["title", "__jazz_include_owner"]);
+      expect(result.array_subqueries).toEqual([
+        {
+          column_name: "__jazz_include_owner",
+          table: "users",
+          inner_column: "id",
+          outer_column: "todos.owner_id",
+          filters: [],
+          joins: [],
+          select_columns: null,
+          order_by: [],
+          limit: null,
+          nested_arrays: [],
+        },
+      ]);
+    });
+
     it("translates reverse relation include", () => {
       const builderJson = JSON.stringify({
         table: "users",
@@ -849,6 +907,94 @@ describe("translateQuery", () => {
               filters: [],
               joins: [],
               select_columns: null,
+              order_by: [],
+              limit: null,
+              nested_arrays: [],
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("translates include builders with projected nested columns", () => {
+      const nestedSchema: WasmSchema = {
+        comments: {
+          columns: [
+            { name: "text", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "todo_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "todos",
+            },
+          ],
+        },
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        users: {
+          columns: [
+            { name: "name", column_type: { type: "Text" }, nullable: false },
+            { name: "email", column_type: { type: "Text" }, nullable: false },
+          ],
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "comments",
+        conditions: [],
+        includes: {
+          todo: {
+            table: "todos",
+            conditions: [],
+            includes: {
+              owner: {
+                table: "users",
+                conditions: [],
+                includes: {},
+                select: ["name"],
+                orderBy: [],
+                hops: [],
+              },
+            },
+            select: ["title"],
+            orderBy: [],
+            hops: [],
+          },
+        },
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, nestedSchema);
+
+      expect(result.array_subqueries).toEqual([
+        {
+          column_name: "todo",
+          table: "todos",
+          inner_column: "id",
+          outer_column: "comments.todo_id",
+          filters: [],
+          joins: [],
+          select_columns: ["title", "__jazz_include_owner"],
+          order_by: [],
+          limit: null,
+          nested_arrays: [
+            {
+              column_name: "__jazz_include_owner",
+              table: "users",
+              inner_column: "id",
+              outer_column: "todos.owner_id",
+              filters: [],
+              joins: [],
+              select_columns: ["name"],
               order_by: [],
               limit: null,
               nested_arrays: [],

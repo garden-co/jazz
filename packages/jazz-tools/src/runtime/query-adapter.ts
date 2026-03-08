@@ -11,6 +11,13 @@
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import {
+  normalizeBuiltQuery,
+  type BuiltCondition,
+  type BuiltGather,
+  type NormalizedIncludeEntry,
+  type NormalizedIncludeSpec,
+} from "./query-builder-shape.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -18,26 +25,6 @@ import type {
   RelPredicateExpr,
   RelProjectColumn,
 } from "../ir.js";
-
-/**
- * Structure produced by QueryBuilder._build()
- */
-interface BuilderOutput {
-  table: string;
-  conditions: Array<{ column: string; op: string; value: unknown }>;
-  includes: Record<string, boolean | object>;
-  orderBy: Array<[string, "asc" | "desc"]>;
-  limit?: number;
-  offset?: number;
-  hops?: string[];
-  gather?: {
-    max_depth: number;
-    step_table: string;
-    step_current_column: string;
-    step_conditions: Array<{ column: string; op: string; value: unknown }>;
-    step_hops: string[];
-  };
-}
 
 function relColumn(column: string, scope?: string): RelColumnRef {
   return scope ? { scope, column } : { column };
@@ -181,58 +168,145 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
  * @param relations Map from table name to relations on that table
  * @returns Array of array_subquery objects
  */
+function hiddenIncludeColumnName(relationName: string): string {
+  return `__jazz_include_${relationName}`;
+}
+
+function validateIncludeBuilderSpec(
+  relation: Relation,
+  spec: NormalizedIncludeEntry,
+  relationName: string,
+): void {
+  if (spec.table && spec.table !== relation.toTable) {
+    throw new Error(
+      `Include builder for relation "${relationName}" must target table "${relation.toTable}", got "${spec.table}".`,
+    );
+  }
+  if (typeof spec.offset === "number" && spec.offset !== 0) {
+    throw new Error(`Include builder for relation "${relationName}" does not support offset().`);
+  }
+  if (spec.hops.length > 0) {
+    throw new Error(`Include builder for relation "${relationName}" does not support hopTo(...).`);
+  }
+  if (spec.gather) {
+    throw new Error(`Include builder for relation "${relationName}" does not support gather(...).`);
+  }
+}
+
+function conditionToArraySubqueryFilter(
+  cond: BuiltCondition,
+  schema: WasmSchema,
+  table: string,
+): object {
+  const column = stripQualifier(cond.column);
+  const columnType = getColumnType(schema, table, column);
+  if (!columnType) {
+    throw new Error(`Unknown column "${column}" in table "${table}"`);
+  }
+
+  if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
+    throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
+  }
+  if (columnType.type === "Bytea" && cond.op === "contains") {
+    throw new Error(`BYTEA column "${column}" does not support contains filters.`);
+  }
+  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
+    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
+  }
+
+  const valueTypeForCondition =
+    cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
+  const literalValue = toWasmValue(cond.value, valueTypeForCondition);
+
+  switch (cond.op) {
+    case "eq":
+      return { Eq: { column, value: literalValue } };
+    case "ne":
+      return { Ne: { column, value: literalValue } };
+    case "gt":
+      return { Gt: { column, value: literalValue } };
+    case "gte":
+      return { Ge: { column, value: literalValue } };
+    case "lt":
+      return { Lt: { column, value: literalValue } };
+    case "lte":
+      return { Le: { column, value: literalValue } };
+    case "isNull":
+      return { IsNull: { column } };
+    case "contains":
+      return { Contains: { column, value: literalValue } };
+    default:
+      throw new Error(
+        `Include builder for table "${table}" does not support "${cond.op}" filters.`,
+      );
+  }
+}
+
 function toArraySubqueries(
-  includes: Record<string, boolean | object>,
+  includes: NormalizedIncludeSpec,
   tableName: string,
   relations: Map<string, Relation[]>,
+  schema: WasmSchema,
+  options?: { hideCurrentLevelColumnNames?: boolean },
 ): object[] {
   const tableRels = relations.get(tableName) || [];
   const subqueries: object[] = [];
+  const hideCurrentLevelColumnNames = options?.hideCurrentLevelColumnNames === true;
 
   for (const [relName, spec] of Object.entries(includes)) {
-    if (!spec) continue;
-
     const rel = tableRels.find((r) => r.name === relName);
     if (!rel) {
       throw new Error(`Unknown relation "${relName}" on table "${tableName}"`);
     }
+    validateIncludeBuilderSpec(rel, spec, relName);
+
+    const includeProjectionColumns =
+      spec.select.length > 0
+        ? Object.keys(spec.includes).map((relationName) => hiddenIncludeColumnName(relationName))
+        : [];
+    const filters = spec.conditions.map((condition) =>
+      conditionToArraySubqueryFilter(condition, schema, rel.toTable),
+    );
+    const orderBy = spec.orderBy.map(([column, direction]) => [
+      stripQualifier(column),
+      direction === "desc" ? "Descending" : "Ascending",
+    ]);
+    const nestedArrays = toArraySubqueries(spec.includes, rel.toTable, relations, schema, {
+      hideCurrentLevelColumnNames: spec.select.length > 0,
+    });
+    const selectColumns =
+      spec.select.length > 0 ? [...spec.select, ...includeProjectionColumns] : null;
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
       // Forward relation: todos.owner_id -> users.id
       // We join from the FK column to the target table's id
       subqueries.push({
-        column_name: relName,
+        column_name: hideCurrentLevelColumnNames ? hiddenIncludeColumnName(relName) : relName,
         table: rel.toTable,
         inner_column: "id",
         outer_column: `${tableName}.${rel.fromColumn}`,
-        filters: [],
+        filters,
         joins: [],
-        select_columns: null,
-        order_by: [],
-        limit: null,
-        nested_arrays:
-          typeof spec === "object"
-            ? toArraySubqueries(spec as Record<string, boolean | object>, rel.toTable, relations)
-            : [],
+        select_columns: selectColumns,
+        order_by: orderBy,
+        limit: spec.limit ?? null,
+        nested_arrays: nestedArrays,
       });
     } else {
       // Reverse relation: users -> todos via todos.owner_id
       // We join from the target table's FK column to our id
       subqueries.push({
-        column_name: relName,
+        column_name: hideCurrentLevelColumnNames ? hiddenIncludeColumnName(relName) : relName,
         table: rel.toTable,
         inner_column: rel.toColumn,
         outer_column: `${tableName}.id`,
-        filters: [],
+        filters,
         joins: [],
-        select_columns: null,
-        order_by: [],
-        limit: null,
-        nested_arrays:
-          typeof spec === "object"
-            ? toArraySubqueries(spec as Record<string, boolean | object>, rel.toTable, relations)
-            : [],
+        select_columns: selectColumns,
+        order_by: orderBy,
+        limit: spec.limit ?? null,
+        nested_arrays: nestedArrays,
       });
     }
   }
@@ -421,7 +495,7 @@ function lowerHopsToRelExpr(
 }
 
 function gatherToRelExpr(
-  gather: NonNullable<BuilderOutput["gather"]>,
+  gather: BuiltGather,
   seedTable: string,
   seedExpr: RelExpr,
   relations: Map<string, Relation[]>,
@@ -516,23 +590,21 @@ function gatherToRelExpr(
  * - gather => Gather with step Join + Project
  */
 export function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
-  const builder: BuilderOutput = JSON.parse(builderJson);
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
   const relations = analyzeRelations(schema);
-  const hops = Array.isArray(builder.hops)
-    ? builder.hops.filter((hop): hop is string => typeof hop === "string")
-    : [];
+  const hops = builder.hops;
 
-  if (builder.gather && Object.keys(builder.includes ?? {}).length > 0) {
+  if (builder.gather && Object.keys(builder.includes).length > 0) {
     throw new Error("gather(...) does not yet support include(...).");
   }
-  if (hops.length > 0 && Object.keys(builder.includes ?? {}).length > 0) {
+  if (hops.length > 0 && Object.keys(builder.includes).length > 0) {
     throw new Error("hopTo(...) does not yet support include(...).");
   }
 
   let relation: RelExpr = { TableScan: { table: builder.table } };
   relation = applyFilter(
     relation,
-    conditionsToRelPredicate(builder.conditions ?? [], schema, builder.table, builder.table),
+    conditionsToRelPredicate(builder.conditions, schema, builder.table, builder.table),
   );
 
   if (builder.gather) {
@@ -589,13 +661,23 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
  * @returns JSON string for WASM runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder: BuilderOutput = JSON.parse(builderJson);
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
   const relations = analyzeRelations(schema);
   const relation = translateBuilderToRelationIr(builderJson, schema);
+  const selectColumns = builder.select;
+  const includeProjectionColumns =
+    selectColumns.length > 0
+      ? Object.keys(builder.includes).map((relationName) => hiddenIncludeColumnName(relationName))
+      : [];
   const query = {
     table: builder.table,
-    array_subqueries: toArraySubqueries(builder.includes ?? {}, builder.table, relations),
+    array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
+      hideCurrentLevelColumnNames: selectColumns.length > 0,
+    }),
     relation_ir: relation,
+    ...(selectColumns.length > 0
+      ? { select_columns: [...selectColumns, ...includeProjectionColumns] }
+      : {}),
   };
 
   return JSON.stringify(query);

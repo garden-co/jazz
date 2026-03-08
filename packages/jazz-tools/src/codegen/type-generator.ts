@@ -235,9 +235,9 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
       const targetWithIncludes = targetInterface + "WithIncludes";
       const includeSelector = `NonNullable<I["${rel.name}"]>`;
       const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
-      const queryBuilderType = rel.isArray
-        ? `${targetWithIncludes}<QueryInclude>[]`
-        : `${targetWithIncludes}<QueryInclude>`;
+      const queryBuilderSelectedType = rel.isArray
+        ? `${targetInterface}SelectedWithIncludes<QueryInclude, QuerySelect>[]`
+        : `${targetInterface}SelectedWithIncludes<QueryInclude, QuerySelect>`;
       const nestedIncludeType = rel.isArray
         ? `${targetWithIncludes}<RelationInclude>[]`
         : `${targetWithIncludes}<RelationInclude>`;
@@ -246,9 +246,9 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
       lines.push(`    ? RelationInclude extends true`);
       lines.push(`      ? ${trueType}`);
       lines.push(
-        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}>`,
+        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}, infer QuerySelect extends keyof ${targetInterface} | "*">`,
       );
-      lines.push(`        ? ${queryBuilderType}`);
+      lines.push(`        ? ${queryBuilderSelectedType}`);
       lines.push(`        : RelationInclude extends ${targetInclude}`);
       lines.push(`          ? ${nestedIncludeType}`);
       lines.push(`          : never`);
@@ -256,6 +256,31 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     }
     lines.push(`};`);
     lines.push(``);
+  }
+
+  return lines;
+}
+
+function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relation[]>): string[] {
+  const lines: string[] = [];
+
+  for (const tableName of Object.keys(schema)) {
+    const baseInterface = tableNameToInterface(tableName);
+    const includeInterface = baseInterface + "Include";
+    const withIncludesType = baseInterface + "WithIncludes";
+    const hasRelations = (relations.get(tableName) ?? []).length > 0;
+
+    lines.push(
+      `export type ${baseInterface}Selected<S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>;`,
+    );
+    lines.push("");
+
+    if (hasRelations) {
+      lines.push(
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = ${baseInterface}Selected<S> & Omit<${withIncludesType}<I>, keyof ${baseInterface}>;`,
+      );
+      lines.push("");
+    }
   }
 
   return lines;
@@ -271,9 +296,10 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
  * 4. Include types for relation loading (e.g., TodoInclude)
  * 5. Relations types mapping relation names to types (e.g., TodoRelations)
  * 6. WithIncludes types for type-safe results (e.g., TodoWithIncludes)
- * 7. QueryBuilder classes (e.g., TodoQueryBuilder)
- * 8. Exported wasmSchema constant
- * 9. App export with table proxies
+ * 7. Selection helper types for type-safe projections (e.g., TodoSelected)
+ * 8. QueryBuilder classes (e.g., TodoQueryBuilder)
+ * 9. Exported wasmSchema constant
+ * 10. App export with table proxies
  */
 export function generateTypes(schema: WasmSchema): string {
   const jsonSchemaBindings = collectJsonSchemaBindings(schema);
@@ -346,6 +372,9 @@ export function generateTypes(schema: WasmSchema): string {
 
   // WithIncludes types (type-safe results based on include spec)
   lines.push(...generateWithIncludesTypes(relations));
+
+  // Selection helper types (type-safe results based on select columns)
+  lines.push(...generateSelectionTypes(schema, relations));
 
   // Export WasmSchema JSON
   lines.push(`export const wasmSchema: WasmSchema = ${JSON.stringify(schema, null, 2)};`);
