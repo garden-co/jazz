@@ -92,7 +92,8 @@ function scenarioMap(run) {
 function metricKeysForScenario(scenario) {
   const keys = [];
   if (Number.isFinite(Number(scenario?.wall_time_ms))) keys.push("wall_time_ms");
-  if (Number.isFinite(Number(scenario?.throughput_ops_per_sec))) keys.push("throughput_ops_per_sec");
+  if (Number.isFinite(Number(scenario?.throughput_ops_per_sec)))
+    keys.push("throughput_ops_per_sec");
 
   const ops = scenario?.operation_summaries ?? {};
   for (const opName of Object.keys(ops).sort()) {
@@ -139,7 +140,8 @@ function fmt(value) {
 
 function latestRun(runs, branch, suite, profile) {
   return (
-    runs.find((run) => run.branch === branch && run.suite === suite && run.profile === profile) ?? null
+    runs.find((run) => run.branch === branch && run.suite === suite && run.profile === profile) ??
+    null
   );
 }
 
