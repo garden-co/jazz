@@ -220,6 +220,27 @@ function statusForRun(result) {
   return "failed";
 }
 
+function failureNote(result) {
+  if (result.timedOut) {
+    return `[benchmark-timeout] exceeded budget`;
+  }
+
+  const lines = [...(result.stderrLines ?? []), ...(result.stdoutLines ?? [])]
+    .map((line) => String(line ?? "").trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (
+      line.startsWith("Error:") ||
+      line.includes("Unhandled Error") ||
+      line.includes("Executable doesn't exist")
+    ) {
+      return line;
+    }
+  }
+
+  return null;
+}
+
 function summarizeBenchmark(benchmark, status, durationMs, extra = {}) {
   return {
     id: benchmark.id,
@@ -237,6 +258,8 @@ async function runNativeBenchmark(benchmark, args) {
 
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
+    const tempOutputFile = `${outputFile}.partial`;
+    fs.rmSync(tempOutputFile, { force: true });
     const command = [
       "cargo",
       "run",
@@ -261,11 +284,17 @@ async function runNativeBenchmark(benchmark, args) {
       cwd: process.cwd(),
       env: process.env,
       timeoutSeconds: args.timeoutSeconds,
-      stdoutFile: outputFile,
+      stdoutFile: tempOutputFile,
       logFile,
     });
 
     const status = statusForRun(result);
+    const tempExists = fs.existsSync(tempOutputFile) && fs.statSync(tempOutputFile).size > 0;
+    if (status === "passed" && tempExists) {
+      fs.renameSync(tempOutputFile, outputFile);
+    } else {
+      fs.rmSync(tempOutputFile, { force: true });
+    }
     const fileExists = fs.existsSync(outputFile) && fs.statSync(outputFile).size > 0;
     const finalStatus = status === "passed" && !fileExists ? "failed" : status;
     return summarizeBenchmark(benchmark, finalStatus, result.durationMs, {
@@ -279,7 +308,7 @@ async function runNativeBenchmark(benchmark, args) {
       note:
         finalStatus === "failed" && status === "passed" && !fileExists
           ? "Benchmark completed without emitting JSON output."
-          : null,
+          : failureNote(result),
     });
   }
 
@@ -314,6 +343,7 @@ async function runNativeBenchmark(benchmark, args) {
     exit_code: result.code,
     signal: result.signal,
     timeout_seconds: args.timeoutSeconds,
+    note: failureNote(result),
   });
 }
 
@@ -378,7 +408,7 @@ async function runBrowserBenchmark(benchmark, args) {
       exit_code: result.code,
       signal: result.signal,
       timeout_seconds: args.timeoutSeconds,
-      note,
+      note: note ?? failureNote(result),
       scenario,
     },
   );

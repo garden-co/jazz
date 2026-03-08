@@ -210,6 +210,7 @@ jobs:
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium
 
       - name: Collect host metadata
         run: |

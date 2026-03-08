@@ -64,7 +64,13 @@ function printHelp() {
 
 function readJsonIfExists(file) {
   if (!file || !fs.existsSync(file)) return null;
-  return JSON.parse(fs.readFileSync(file, "utf8"));
+  const raw = fs.readFileSync(file, "utf8");
+  if (raw.trim().length === 0) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 function readJsonRequired(file) {
@@ -131,14 +137,69 @@ function buildRunId(parts) {
   return parts.map((p) => String(p ?? "na")).join(":");
 }
 
+function passedBenchmarkIds(status) {
+  return new Set(
+    (status?.benchmarks ?? [])
+      .filter((benchmark) => benchmark?.status === "passed" && typeof benchmark?.id === "string")
+      .map((benchmark) => benchmark.id),
+  );
+}
+
+function nativeBenchmarkIdForFile(file) {
+  if (file === "w1_interactive.json") return "native:w1_interactive";
+  if (file === "w4_cold_start.json") return "native:w4_cold_start";
+  return null;
+}
+
+function criterionBenchmarkId(benchmark) {
+  const groupId = benchmark?.group_id;
+  if (groupId === "realistic_phase1/crud_sustained") {
+    return "native-criterion:r1_crud_sustained";
+  }
+  if (groupId === "realistic_phase1/crud_sustained_single_hop") {
+    return "native-criterion:r1_crud_sustained_single_hop";
+  }
+  if (groupId === "realistic_phase1/reads_sustained") {
+    return "native-criterion:r2_reads_sustained";
+  }
+  if (groupId === "realistic_phase1/reads_sustained_single_hop") {
+    return "native-criterion:r2_reads_sustained_single_hop";
+  }
+  if (groupId === "realistic_phase1/reads_sustained_with_write_churn") {
+    return "native-criterion:r2_reads_with_write_churn";
+  }
+  if (groupId === "realistic_phase1/cold_load_surrealkv") {
+    return "native-criterion:r3_cold_load_surrealkv";
+  }
+  if (groupId === "realistic_phase1/fanout_updates") {
+    return "native-criterion:r4_fanout_updates";
+  }
+  if (groupId === "realistic_phase1/permission_recursive") {
+    return "native-criterion:r5_permission_recursive";
+  }
+  if (groupId === "realistic_phase1/permission_write_heavy") {
+    return "native-criterion:r6_permission_write_heavy";
+  }
+  if (groupId === "realistic_phase1/hotspot_history") {
+    return "native-criterion:r7_hotspot_history";
+  }
+  return null;
+}
+
 function extractNative(nativeDir) {
   if (!nativeDir) return [];
   if (!fs.existsSync(nativeDir)) return [];
 
   const metadata = readJsonIfExists(path.join(nativeDir, "metadata.json")) ?? {};
   const manifest = readJsonIfExists(path.join(nativeDir, "manifest.json")) ?? {};
+  const suiteStatus = readJsonIfExists(path.join(nativeDir, "suite_status.json")) ?? {};
+  const passedIds = passedBenchmarkIds(suiteStatus);
   const scenarios = [];
   for (const file of ["w1_interactive.json", "w4_cold_start.json"]) {
+    const benchmarkId = nativeBenchmarkIdForFile(file);
+    if (passedIds.size > 0 && benchmarkId && !passedIds.has(benchmarkId)) {
+      continue;
+    }
     const full = path.join(nativeDir, file);
     const parsed = readJsonIfExists(full);
     if (!parsed || typeof parsed !== "object" || typeof parsed.scenario_id !== "string") {
@@ -182,11 +243,18 @@ function extractNativeCriterion(nativeDir) {
 
   const metadata = readJsonIfExists(path.join(nativeDir, "metadata.json")) ?? {};
   const manifest = readJsonIfExists(path.join(nativeDir, "manifest.json")) ?? {};
+  const suiteStatus = readJsonIfExists(path.join(nativeDir, "suite_status.json")) ?? {};
+  const passedIds = passedBenchmarkIds(suiteStatus);
   const criterion = readJsonIfExists(path.join(nativeDir, "criterion_realistic_phase1.json"));
   if (!criterion || !Array.isArray(criterion.benchmarks)) return [];
 
   const scenarios = criterion.benchmarks
     .filter((x) => x && typeof x === "object" && typeof x.full_id === "string")
+    .filter((x) => {
+      if (passedIds.size === 0) return true;
+      const benchmarkId = criterionBenchmarkId(x);
+      return benchmarkId ? passedIds.has(benchmarkId) : true;
+    })
     .map((x) => criterionScenarioSummary(x));
   if (scenarios.length === 0) return [];
 
