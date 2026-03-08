@@ -265,57 +265,54 @@ fn normalize_conjunction(conjunction: &Conjunction) -> Option<PredicateExpr> {
 }
 
 fn normalize_condition(condition: &Condition) -> Option<PredicateExpr> {
+    let column_ref = condition.column_ref()?;
     match condition {
-        Condition::Eq { column, value } => Some(PredicateExpr::Cmp {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::Eq { value, .. } => Some(PredicateExpr::Cmp {
+            left: column_ref,
             op: PredicateCmpOp::Eq,
             right: ValueRef::Literal(value.clone()),
         }),
-        Condition::Ne { column, value } => Some(PredicateExpr::Cmp {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::Ne { value, .. } => Some(PredicateExpr::Cmp {
+            left: column_ref,
             op: PredicateCmpOp::Ne,
             right: ValueRef::Literal(value.clone()),
         }),
-        Condition::Lt { column, value } => Some(PredicateExpr::Cmp {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::Lt { value, .. } => Some(PredicateExpr::Cmp {
+            left: column_ref,
             op: PredicateCmpOp::Lt,
             right: ValueRef::Literal(value.clone()),
         }),
-        Condition::Le { column, value } => Some(PredicateExpr::Cmp {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::Le { value, .. } => Some(PredicateExpr::Cmp {
+            left: column_ref,
             op: PredicateCmpOp::Le,
             right: ValueRef::Literal(value.clone()),
         }),
-        Condition::Gt { column, value } => Some(PredicateExpr::Cmp {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::Gt { value, .. } => Some(PredicateExpr::Cmp {
+            left: column_ref,
             op: PredicateCmpOp::Gt,
             right: ValueRef::Literal(value.clone()),
         }),
-        Condition::Ge { column, value } => Some(PredicateExpr::Cmp {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::Ge { value, .. } => Some(PredicateExpr::Cmp {
+            left: column_ref,
             op: PredicateCmpOp::Ge,
             right: ValueRef::Literal(value.clone()),
         }),
-        Condition::Between { column, min, max } => Some(PredicateExpr::And(vec![
+        Condition::Between { min, max, .. } => Some(PredicateExpr::And(vec![
             PredicateExpr::Cmp {
-                left: ColumnRef::unscoped(column.clone()),
+                left: column_ref.clone(),
                 op: PredicateCmpOp::Ge,
                 right: ValueRef::Literal(min.clone()),
             },
             PredicateExpr::Cmp {
-                left: ColumnRef::unscoped(column.clone()),
+                left: column_ref,
                 op: PredicateCmpOp::Le,
                 right: ValueRef::Literal(max.clone()),
             },
         ])),
-        Condition::IsNull { column } => Some(PredicateExpr::IsNull {
-            column: ColumnRef::unscoped(column.clone()),
-        }),
-        Condition::IsNotNull { column } => Some(PredicateExpr::IsNotNull {
-            column: ColumnRef::unscoped(column.clone()),
-        }),
-        Condition::Contains { column, value } => Some(PredicateExpr::Contains {
-            left: ColumnRef::unscoped(column.clone()),
+        Condition::IsNull { .. } => Some(PredicateExpr::IsNull { column: column_ref }),
+        Condition::IsNotNull { .. } => Some(PredicateExpr::IsNotNull { column: column_ref }),
+        Condition::Contains { value, .. } => Some(PredicateExpr::Contains {
+            left: column_ref,
             right: ValueRef::Literal(value.clone()),
         }),
     }
@@ -442,6 +439,51 @@ mod tests {
                     left: ColumnRef::unscoped("tags"),
                     right: ValueRef::Literal(Value::Text("admin".to_string())),
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_query_with_scoped_join_filters_preserves_scope() {
+        let query = QueryBuilder::new("users")
+            .alias("u")
+            .join("posts")
+            .alias("p")
+            .on("u.id", "p.author_id")
+            .filter_eq("u.name", Value::Text("Bob".to_string()))
+            .filter_eq("p.title", Value::Text("Learning Rust".to_string()))
+            .build();
+
+        let relation = normalize_query_to_rel_expr(&query)
+            .expect("scoped join filters should normalize to relation");
+        assert_eq!(
+            relation,
+            RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::TableScan {
+                        table: TableName::new("users"),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("posts"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("u", "id"),
+                        right: ColumnRef::scoped("p", "author_id"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::And(vec![
+                    PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("u", "name"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text("Bob".to_string())),
+                    },
+                    PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("p", "title"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text("Learning Rust".to_string())),
+                    },
+                ]),
             }
         );
     }
