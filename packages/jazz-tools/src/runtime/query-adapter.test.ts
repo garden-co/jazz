@@ -107,6 +107,21 @@ describe("translateQuery", () => {
       expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
     });
 
+    it("pushes magic select columns into the runtime query payload", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["title", "_canRead", "_canEdit"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toEqual(["title", "_canRead", "_canEdit"]);
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
+
     it('treats select(["*"]) as selecting all columns', () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -214,6 +229,23 @@ describe("translateQuery", () => {
         left: { scope: "todos", column: "done" },
         op: "Eq",
         right: { type: "Literal", value: { Boolean: false } },
+      });
+    });
+
+    it("translates eq condition with magic boolean column", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "_canEdit", op: "eq", value: true }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "_canEdit" },
+        op: "Eq",
+        right: { type: "Literal", value: { Boolean: true } },
       });
     });
 
@@ -634,6 +666,21 @@ describe("translateQuery", () => {
       expect(result.relation_ir?.terms).toEqual([
         { column: { column: "priority" }, direction: "Desc" },
         { column: { column: "title" }, direction: "Asc" },
+      ]);
+    });
+
+    it("translates magic columns in orderBy", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [["_canEdit", "desc"]],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(result.relation_ir?.type).toBe("OrderBy");
+      expect(result.relation_ir?.terms).toEqual([
+        { column: { column: "_canEdit" }, direction: "Desc" },
       ]);
     });
 

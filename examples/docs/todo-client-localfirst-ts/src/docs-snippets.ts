@@ -70,6 +70,16 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 }
 // #endregion reading-select-ts
 
+// #region reading-magic-columns-ts
+export async function readTodoPermissionIntrospection(db: Db) {
+  return db.all(app.todos.select("title", "_canRead", "_canEdit").orderBy("title", "asc"));
+}
+
+export async function readEditableTodos(db: Db) {
+  return db.all(app.todos.where({ _canEdit: true }).select("title", "_canEdit"));
+}
+// #endregion reading-magic-columns-ts
+
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
   return app.todos.gather({

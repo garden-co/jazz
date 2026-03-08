@@ -217,6 +217,22 @@ Schema references used by the include examples:
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
 </include>
 
+## Magic Columns
+
+### Permission Introspection
+
+Permission introspection columns are computed for the current session and are omitted from
+`select("*")`, so you opt into them explicitly.
+
+- `_canRead` reflects whether the current session can read the row. Since read policies already
+  gate which rows appear, returned rows will usually show `_canRead: true`.
+- `_canEdit` reflects whether the current session passes the row's `UPDATE USING` policy.
+- Without a session, permission introspection columns return `null`.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
+</include>
+
 ## Advanced: Recursive Queries
 
 Recursive queries compute bounded transitive closures from a seed row set.

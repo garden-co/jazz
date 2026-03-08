@@ -163,6 +163,64 @@ describe("TS Query API", () => {
     ]);
   });
 
+  it("selects and filters permission magic columns end to end", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-magic-columns") },
+        localAuthMode: "anonymous",
+        localAuthToken: "magic-columns-user",
+      }),
+    );
+
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+    const { id: editableId } = await db.insert(app.todos, {
+      title: "Draft docs",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+    });
+    const { id: lockedId } = await db.insert(app.todos, {
+      title: "Shipped docs",
+      done: true,
+      tags: ["docs"],
+      project: projectId,
+    });
+
+    const projected = await db.all(
+      app.todos.select("title", "_canRead", "_canEdit", "_canDelete").orderBy("title", "asc"),
+    );
+
+    expect(projected).toEqual([
+      {
+        id: editableId,
+        title: "Draft docs",
+        _canRead: true,
+        _canEdit: true,
+        _canDelete: true,
+      },
+      {
+        id: lockedId,
+        title: "Shipped docs",
+        _canRead: true,
+        _canEdit: false,
+        _canDelete: false,
+      },
+    ]);
+
+    const editableOnly = await db.all(
+      app.todos.where({ _canEdit: true }).select("title", "_canEdit").orderBy("title", "asc"),
+    );
+
+    expect(editableOnly).toEqual([
+      {
+        id: editableId,
+        title: "Draft docs",
+        _canEdit: true,
+      },
+    ]);
+  });
+
   it("include builders can project nested relation columns", async () => {
     const db = track(
       await createDb({

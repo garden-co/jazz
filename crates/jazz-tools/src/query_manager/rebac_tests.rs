@@ -1860,7 +1860,7 @@ fn magic_columns_reactively_track_update_and_delete_permissions() {
 
     let query = qm
         .query("protected")
-        .select(&["data", "_canEdit", "_canDelete"])
+        .select(&["data", "_canRead", "_canEdit", "_canDelete"])
         .build();
     let sub_id = qm
         .subscribe_with_session(query, Some(Session::new("alice")), None)
@@ -1882,6 +1882,7 @@ fn magic_columns_reactively_track_update_and_delete_permissions() {
         initial_values,
         vec![
             Value::Text("initial".into()),
+            Value::Boolean(true),
             Value::Boolean(false),
             Value::Boolean(false),
         ]
@@ -1906,6 +1907,7 @@ fn magic_columns_reactively_track_update_and_delete_permissions() {
         updated_values,
         vec![
             Value::Text("initial".into()),
+            Value::Boolean(true),
             Value::Boolean(true),
             Value::Boolean(true),
         ]
@@ -1936,7 +1938,7 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
 
     let projected_query = qm
         .query("protected")
-        .select(&["data", "_canEdit", "_canDelete"])
+        .select(&["data", "_canRead", "_canEdit", "_canDelete"])
         .build();
     let projected_sub = qm
         .subscribe_with_session(projected_query, None, None)
@@ -1956,7 +1958,12 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
     let projected_values = decode_row(&projected_update.descriptor, &projected_row.data).unwrap();
     assert_eq!(
         projected_values,
-        vec![Value::Text("initial".into()), Value::Null, Value::Null]
+        vec![
+            Value::Text("initial".into()),
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]
     );
 
     let filtered_query = qm

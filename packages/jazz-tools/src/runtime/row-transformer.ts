@@ -5,6 +5,7 @@
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import { magicColumnType } from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 
 export type { WasmValue };
@@ -41,6 +42,10 @@ function resolveBaseColumns(
       (columnName): columnName is string => typeof columnName === "string" && columnName !== "id",
     )
     .map((columnName) => {
+      const magicType = magicColumnType(columnName);
+      if (magicType) {
+        return { name: columnName, columnType: magicType };
+      }
       const column = table.columns.find((candidate) => candidate.name === columnName);
       return column ? { name: column.name, columnType: column.column_type } : null;
     })
