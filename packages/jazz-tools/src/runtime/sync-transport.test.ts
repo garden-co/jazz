@@ -49,6 +49,16 @@ describe("sync-transport", () => {
         isCatalogue: boolean,
       ) => router(null, destinationKind, destinationId, payloadJson, isCatalogue),
     ],
+    [
+      "napi-nested",
+      (
+        router: RuntimeSyncOutboxCallback,
+        destinationKind: "server" | "client",
+        destinationId: string,
+        payloadJson: string,
+        isCatalogue: boolean,
+      ) => router(null, [destinationKind, destinationId, payloadJson, isCatalogue]),
+    ],
   ];
 
   function encodeFrames(events: unknown[]): Uint8Array {
@@ -503,6 +513,19 @@ describe("sync-transport", () => {
       expect(onClientPayload).toHaveBeenCalledWith(JSON.stringify({ Pong: {} }));
     },
   );
+
+  it("sync outbox router accepts the real nested NAPI callback shape", async () => {
+    const onServerPayload = vi.fn().mockResolvedValue(undefined);
+    const router = createSyncOutboxRouter({
+      onServerPayload,
+    });
+
+    router(null, ["server", "upstream-1", JSON.stringify({ Ping: {} }), false]);
+
+    await vi.waitFor(() =>
+      expect(onServerPayload).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), false),
+    );
+  });
 
   it.each(outboxInvokers)(
     "sync outbox router posts server payloads via sendSyncPayload (%s)",
