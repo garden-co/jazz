@@ -119,7 +119,7 @@ The workflow currently:
 - runs on `main` pushes and nightly schedule
 - runs on PRs only when the PR has the `benchmark` label
 - records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`)
-- records browser outputs when the browser suite runs
+- records browser outputs on `main`/nightly/manual runs when the browser suite runs
 
 The `site` job:
 
