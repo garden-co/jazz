@@ -9,14 +9,12 @@
 mod common;
 
 use common::{
-    MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator, create_runtime,
-    create_session, current_timestamp, document_plaintext_size, format_bytes, get_stats,
-    reset_stats, setup_data,
+    BenchRuntime, MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator,
+    create_runtime, create_session, current_timestamp, document_plaintext_size, format_bytes,
+    get_stats, reset_stats, setup_data,
 };
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::types::Value;
-use jazz_tools::runtime_core::RuntimeCore;
-use jazz_tools::storage::MemoryStorage;
 
 // Install tracking allocator globally
 #[global_allocator]
@@ -166,7 +164,7 @@ fn run_memory_benchmark(scale: usize) {
 }
 
 /// Compute memory breakdown from RuntimeCore.
-fn compute_memory_breakdown(core: &RuntimeCore<MemoryStorage>) -> MemoryBreakdown {
+fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
     let qm = core.schema_manager().query_manager();
 
     // Get ObjectManager memory breakdown via SyncManager

@@ -80,12 +80,12 @@ function requireNative() {
         const binding = require("jazz-napi-android-arm64");
         const bindingPackageVersion = require("jazz-napi-android-arm64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -102,12 +102,12 @@ function requireNative() {
         const binding = require("jazz-napi-android-arm-eabi");
         const bindingPackageVersion = require("jazz-napi-android-arm-eabi/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -132,12 +132,12 @@ function requireNative() {
           const binding = require("jazz-napi-win32-x64-gnu");
           const bindingPackageVersion = require("jazz-napi-win32-x64-gnu/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -154,12 +154,12 @@ function requireNative() {
           const binding = require("jazz-napi-win32-x64-msvc");
           const bindingPackageVersion = require("jazz-napi-win32-x64-msvc/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -177,12 +177,12 @@ function requireNative() {
         const binding = require("jazz-napi-win32-ia32-msvc");
         const bindingPackageVersion = require("jazz-napi-win32-ia32-msvc/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -199,12 +199,12 @@ function requireNative() {
         const binding = require("jazz-napi-win32-arm64-msvc");
         const bindingPackageVersion = require("jazz-napi-win32-arm64-msvc/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -224,12 +224,12 @@ function requireNative() {
       const binding = require("jazz-napi-darwin-universal");
       const bindingPackageVersion = require("jazz-napi-darwin-universal/package.json").version;
       if (
-        bindingPackageVersion !== "2.0.0-alpha.13" &&
+        bindingPackageVersion !== "2.0.0-alpha.14" &&
         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
       ) {
         throw new Error(
-          `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+          `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
         );
       }
       return binding;
@@ -246,12 +246,12 @@ function requireNative() {
         const binding = require("jazz-napi-darwin-x64");
         const bindingPackageVersion = require("jazz-napi-darwin-x64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -268,12 +268,12 @@ function requireNative() {
         const binding = require("jazz-napi-darwin-arm64");
         const bindingPackageVersion = require("jazz-napi-darwin-arm64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -294,12 +294,12 @@ function requireNative() {
         const binding = require("jazz-napi-freebsd-x64");
         const bindingPackageVersion = require("jazz-napi-freebsd-x64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -316,12 +316,12 @@ function requireNative() {
         const binding = require("jazz-napi-freebsd-arm64");
         const bindingPackageVersion = require("jazz-napi-freebsd-arm64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -343,12 +343,12 @@ function requireNative() {
           const binding = require("jazz-napi-linux-x64-musl");
           const bindingPackageVersion = require("jazz-napi-linux-x64-musl/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -365,12 +365,12 @@ function requireNative() {
           const binding = require("jazz-napi-linux-x64-gnu");
           const bindingPackageVersion = require("jazz-napi-linux-x64-gnu/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -389,12 +389,12 @@ function requireNative() {
           const binding = require("jazz-napi-linux-arm64-musl");
           const bindingPackageVersion = require("jazz-napi-linux-arm64-musl/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -411,12 +411,12 @@ function requireNative() {
           const binding = require("jazz-napi-linux-arm64-gnu");
           const bindingPackageVersion = require("jazz-napi-linux-arm64-gnu/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -436,12 +436,12 @@ function requireNative() {
           const bindingPackageVersion =
             require("jazz-napi-linux-arm-musleabihf/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -459,12 +459,12 @@ function requireNative() {
           const bindingPackageVersion =
             require("jazz-napi-linux-arm-gnueabihf/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -484,12 +484,12 @@ function requireNative() {
           const bindingPackageVersion =
             require("jazz-napi-linux-loong64-musl/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -506,12 +506,12 @@ function requireNative() {
           const binding = require("jazz-napi-linux-loong64-gnu");
           const bindingPackageVersion = require("jazz-napi-linux-loong64-gnu/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -531,12 +531,12 @@ function requireNative() {
           const bindingPackageVersion =
             require("jazz-napi-linux-riscv64-musl/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -553,12 +553,12 @@ function requireNative() {
           const binding = require("jazz-napi-linux-riscv64-gnu");
           const bindingPackageVersion = require("jazz-napi-linux-riscv64-gnu/package.json").version;
           if (
-            bindingPackageVersion !== "2.0.0-alpha.13" &&
+            bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
           ) {
             throw new Error(
-              `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+              `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
             );
           }
           return binding;
@@ -576,12 +576,12 @@ function requireNative() {
         const binding = require("jazz-napi-linux-ppc64-gnu");
         const bindingPackageVersion = require("jazz-napi-linux-ppc64-gnu/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -598,12 +598,12 @@ function requireNative() {
         const binding = require("jazz-napi-linux-s390x-gnu");
         const bindingPackageVersion = require("jazz-napi-linux-s390x-gnu/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -624,12 +624,12 @@ function requireNative() {
         const binding = require("jazz-napi-openharmony-arm64");
         const bindingPackageVersion = require("jazz-napi-openharmony-arm64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -646,12 +646,12 @@ function requireNative() {
         const binding = require("jazz-napi-openharmony-x64");
         const bindingPackageVersion = require("jazz-napi-openharmony-x64/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;
@@ -668,12 +668,12 @@ function requireNative() {
         const binding = require("jazz-napi-openharmony-arm");
         const bindingPackageVersion = require("jazz-napi-openharmony-arm/package.json").version;
         if (
-          bindingPackageVersion !== "2.0.0-alpha.13" &&
+          bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0"
         ) {
           throw new Error(
-            `Native binding package version mismatch, expected 2.0.0-alpha.13 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+            `Native binding package version mismatch, expected 2.0.0-alpha.14 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
           );
         }
         return binding;

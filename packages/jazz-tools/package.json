@@ -65,6 +65,7 @@
     "test": "vitest run --config vitest.config.ts",
     "test:build": "node dist/cli.js build --schema-dir tests/ts-dsl/fixtures/basic",
     "test:browser": "vitest run --config vitest.config.browser.ts",
+    "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:local": "node scripts/stage-local-binary.mjs",
     "pack:dry-run": "npm pack --dry-run"
   },

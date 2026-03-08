@@ -6,7 +6,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
-use super::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
+use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
 use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
@@ -14,14 +14,14 @@ use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
 impl QueryManager {
     /// Insert a new row into a table.
     ///
-    /// Returns an `InsertHandle` that can be polled to check durability.
+    /// Returns an `InsertResult` that can be polled to check durability.
     /// Index updates happen immediately (creating sentinels if needed).
     pub fn insert<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
         values: &[Value],
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         self.insert_with_session(storage, table, values, None)
     }
 
@@ -36,7 +36,7 @@ impl QueryManager {
         table: &str,
         values: &[Value],
         session: Option<&Session>,
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
         let table_name = TableName::new(table);
         let table_schema = self
@@ -124,9 +124,10 @@ impl QueryManager {
         tracing::trace!(table, "mark_subscriptions_dirty");
 
         tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
-        Ok(InsertHandle {
+        Ok(InsertResult {
             row_id: object_id,
             row_commit_id,
+            row_values: values.to_vec(),
         })
     }
 
@@ -139,7 +140,7 @@ impl QueryManager {
         table: &str,
         branch: &str,
         values: &[Value],
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         self.insert_on_branch_with_session(storage, table, branch, values, None)
     }
 
@@ -151,7 +152,7 @@ impl QueryManager {
         branch: &str,
         values: &[Value],
         session: Option<&Session>,
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
         let table_schema = self
             .schema
@@ -234,9 +235,10 @@ impl QueryManager {
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty_local(table);
 
-        Ok(InsertHandle {
+        Ok(InsertResult {
             row_id: object_id,
             row_commit_id,
+            row_values: values.to_vec(),
         })
     }
 
@@ -1187,7 +1189,7 @@ impl QueryManager {
         storage: &mut H,
         id: ObjectId,
         values: &[Value],
-    ) -> Result<InsertHandle, QueryError> {
+    ) -> Result<InsertResult, QueryError> {
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -1266,9 +1268,10 @@ impl QueryManager {
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty_local(&table);
 
-        Ok(InsertHandle {
+        Ok(InsertResult {
             row_id: id,
             row_commit_id,
+            row_values: values.to_vec(),
         })
     }
 
@@ -1526,7 +1529,7 @@ impl QueryManager {
     /// Check if a commit has been stored to disk.
     ///
     /// With sync storage, commits are stored immediately.
-    /// Used by `InsertHandle::is_complete()` to check durability.
+    /// Used by `InsertResult::is_complete()` to check durability.
     pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
         if let Some(obj) = self.sync_manager.object_manager.get(object_id) {
             // Check all branches for the commit

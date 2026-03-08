@@ -34,7 +34,7 @@ describe("TS Query API", () => {
       }),
     );
 
-    const id = await db.insert(app.projects, { name: "Project A" });
+    const { id } = await db.insert(app.projects, { name: "Project A" });
 
     const results = await db.all(app.projects.where({ id: { eq: id } }));
     expect(results.length).toBe(1);
@@ -51,8 +51,8 @@ describe("TS Query API", () => {
       }),
     );
 
-    const projectId = await db.insert(app.projects, { name: "Announcements" });
-    const todoId = await db.insert(app.todos, {
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+    const { id: todoId } = await db.insert(app.todos, {
       title: "Hello world",
       done: false,
       tags: ["general"],
@@ -78,8 +78,8 @@ describe("TS Query API", () => {
       }),
     );
 
-    const projectId = await db.insert(app.projects, { name: "Announcements" });
-    const todoId = await db.insert(app.todos, {
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+    const { id: todoId } = await db.insert(app.todos, {
       title: "Write tests",
       done: false,
       tags: ["dev"],
@@ -105,20 +105,20 @@ describe("TS Query API", () => {
           driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-equality") },
         }),
       );
-      const projectId = await db.insert(app.projects, { name: "Project A" });
-      const id1 = await db.insert(app.todos, {
+      const { id: projectId } = await db.insert(app.projects, { name: "Project A" });
+      const { id: id1 } = await db.insert(app.todos, {
         title: "Todo 1",
         done: false,
         tags: ["tag1"],
         project: projectId,
       });
-      const _id2 = await db.insert(app.todos, {
+      await db.insert(app.todos, {
         title: "Todo 2",
         done: false,
         tags: ["tag2"],
         project: projectId,
       });
-      const _id3 = await db.insert(app.todos, {
+      await db.insert(app.todos, {
         title: "Todo 3",
         done: false,
         tags: ["tag1", "tag2"],
@@ -137,20 +137,20 @@ describe("TS Query API", () => {
           driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-contains") },
         }),
       );
-      const projectId = await db.insert(app.projects, { name: "Project A" });
-      const id1 = await db.insert(app.todos, {
+      const { id: projectId } = await db.insert(app.projects, { name: "Project A" });
+      const { id: id1 } = await db.insert(app.todos, {
         title: "Todo 1",
         done: false,
         tags: ["tag1"],
         project: projectId,
       });
-      const _id2 = await db.insert(app.todos, {
+      await db.insert(app.todos, {
         title: "Todo 2",
         done: false,
         tags: ["tag2"],
         project: projectId,
       });
-      const id3 = await db.insert(app.todos, {
+      const { id: id3 } = await db.insert(app.todos, {
         title: "Todo 3",
         done: false,
         tags: ["tag1", "tag2"],

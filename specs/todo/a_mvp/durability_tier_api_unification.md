@@ -57,17 +57,26 @@ Default write behavior (`WriteOptions.tier` omitted):
 1. client: `"worker"`
 2. backend: `"edge"`
 
-### Method shape (no suffix variants)
+### Method shape (sync base + durable suffix variants)
 
-Tier options are accepted by base methods:
+Base mutation methods stay synchronous and local-first:
 
-1. `insert(..., options?: WriteOptions): Promise<...>`
-2. `update(..., options?: WriteOptions): Promise<void>`
-3. `deleteFrom(..., options?: WriteOptions): Promise<void>`
-4. `all(..., options?: ReadOptions): Promise<...>`
-5. `one(..., options?: ReadOptions): Promise<...>`
-6. `subscribeAll(..., options?: ReadOptions): () => void`
-7. Client-level `query/subscribe` equivalents take `ReadOptions`.
+1. `insert(...): Row`
+2. `update(...): void`
+3. `delete(...): void`
+
+Durable variants opt into acknowledgement promises:
+
+1. `insertDurable(..., options: WriteOptions): Promise<Row>`
+2. `updateDurable(..., options?: WriteOptions): Promise<void>`
+3. `deleteDurable(..., options?: WriteOptions): Promise<void>`
+
+Read methods continue to accept `ReadOptions`:
+
+1. `all(..., options?: ReadOptions): Promise<...>`
+2. `one(..., options?: ReadOptions): Promise<...>`
+3. `subscribeAll(..., options?: ReadOptions): () => void`
+4. Client-level `query/subscribe` equivalents take `ReadOptions`.
 
 Removed APIs:
 
