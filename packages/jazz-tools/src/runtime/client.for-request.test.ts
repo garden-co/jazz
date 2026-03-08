@@ -369,6 +369,33 @@ describe("JazzClient.forRequest", () => {
     });
   });
 
+  it("forwards NAPI error-first delta payloads to subscription callbacks", async () => {
+    const { client, executeSubscriptionCalls } = makeClient();
+    const callback = vi.fn();
+    client.subscribe('{"table":"todos"}', callback);
+    await flushMicrotasks();
+
+    const onUpdate = executeSubscriptionCalls[0][1];
+    onUpdate(null, [
+      {
+        kind: 0,
+        id: "row-a",
+        index: 0,
+        row: { id: "row-a", values: [] },
+      },
+    ]);
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith([
+      {
+        kind: 0,
+        id: "row-a",
+        index: 0,
+        row: { id: "row-a", values: [] },
+      },
+    ]);
+  });
+
   it("forwards partial structured deltas without throwing", async () => {
     const { client, executeSubscriptionCalls } = makeClient();
     const callback = vi.fn();

@@ -32,7 +32,7 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
-use super::relation_ir::RelExpr;
+use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
@@ -122,6 +122,55 @@ pub(crate) struct RelationCompileFeatures {
     pub include_deleted: bool,
     pub array_subqueries: Vec<ArraySubquerySpec>,
     pub select_columns: Option<Vec<String>>,
+}
+
+fn natural_row_projection_element_index(
+    input_tuple_descriptor: &TupleDescriptor,
+    columns: &[ProjectColumn],
+) -> Option<usize> {
+    for element_index in 0..input_tuple_descriptor.element_count() {
+        let element = input_tuple_descriptor.element(element_index)?;
+
+        // Implicit-id tables carry row identity separately from row content. When
+        // a projection simply re-exposes that natural row shape, prefer selecting
+        // the tuple element directly so downstream consumers still see `row.id`
+        // plus only the declared data columns.
+        if element.descriptor.column_index("id").is_some() {
+            continue;
+        }
+
+        let Some((projected_id, projected_columns)) = columns.split_first() else {
+            continue;
+        };
+        let ProjectExpr::Column(projected_id_ref) = &projected_id.expr else {
+            continue;
+        };
+        if projected_id.alias != "id"
+            || projected_id_ref.column != "_id"
+            || projected_id_ref.scope.as_deref() != Some(element.table.as_str())
+            || projected_columns.len() != element.descriptor.columns.len()
+        {
+            continue;
+        }
+
+        let matches_declared_columns = projected_columns
+            .iter()
+            .zip(element.descriptor.columns.iter())
+            .all(|(projected, declared)| {
+                projected.alias == declared.name.as_str()
+                    && matches!(
+                        &projected.expr,
+                        ProjectExpr::Column(column_ref)
+                            if column_ref.scope.as_deref() == Some(element.table.as_str())
+                                && column_ref.column == declared.name.as_str()
+                    )
+            });
+        if matches_declared_columns {
+            return Some(element_index);
+        }
+    }
+
+    None
 }
 
 impl QueryGraph {
@@ -598,10 +647,14 @@ impl QueryGraph {
             phase2_input = limit_offset_id;
         }
 
-        // Project node (if select_columns specified)
-        if let Some(columns) = &plan.select_columns {
-            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
-            let project_node = ProjectNode::new(current_descriptor.clone(), &col_refs);
+        // Project node (if projection specified)
+        if let Some(columns) = &plan.project_columns {
+            let project_input = TupleDescriptor::single_with_materialization(
+                plan.base_scope.as_str(),
+                current_descriptor.clone(),
+                true,
+            );
+            let project_node = ProjectNode::with_project_columns(project_input, columns)?;
             current_descriptor = project_node.output_descriptor().clone();
             let project_id = graph.add_node(GraphNode::Project(project_node));
             graph.add_edge(project_id, phase2_input);
@@ -1238,18 +1291,6 @@ impl QueryGraph {
 
         let mut phase2_input = left_id;
 
-        // Project node (if select_columns specified)
-        if let Some(columns) = &plan.select_columns {
-            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
-            let project_node = ProjectNode::new(combined_descriptor.clone(), &col_refs);
-            output_descriptor = project_node.output_descriptor().clone();
-            let project_id = graph.add_node(GraphNode::Project(project_node));
-            graph.add_edge(project_id, phase2_input);
-            phase2_input = project_id;
-            output_tuple_descriptor =
-                TupleDescriptor::single_with_materialization("", output_descriptor.clone(), true);
-        }
-
         // Filter node (if conditions exist)
         // Use TupleDescriptor to enable filtering on columns from any joined table
         let predicate = disjuncts_to_predicate(&plan.disjuncts, &tuple_descriptor);
@@ -1283,16 +1324,16 @@ impl QueryGraph {
             phase2_input = limit_offset_id;
         }
 
+        let natural_projection_element_index = plan.project_columns.as_ref().and_then(|columns| {
+            natural_row_projection_element_index(&output_tuple_descriptor, columns)
+        });
+
         // Optional output projection to a specific joined element.
-        if let Some(element_index) = plan.result_element_index {
-            let select_input_descriptor = TupleDescriptor::from_tables(
-                &table_names
-                    .iter()
-                    .cloned()
-                    .zip(graph.table_descriptors.iter().cloned())
-                    .collect::<Vec<_>>(),
-            )
-            .with_all_materialized();
+        if let Some(element_index) = plan
+            .result_element_index
+            .or(natural_projection_element_index)
+        {
+            let select_input_descriptor = output_tuple_descriptor.clone();
             let select_node = SelectElementNode::new(select_input_descriptor, element_index)?;
             output_descriptor = select_node.output_descriptor().clone();
             output_tuple_descriptor =
@@ -1300,6 +1341,19 @@ impl QueryGraph {
             let select_id = graph.add_node(GraphNode::SelectElement(select_node));
             graph.add_edge(select_id, phase2_input);
             phase2_input = select_id;
+        }
+
+        // Project node (if projection specified)
+        if let Some(columns) = &plan.project_columns
+            && natural_projection_element_index.is_none()
+        {
+            let project_node =
+                ProjectNode::with_project_columns(output_tuple_descriptor.clone(), columns)?;
+            output_descriptor = project_node.output_descriptor().clone();
+            output_tuple_descriptor = project_node.output_tuple_descriptor().clone();
+            let project_id = graph.add_node(GraphNode::Project(project_node));
+            graph.add_edge(project_id, phase2_input);
+            phase2_input = project_id;
         }
 
         // Output node
@@ -2688,6 +2742,23 @@ mod tests {
         schema
     }
 
+    fn implicit_id_join_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Uuid),
+            ])
+            .into(),
+        );
+        schema
+    }
+
     fn has_join_node(graph: &QueryGraph) -> bool {
         graph
             .nodes
@@ -3120,6 +3191,51 @@ mod tests {
     }
 
     #[test]
+    fn compile_relation_ir_with_join_projection_preserves_aliases() {
+        let schema = join_schema();
+        let relation = RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("users"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("posts"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("users", "id"),
+                    right: ColumnRef::scoped("posts", "author_id"),
+                }],
+                join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+            }),
+            columns: vec![
+                ProjectColumn {
+                    alias: "author_name".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("users", "name")),
+                },
+                ProjectColumn {
+                    alias: "post_title".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("posts", "title")),
+                },
+            ],
+        };
+
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Project(_))),
+            "precise relation-ir projection should still compile to ProjectNode",
+        );
+        assert_eq!(graph.combined_descriptor.columns.len(), 2);
+        assert_eq!(graph.combined_descriptor.columns[0].name, "author_name");
+        assert_eq!(graph.combined_descriptor.columns[1].name, "post_title");
+    }
+
+    #[test]
     fn compile_relation_ir_with_or_filter_produces_union_plan() {
         let schema = test_schema();
         let relation = RelExpr::Filter {
@@ -3299,6 +3415,71 @@ mod tests {
                 .column_index("author_id")
                 .is_none(),
             "base element projection should not expose joined table columns",
+        );
+    }
+
+    #[test]
+    fn compile_query_with_relation_ir_project_join_full_implicit_id_element_shape() {
+        let schema = implicit_id_join_schema();
+        let relation = RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("users"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("posts"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("users", "id"),
+                    right: ColumnRef::scoped("__hop_0", "author_id"),
+                }],
+                join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+            }),
+            columns: vec![
+                ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+                },
+                ProjectColumn {
+                    alias: "title".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "title")),
+                },
+                ProjectColumn {
+                    alias: "author_id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "author_id")),
+                },
+            ],
+        };
+
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::SelectElement(_))),
+            "full implicit-id element projection should compile to SelectElementNode",
+        );
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::Project(_))),
+            "full implicit-id element projection should not add a ProjectNode",
+        );
+        assert_eq!(graph.combined_descriptor.columns.len(), 2);
+        assert!(graph.combined_descriptor.column_index("title").is_some());
+        assert!(
+            graph
+                .combined_descriptor
+                .column_index("author_id")
+                .is_some()
+        );
+        assert!(
+            graph.combined_descriptor.column_index("id").is_none(),
+            "implicit row id should remain out-of-band",
         );
     }
 

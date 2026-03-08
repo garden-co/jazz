@@ -305,6 +305,15 @@ export type RuntimeSyncOutboxCallbackArgs =
       destinationId: string,
       payload: Uint8Array | string,
       isCatalogue: boolean,
+    ]
+  | [
+      err: unknown,
+      message: [
+        destinationKind: OutboxDestinationKind,
+        destinationId: string,
+        payload: Uint8Array | string,
+        isCatalogue: boolean,
+      ],
     ];
 export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
 
@@ -340,6 +349,17 @@ function normalizeOutboxCallbackArgs(args: unknown[]): {
       destinationKind: args[1],
       payload: payload,
       isCatalogue: Boolean(args[4]),
+    };
+  }
+
+  // Real NAPI callback: (err, [destinationKind, destinationId, payloadJson, isCatalogue])
+  if (Array.isArray(args[1]) && isOutboxDestinationKind(args[1][0])) {
+    const payload = args[1][2];
+    if (!isOutboxPayload(payload)) return null;
+    return {
+      destinationKind: args[1][0],
+      payload,
+      isCatalogue: Boolean(args[1][3]),
     };
   }
 
