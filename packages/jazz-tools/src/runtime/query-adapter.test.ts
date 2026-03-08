@@ -106,6 +106,21 @@ describe("translateQuery", () => {
       expect(result.select_columns).toEqual(["title", "done"]);
       expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
     });
+
+    it('treats select(["*"]) as selecting all columns', () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["*"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toBeUndefined();
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
   });
 
   describe("condition translation", () => {

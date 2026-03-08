@@ -134,6 +134,35 @@ describe("TS Query API", () => {
     expect("tags" in results[0]).toBe(false);
   });
 
+  it('select("*") resets to all root columns', async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-all-columns") },
+      }),
+    );
+
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+    const { id: todoId } = await db.insert(app.todos, {
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+    });
+
+    const results = await db.all(app.todos.select("*").where({ id: { eq: todoId } }));
+
+    expect(results).toEqual([
+      {
+        id: todoId,
+        title: "Write tests",
+        done: false,
+        tags: ["dev"],
+        project: projectId,
+      },
+    ]);
+  });
+
   it("include builders can project nested relation columns", async () => {
     const db = track(
       await createDb({

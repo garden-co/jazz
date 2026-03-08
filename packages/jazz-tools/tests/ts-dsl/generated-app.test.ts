@@ -13,6 +13,17 @@ describe("generated TS DSL fixture", () => {
     });
   });
 
+  it('serializes select("*") metadata on generated query builders', () => {
+    expect(JSON.parse(app.todos.select("*")._build())).toEqual({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      select: ["*"],
+      orderBy: [],
+      hops: [],
+    });
+  });
+
   it("serializes nested include builders as query objects", () => {
     expect(
       JSON.parse(app.projects.include({ todosViaProject: app.todos.select("title") })._build()),

@@ -246,7 +246,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
       lines.push(`    ? RelationInclude extends true`);
       lines.push(`      ? ${trueType}`);
       lines.push(
-        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}, infer QuerySelect extends keyof ${targetInterface}>`,
+        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}, infer QuerySelect extends keyof ${targetInterface} | "*">`,
       );
       lines.push(`        ? ${queryBuilderSelectedType}`);
       lines.push(`        : RelationInclude extends ${targetInclude}`);
@@ -271,13 +271,13 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
     const hasRelations = (relations.get(tableName) ?? []).length > 0;
 
     lines.push(
-      `export type ${baseInterface}Selected<S extends keyof ${baseInterface} = keyof ${baseInterface}> = Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>;`,
+      `export type ${baseInterface}Selected<S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>;`,
     );
     lines.push("");
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} = keyof ${baseInterface}> = ${baseInterface}Selected<S> & Omit<${withIncludesType}<I>, keyof ${baseInterface}>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = ${baseInterface}Selected<S> & Omit<${withIncludesType}<I>, keyof ${baseInterface}>;`,
       );
       lines.push("");
     }
