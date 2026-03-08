@@ -212,17 +212,8 @@ async fn create_todo(
         Value::Null,
     ];
     match state.client.create("todos", values).await {
-        Ok(row_id) => {
-            let todo = Todo {
-                id: *row_id.uuid(),
-                title: request.title,
-                done: false,
-                description: if description.is_empty() {
-                    None
-                } else {
-                    Some(description)
-                },
-            };
+        Ok((row_id, row_values)) => {
+            let todo = row_to_todo(row_id, &row_values);
             broadcast_todos(&state).await;
             (StatusCode::CREATED, Json(todo)).into_response()
         }
@@ -469,7 +460,7 @@ async fn test_local_persistence() {
             Value::Null,
             Value::Null,
         ];
-        let row_id = client.create("todos", values).await.unwrap();
+        let (row_id, _row_values) = client.create("todos", values).await.unwrap();
 
         // Verify it exists
         let query = QueryBuilder::new("todos").build();
@@ -766,7 +757,7 @@ async fn test_server_resync() {
             Value::Null,
             Value::Null,
         ];
-        let _row_id = client.create("todos", values).await.unwrap();
+        let (_row_id, _row_values) = client.create("todos", values).await.unwrap();
 
         // Verify it exists locally
         let query = QueryBuilder::new("todos").build();

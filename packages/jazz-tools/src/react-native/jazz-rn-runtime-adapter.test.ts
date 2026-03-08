@@ -12,7 +12,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
-    insert: vi.fn((_table, _valuesJson) => "row-1"),
+    insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
@@ -46,8 +46,8 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    const id = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
-    expect(id).toBe("row-1");
+    const row = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
+    expect(row).toEqual({ id: "row-1", values: [] });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify([{ type: "Text", value: "milk" }]),
@@ -185,7 +185,10 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertDurable("todos", [], "worker")).resolves.toBe("row-1");
+    await expect(adapter.insertDurable("todos", [], "worker")).resolves.toEqual({
+      id: "row-1",
+      values: [],
+    });
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
     await expect(adapter.updateDurable("row-1", {}, "worker")).resolves.toBeUndefined();

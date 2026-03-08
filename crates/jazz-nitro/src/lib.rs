@@ -24,7 +24,7 @@ use groove::query_manager::manager::LocalUpdates;
 use groove::query_manager::parse_query_json;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, SchemaHash, Value};
+use groove::query_manager::types::{RowDescriptor, Schema, SchemaHash, TableName, Value};
 use groove::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
     SyncSender,
@@ -44,6 +44,55 @@ fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, String> {
     let partial: HashMap<String, Value> =
         serde_json::from_str(values_json).map_err(|e| format!("Invalid values JSON: {e}"))?;
     Ok(partial.into_iter().collect())
+}
+
+fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
+    query.joins.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.recursive.is_none()
+        && query.select_columns.is_none()
+        && query.result_element_index.is_none()
+}
+
+fn reorder_values_by_column_name(
+    source_descriptor: &RowDescriptor,
+    target_descriptor: &RowDescriptor,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if values.len() != source_descriptor.columns.len()
+        || source_descriptor.columns.len() != target_descriptor.columns.len()
+    {
+        return None;
+    }
+
+    let mut values_by_column = HashMap::with_capacity(values.len());
+    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name, value.clone());
+    }
+
+    let mut reordered_values = Vec::with_capacity(values.len());
+    for column in &target_descriptor.columns {
+        reordered_values.push(values_by_column.remove(&column.name)?);
+    }
+
+    Some(reordered_values)
+}
+
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(table) else {
+        return values;
+    };
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+
+    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
+        .unwrap_or(values)
 }
 
 // ============================================================================
@@ -313,6 +362,7 @@ fn error_json(msg: String) -> String {
 
 pub struct JazzRuntimeImpl {
     core: Mutex<Option<NitroCoreType>>,
+    declared_schema: Mutex<Option<Schema>>,
     upstream_server_id: Mutex<Option<ServerId>>,
 }
 
@@ -326,6 +376,7 @@ impl JazzRuntimeImpl {
     pub fn new() -> Self {
         Self {
             core: Mutex::new(None),
+            declared_schema: Mutex::new(None),
             upstream_server_id: Mutex::new(None),
         }
     }
@@ -354,6 +405,7 @@ impl JazzRuntimeImpl {
     ) -> Result<(), String> {
         let schema: Schema =
             serde_json::from_str(&schema_json).map_err(|e| format!("Invalid schema JSON: {e}"))?;
+        let declared_schema = schema.clone();
 
         let node_tiers = parse_node_durability_tier(tier)?;
 
@@ -379,6 +431,11 @@ impl JazzRuntimeImpl {
 
         let mut guard = self.core.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(core);
+        let mut declared_schema_guard = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *declared_schema_guard = Some(declared_schema);
         Ok(())
     }
 
@@ -417,10 +474,31 @@ impl JazzRuntimeImpl {
 
     fn insert_inner(&mut self, table: String, values_json: String) -> Result<String, String> {
         let values = convert_values(&values_json)?;
+        let declared_schema = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         self.with_core("insert", |core| {
             core.insert(&table, values, None)
-                .map(|id| id.uuid().to_string())
                 .map_err(|e| format!("Insert failed: {e}"))
+                .and_then(|(id, values)| {
+                    let values = if let Some(schema) = declared_schema.as_ref() {
+                        align_row_values_to_declared_schema(
+                            schema,
+                            core.current_schema(),
+                            &TableName::new(table.clone()),
+                            values,
+                        )
+                    } else {
+                        values
+                    };
+                    serde_json::to_string(&serde_json::json!({
+                        "id": id.uuid().to_string(),
+                        "values": values,
+                    }))
+                    .map_err(|e| format!("Insert serialization failed: {e}"))
+                })
         })?
     }
 
@@ -472,14 +550,45 @@ impl JazzRuntimeImpl {
         options_json: Option<String>,
     ) -> Result<String, String> {
         let query = parse_query(&query_json)?;
+        let query_for_alignment = query.clone();
         let session = parse_session(session_json)?;
         let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
+        let declared_schema = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
-        let fut = self.with_core("query", |core| {
-            core.query_with_propagation(query, session, durability, propagation)
+        let (fut, runtime_schema) = self.with_core("query", |core| {
+            (
+                core.query_with_propagation(query, session, durability, propagation),
+                core.current_schema().clone(),
+            )
         })?;
 
         let results = block_on(fut).map_err(|e| format!("Query failed: {e}"))?;
+        let results = if query_rows_can_be_schema_aligned(&query_for_alignment) {
+            if let Some(schema) = declared_schema.as_ref() {
+                results
+                    .into_iter()
+                    .map(|(id, values)| {
+                        (
+                            id,
+                            align_row_values_to_declared_schema(
+                                schema,
+                                &runtime_schema,
+                                &query_for_alignment.table,
+                                values,
+                            ),
+                        )
+                    })
+                    .collect()
+            } else {
+                results
+            }
+        } else {
+            results
+        };
 
         let rows_json: Vec<serde_json::Value> = results
             .into_iter()
@@ -589,14 +698,37 @@ impl JazzRuntimeImpl {
     ) -> Result<String, String> {
         let persistence_tier = parse_tier(&tier)?;
         let values = convert_values(&values_json)?;
+        let declared_schema = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
-        let (object_id, receiver) = self.with_core("insert_persisted", |core| {
-            core.insert_persisted(&table, values, None, persistence_tier)
-                .map_err(|e| format!("Insert failed: {e}"))
-        })??;
+        let ((object_id, row_values), receiver) =
+            self.with_core("insert_persisted", |core| {
+                core.insert_persisted(&table, values, None, persistence_tier)
+                    .map_err(|e| format!("Insert failed: {e}"))
+                    .map(|((object_id, row_values), receiver)| {
+                        let row_values = if let Some(schema) = declared_schema.as_ref() {
+                            align_row_values_to_declared_schema(
+                                schema,
+                                core.current_schema(),
+                                &TableName::new(table.clone()),
+                                row_values,
+                            )
+                        } else {
+                            row_values
+                        };
+                        ((object_id, row_values), receiver)
+                    })
+            })??;
 
         let _ = block_on(receiver);
-        Ok(object_id.uuid().to_string())
+        serde_json::to_string(&serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
+        .map_err(|e| format!("Insert serialization failed: {e}"))
     }
 
     pub fn insert_persisted(&mut self, table: String, values_json: String, tier: String) -> String {
@@ -899,8 +1031,18 @@ mod tests {
         ])
         .to_string();
 
-        let id = rt.insert("todos".into(), values_json);
+        let insert_result: serde_json::Value =
+            serde_json::from_str(&rt.insert("todos".into(), values_json)).unwrap();
+        let id = insert_result["id"].as_str().unwrap().to_string();
         assert!(!id.is_empty());
+        assert_eq!(
+            insert_result["values"][0],
+            serde_json::json!({ "type": "Text", "value": "Buy milk" })
+        );
+        assert_eq!(
+            insert_result["values"][1],
+            serde_json::json!({ "type": "Boolean", "value": false })
+        );
 
         let query_json = serde_json::json!({ "table": "todos", "relation_ir": { "TableScan": { "table": "todos" } } }).to_string();
         let result = rt.query(query_json, None, None);
@@ -1142,10 +1284,20 @@ mod tests {
             { "type": "Boolean", "value": false }
         ])
         .to_string();
-        let id = alice.insert("todos".into(), values);
+        let insert_result: serde_json::Value =
+            serde_json::from_str(&alice.insert("todos".into(), values)).unwrap();
+        let id = insert_result["id"].as_str().unwrap().to_string();
         assert!(
             uuid::Uuid::parse_str(&id).is_ok(),
             "Insert should return valid UUID"
+        );
+        assert_eq!(
+            insert_result["values"][0],
+            serde_json::json!({ "type": "Text", "value": "Walk the dog" })
+        );
+        assert_eq!(
+            insert_result["values"][1],
+            serde_json::json!({ "type": "Boolean", "value": false })
         );
 
         // Update: mark done

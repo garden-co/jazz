@@ -23,7 +23,7 @@ import {
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
-import { resolveJwtSession } from "./client-session.js";
+import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
 
 /**
@@ -44,8 +44,8 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: any): string;
-  insertDurable(table: string, values: any, tier: string): Promise<string>;
+  insert(table: string, values: any): Row;
+  insertDurable(table: string, values: any, tier: string): Promise<Row>;
   update(object_id: string, values: any): void;
   updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   delete(object_id: string): void;
@@ -138,6 +138,10 @@ export interface QueryInput {
 }
 
 type RelationIrNode = Record<string, unknown>;
+type ArraySubqueryPlan = {
+  table: string;
+  nested: ArraySubqueryPlan[];
+};
 
 function resolveQueryJson(query: string | QueryInput): string {
   if (typeof query === "string") {
@@ -220,6 +224,57 @@ function resolveQueryOutputTable(queryJson: string): string | null {
     return resolveRelationIrOutputTable(parsed.relation_ir);
   } catch {
     return null;
+  }
+}
+
+function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const plans: ArraySubqueryPlan[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const plan = entry as {
+      table?: unknown;
+      nested_arrays?: unknown;
+    };
+    if (typeof plan.table !== "string") {
+      continue;
+    }
+    plans.push({
+      table: plan.table,
+      nested: parseArraySubqueryPlans(plan.nested_arrays),
+    });
+  }
+
+  return plans;
+}
+
+function resolveQueryAlignmentPlan(queryJson: string): {
+  outputTable: string | null;
+  arraySubqueries: ArraySubqueryPlan[];
+} {
+  try {
+    const parsed = JSON.parse(queryJson) as {
+      table?: unknown;
+      relation_ir?: unknown;
+      array_subqueries?: unknown;
+    };
+    return {
+      outputTable:
+        typeof parsed.table === "string"
+          ? parsed.table
+          : resolveRelationIrOutputTable(parsed.relation_ir),
+      arraySubqueries: parseArraySubqueryPlans(parsed.array_subqueries),
+    };
+  } catch {
+    return {
+      outputTable: null,
+      arraySubqueries: [],
+    };
   }
 }
 
@@ -487,7 +542,12 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.resolvedSession = resolveJwtSession(context.jwtToken ?? "");
+    this.resolvedSession = resolveClientSessionSync({
+      appId: context.appId,
+      jwtToken: context.jwtToken,
+      localAuthMode: context.localAuthMode,
+      localAuthToken: context.localAuthToken,
+    });
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
       getAuth: () => this.getSyncAuth(),
@@ -683,44 +743,11 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
-  private alignCreateValuesToRuntimeSchema(
-    table: string,
-    values: Value[],
-    runtimeSchema = this.getSchema(),
-  ): Value[] {
-    const declaredTable = this.context.schema[table];
-    const runtimeTable = runtimeSchema[table];
-
-    if (!declaredTable || !runtimeTable || values.length !== declaredTable.columns.length) {
-      return values;
-    }
-
-    const valuesByColumn = new Map<string, Value>();
-    for (let index = 0; index < declaredTable.columns.length; index += 1) {
-      const column = declaredTable.columns[index];
-      const value = values[index];
-      if (value === undefined) {
-        return values;
-      }
-      valuesByColumn.set(column.name, value);
-    }
-
-    const reorderedValues: Value[] = [];
-    for (const column of runtimeTable.columns) {
-      const value = valuesByColumn.get(column.name);
-      if (value === undefined) {
-        return values;
-      }
-      reorderedValues.push(value);
-    }
-
-    return reorderedValues;
-  }
-
   private alignRowValuesToDeclaredSchema(
     table: string,
     values: Value[],
     runtimeSchema = this.getSchema(),
+    arraySubqueries: ArraySubqueryPlan[] = [],
   ): Value[] {
     const declaredTable = this.context.schema[table];
     const runtimeTable = runtimeSchema[table];
@@ -748,7 +775,52 @@ export class JazzClient {
       reorderedValues.push(value);
     }
 
-    return reorderedValues.concat(values.slice(runtimeTable.columns.length));
+    const trailingValues = values.slice(runtimeTable.columns.length);
+    if (arraySubqueries.length === 0) {
+      return reorderedValues.concat(trailingValues);
+    }
+
+    const alignedTrailingValues = trailingValues.map((value, index) => {
+      const plan = arraySubqueries[index];
+      if (!plan) {
+        return value;
+      }
+      return this.alignIncludedValueToDeclaredSchema(value, plan, runtimeSchema);
+    });
+
+    return reorderedValues.concat(alignedTrailingValues);
+  }
+
+  private alignIncludedValueToDeclaredSchema(
+    value: Value,
+    plan: ArraySubqueryPlan,
+    runtimeSchema = this.getSchema(),
+  ): Value {
+    if (value.type !== "Array") {
+      return value;
+    }
+
+    return {
+      ...value,
+      value: value.value.map((entry) => {
+        if (entry.type !== "Row") {
+          return entry;
+        }
+
+        return {
+          ...entry,
+          value: {
+            ...entry.value,
+            values: this.alignRowValuesToDeclaredSchema(
+              plan.table,
+              entry.value.values,
+              runtimeSchema,
+              plan.nested,
+            ),
+          },
+        };
+      }),
+    };
   }
 
   private alignQueryRowsToDeclaredSchema(
@@ -756,14 +828,19 @@ export class JazzClient {
     rows: Row[],
     runtimeSchema = this.getSchema(),
   ): Row[] {
-    const outputTable = resolveQueryOutputTable(queryJson);
+    const { outputTable, arraySubqueries } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable) {
       return rows;
     }
 
     return rows.map((row) => ({
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(outputTable, row.values, runtimeSchema),
+      values: this.alignRowValuesToDeclaredSchema(
+        outputTable,
+        row.values,
+        runtimeSchema,
+        arraySubqueries,
+      ),
     }));
   }
 
@@ -772,7 +849,7 @@ export class JazzClient {
     delta: RowDelta,
     runtimeSchema = this.getSchema(),
   ): RowDelta {
-    const outputTable = resolveQueryOutputTable(queryJson);
+    const { outputTable, arraySubqueries } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable || !Array.isArray(delta)) {
       return delta;
     }
@@ -787,6 +864,7 @@ export class JazzClient {
               outputTable,
               change.row.values as Value[],
               runtimeSchema,
+              arraySubqueries,
             ),
           },
         };
@@ -797,16 +875,30 @@ export class JazzClient {
   }
 
   /**
+   * Insert a new row into a table without waiting for durability.
+   */
+  create(table: string, values: Value[]): Row {
+    const row = this.runtime.insert(table, values);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+    };
+  }
+
+  /**
    * Insert a new row into a table and wait for durability at the requested tier.
    */
-  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
+  async createDurable(
+    table: string,
+    values: Value[],
+    options?: WriteDurabilityOptions,
+  ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
-    const runtimeSchema = this.getSchema();
-    return this.runtime.insertDurable(
-      table,
-      this.alignCreateValuesToRuntimeSchema(table, values, runtimeSchema),
-      tier,
-    );
+    const row = await this.runtime.insertDurable(table, values, tier);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+    };
   }
 
   /**
@@ -844,9 +936,16 @@ export class JazzClient {
   }
 
   /**
+   * Update a row by ID without waiting for durability.
+   */
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.runtime.update(objectId, updates);
+  }
+
+  /**
    * Update a row by ID and wait for durability at the requested tier.
    */
-  async update(
+  async updateDurable(
     objectId: string,
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
@@ -856,9 +955,16 @@ export class JazzClient {
   }
 
   /**
+   * Delete a row by ID without waiting for durability.
+   */
+  delete(objectId: string): void {
+    this.runtime.delete(objectId);
+  }
+
+  /**
    * Delete a row by ID and wait for durability at the requested tier.
    */
-  async delete(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+  async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
     const tier = this.resolveWriteTier(options);
     await this.runtime.deleteDurable(objectId, tier);
   }
