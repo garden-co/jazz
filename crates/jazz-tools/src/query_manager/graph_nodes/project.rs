@@ -1,110 +1,163 @@
 use ahash::AHashSet;
 
-use crate::query_manager::encoding::project_row;
+use crate::commit::CommitId;
+use crate::query_manager::encoding::{decode_column, encode_row};
+use crate::query_manager::relation_ir::{ProjectColumn, ProjectExpr, RowIdRef};
 use crate::query_manager::types::{
-    ColumnDescriptor, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, TupleElement,
+    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Tuple, TupleDelta, TupleDescriptor,
+    TupleElement, Value,
 };
 
 use super::RowNode;
 
+#[derive(Debug, Clone)]
+enum ProjectionSource {
+    Column { global_index: usize },
+    RowId { element_index: usize },
+}
+
+#[derive(Debug, Clone)]
+struct ProjectionField {
+    output_column: ColumnDescriptor,
+    source: ProjectionSource,
+}
+
 /// Project node for column selection.
 ///
-/// Transforms tuples by selecting a subset of columns from the input rows.
-/// Requires materialized tuples (needs to read and re-encode row data).
-///
-/// Example: `SELECT name, age FROM users` would project columns [1, 2] from
-/// a table with columns [id, name, age, email].
+/// Transforms fully materialized tuples into a single output row with the
+/// requested projection shape. This supports both the legacy "select these
+/// column names" path and precise relation-IR projections with aliases/scopes.
 #[derive(Debug)]
 pub struct ProjectNode {
-    /// Input row descriptor.
-    input_descriptor: RowDescriptor,
-    /// Output row descriptor (selected columns only).
+    input_tuple_descriptor: TupleDescriptor,
     output_descriptor: RowDescriptor,
-    /// Output tuple descriptor.
     output_tuple_descriptor: TupleDescriptor,
-    /// Mapping from input column index to output column index.
-    /// Vec of (src_col_idx, dst_col_idx) pairs.
-    column_mapping: Vec<(usize, usize)>,
-    /// Current projected tuples.
+    projection_fields: Vec<ProjectionField>,
     current_tuples: AHashSet<Tuple>,
     dirty: bool,
 }
 
 impl ProjectNode {
-    /// Create a new project node.
-    ///
-    /// # Arguments
-    /// * `input_descriptor` - The input row descriptor
-    /// * `select_columns` - Column names to select (in output order)
+    /// Create a new project node from a single input row descriptor.
     pub fn new(input_descriptor: RowDescriptor, select_columns: &[&str]) -> Self {
-        // Build output descriptor and column mapping
-        let mut output_columns = Vec::new();
-        let mut column_mapping = Vec::new();
-
-        for (dst_idx, col_name) in select_columns.iter().enumerate() {
-            if let Some(src_idx) = input_descriptor.column_index(col_name) {
-                let col = &input_descriptor.columns[src_idx];
-                output_columns.push(ColumnDescriptor {
-                    name: col.name,
-                    column_type: col.column_type.clone(),
-                    nullable: col.nullable,
-                    references: col.references,
-                });
-                column_mapping.push((src_idx, dst_idx));
-            }
-        }
-
-        let output_descriptor = RowDescriptor::new(output_columns.clone());
-        let output_tuple_descriptor = TupleDescriptor::single_with_materialization(
-            "",
-            RowDescriptor::new(output_columns),
-            true,
-        );
-
-        Self {
-            input_descriptor,
-            output_descriptor,
-            output_tuple_descriptor,
-            column_mapping,
-            current_tuples: AHashSet::new(),
-            dirty: true,
-        }
+        let input_tuple_descriptor =
+            TupleDescriptor::single_with_materialization("", input_descriptor, true);
+        Self::with_tuple_descriptor(input_tuple_descriptor, select_columns)
     }
 
-    /// Create a new project node with TupleDescriptor.
+    /// Create a new project node from a tuple descriptor and unqualified column names.
     pub fn with_tuple_descriptor(
         input_tuple_descriptor: TupleDescriptor,
         select_columns: &[&str],
     ) -> Self {
-        let input_descriptor = input_tuple_descriptor.combined_descriptor();
-        let mut output_columns = Vec::new();
-        let mut column_mapping = Vec::new();
+        let combined_descriptor = input_tuple_descriptor.combined_descriptor();
+        let projection_fields = select_columns
+            .iter()
+            .filter_map(|col_name| {
+                let src_idx = combined_descriptor.column_index(col_name)?;
+                let col = combined_descriptor.columns[src_idx].clone();
+                Some(ProjectionField {
+                    output_column: col,
+                    source: ProjectionSource::Column {
+                        global_index: src_idx,
+                    },
+                })
+            })
+            .collect();
 
-        for (dst_idx, col_name) in select_columns.iter().enumerate() {
-            if let Some(src_idx) = input_descriptor.column_index(col_name) {
-                let col = &input_descriptor.columns[src_idx];
-                output_columns.push(ColumnDescriptor {
-                    name: col.name,
-                    column_type: col.column_type.clone(),
-                    nullable: col.nullable,
-                    references: col.references,
-                });
-                column_mapping.push((src_idx, dst_idx));
-            }
+        Self::from_projection_fields(input_tuple_descriptor, projection_fields)
+    }
+
+    /// Create a new project node from explicit projected expressions.
+    pub fn with_project_columns(
+        input_tuple_descriptor: TupleDescriptor,
+        project_columns: &[ProjectColumn],
+    ) -> Option<Self> {
+        let mut projection_fields = Vec::with_capacity(project_columns.len());
+        for column in project_columns {
+            let Some(source) = (match &column.expr {
+                ProjectExpr::Column(column_ref) if column_ref.column == "_id" => {
+                    Some(ProjectionSource::RowId {
+                        element_index: resolve_row_id_element(
+                            &input_tuple_descriptor,
+                            column_ref.scope.as_deref(),
+                        )?,
+                    })
+                }
+                ProjectExpr::Column(column_ref) => {
+                    let global_index = if let Some(scope) = column_ref.scope.as_deref() {
+                        input_tuple_descriptor.qualified_column_index(scope, &column_ref.column)
+                    } else {
+                        input_tuple_descriptor.column_index(&column_ref.column)
+                    };
+                    global_index.map(|global_index| ProjectionSource::Column { global_index })
+                }
+                ProjectExpr::RowId(RowIdRef::Current) => {
+                    resolve_row_id_element(&input_tuple_descriptor, None)
+                        .map(|element_index| ProjectionSource::RowId { element_index })
+                }
+                ProjectExpr::RowId(_) => None,
+            }) else {
+                continue;
+            };
+
+            let output_column = match &source {
+                ProjectionSource::Column { global_index } => {
+                    let (element_index, local_index) =
+                        input_tuple_descriptor.resolve_column(*global_index)?;
+                    let source_column = &input_tuple_descriptor
+                        .element(element_index)?
+                        .descriptor
+                        .columns[local_index];
+                    ColumnDescriptor {
+                        name: ColumnName::new(column.alias.clone()),
+                        column_type: source_column.column_type.clone(),
+                        nullable: source_column.nullable,
+                        references: source_column.references,
+                    }
+                }
+                ProjectionSource::RowId { .. } => ColumnDescriptor {
+                    name: ColumnName::new(column.alias.clone()),
+                    column_type: ColumnType::Uuid,
+                    nullable: false,
+                    references: None,
+                },
+            };
+
+            projection_fields.push(ProjectionField {
+                output_column,
+                source,
+            });
         }
 
-        let output_descriptor = RowDescriptor::new(output_columns.clone());
-        let output_tuple_descriptor = TupleDescriptor::single_with_materialization(
-            "",
-            RowDescriptor::new(output_columns),
-            true,
+        if projection_fields.is_empty() && !project_columns.is_empty() {
+            return None;
+        }
+
+        Some(Self::from_projection_fields(
+            input_tuple_descriptor,
+            projection_fields,
+        ))
+    }
+
+    fn from_projection_fields(
+        input_tuple_descriptor: TupleDescriptor,
+        projection_fields: Vec<ProjectionField>,
+    ) -> Self {
+        let output_descriptor = RowDescriptor::new(
+            projection_fields
+                .iter()
+                .map(|field| field.output_column.clone())
+                .collect(),
         );
+        let output_tuple_descriptor =
+            TupleDescriptor::single_with_materialization("", output_descriptor.clone(), true);
 
         Self {
-            input_descriptor,
+            input_tuple_descriptor,
             output_descriptor,
             output_tuple_descriptor,
-            column_mapping,
+            projection_fields,
             current_tuples: AHashSet::new(),
             dirty: true,
         }
@@ -115,46 +168,63 @@ impl ProjectNode {
         &self.output_tuple_descriptor
     }
 
-    /// Project a single tuple to selected columns.
-    fn project_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
-        let mut projected_elements = Vec::with_capacity(tuple.len());
-
-        for element in tuple.iter() {
-            match element {
-                TupleElement::Id(id) => {
-                    // Can't project unmaterialized tuple
-                    projected_elements.push(TupleElement::Id(*id));
-                }
-                TupleElement::Row {
-                    id,
-                    content,
-                    commit_id,
-                } => {
-                    // Project the row data
-                    match project_row(
-                        &self.input_descriptor,
-                        content,
-                        &self.output_descriptor,
-                        &self.column_mapping,
-                    ) {
-                        Ok(projected_content) => {
-                            projected_elements.push(TupleElement::Row {
-                                id: *id,
-                                content: projected_content,
-                                commit_id: *commit_id,
-                            });
-                        }
-                        Err(_) => {
-                            // Projection failed, pass through as ID
-                            projected_elements.push(TupleElement::Id(*id));
-                        }
-                    }
-                }
+    fn projected_value(&self, tuple: &Tuple, source: &ProjectionSource) -> Option<Value> {
+        match source {
+            ProjectionSource::Column { global_index } => {
+                let (element_index, local_index) =
+                    self.input_tuple_descriptor.resolve_column(*global_index)?;
+                let element = tuple.get(element_index)?;
+                let descriptor = &self
+                    .input_tuple_descriptor
+                    .element(element_index)?
+                    .descriptor;
+                decode_column(descriptor, element.content()?, local_index).ok()
+            }
+            ProjectionSource::RowId { element_index } => {
+                Some(Value::Uuid(tuple.get(*element_index)?.id()))
             }
         }
-
-        Some(Tuple::new(projected_elements).with_provenance(tuple.provenance().clone()))
     }
+
+    /// Project a single tuple to the output row shape.
+    fn project_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
+        let values: Option<Vec<_>> = self
+            .projection_fields
+            .iter()
+            .map(|field| self.projected_value(tuple, &field.source))
+            .collect();
+        let projected_content = encode_row(&self.output_descriptor, &values?).ok()?;
+        let id = tuple.first_id()?;
+        let commit_id = tuple
+            .iter()
+            .find_map(TupleElement::commit_id)
+            .unwrap_or(CommitId([0; 32]));
+
+        Some(
+            Tuple::new(vec![TupleElement::Row {
+                id,
+                content: projected_content,
+                commit_id,
+            }])
+            .with_provenance(tuple.provenance().clone()),
+        )
+    }
+}
+
+fn resolve_row_id_element(
+    input_tuple_descriptor: &TupleDescriptor,
+    scope: Option<&str>,
+) -> Option<usize> {
+    if let Some(scope) = scope {
+        for index in 0..input_tuple_descriptor.element_count() {
+            if input_tuple_descriptor.element(index)?.table == scope {
+                return Some(index);
+            }
+        }
+        return None;
+    }
+
+    (input_tuple_descriptor.element_count() == 1).then_some(0)
 }
 
 impl RowNode for ProjectNode {
@@ -165,7 +235,6 @@ impl RowNode for ProjectNode {
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
 
-        // Project removed tuples
         for tuple in input.removed {
             if let Some(projected) = self.project_tuple(&tuple) {
                 self.current_tuples.remove(&projected);
@@ -173,7 +242,6 @@ impl RowNode for ProjectNode {
             }
         }
 
-        // Project added tuples
         for tuple in input.added {
             if let Some(projected) = self.project_tuple(&tuple) {
                 self.current_tuples.insert(projected.clone());
@@ -181,7 +249,6 @@ impl RowNode for ProjectNode {
             }
         }
 
-        // Project updated tuples
         for (old_tuple, new_tuple) in input.updated {
             if let (Some(old_projected), Some(new_projected)) = (
                 self.project_tuple(&old_tuple),
@@ -216,7 +283,8 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::query_manager::types::{ColumnType, Value};
+    use crate::query_manager::relation_ir::ColumnRef;
+    use crate::query_manager::types::Value;
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -264,10 +332,9 @@ mod tests {
 
         assert_eq!(result.added.len(), 1);
 
-        // Verify projected tuple has only selected columns
         let projected = &result.added[0];
         let row = projected.to_single_row().unwrap();
-        let values = decode_row(&node.output_descriptor, &row.data).unwrap();
+        let values = decode_row(node.output_descriptor(), &row.data).unwrap();
 
         assert_eq!(values.len(), 2);
         assert_eq!(values[0], Value::Text("Alice".into()));
@@ -310,7 +377,6 @@ mod tests {
 
         node.process(delta);
 
-        // Projected tuple should have same ID
         assert_eq!(node.current_tuples().len(), 1);
         let projected = node.current_tuples().iter().next().unwrap();
         assert_eq!(projected.ids()[0], id1);
@@ -341,7 +407,6 @@ mod tests {
             ],
         );
 
-        // Add old tuple
         node.process(TupleDelta {
             added: vec![old_tuple.clone()],
             removed: vec![],
@@ -349,7 +414,6 @@ mod tests {
             updated: vec![],
         });
 
-        // Update tuple
         let result = node.process(TupleDelta {
             added: vec![],
             removed: vec![],
@@ -359,11 +423,10 @@ mod tests {
 
         assert_eq!(result.updated.len(), 1);
 
-        // Verify age changed in projected output
         let (_, new_projected) = &result.updated[0];
         let row = new_projected.to_single_row().unwrap();
-        let values = decode_row(&node.output_descriptor(), &row.data).unwrap();
-        assert_eq!(values[1], Value::Integer(31)); // age updated
+        let values = decode_row(node.output_descriptor(), &row.data).unwrap();
+        assert_eq!(values[1], Value::Integer(31));
     }
 
     #[test]
@@ -371,10 +434,91 @@ mod tests {
         let descriptor = test_descriptor();
         let node = ProjectNode::new(descriptor, &["name", "nonexistent", "age"]);
 
-        // Only known columns should be in output
         let output = node.output_descriptor();
         assert_eq!(output.columns.len(), 2);
         assert_eq!(output.columns[0].name, "name");
         assert_eq!(output.columns[1].name, "age");
+    }
+
+    #[test]
+    fn precise_project_uses_scopes_and_aliases() {
+        let users = RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+        let posts = RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+        let input = TupleDescriptor::from_tables(&[
+            ("u".to_string(), users.clone()),
+            ("p".to_string(), posts.clone()),
+        ])
+        .with_all_materialized();
+        let node = ProjectNode::with_project_columns(
+            input,
+            &[
+                ProjectColumn {
+                    alias: "author_name".into(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("u", "name")),
+                },
+                ProjectColumn {
+                    alias: "post_title".into(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("p", "title")),
+                },
+            ],
+        )
+        .expect("precise projection should build");
+
+        assert_eq!(node.output_descriptor().columns.len(), 2);
+        assert_eq!(node.output_descriptor().columns[0].name, "author_name");
+        assert_eq!(node.output_descriptor().columns[1].name, "post_title");
+
+        let user_id = ObjectId::new();
+        let post_id = ObjectId::new();
+        let user_row = encode_row(&users, &[Value::Text("Alice".into())]).unwrap();
+        let post_row = encode_row(&posts, &[Value::Text("Hello".into())]).unwrap();
+        let tuple = Tuple::new(vec![
+            TupleElement::Row {
+                id: user_id,
+                content: user_row,
+                commit_id: CommitId([1; 32]),
+            },
+            TupleElement::Row {
+                id: post_id,
+                content: post_row,
+                commit_id: CommitId([2; 32]),
+            },
+        ]);
+
+        let result = node
+            .project_tuple(&tuple)
+            .expect("tuple should project to a single row");
+        let row = result
+            .to_single_row()
+            .expect("projected tuple should be a row");
+        let values = decode_row(node.output_descriptor(), &row.data).unwrap();
+
+        assert_eq!(row.id, user_id);
+        assert_eq!(
+            values,
+            vec![Value::Text("Alice".into()), Value::Text("Hello".into())]
+        );
+    }
+
+    #[test]
+    fn precise_project_can_expose_scoped_row_id() {
+        let users = RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+        let input =
+            TupleDescriptor::from_tables(&[("u".to_string(), users)]).with_all_materialized();
+        let node = ProjectNode::with_project_columns(
+            input,
+            &[ProjectColumn {
+                alias: "row_id".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("u", "_id")),
+            }],
+        )
+        .expect("row id projection should build");
+
+        assert_eq!(
+            node.output_descriptor().columns[0].column_type,
+            ColumnType::Uuid
+        );
+        assert_eq!(node.output_descriptor().columns[0].references, None);
+        assert_eq!(node.output_descriptor().columns[0].name, "row_id");
     }
 }
