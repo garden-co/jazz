@@ -3,8 +3,8 @@ use super::query::{
     ArraySubquerySpec, Condition, Conjunction, JoinSpec, RecursiveHopSpec, RecursiveSpec,
 };
 use super::relation_ir::{
-    JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr, RelExpr,
-    RowIdRef, ValueRef,
+    ColumnRef, JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
+    RelExpr, RowIdRef, ValueRef,
 };
 use super::types::TableName;
 
@@ -28,6 +28,7 @@ struct LinearJoinInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeCorePlan {
     table: TableName,
+    base_scope: String,
     disjuncts: Vec<Conjunction>,
     joins: Vec<JoinSpec>,
     result_element_index: Option<usize>,
@@ -37,6 +38,7 @@ struct RuntimeCorePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionQueryPlan {
     pub table: TableName,
+    pub base_scope: String,
     pub branches: Vec<String>,
     pub disjuncts: Vec<Conjunction>,
     pub joins: Vec<JoinSpec>,
@@ -64,6 +66,48 @@ fn to_runtime_column(column: &str) -> String {
     }
 }
 
+fn to_scoped_runtime_column(column_ref: &ColumnRef) -> String {
+    let column = to_runtime_column(&column_ref.column);
+    match column_ref.scope.as_deref() {
+        Some(scope) => format!("{scope}.{column}"),
+        None => column,
+    }
+}
+
+fn predicate_single_scope(predicate: &PredicateExpr) -> Option<String> {
+    fn collect(predicate: &PredicateExpr, scopes: &mut Vec<String>) {
+        match predicate {
+            PredicateExpr::Cmp { left, .. }
+            | PredicateExpr::Contains { left, .. }
+            | PredicateExpr::In { left, .. } => {
+                if let Some(scope) = &left.scope {
+                    scopes.push(scope.clone());
+                }
+            }
+            PredicateExpr::IsNull { column } | PredicateExpr::IsNotNull { column } => {
+                if let Some(scope) = &column.scope {
+                    scopes.push(scope.clone());
+                }
+            }
+            PredicateExpr::And(exprs) | PredicateExpr::Or(exprs) => {
+                for expr in exprs {
+                    collect(expr, scopes);
+                }
+            }
+            PredicateExpr::Not(inner) => collect(inner, scopes),
+            PredicateExpr::True | PredicateExpr::False => {}
+        }
+    }
+
+    let mut scopes = Vec::new();
+    collect(predicate, &mut scopes);
+    let first = scopes.first()?.clone();
+    scopes
+        .into_iter()
+        .all(|scope| scope == first)
+        .then_some(first)
+}
+
 fn flatten_predicate_terms<'a>(predicate: &'a PredicateExpr, out: &mut Vec<&'a PredicateExpr>) {
     match predicate {
         PredicateExpr::And(exprs) => {
@@ -82,7 +126,7 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
             op,
             right: ValueRef::Literal(value),
         } => {
-            let column = to_runtime_column(&left.column);
+            let column = to_scoped_runtime_column(left);
             Some(match op {
                 PredicateCmpOp::Eq => Condition::Eq {
                     column,
@@ -114,14 +158,14 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
             left,
             right: ValueRef::Literal(value),
         } => Some(Condition::Contains {
-            column: to_runtime_column(&left.column),
+            column: to_scoped_runtime_column(left),
             value: value.clone(),
         }),
         PredicateExpr::IsNull { column } => Some(Condition::IsNull {
-            column: to_runtime_column(&column.column),
+            column: to_scoped_runtime_column(column),
         }),
         PredicateExpr::IsNotNull { column } => Some(Condition::IsNotNull {
-            column: to_runtime_column(&column.column),
+            column: to_scoped_runtime_column(column),
         }),
         PredicateExpr::True => None,
         _ => None,
@@ -168,7 +212,7 @@ fn relation_predicate_to_disjuncts(predicate: &PredicateExpr) -> Option<Vec<Conj
                 };
                 out.push(Conjunction {
                     conditions: vec![Condition::Eq {
-                        column: to_runtime_column(&left.column),
+                        column: to_scoped_runtime_column(left),
                         value: literal,
                     }],
                 });
@@ -211,6 +255,14 @@ fn extract_linear_join_info(expr: &RelExpr) -> Option<LinearJoinInfo> {
         }),
         RelExpr::Filter { input, predicate } => {
             let mut inner = extract_linear_join_info(input)?;
+            if inner.joins.is_empty()
+                && let Some(scope) = predicate_single_scope(predicate)
+            {
+                if let Some(base_scope) = inner.scope_order.first_mut() {
+                    *base_scope = scope.clone();
+                }
+                inner.current_scope = scope;
+            }
             let filter_disjuncts = relation_predicate_to_disjuncts(predicate)?;
             inner.disjuncts = and_disjuncts(inner.disjuncts, filter_disjuncts);
             if inner.disjuncts.is_empty() {
@@ -391,6 +443,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
 
             return Some(RuntimeCorePlan {
                 table: seed_info.base_table,
+                base_scope: seed_info.scope_order[0].clone(),
                 disjuncts: seed_info.disjuncts,
                 joins: Vec::new(),
                 result_element_index: None,
@@ -466,6 +519,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
 
     Some(RuntimeCorePlan {
         table: seed_info.base_table,
+        base_scope: seed_info.scope_order[0].clone(),
         disjuncts: seed_info.disjuncts,
         joins: Vec::new(),
         result_element_index: None,
@@ -483,12 +537,18 @@ fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
         } => {
             let plan = parse_gather_core(seed, step, *max_depth)?;
             Some(GatherJoinInfo {
-                current_scope: plan.table.as_str().to_string(),
+                current_scope: plan.base_scope.clone(),
                 plan,
             })
         }
         RelExpr::Filter { input, predicate } => {
             let mut inner = parse_gather_join_info(input)?;
+            if inner.plan.joins.is_empty()
+                && let Some(scope) = predicate_single_scope(predicate)
+            {
+                inner.current_scope = scope.clone();
+                inner.plan.base_scope = scope;
+            }
             let filter_disjuncts = relation_predicate_to_disjuncts(predicate)?;
             inner.plan.disjuncts = and_disjuncts(inner.plan.disjuncts, filter_disjuncts);
             if inner.plan.disjuncts.is_empty() {
@@ -570,7 +630,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
         } => parse_gather_core(seed, step, *max_depth),
         RelExpr::Project { input, columns } => {
             if let Some(mut gather_info) = parse_gather_join_info(input) {
-                let mut scope_order = vec![gather_info.plan.table.as_str().to_string()];
+                let mut scope_order = vec![gather_info.plan.base_scope.clone()];
                 scope_order.extend(
                     gather_info
                         .plan
@@ -597,6 +657,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
                 };
             Some(RuntimeCorePlan {
                 table: linear.base_table,
+                base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
                 joins: linear.joins.clone(),
                 result_element_index,
@@ -611,6 +672,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             let linear = extract_linear_join_info(core)?;
             Some(RuntimeCorePlan {
                 table: linear.base_table,
+                base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
                 joins: linear.joins,
                 result_element_index: None,
@@ -680,6 +742,7 @@ pub(crate) fn lower_relation_to_execution_plan(
 
     Some(ExecutionQueryPlan {
         table: core_plan.table,
+        base_scope: core_plan.base_scope,
         branches: branches.to_vec(),
         disjuncts: core_plan.disjuncts,
         joins: core_plan.joins,
@@ -692,4 +755,91 @@ pub(crate) fn lower_relation_to_execution_plan(
         array_subqueries,
         select_columns,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::relation_ir::{ColumnRef, JoinCondition, PredicateCmpOp};
+    use crate::query_manager::types::Value;
+
+    #[test]
+    fn lower_relation_to_execution_plan_preserves_scoped_join_filters() {
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("users"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("posts"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("u", "id"),
+                    right: ColumnRef::scoped("p", "author_id"),
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("u", "name"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Bob".to_string())),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("p", "title"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("Learning Rust".to_string())),
+                },
+            ]),
+        };
+        let branches = vec!["main".to_string()];
+
+        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
+            .expect("scoped join filters should lower");
+
+        assert_eq!(plan.base_scope, "u");
+        assert_eq!(plan.joins.len(), 1);
+        assert_eq!(plan.joins[0].alias.as_deref(), Some("p"));
+        assert_eq!(plan.disjuncts.len(), 1);
+        assert_eq!(
+            plan.disjuncts[0].conditions,
+            vec![
+                Condition::Eq {
+                    column: "u.name".to_string(),
+                    value: Value::Text("Bob".to_string()),
+                },
+                Condition::Eq {
+                    column: "p.title".to_string(),
+                    value: Value::Text("Learning Rust".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lower_relation_to_execution_plan_tracks_single_table_alias_scope() {
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::scoped("u", "name"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Text("Bob".to_string())),
+            },
+        };
+        let branches = vec!["main".to_string()];
+
+        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
+            .expect("single-table alias filter should lower");
+
+        assert_eq!(plan.base_scope, "u");
+        assert_eq!(
+            plan.disjuncts[0].conditions,
+            vec![Condition::Eq {
+                column: "u.name".to_string(),
+                value: Value::Text("Bob".to_string()),
+            }]
+        );
+    }
 }

@@ -551,11 +551,18 @@ impl QueryGraph {
         let predicate = build_remaining_predicate_from_disjuncts(
             &plan.disjuncts,
             &index_columns,
-            &current_descriptor,
+            &TupleDescriptor::single_with_materialization(
+                plan.base_scope.as_str(),
+                current_descriptor.clone(),
+                true,
+            ),
         );
         if !matches!(predicate, Predicate::True) {
-            let filter_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let filter_tuple_desc = TupleDescriptor::single_with_materialization(
+                plan.base_scope.as_str(),
+                current_descriptor.clone(),
+                true,
+            );
             let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
             let filter_id = graph.add_node(GraphNode::Filter(filter_node));
             graph.add_edge(filter_id, phase2_input);
@@ -565,8 +572,11 @@ impl QueryGraph {
         // Sort node (default: id ASC when order_by is omitted)
         let sort_keys = sort_keys_from_order_by(&plan.order_by, &current_descriptor);
         if !sort_keys.is_empty() {
-            let sort_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let sort_tuple_desc = TupleDescriptor::single_with_materialization(
+                plan.base_scope.as_str(),
+                current_descriptor.clone(),
+                true,
+            );
             let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
             let sort_id = graph.add_node(GraphNode::Sort(sort_node));
             graph.add_edge(sort_id, phase2_input);
@@ -575,8 +585,11 @@ impl QueryGraph {
 
         // LimitOffset node (if limit or offset specified)
         if plan.limit.is_some() || plan.offset > 0 {
-            let limit_tuple_desc =
-                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let limit_tuple_desc = TupleDescriptor::single_with_materialization(
+                plan.base_scope.as_str(),
+                current_descriptor.clone(),
+                true,
+            );
             let limit_offset_node =
                 LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, plan.limit, plan.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
@@ -614,8 +627,11 @@ impl QueryGraph {
 
         // Output node
         graph.combined_descriptor = current_descriptor.clone();
-        let output_tuple_desc =
-            TupleDescriptor::single_with_materialization("", current_descriptor, true);
+        let output_tuple_desc = TupleDescriptor::single_with_materialization(
+            plan.base_scope.as_str(),
+            current_descriptor,
+            true,
+        );
         let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, phase2_input);
@@ -996,7 +1012,7 @@ impl QueryGraph {
         };
 
         // Track all table names and descriptors for TupleDescriptor
-        let mut table_names = vec![plan.table.as_str().to_string()];
+        let mut table_names = vec![plan.base_scope.clone()];
         let mut table_descriptors = vec![base_descriptor.clone()];
         let mut seen_tables: HashSet<String> = HashSet::new();
         seen_tables.insert(plan.table.as_str().to_string());
@@ -1030,7 +1046,7 @@ impl QueryGraph {
         };
 
         let base_tuple_desc = TupleDescriptor::single_with_materialization(
-            plan.table.as_str(),
+            plan.base_scope.as_str(),
             base_descriptor.clone(),
             true,
         );
@@ -1236,7 +1252,7 @@ impl QueryGraph {
 
         // Filter node (if conditions exist)
         // Use TupleDescriptor to enable filtering on columns from any joined table
-        let predicate = disjuncts_to_predicate(&plan.disjuncts, &combined_descriptor);
+        let predicate = disjuncts_to_predicate(&plan.disjuncts, &tuple_descriptor);
         if !matches!(predicate, Predicate::True) {
             let filter_node =
                 FilterNode::with_tuple_descriptor(tuple_descriptor.clone(), predicate);
@@ -2241,7 +2257,10 @@ fn descriptors_compatible_by_shape(left: &RowDescriptor, right: &RowDescriptor) 
         .all(|(l, r)| l.column_type == r.column_type)
 }
 
-fn disjuncts_to_predicate(disjuncts: &[Conjunction], descriptor: &RowDescriptor) -> Predicate {
+fn disjuncts_to_predicate(
+    disjuncts: &[Conjunction],
+    tuple_descriptor: &TupleDescriptor,
+) -> Predicate {
     if disjuncts.is_empty() {
         return Predicate::True;
     }
@@ -2254,13 +2273,13 @@ fn disjuncts_to_predicate(disjuncts: &[Conjunction], descriptor: &RowDescriptor)
         return Predicate::True;
     }
     if non_empty.len() == 1 {
-        return non_empty[0].to_predicate(descriptor);
+        return non_empty[0].to_tuple_predicate(tuple_descriptor);
     }
 
     Predicate::Or(
         non_empty
             .iter()
-            .map(|d| d.to_predicate(descriptor))
+            .map(|d| d.to_tuple_predicate(tuple_descriptor))
             .collect(),
     )
 }
@@ -2312,7 +2331,7 @@ fn sort_keys_from_order_by(
 fn build_remaining_predicate_from_disjuncts(
     disjuncts: &[Conjunction],
     index_columns: &[String],
-    descriptor: &RowDescriptor,
+    tuple_descriptor: &TupleDescriptor,
 ) -> Predicate {
     // Check if all disjuncts are fully covered by their respective index scans
     let all_fully_covered = disjuncts
@@ -2328,7 +2347,9 @@ fn build_remaining_predicate_from_disjuncts(
     let remaining_predicates: Vec<Predicate> = disjuncts
         .iter()
         .zip(index_columns.iter())
-        .map(|(disjunct, index_col)| disjunct.remaining_predicate(index_col, descriptor))
+        .map(|(disjunct, index_col)| {
+            disjunct.remaining_tuple_predicate(index_col, tuple_descriptor)
+        })
         .filter(|p| !matches!(p, Predicate::True))
         .collect();
 
@@ -2338,7 +2359,7 @@ fn build_remaining_predicate_from_disjuncts(
         Predicate::True
     } else {
         // Fall back to full predicate for partial coverage cases
-        disjuncts_to_predicate(disjuncts, descriptor)
+        disjuncts_to_predicate(disjuncts, tuple_descriptor)
     }
 }
 
