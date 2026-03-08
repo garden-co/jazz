@@ -60,7 +60,7 @@ export async function readTodosWithIncludes(db: Db) {
 // #endregion reading-includes-ts
 
 // #region reading-select-ts
-export async function readTodoTitlesWithProjectedProject(db: Db) {
+export async function readTodoTitlesWithSelectedProject(db: Db) {
   return db.all(
     app.todos
       .select("title")
