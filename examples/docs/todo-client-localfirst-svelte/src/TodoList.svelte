@@ -43,7 +43,7 @@
 
 	// #region writing-durability-svelte
 	async function addImportantTodo(todoTitle: string) {
-		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
+		const { id } = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
 		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
 		await db.deleteFrom(app.todos, id, { tier: 'global' });
 	}

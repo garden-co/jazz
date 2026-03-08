@@ -84,7 +84,7 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 
 // #region writing-durability-tier-ts
 export async function writeTodoWithDurabilityTiers(db: Db) {
-  const id = await db.insert(
+  const { id } = await db.insert(
     app.todos,
     {
       title: "Write docs with durability tier",

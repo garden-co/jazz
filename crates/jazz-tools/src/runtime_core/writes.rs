@@ -11,15 +11,17 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         table: &str,
         values: Vec<Value>,
         session: Option<&Session>,
-    ) -> Result<ObjectId, RuntimeError> {
+    ) -> Result<InsertedRow, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
-        debug!(object_id = %result.row_id, "inserted");
+        let row_id = result.row_id;
+        let row_values = result.row_values;
+        debug!(object_id = %row_id, "inserted");
         self.immediate_tick();
-        Ok(result.row_id)
+        Ok((row_id, row_values))
     }
 
     /// Update a row (partial update by column name).
@@ -69,11 +71,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<Value>,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<(ObjectId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        let row_id = result.row_id;
+        let row_commit_id = result.row_commit_id;
+        let row_values = result.row_values;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -85,13 +90,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(result.row_commit_id)
+                .entry(row_commit_id)
                 .or_default()
                 .push((tier, sender));
         }
 
         self.immediate_tick();
-        Ok((result.row_id, receiver))
+        Ok(((row_id, row_values), receiver))
     }
 
     /// Update a row and return a receiver that resolves when the requested

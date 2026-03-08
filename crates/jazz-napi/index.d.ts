@@ -18,7 +18,7 @@ export declare class NapiRuntime {
     userBranch: string,
     tier?: string | undefined | null,
   ): NapiRuntime;
-  insert(table: string, values: any): string;
+  insert(table: string, values: any): any;
   update(objectId: string, values: any): void;
   delete(objectId: string): void;
   query(
@@ -44,7 +44,7 @@ export declare class NapiRuntime {
   ): number;
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void;
-  insertDurable(table: string, values: any, tier: string): Promise<string>;
+  insertDurable(table: string, values: any, tier: string): Promise<any>;
   updateDurable(objectId: string, values: any, tier: string): Promise<void>;
   deleteDurable(objectId: string, tier: string): Promise<void>;
   onSyncMessageReceived(messageJson: string): void;

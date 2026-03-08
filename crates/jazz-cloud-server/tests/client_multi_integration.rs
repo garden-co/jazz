@@ -438,7 +438,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     // Ensure query path is fully ready before asserting cross-client sync.
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
 
-    let row_id = client_a
+    let (row_id, _row_values) = client_a
         .create(
             "todos",
             vec![
@@ -788,7 +788,7 @@ async fn jazz_tools_where_subscription_drops_row_when_remote_client_updates_it_o
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
 
     // Insert via client-a so it's visible in its own subscription immediately.
-    let row_id = client_a
+    let (row_id, _row_values) = client_a
         .create(
             "todos",
             vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],

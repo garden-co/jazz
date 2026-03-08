@@ -399,10 +399,21 @@ impl JazzClient {
     }
 
     /// Create a new row in a table.
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        self.runtime
+    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values) = self
+            .runtime
             .insert(table, values, None)
-            .map_err(|e| JazzError::Write(e.to_string()))
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        Ok((object_id, row_values))
     }
 
     /// Update a row.
@@ -507,11 +518,22 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        self.client
+    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values) = self
+            .client
             .runtime
             .insert(table, values, Some(&self.session))
-            .map_err(|e| JazzError::Write(e.to_string()))
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.client.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.client.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        Ok((object_id, row_values))
     }
 
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {

@@ -1254,7 +1254,7 @@ impl MetaStore {
             })
             .collect();
 
-        let object_id = self
+        let (object_id, _row_values) = self
             .runtime
             .insert("apps", values, None)
             .map_err(|e| format!("failed to insert meta app record: {e}"))?;
