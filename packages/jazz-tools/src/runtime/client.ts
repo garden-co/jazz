@@ -878,7 +878,11 @@ export class JazzClient {
    * Insert a new row into a table without waiting for durability.
    */
   create(table: string, values: Value[]): Row {
-    return this.runtime.insert(table, values);
+    const row = this.runtime.insert(table, values);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+    };
   }
 
   /**
