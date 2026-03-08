@@ -78,23 +78,6 @@ fn reorder_values_by_column_name(
     Some(reordered_values)
 }
 
-fn align_create_values_to_runtime_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(&declared_table.columns, &runtime_table.columns, &values)
-        .unwrap_or(values)
-}
-
 fn align_row_values_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
@@ -491,22 +474,7 @@ impl JazzRuntimeImpl {
 
     fn insert_inner(&mut self, table: String, values_json: String) -> Result<String, String> {
         let values = convert_values(&values_json)?;
-        let declared_schema = self
-            .declared_schema
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         self.with_core("insert", |core| {
-            let values = if let Some(schema) = declared_schema.as_ref() {
-                align_create_values_to_runtime_schema(
-                    schema,
-                    core.current_schema(),
-                    &TableName::new(table.clone()),
-                    values,
-                )
-            } else {
-                values
-            };
             core.insert(&table, values, None)
                 .map(|id| id.uuid().to_string())
                 .map_err(|e| format!("Insert failed: {e}"))
