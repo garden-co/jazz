@@ -3901,6 +3901,90 @@ fn join_subscription_can_execute_precise_relation_ir_projection() {
 }
 
 #[test]
+fn join_subscription_precise_relation_ir_full_joined_element_preserves_implicit_id_row_shape() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, ProjectColumn, ProjectExpr, RelExpr,
+    };
+
+    let sync_manager = SyncManager::new();
+    let schema = join_schema_with_implicit_base_id();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = qm
+        .insert(&mut storage, "users", &[Value::Text("Alice".into())])
+        .unwrap();
+    let post = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[Value::Text("Hello World".into()), Value::Uuid(alice.row_id)],
+        )
+        .unwrap();
+
+    let mut query = qm
+        .query("users")
+        .join("posts")
+        .on("users.id", "posts.author_id")
+        .build();
+    query.relation_ir = RelExpr::Project {
+        input: Box::new(RelExpr::Join {
+            left: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            right: Box::new(RelExpr::TableScan {
+                table: TableName::new("posts"),
+            }),
+            on: vec![JoinCondition {
+                left: ColumnRef::scoped("users", "id"),
+                right: ColumnRef::scoped("__hop_0", "author_id"),
+            }],
+            join_kind: JoinKind::Inner,
+        }),
+        columns: vec![
+            ProjectColumn {
+                alias: "id".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+            },
+            ProjectColumn {
+                alias: "title".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "title")),
+            },
+            ProjectColumn {
+                alias: "author_id".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "author_id")),
+            },
+        ],
+    };
+    query.select_columns = None;
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("Expected precise implicit-id projection update");
+
+    assert_eq!(update.delta.added.len(), 1);
+    assert_eq!(
+        update.descriptor.columns.len(),
+        2,
+        "descriptor should only contain declared data columns",
+    );
+    assert_eq!(update.descriptor.columns[0].name, "title");
+    assert_eq!(update.descriptor.columns[1].name, "author_id");
+
+    let row = &update.delta.added[0];
+    assert_eq!(row.id, post.row_id);
+    let values = decode_row(&update.descriptor, &row.data)
+        .expect("should decode full joined element projection");
+    assert_eq!(
+        values,
+        vec![Value::Text("Hello World".into()), Value::Uuid(alice.row_id)]
+    );
+}
+
+#[test]
 fn join_subscription_supports_implicit_base_id_keys() {
     let sync_manager = SyncManager::new();
     let schema = join_schema_with_implicit_base_id();
