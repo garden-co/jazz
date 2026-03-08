@@ -13,6 +13,10 @@
     "release:publish": "changeset publish",
     "release:publish:alpha": "changeset publish --tag alpha",
     "test": "turbo run test --filter=!jazz-rn --only",
+    "bench:realistic:update-history": "node benchmarks/realistic/update_history.mjs",
+    "bench:realistic:build-site": "node benchmarks/realistic/build_site.mjs",
+    "bench:realistic:render": "node benchmarks/realistic/render_deltas.mjs",
+    "bench:realistic:export-criterion": "node benchmarks/realistic/export_criterion.mjs",
     "postinstall": "lefthook install"
   },
   "devDependencies": {

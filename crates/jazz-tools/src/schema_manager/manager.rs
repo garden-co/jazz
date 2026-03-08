@@ -13,7 +13,9 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash, Value};
+use crate::query_manager::types::{
+    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, Value,
+};
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
 
@@ -62,6 +64,7 @@ use super::types::AppId;
 /// manager.query_manager_mut().unsubscribe_with_sync(sub_id);
 /// ```
 pub struct SchemaManager {
+    declared_current_schema: Option<Schema>,
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
@@ -89,6 +92,7 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
+        let declared_current_schema = schema.clone();
         let schema = normalize_schema(schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -103,6 +107,7 @@ impl SchemaManager {
         known_schemas.insert(current_hash, schema);
 
         Ok(Self {
+            declared_current_schema: Some(declared_current_schema),
             context,
             query_manager,
             app_id,
@@ -132,6 +137,7 @@ impl SchemaManager {
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
         let query_manager = QueryManager::new(sync_manager);
         Self {
+            declared_current_schema: None,
             context: SchemaContext::empty(),
             query_manager,
             app_id,
@@ -214,6 +220,23 @@ impl SchemaManager {
     /// Get the user branch.
     pub fn user_branch(&self) -> &str {
         &self.context.user_branch
+    }
+
+    fn align_insert_values_to_runtime_schema(&self, table: &str, values: &[Value]) -> Vec<Value> {
+        let Some(declared_schema) = self.declared_current_schema.as_ref() else {
+            return values.to_vec();
+        };
+
+        let table_name = TableName::new(table);
+        let Some(declared_table) = declared_schema.get(&table_name) else {
+            return values.to_vec();
+        };
+        let Some(runtime_table) = self.context.current_schema.get(&table_name) else {
+            return values.to_vec();
+        };
+
+        reorder_values_by_column_name(&declared_table.columns, &runtime_table.columns, values)
+            .unwrap_or_else(|| values.to_vec())
     }
 
     /// Add a live schema version with auto-generated lens.
@@ -835,11 +858,12 @@ impl SchemaManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<InsertHandle, QueryError> {
+        let aligned_values = self.align_insert_values_to_runtime_schema(table, values);
         self.query_manager.insert_on_branch_with_session(
             storage,
             table,
             self.context.branch_name().as_str(),
-            values,
+            &aligned_values,
             session,
         )
     }
@@ -894,6 +918,30 @@ impl SchemaManager {
         // Retry any pending row updates that might now be processable
         self.query_manager.retry_pending_row_updates(storage);
     }
+}
+
+fn reorder_values_by_column_name(
+    source_descriptor: &RowDescriptor,
+    target_descriptor: &RowDescriptor,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if values.len() != source_descriptor.columns.len()
+        || source_descriptor.columns.len() != target_descriptor.columns.len()
+    {
+        return None;
+    }
+
+    let mut values_by_column = HashMap::with_capacity(values.len());
+    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name, value.clone());
+    }
+
+    let mut reordered_values = Vec::with_capacity(values.len());
+    for column in &target_descriptor.columns {
+        reordered_values.push(values_by_column.remove(&column.name)?);
+    }
+
+    Some(reordered_values)
 }
 
 fn normalize_schema(mut schema: Schema) -> Schema {
@@ -1268,16 +1316,7 @@ mod tests {
             .unwrap()
             .columns
             .clone();
-        let values: Vec<_> = descriptor
-            .columns
-            .iter()
-            .map(|column| match column.name_str() {
-                "email" => email.clone(),
-                "id" => id_val.clone(),
-                "name" => name.clone(),
-                other => panic!("unexpected column {other}"),
-            })
-            .collect();
+        let values = vec![id_val.clone(), name.clone(), email.clone()];
 
         let _handle = manager.insert(&mut storage, "users", &values).unwrap();
         manager.process(&mut storage);
