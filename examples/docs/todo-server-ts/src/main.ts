@@ -72,9 +72,9 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     userBranch: "main",
   });
   const client = context.client();
-  const runtimeTodoColumns = client.getSchema().todos.columns;
+  const declaredTodoColumns = schemaApp.wasmSchema.todos.columns;
   const todoColumnIndexes = new Map(
-    runtimeTodoColumns.map((column, index) => [column.name, index] as const),
+    declaredTodoColumns.map((column, index) => [column.name, index] as const),
   );
 
   function getTodoValue(values: Value[], columnName: string): Value | undefined {
@@ -85,7 +85,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   function buildTodoValues(body: CreateTodoRequest): Value[] {
     const ownerId = body.owner_id ?? "anonymous";
 
-    return runtimeTodoColumns.map((column) => {
+    return declaredTodoColumns.map((column) => {
       switch (column.name) {
         case "description":
           return body.description
@@ -181,14 +181,13 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
       const values = buildTodoValues(body);
 
-      const id = await client.create("todos", values);
+      const row = await client.create("todos", values);
+      const todo = rowToTodo(row.id, row.values);
 
-      const todo: Todo = {
-        id,
-        title: body.title,
-        done: false,
-        description: body.description,
-      };
+      if (!todo) {
+        res.status(500).json({ error: "Failed to create todo" });
+        return;
+      }
 
       res.status(201).json(todo);
 
@@ -297,7 +296,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      await client.update(id, updates);
+      await client.updateDurable(id, updates);
 
       // Fetch updated todo
       const rows = await client.query(schemaApp.todos.where({ id }));
@@ -323,7 +322,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      await client.delete(id);
+      await client.deleteDurable(id);
       res.status(204).send();
 
       // Notify SSE connections

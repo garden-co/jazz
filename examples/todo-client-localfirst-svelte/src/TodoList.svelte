@@ -40,7 +40,7 @@
 			{#if todo.description}
 				<small>{todo.description}</small>
 			{/if}
-			<button class="delete-btn" onclick={() => db.deleteFrom(app.todos, todo.id)}>
+			<button class="delete-btn" onclick={() => db.delete(app.todos, todo.id)}>
 				&times;
 			</button>
 		</li>

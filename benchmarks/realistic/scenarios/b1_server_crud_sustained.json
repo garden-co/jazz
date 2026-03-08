@@ -1,0 +1,8 @@
+{
+  "id": "B1",
+  "name": "server_crud_sustained",
+  "seed": 20260222,
+  "insert_count": 48,
+  "update_count": 48,
+  "delete_count": 48
+}

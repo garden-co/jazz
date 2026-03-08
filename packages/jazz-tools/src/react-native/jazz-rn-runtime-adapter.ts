@@ -1,5 +1,5 @@
 import type { WasmSchema } from "../drivers/types.js";
-import type { Runtime } from "../runtime/client.js";
+import type { Row, Runtime } from "../runtime/client.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
 export interface JazzRnRuntimeBinding {
@@ -118,8 +118,9 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  insert(table: string, values: any): string {
-    return this.binding.insert(table, JSON.stringify(values));
+  insert(table: string, values: any): Row {
+    const rowJson = this.binding.insert(table, JSON.stringify(values));
+    return JSON.parse(rowJson) as Row;
   }
 
   update(object_id: string, values: any): void {
@@ -218,11 +219,11 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertDurable(table: string, values: any, tier: string): Promise<string> {
+  insertDurable(table: string, values: any, tier: string): Promise<Row> {
     assertWorkerTier(tier);
-    const id = this.insert(table, values);
+    const row = this.insert(table, values);
     this.binding.flush();
-    return Promise.resolve(id);
+    return Promise.resolve(row);
   }
 
   updateDurable(object_id: string, values: any, tier: string): Promise<void> {

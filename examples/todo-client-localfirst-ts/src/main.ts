@@ -170,7 +170,7 @@ export async function startApp(
       const checkbox = target as HTMLInputElement;
       db.update(app.todos, id, { done: checkbox.checked });
     } else if (target.classList.contains("delete-btn")) {
-      db.deleteFrom(app.todos, id);
+      db.delete(app.todos, id);
     }
   });
 

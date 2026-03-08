@@ -134,6 +134,11 @@ function encodeBase64(bytes: Uint8Array): string {
   throw new Error("No base64 encoder available in this runtime");
 }
 
+function encodeLocalPrincipalId(digest: Uint8Array): string {
+  const encoded = encodeBase64(digest).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return `local:${encoded}`;
+}
+
 function rightRotate(value: number, amount: number): number {
   return (value >>> amount) | (value << (32 - amount));
 }
@@ -260,8 +265,16 @@ export async function deriveLocalPrincipalId(
 ): Promise<string> {
   const input = `${appId}:${mode}:${token}`;
   const digest = await sha256(input);
-  const encoded = encodeBase64(digest).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  return `local:${encoded}`;
+  return encodeLocalPrincipalId(digest);
+}
+
+export function deriveLocalPrincipalIdSync(
+  appId: string,
+  mode: LocalAuthMode,
+  token: string,
+): string {
+  const input = `${appId}:${mode}:${token}`;
+  return encodeLocalPrincipalId(sha256PureJs(input));
 }
 
 export function resolveJwtSession(jwtToken: string): Session | null {
@@ -309,6 +322,25 @@ export async function resolveClientSession(config: ClientSessionInput): Promise<
   const principalId = await deriveLocalPrincipalId(config.appId, localMode, localToken);
   return {
     user_id: principalId,
+    claims: {
+      auth_mode: "local",
+      local_mode: localMode,
+    },
+  };
+}
+
+export function resolveClientSessionSync(config: ClientSessionInput): Session | null {
+  const jwtSession = resolveJwtSession(config.jwtToken ?? "");
+  if (jwtSession) return jwtSession;
+
+  const localMode = config.localAuthMode;
+  const localToken = trimOptional(config.localAuthToken);
+  if (!localMode || !localToken) {
+    return null;
+  }
+
+  return {
+    user_id: deriveLocalPrincipalIdSync(config.appId, localMode, localToken),
     claims: {
       auth_mode: "local",
       local_mode: localMode,
