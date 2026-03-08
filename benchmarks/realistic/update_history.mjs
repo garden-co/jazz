@@ -78,6 +78,19 @@ function toBranch(ref) {
   return ref;
 }
 
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function resolveBranch(metadata, manifest, fallbackRef) {
+  return firstNonEmptyString(metadata?.branch, manifest?.branch) ?? toBranch(fallbackRef);
+}
+
 function scenarioSummary(scenario) {
   return {
     scenario_id: scenario.scenario_id,
@@ -88,6 +101,29 @@ function scenarioSummary(scenario) {
     throughput_ops_per_sec: scenario.throughput_ops_per_sec,
     operation_summaries: scenario.operation_summaries ?? {},
     extra: scenario.extra ?? {},
+  };
+}
+
+function criterionScenarioSummary(benchmark) {
+  const metrics = benchmark?.metrics ?? {};
+  return {
+    scenario_id: benchmark.scenario_id ?? benchmark.full_id ?? "unknown",
+    scenario_name: benchmark.scenario_name ?? benchmark.benchmark_id ?? benchmark.full_id ?? null,
+    topology: benchmark.group_id ?? "criterion",
+    total_operations: benchmark.throughput_elements ?? null,
+    wall_time_ms: metrics.mean_ms ?? null,
+    throughput_ops_per_sec: metrics.elems_per_sec ?? metrics.iter_per_sec ?? null,
+    operation_summaries: {},
+    extra: {
+      full_id: benchmark.full_id ?? null,
+      benchmark_id: benchmark.benchmark_id ?? null,
+      throughput_elements: benchmark.throughput_elements ?? null,
+      iter_per_sec: metrics.iter_per_sec ?? null,
+      iter_per_sec_ci_low: metrics.iter_per_sec_ci_low ?? null,
+      iter_per_sec_ci_high: metrics.iter_per_sec_ci_high ?? null,
+      elems_per_sec_ci_low: metrics.elems_per_sec_ci_low ?? null,
+      elems_per_sec_ci_high: metrics.elems_per_sec_ci_high ?? null,
+    },
   };
 }
 
@@ -113,7 +149,7 @@ function extractNative(nativeDir) {
   if (scenarios.length === 0) return [];
 
   const generatedAt = manifest.generated_at ?? metadata.generated_at ?? new Date().toISOString();
-  const branch = toBranch(metadata.ref ?? manifest.ref);
+  const branch = resolveBranch(metadata, manifest, metadata.ref ?? manifest.ref);
   return [
     {
       id: buildRunId([
@@ -129,6 +165,52 @@ function extractNative(nativeDir) {
       run_id: metadata.run_id ?? manifest.run_id ?? null,
       run_attempt: metadata.run_attempt ?? manifest.run_attempt ?? null,
       sha: metadata.sha ?? manifest.sha ?? null,
+      ref: metadata.ref ?? manifest.ref ?? null,
+      branch,
+      profile: metadata.profile ?? manifest.profile ?? null,
+      runner_name: metadata.runner_name ?? null,
+      runner_os: metadata.runner_os ?? null,
+      runner_arch: metadata.runner_arch ?? null,
+      scenarios,
+    },
+  ];
+}
+
+function extractNativeCriterion(nativeDir) {
+  if (!nativeDir) return [];
+  if (!fs.existsSync(nativeDir)) return [];
+
+  const metadata = readJsonIfExists(path.join(nativeDir, "metadata.json")) ?? {};
+  const manifest = readJsonIfExists(path.join(nativeDir, "manifest.json")) ?? {};
+  const criterion = readJsonIfExists(path.join(nativeDir, "criterion_realistic_phase1.json"));
+  if (!criterion || !Array.isArray(criterion.benchmarks)) return [];
+
+  const scenarios = criterion.benchmarks
+    .filter((x) => x && typeof x === "object" && typeof x.full_id === "string")
+    .map((x) => criterionScenarioSummary(x));
+  if (scenarios.length === 0) return [];
+
+  const generatedAt =
+    criterion.generated_at ??
+    manifest.generated_at ??
+    metadata.generated_at ??
+    new Date().toISOString();
+  const branch = resolveBranch(metadata, manifest, metadata.ref ?? manifest.ref);
+  return [
+    {
+      id: buildRunId([
+        "native-criterion",
+        metadata.run_id,
+        metadata.run_attempt,
+        metadata.sha,
+        metadata.profile,
+      ]),
+      suite: "native-criterion",
+      generated_at: generatedAt,
+      repository: metadata.repository ?? manifest.repository ?? null,
+      run_id: metadata.run_id ?? manifest.run_id ?? null,
+      run_attempt: metadata.run_attempt ?? manifest.run_attempt ?? null,
+      sha: metadata.sha ?? manifest.sha ?? criterion?.metadata?.sha ?? null,
       ref: metadata.ref ?? manifest.ref ?? null,
       branch,
       profile: metadata.profile ?? manifest.profile ?? null,
@@ -159,7 +241,7 @@ function extractBrowser(browserDir) {
     manifest.generated_at ??
     metadata.generated_at ??
     new Date().toISOString();
-  const branch = toBranch(metadata.ref ?? manifest.ref);
+  const branch = resolveBranch(metadata, manifest, metadata.ref ?? manifest.ref);
   return [
     {
       id: buildRunId([
@@ -201,6 +283,7 @@ function main() {
 
   const incoming = [
     ...extractNative(path.resolve(args.native || "")),
+    ...extractNativeCriterion(path.resolve(args.native || "")),
     ...extractBrowser(path.resolve(args.browser || "")),
   ];
   if (incoming.length === 0) {
