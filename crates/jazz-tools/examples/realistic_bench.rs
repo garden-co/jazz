@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::{
-    AppContext, AppId, ColumnType, JazzClient, ObjectId, PersistenceTier, QueryBuilder, Schema,
+    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema,
     SchemaBuilder, TableSchema, Value,
 };
 use serde::{Deserialize, Serialize};
@@ -350,7 +350,7 @@ async fn seed_dataset(
 
     for i in 0..profile.users {
         report_loop_progress("seed users", i, profile.users);
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "users",
                 vec![
@@ -364,7 +364,7 @@ async fn seed_dataset(
 
     for i in 0..profile.organizations {
         report_loop_progress("seed organizations", i, profile.organizations);
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "organizations",
                 vec![
@@ -380,7 +380,7 @@ async fn seed_dataset(
         report_loop_progress("seed memberships", i, profile.users);
         let org = organizations[i % organizations.len()];
         let user = users[i];
-        client
+        let _ = client
             .create(
                 "memberships",
                 vec![
@@ -395,7 +395,7 @@ async fn seed_dataset(
     for i in 0..profile.projects {
         report_loop_progress("seed projects", i, profile.projects);
         let org = organizations[i % organizations.len()];
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "projects",
                 vec![
@@ -414,7 +414,7 @@ async fn seed_dataset(
         report_loop_progress("seed tasks", i, profile.tasks);
         let project_idx = i % projects.len();
         let assignee_idx = i % users.len();
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "tasks",
                 vec![
@@ -435,7 +435,7 @@ async fn seed_dataset(
         report_loop_progress("seed comments", i, profile.comments);
         let task_idx = i % tasks.len();
         let author = users[(i * 7) % users.len()];
-        client
+        let _ = client
             .create(
                 "task_comments",
                 vec![
@@ -453,7 +453,7 @@ async fn seed_dataset(
         report_loop_progress("seed task_watchers", task_idx, tasks.len());
         for w in 0..profile.watchers_per_task {
             let watcher = users[(task_idx + w) % users.len()];
-            client
+            let _ = client
                 .create(
                     "task_watchers",
                     vec![Value::Uuid(task.id), Value::Uuid(watcher)],
@@ -467,7 +467,7 @@ async fn seed_dataset(
         let task_idx = i % tasks.len();
         let task = &tasks[task_idx];
         let actor = users[(i * 11) % users.len()];
-        client
+        let _ = client
             .create(
                 "activity_events",
                 vec![
@@ -726,7 +726,7 @@ async fn run_w3_offline_reconnect(
     let t_offline_start = Instant::now();
     for i in 0..offline_writes {
         let author = seed.users[rng.next_usize(seed.users.len())];
-        offline_client
+        let _ = offline_client
             .create(
                 "task_comments",
                 vec![
@@ -756,7 +756,7 @@ async fn run_w3_offline_reconnect(
             .filter_eq("task_id", Value::Uuid(target_task_id))
             .build();
         let rows = online_client
-            .query(query, Some(PersistenceTier::EdgeServer))
+            .query(query, Some(DurabilityTier::EdgeServer))
             .await?;
         observed_count = rows.len();
         polls += 1;
