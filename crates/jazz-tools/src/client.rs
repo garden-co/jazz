@@ -400,7 +400,6 @@ impl JazzClient {
 
     /// Create a new row in a table.
     pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        let values = self.align_create_values_to_runtime_schema(table, values);
         self.runtime
             .insert(table, values, None)
             .map_err(|e| JazzError::Write(e.to_string()))
@@ -471,20 +470,6 @@ impl JazzClient {
         Ok(())
     }
 
-    fn align_create_values_to_runtime_schema(&self, table: &str, values: Vec<Value>) -> Vec<Value> {
-        let runtime_schema = match self.runtime.current_schema() {
-            Ok(schema) => schema,
-            Err(_) => return values,
-        };
-
-        align_create_values_to_runtime_schema(
-            &self.declared_schema,
-            &runtime_schema,
-            &TableName::new(table),
-            values,
-        )
-    }
-
     fn align_query_rows_to_declared_schema(
         &self,
         query: &Query,
@@ -523,9 +508,6 @@ pub struct SessionClient<'a> {
 
 impl<'a> SessionClient<'a> {
     pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        let values = self
-            .client
-            .align_create_values_to_runtime_schema(table, values);
         self.client
             .runtime
             .insert(table, values, Some(&self.session))
@@ -586,23 +568,6 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
         && query.recursive.is_none()
         && query.select_columns.is_none()
         && query.result_element_index.is_none()
-}
-
-fn align_create_values_to_runtime_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(&declared_table.columns, &runtime_table.columns, &values)
-        .unwrap_or(values)
 }
 
 fn align_row_values_to_declared_schema(
@@ -672,21 +637,6 @@ mod tests {
     }
 
     #[test]
-    fn create_values_are_reordered_to_runtime_schema() {
-        let aligned = align_create_values_to_runtime_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &TableName::new("todos"),
-            vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
-        );
-
-        assert_eq!(
-            aligned,
-            vec![Value::Boolean(false), Value::Text("buy milk".to_string())]
-        );
-    }
-
-    #[test]
     fn query_rows_are_reordered_back_to_declared_schema() {
         let aligned = align_row_values_to_declared_schema(
             &declared_todo_schema(),
@@ -699,19 +649,6 @@ mod tests {
             aligned,
             vec![Value::Text("done".to_string()), Value::Boolean(true)]
         );
-    }
-
-    #[test]
-    fn skips_reordering_when_value_count_does_not_match_descriptor() {
-        let values = vec![Value::Text("only-title".to_string())];
-        let aligned = align_create_values_to_runtime_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &TableName::new("todos"),
-            values.clone(),
-        );
-
-        assert_eq!(aligned, values);
     }
 
     #[test]
