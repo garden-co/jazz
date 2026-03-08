@@ -28,8 +28,10 @@ env:
   BENCH_PROFILE: ${{ github.event.inputs.profile || 's' }}
   BENCH_BRANCH: ${{ github.head_ref || github.ref_name }}
   BENCH_REF: ${{ github.ref }}
-  BENCH_SHA: ${{ github.sha }}
+  BENCH_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   BENCH_TIMEOUT_SECONDS: "60"
+  VERCEL_ORG_ID: team_xiRKInFi7lBd1gTqyAGuzmkC
+  VERCEL_PROJECT_ID: prj_RfjK9XUx0HaHkxGmvsMrPJhhuZVG
 
 permissions:
   contents: read
@@ -351,11 +353,63 @@ jobs:
           name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: site-input/browser
 
+      - name: Seed benchmark history snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/site-history
+          history_path=bench-out/site-history/working_history.json
+
+          if git cat-file -e origin/main:benchmarks/realistic/history/bench_history.json 2>/dev/null; then
+            git show origin/main:benchmarks/realistic/history/bench_history.json > "$history_path"
+          elif [ -f benchmarks/realistic/history/bench_history.json ]; then
+            cp benchmarks/realistic/history/bench_history.json "$history_path"
+          else
+            printf '{\n  "version": 1,\n  "updated_at": null,\n  "runs": []\n}\n' > "$history_path"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${PR_NUMBER}" ]; then
+            previous_run_id="$(
+              gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/benchmarks.yml/runs?branch=${BENCH_BRANCH}&status=success&per_page=20" \
+                --jq '.workflow_runs[] | select(.id != '"${GITHUB_RUN_ID}"') | select(.event == "pull_request") | select(any(.pull_requests[]?; .number == '"${PR_NUMBER}"')) | .id' \
+                | head -n1
+            )"
+
+            if [ -n "${previous_run_id}" ]; then
+              previous_artifact="$(
+                gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${previous_run_id}/artifacts" \
+                  --jq '.artifacts[] | select(.expired == false and (.name | startswith("realistic-site-"))) | .name' \
+                  | head -n1
+              )"
+
+              if [ -n "${previous_artifact}" ]; then
+                mkdir -p bench-out/previous-site
+                gh run download "${previous_run_id}" \
+                  --repo "${GITHUB_REPOSITORY}" \
+                  --name "${previous_artifact}" \
+                  --dir bench-out/previous-site
+
+                previous_history="$(find bench-out/previous-site -name history.json -print -quit || true)"
+                if [ -n "${previous_history}" ]; then
+                  node benchmarks/realistic/merge_histories.mjs \
+                    --out "$history_path" \
+                    --history "$history_path" \
+                    --history "$previous_history" \
+                    --max-runs 5000
+                fi
+              fi
+            fi
+          fi
+
+          echo "BENCH_WORKING_HISTORY=$history_path" >> "$GITHUB_ENV"
+
       - name: Update benchmark history
         run: |
           set -euo pipefail
           args=(
-            --history benchmarks/realistic/history/bench_history.json
+            --history "${BENCH_WORKING_HISTORY}"
             --native site-input/native
             --max-runs 5000
           )
@@ -380,8 +434,67 @@ jobs:
         run: |
           set -euo pipefail
           node benchmarks/realistic/build_site.mjs \
-            --history benchmarks/realistic/history/bench_history.json \
+            --history "${BENCH_WORKING_HISTORY}" \
             --out benchmarks/realistic/site
+
+      - name: Sync checked-in history from working snapshot
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          cp "${BENCH_WORKING_HISTORY}" benchmarks/realistic/history/bench_history.json
+
+      - name: Deploy benchmark site preview
+        if: ${{ github.event_name == 'pull_request' && secrets.VERCEL_BENCHMARKS_TOKEN != '' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_BENCHMARKS_TOKEN }}
+        run: |
+          set -euo pipefail
+          pushd benchmarks/realistic/site >/dev/null
+          deployment_url="$(
+            npx vercel@latest deploy . \
+              --yes \
+              --scope garden-co \
+              --token "${VERCEL_TOKEN}" \
+              -m benchmark_branch="${BENCH_BRANCH}" \
+              -m benchmark_sha="${BENCH_SHA}" \
+              -m benchmark_run_id="${GITHUB_RUN_ID}" \
+              -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
+              | tail -n1
+          )"
+          popd >/dev/null
+          echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
+          {
+            echo "### Benchmark Preview"
+            echo ""
+            echo "${deployment_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy benchmark site to production
+        if: ${{ github.ref == 'refs/heads/main' && secrets.VERCEL_BENCHMARKS_TOKEN != '' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_BENCHMARKS_TOKEN }}
+        run: |
+          set -euo pipefail
+          pushd benchmarks/realistic/site >/dev/null
+          deployment_url="$(
+            npx vercel@latest deploy . \
+              --prod \
+              --yes \
+              --scope garden-co \
+              --token "${VERCEL_TOKEN}" \
+              -m benchmark_branch="${BENCH_BRANCH}" \
+              -m benchmark_sha="${BENCH_SHA}" \
+              -m benchmark_run_id="${GITHUB_RUN_ID}" \
+              -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
+              | tail -n1
+          )"
+          popd >/dev/null
+          echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
+          {
+            echo "### Benchmark Production Site"
+            echo ""
+            echo "${deployment_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Render PR benchmark report
         if: ${{ github.event_name == 'pull_request' }}
@@ -389,6 +502,9 @@ jobs:
           set -euo pipefail
           mkdir -p bench-out
           : > bench-out/pr-report.md
+          if [ -n "${BENCH_SITE_URL:-}" ]; then
+            printf 'Preview site: %s\n\n' "${BENCH_SITE_URL}" >> bench-out/pr-report.md
+          fi
           for summary in site-input/native/summary.md site-input/browser/summary.md; do
             if [ -f "$summary" ]; then
               cat "$summary" >> bench-out/pr-report.md
@@ -396,7 +512,7 @@ jobs:
             fi
           done
           node benchmarks/realistic/render_history_report.mjs \
-            --history benchmarks/realistic/history/bench_history.json \
+            --history "${BENCH_WORKING_HISTORY}" \
             --base-branch main \
             --head-branch "${BENCH_BRANCH}" \
             --out bench-out/history-report.md

@@ -132,8 +132,14 @@ function buildHtml() {
         <label>Head Branch
           <select id="headBranch"></select>
         </label>
+        <label>Head Run
+          <select id="headRun"></select>
+        </label>
         <label>Base Branch
           <select id="baseBranch"></select>
+        </label>
+        <label>Base Run
+          <select id="baseRun"></select>
         </label>
         <label>Suite
           <select id="suite"></select>
@@ -311,7 +317,9 @@ function buildHtml() {
       }
 
       const headBranchSel = document.getElementById("headBranch");
+      const headRunSel = document.getElementById("headRun");
       const baseBranchSel = document.getElementById("baseBranch");
+      const baseRunSel = document.getElementById("baseRun");
       const suiteSel = document.getElementById("suite");
       const profileSel = document.getElementById("profile");
       const scenarioSel = document.getElementById("scenario");
@@ -345,7 +353,9 @@ function buildHtml() {
 
       if (runs.length === 0) {
         fillSelect(headBranchSel, []);
+        fillSelect(headRunSel, []);
         fillSelect(baseBranchSel, []);
+        fillSelect(baseRunSel, []);
         fillSelect(suiteSel, []);
         fillSelect(profileSel, []);
         fillSelect(scenarioSel, []);
@@ -368,8 +378,74 @@ function buildHtml() {
         return runs.filter((r) => r.suite === suite && r.profile === profile);
       }
 
+      function runsForBranch(branch, suite, profile) {
+        return runs.filter((r) => r.branch === branch && r.suite === suite && r.profile === profile);
+      }
+
       function latestRun(branch, suite, profile) {
-        return runs.find((r) => r.branch === branch && r.suite === suite && r.profile === profile) || null;
+        return runsForBranch(branch, suite, profile)[0] || null;
+      }
+
+      function findRunById(runIdValue) {
+        return runs.find((run) => run.id === runIdValue) || null;
+      }
+
+      function runOptionLabel(run) {
+        return [
+          run.generated_at || "n/a",
+          String(run.sha || "n/a").slice(0, 12),
+          runId(run),
+        ].join(" • ");
+      }
+
+      function pickRunId(candidates, currentValue, preferredValue) {
+        if (currentValue && candidates.some((run) => run.id === currentValue)) {
+          return currentValue;
+        }
+        if (preferredValue && candidates.some((run) => run.id === preferredValue)) {
+          return preferredValue;
+        }
+        return candidates[0] ? candidates[0].id : "";
+      }
+
+      function firstDifferentRunId(candidates, excludedId) {
+        const found = candidates.find((run) => run.id !== excludedId);
+        return found ? found.id : "";
+      }
+
+      function refreshRunOptions() {
+        const suite = suiteSel.value;
+        const profile = profileSel.value;
+        const headCandidates = runsForBranch(headBranchSel.value, suite, profile);
+        const baseCandidates = runsForBranch(baseBranchSel.value, suite, profile);
+
+        const nextHeadRunId = pickRunId(headCandidates, headRunSel.value, headCandidates[0]?.id || "");
+        fillSelect(
+          headRunSel,
+          headCandidates.map((run) => ({ value: run.id, label: runOptionLabel(run) })),
+          nextHeadRunId,
+        );
+
+        let preferredBaseRunId = baseCandidates[0]?.id || "";
+        if (baseBranchSel.value === headBranchSel.value) {
+          preferredBaseRunId = firstDifferentRunId(baseCandidates, headRunSel.value || nextHeadRunId) || preferredBaseRunId;
+        }
+
+        const nextBaseRunId = pickRunId(baseCandidates, baseRunSel.value, preferredBaseRunId);
+        fillSelect(
+          baseRunSel,
+          baseCandidates.map((run) => ({ value: run.id, label: runOptionLabel(run) })),
+          nextBaseRunId,
+        );
+
+        if (
+          baseBranchSel.value === headBranchSel.value &&
+          headRunSel.value &&
+          baseRunSel.value === headRunSel.value &&
+          baseCandidates.length > 1
+        ) {
+          baseRunSel.value = firstDifferentRunId(baseCandidates, headRunSel.value) || baseRunSel.value;
+        }
       }
 
       function collectScenarioIds(filteredRuns) {
@@ -474,31 +550,38 @@ function buildHtml() {
       }
 
       function renderComparison() {
-        const headBranch = headBranchSel.value;
-        const baseBranch = baseBranchSel.value;
         const suite = suiteSel.value;
         const profile = profileSel.value;
         const selectedScenario = scenarioSel.value || "__all__";
         const selectedMetric = metricSel.value || "__all__";
 
-        const headRun = latestRun(headBranch, suite, profile);
-        const baseRun = latestRun(baseBranch, suite, profile);
+        const headRun = findRunById(headRunSel.value);
+        const baseRun = findRunById(baseRunSel.value);
 
         const meta = document.getElementById("compareMeta");
         const tbody = document.querySelector("#compareTable tbody");
         tbody.innerHTML = "";
 
         if (!headRun || !baseRun) {
-          meta.textContent = "No matching runs for selected branches/suite/profile.";
+          meta.textContent = "No matching runs for selected filters.";
+          return;
+        }
+
+        if (headRun.id === baseRun.id) {
+          meta.textContent = "Choose two different runs to compare.";
           return;
         }
 
         meta.textContent =
           "Base " +
+          (baseRun.branch || "n/a") +
+          " " +
           (baseRun.generated_at || "n/a") +
           " (" +
           String(baseRun.sha || "").slice(0, 12) +
           ") vs Head " +
+          (headRun.branch || "n/a") +
+          " " +
           (headRun.generated_at || "n/a") +
           " (" +
           String(headRun.sha || "").slice(0, 12) +
@@ -534,7 +617,7 @@ function buildHtml() {
         const selectedScenario = scenarioSel.value || "__all__";
         const selectedMetric = metricSel.value || "__all__";
 
-        const baseRun = latestRun(baseBranch, suite, profile);
+        const baseRun = findRunById(baseRunSel.value);
         const tbody = document.querySelector("#regressionsTable tbody");
         tbody.innerHTML = "";
 
@@ -596,13 +679,20 @@ function buildHtml() {
       }
 
       refreshScenarioAndMetricOptions();
+      refreshRunOptions();
       renderRunsTable();
       renderAll();
 
-      [headBranchSel, baseBranchSel].forEach((el) => el.addEventListener("change", renderAll));
+      [headBranchSel, baseBranchSel].forEach((el) =>
+        el.addEventListener("change", () => {
+          refreshRunOptions();
+          renderAll();
+        }),
+      );
       [suiteSel, profileSel].forEach((el) =>
         el.addEventListener("change", () => {
           refreshScenarioAndMetricOptions();
+          refreshRunOptions();
           renderAll();
         }),
       );
@@ -610,6 +700,18 @@ function buildHtml() {
         refreshScenarioAndMetricOptions();
         renderAll();
       });
+      headRunSel.addEventListener("change", () => {
+        if (
+          baseBranchSel.value === headBranchSel.value &&
+          baseRunSel.value === headRunSel.value &&
+          baseRunSel.options.length > 1
+        ) {
+          const sameBranchRuns = runsForBranch(baseBranchSel.value, suiteSel.value, profileSel.value);
+          baseRunSel.value = firstDifferentRunId(sameBranchRuns, headRunSel.value) || baseRunSel.value;
+        }
+        renderComparison();
+      });
+      baseRunSel.addEventListener("change", renderAll);
       metricSel.addEventListener("change", renderAll);
     }
 
