@@ -3,9 +3,10 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait()],
+  plugins: [wasm(), topLevelAwait(), svelte({ hot: false })],
   server: {
     fs: {
       allow: [resolve(__dirname, "../..")],
