@@ -97,6 +97,150 @@ describe("TS Query API", () => {
     expect(todo.project?.name).toBe("Announcements");
   });
 
+  it("select narrows root columns while preserving id and includes", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-root-columns") },
+      }),
+    );
+
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+    const { id: todoId } = await db.insert(app.todos, {
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+    });
+
+    const results = await db.all(
+      app.todos
+        .select("title")
+        .where({ id: { eq: todoId } })
+        .include({ project: true }),
+    );
+
+    expect(results).toEqual([
+      {
+        id: todoId,
+        title: "Write tests",
+        project: {
+          id: projectId,
+          name: "Announcements",
+        },
+      },
+    ]);
+    expect("done" in results[0]).toBe(false);
+    expect("tags" in results[0]).toBe(false);
+  });
+
+  it("include builders can project nested relation columns", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-nested-columns") },
+      }),
+    );
+
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+    const { id: todoId } = await db.insert(app.todos, {
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+    });
+
+    const results = await db.all(
+      app.projects
+        .where({ id: { eq: projectId } })
+        .include({ todosViaProject: app.todos.select("title") }),
+    );
+
+    expect(results).toEqual([
+      {
+        id: projectId,
+        name: "Announcements",
+        todosViaProject: [
+          {
+            id: todoId,
+            title: "Write tests",
+          },
+        ],
+      },
+    ]);
+    expect("done" in results[0].todosViaProject![0]).toBe(false);
+    expect("tags" in results[0].todosViaProject![0]).toBe(false);
+    expect("project" in results[0].todosViaProject![0]).toBe(false);
+  });
+
+  it("subscribeAll preserves projected root columns with includes", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("subscribe-select-root-columns") },
+      }),
+    );
+
+    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
+
+    type SubscribedTodo = {
+      id: string;
+      title: string;
+      project: {
+        id: string;
+        name: string;
+      };
+    };
+
+    let unsubscribe = () => {};
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+      timeout = setTimeout(() => {
+        unsubscribe();
+        reject(new Error("Timed out waiting for subscribeAll projection update"));
+      }, 10_000);
+
+      unsubscribe = db.subscribeAll(
+        app.todos.select("title").include({ project: true }),
+        (delta) => {
+          if (delta.all.length !== 1) {
+            return;
+          }
+
+          resolve(delta as { all: SubscribedTodo[] });
+        },
+      );
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const { id: todoId } = await db.insert(app.todos, {
+      title: "Watch subscription",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+    });
+
+    const delta = await deltaPromise;
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    unsubscribe();
+
+    expect(delta.all).toEqual([
+      {
+        id: todoId,
+        title: "Watch subscription",
+        project: {
+          id: projectId,
+          name: "Announcements",
+        },
+      },
+    ]);
+    expect("done" in delta.all[0]).toBe(false);
+    expect("tags" in delta.all[0]).toBe(false);
+  });
+
   describe("query by array column", () => {
     it("using eq", async () => {
       const db = track(

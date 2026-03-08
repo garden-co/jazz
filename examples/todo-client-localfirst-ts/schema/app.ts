@@ -75,8 +75,11 @@ export type ProjectWithIncludes<I extends ProjectInclude = {}> = Project & {
   todosViaProject?: NonNullable<I["todosViaProject"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Todo[]
-      : RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
-        ? TodoWithIncludes<QueryInclude>[]
+      : RelationInclude extends TodoQueryBuilder<
+            infer QueryInclude extends TodoInclude,
+            infer QuerySelect extends keyof Todo
+          >
+        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]
         : RelationInclude extends TodoInclude
           ? TodoWithIncludes<RelationInclude>[]
           : never
@@ -87,8 +90,11 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
   parent?: NonNullable<I["parent"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Todo
-      : RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
-        ? TodoWithIncludes<QueryInclude>
+      : RelationInclude extends TodoQueryBuilder<
+            infer QueryInclude extends TodoInclude,
+            infer QuerySelect extends keyof Todo
+          >
+        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>
         : RelationInclude extends TodoInclude
           ? TodoWithIncludes<RelationInclude>
           : never
@@ -96,8 +102,11 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
   todosViaParent?: NonNullable<I["todosViaParent"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Todo[]
-      : RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>
-        ? TodoWithIncludes<QueryInclude>[]
+      : RelationInclude extends TodoQueryBuilder<
+            infer QueryInclude extends TodoInclude,
+            infer QuerySelect extends keyof Todo
+          >
+        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]
         : RelationInclude extends TodoInclude
           ? TodoWithIncludes<RelationInclude>[]
           : never
@@ -105,13 +114,36 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
   project?: NonNullable<I["project"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Project
-      : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
-        ? ProjectWithIncludes<QueryInclude>
+      : RelationInclude extends ProjectQueryBuilder<
+            infer QueryInclude extends ProjectInclude,
+            infer QuerySelect extends keyof Project
+          >
+        ? ProjectSelectedWithIncludes<QueryInclude, QuerySelect>
         : RelationInclude extends ProjectInclude
           ? ProjectWithIncludes<RelationInclude>
           : never
     : never;
 };
+
+export type ProjectSelected<S extends keyof Project = keyof Project> = Pick<
+  Project,
+  Extract<S | "id", keyof Project>
+>;
+
+export type ProjectSelectedWithIncludes<
+  I extends ProjectInclude = {},
+  S extends keyof Project = keyof Project,
+> = ProjectSelected<S> & Omit<ProjectWithIncludes<I>, keyof Project>;
+
+export type TodoSelected<S extends keyof Todo = keyof Todo> = Pick<
+  Todo,
+  Extract<S | "id", keyof Todo>
+>;
+
+export type TodoSelectedWithIncludes<
+  I extends TodoInclude = {},
+  S extends keyof Todo = keyof Todo,
+> = TodoSelected<S> & Omit<TodoWithIncludes<I>, keyof Todo>;
 
 export const wasmSchema: WasmSchema = {
   projects: {
@@ -224,15 +256,17 @@ export const wasmSchema: WasmSchema = {
   },
 };
 
-export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<
-  ProjectWithIncludes<I>
-> {
+export class ProjectQueryBuilder<
+  I extends ProjectInclude = {},
+  S extends keyof Project = keyof Project,
+> implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ProjectWithIncludes<I>;
+  declare readonly _rowType: ProjectSelectedWithIncludes<I, S>;
   declare readonly _initType: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -245,7 +279,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     step_hops: string[];
   };
 
-  where(conditions: ProjectWhereInput): ProjectQueryBuilder<I> {
+  where(conditions: ProjectWhereInput): ProjectQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -262,31 +296,37 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     return clone;
   }
 
-  include<NewI extends ProjectInclude>(relations: NewI): ProjectQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Project>(...columns: [NewS, ...NewS[]]): ProjectQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends ProjectInclude>(relations: NewI): ProjectQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Project, direction: "asc" | "desc" = "asc"): ProjectQueryBuilder<I> {
+  orderBy(column: keyof Project, direction: "asc" | "desc" = "asc"): ProjectQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ProjectQueryBuilder<I> {
+  limit(n: number): ProjectQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ProjectQueryBuilder<I> {
+  offset(n: number): ProjectQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "todosViaProject"): ProjectQueryBuilder<I> {
+  hopTo(relation: "todosViaProject"): ProjectQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -296,7 +336,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     start: ProjectWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ProjectQueryBuilder<I> {
+  }): ProjectQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -378,6 +418,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -386,10 +427,14 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
     });
   }
 
-  private _clone<CloneI extends ProjectInclude = I>(): ProjectQueryBuilder<CloneI> {
-    const clone = new ProjectQueryBuilder<CloneI>();
+  private _clone<
+    CloneI extends ProjectInclude = I,
+    CloneS extends keyof Project = S,
+  >(): ProjectQueryBuilder<CloneI, CloneS> {
+    const clone = new ProjectQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -405,15 +450,17 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
   }
 }
 
-export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<
-  TodoWithIncludes<I>
-> {
+export class TodoQueryBuilder<
+  I extends TodoInclude = {},
+  S extends keyof Todo = keyof Todo,
+> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: TodoWithIncludes<I>;
+  declare readonly _rowType: TodoSelectedWithIncludes<I, S>;
   declare readonly _initType: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -426,7 +473,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     step_hops: string[];
   };
 
-  where(conditions: TodoWhereInput): TodoQueryBuilder<I> {
+  where(conditions: TodoWhereInput): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -443,31 +490,37 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     return clone;
   }
 
-  include<NewI extends TodoInclude>(relations: NewI): TodoQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Todo>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends TodoInclude>(relations: NewI): TodoQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Todo, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I> {
+  orderBy(column: keyof Todo, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): TodoQueryBuilder<I> {
+  limit(n: number): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): TodoQueryBuilder<I> {
+  offset(n: number): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "parent" | "todosViaParent" | "project"): TodoQueryBuilder<I> {
+  hopTo(relation: "parent" | "todosViaParent" | "project"): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -477,7 +530,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     start: TodoWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): TodoQueryBuilder<I> {
+  }): TodoQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -559,6 +612,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -567,10 +621,14 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
     });
   }
 
-  private _clone<CloneI extends TodoInclude = I>(): TodoQueryBuilder<CloneI> {
-    const clone = new TodoQueryBuilder<CloneI>();
+  private _clone<CloneI extends TodoInclude = I, CloneS extends keyof Todo = S>(): TodoQueryBuilder<
+    CloneI,
+    CloneS
+  > {
+    const clone = new TodoQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
