@@ -231,6 +231,12 @@ const b3 = b3Json as unknown as B3Scenario;
 const b4 = b4Json as unknown as B4Scenario;
 const b5 = b5Json as unknown as B5Scenario;
 const b6 = b6Json as unknown as B6Scenario;
+const browserScenarioSelection = new Set(
+  (process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "")
+    .split(",")
+    .map((value) => value.trim().toUpperCase())
+    .filter(Boolean),
+);
 
 const usersTable = tableProxy<UserRow, Omit<UserRow, "id">>("users");
 const organizationsTable = tableProxy<OrganizationRow, Omit<OrganizationRow, "id">>(
@@ -1949,55 +1955,107 @@ describe("realistic browser benchmark harness", () => {
   it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
-    const dbName = uniqueDbName("w1");
     progressLog(`bench start profile=${cfg.id}`);
 
-    let db: Db | null = null;
-    let w1Result: ScenarioResult;
     try {
-      try {
-        db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
-        const state = await seedDataset(db, cfg);
-        w1Result = await runW1(db, cfg, state);
-      } finally {
-        if (db) await db.shutdown();
+      const runners = [
+        {
+          id: "W1",
+          run: async (): Promise<ScenarioResult> => {
+            const dbName = uniqueDbName("w1");
+            let db: Db | null = null;
+            try {
+              db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+              const state = await seedDataset(db, cfg);
+              return await runW1(db, cfg, state);
+            } finally {
+              if (db) await db.shutdown();
+            }
+          },
+        },
+        { id: "W4", run: async (): Promise<ScenarioResult> => runW4(cfg) },
+        { id: "B1", run: async (): Promise<ScenarioResult> => runB1(cfg) },
+        { id: "B2", run: async (): Promise<ScenarioResult> => runB2(cfg) },
+        { id: "B3", run: async (): Promise<ScenarioResult> => runB3(cfg) },
+        { id: "B4", run: async (): Promise<ScenarioResult> => runB4(cfg) },
+        { id: "B5", run: async (): Promise<ScenarioResult> => runB5(cfg) },
+        { id: "B6", run: async (): Promise<ScenarioResult> => runB6(cfg) },
+      ];
+      const knownIds = new Set(runners.map((runner) => runner.id));
+      for (const requestedId of browserScenarioSelection) {
+        if (!knownIds.has(requestedId)) {
+          throw new Error(`Unknown browser benchmark scenario id '${requestedId}'`);
+        }
       }
 
-      const w4Result = await runW4(cfg);
-      const b1Result = await runB1(cfg);
-      const b2Result = await runB2(cfg);
-      const b3Result = await runB3(cfg);
-      const b4Result = await runB4(cfg);
-      const b5Result = await runB5(cfg);
-      const b6Result = await runB6(cfg);
+      const selectedRunners =
+        browserScenarioSelection.size === 0
+          ? runners
+          : runners.filter((runner) => browserScenarioSelection.has(runner.id));
+      const scenarioResults: ScenarioResult[] = [];
+      for (const runner of selectedRunners) {
+        scenarioResults.push(await runner.run());
+      }
+      const resultsById = new Map(scenarioResults.map((result) => [result.scenario_id, result]));
 
       const report = {
         runner: "jazz-ts-browser-opfs",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
-        scenarios: [w1Result, w4Result, b1Result, b2Result, b3Result, b4Result, b5Result, b6Result],
+        scenarios: scenarioResults,
       };
 
       // Keeping output machine-readable makes it easy to pipe into trend tooling.
       // eslint-disable-next-line no-console
       console.log("[realistic-bench]", JSON.stringify(report));
 
-      expect(w1Result.total_operations).toBeGreaterThan(0);
-      expect(w1Result.throughput_ops_per_sec).toBeGreaterThan(0);
-      expect(w4Result.operation_summaries.cold_reopen.count).toBeGreaterThan(0);
-      expect(b1Result.operation_summaries.insert_sync.count).toBeGreaterThan(0);
-      expect(b2Result.total_operations).toBeGreaterThan(0);
-      expect(b3Result.operation_summaries.cold_reopen_query.count).toBeGreaterThan(0);
-      expect(b4Result.operation_summaries.fanout_delivery.count).toBeGreaterThan(0);
-      expect(b5Result.operation_summaries.permission_reads.count).toBeGreaterThan(0);
-      expect(Number(b5Result.extra.allowed_documents_visible)).toBeGreaterThan(0);
-      expect(Number(b5Result.extra.denied_documents_seeded)).toBeGreaterThan(0);
-      expect(Number(b5Result.extra.denied_documents_visible)).toBe(0);
-      if (Number(b5Result.extra.allowed_update_candidates) > 0) {
-        expect(Number(b5Result.extra.allowed_updates_succeeded)).toBeGreaterThan(0);
+      const w1Result = resultsById.get("W1");
+      if (w1Result) {
+        expect(w1Result.total_operations).toBeGreaterThan(0);
+        expect(w1Result.throughput_ops_per_sec).toBeGreaterThan(0);
       }
-      expect(Number(b5Result.extra.denied_updates_rejected)).toBeGreaterThan(0);
-      expect(b6Result.operation_summaries.hotspot_update_sync.count).toBeGreaterThan(0);
+
+      const w4Result = resultsById.get("W4");
+      if (w4Result) {
+        expect(w4Result.operation_summaries.cold_reopen.count).toBeGreaterThan(0);
+      }
+
+      const b1Result = resultsById.get("B1");
+      if (b1Result) {
+        expect(b1Result.operation_summaries.insert_sync.count).toBeGreaterThan(0);
+      }
+
+      const b2Result = resultsById.get("B2");
+      if (b2Result) {
+        expect(b2Result.total_operations).toBeGreaterThan(0);
+      }
+
+      const b3Result = resultsById.get("B3");
+      if (b3Result) {
+        expect(b3Result.operation_summaries.cold_reopen_query.count).toBeGreaterThan(0);
+      }
+
+      const b4Result = resultsById.get("B4");
+      if (b4Result) {
+        expect(b4Result.operation_summaries.fanout_delivery.count).toBeGreaterThan(0);
+      }
+
+      const b5Result = resultsById.get("B5");
+      if (b5Result) {
+        expect(b5Result.operation_summaries.permission_reads.count).toBeGreaterThan(0);
+        expect(Number(b5Result.extra.allowed_documents_visible)).toBeGreaterThan(0);
+        expect(Number(b5Result.extra.denied_documents_seeded)).toBeGreaterThan(0);
+        expect(Number(b5Result.extra.denied_documents_visible)).toBe(0);
+        if (Number(b5Result.extra.allowed_update_candidates) > 0) {
+          expect(Number(b5Result.extra.allowed_updates_succeeded)).toBeGreaterThan(0);
+        }
+        expect(Number(b5Result.extra.denied_updates_rejected)).toBeGreaterThan(0);
+      }
+
+      const b6Result = resultsById.get("B6");
+      if (b6Result) {
+        expect(b6Result.operation_summaries.hotspot_update_sync.count).toBeGreaterThan(0);
+      }
     } finally {
       restoreLogs();
     }
