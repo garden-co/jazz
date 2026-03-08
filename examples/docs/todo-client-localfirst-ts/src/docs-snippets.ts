@@ -59,6 +59,17 @@ export async function readTodosWithIncludes(db: Db) {
 }
 // #endregion reading-includes-ts
 
+// #region reading-select-ts
+export async function readTodoTitlesWithProjectedProject(db: Db) {
+  return db.all(
+    app.todos
+      .select("title")
+      .where({ done: false })
+      .include({ project: app.projects.select("name") }),
+  );
+}
+// #endregion reading-select-ts
+
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
   return app.todos.gather({
