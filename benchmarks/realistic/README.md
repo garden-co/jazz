@@ -118,17 +118,20 @@ The workflow currently:
 
 - runs on `main` pushes and nightly schedule
 - runs on PRs only when the PR has the `benchmark` label
-- records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`)
-- records browser outputs on `main`/nightly/manual runs when the browser suite runs
+- runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
+- keeps a checked-in skip set at `benchmarks/realistic/ci_skip_set.json`
+- records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
+- records browser outputs per scenario when they complete within budget
 
 The `site` job:
 
 - pulls the benchmark artifacts for that run
 - updates `history/bench_history.json` with absolute metrics
+- updates `ci_skip_set.json` with newly observed timed-out benchmarks
 - rebuilds `site/index.html` + `site/history.json`
 - uploads `site/` as an artifact
-- posts a markdown comparison report back to labeled PRs
-- commits refreshed history/site back to `main` when the workflow itself runs on `main`
+- posts a markdown comparison report back to labeled PRs, including current-run status summaries
+- commits refreshed history/site/skip-set back to `main` when the workflow itself runs on `main`
 
 ## Delta Rendering (Local)
 
