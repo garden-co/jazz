@@ -16,26 +16,26 @@ export function TodoList() {
   // #endregion reading-filtering-react
 
   // #region writing-use-db-react
-  async function addTodo(todoTitle: string) {
+  function addTodo(todoTitle: string) {
     db.insert(app.todos, { title: todoTitle, done: false });
   }
 
-  async function toggleTodo(todo: { id: string; done: boolean }) {
-    await db.update(app.todos, todo.id, { done: !todo.done });
+  function toggleTodo(todo: { id: string; done: boolean }) {
+    db.update(app.todos, todo.id, { done: !todo.done });
   }
 
-  async function removeTodo(id: string) {
-    await db.deleteFrom(app.todos, id);
+  function removeTodo(id: string) {
+    db.delete(app.todos, id);
   }
   // #endregion writing-use-db-react
   // #endregion read-write-react
 
   const [title, setTitle] = useState("");
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    await addTodo(title.trim());
+    addTodo(title.trim());
     setTitle("");
   };
 

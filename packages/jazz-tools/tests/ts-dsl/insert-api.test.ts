@@ -6,7 +6,7 @@ function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-describe("TS Insert API", () => {
+describe("TS Write API", () => {
   let db: Db;
 
   beforeEach(async () => {
@@ -74,5 +74,81 @@ describe("TS Insert API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
     });
+  });
+
+  it("updates rows synchronously without returning a promise", async () => {
+    const project = db.insert(app.projects, { name: "Test Project" });
+    const todo = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      project: project.id,
+    });
+
+    const result = db.update(app.todos, todo.id, { done: true });
+    expect(result).toBeUndefined();
+
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }));
+    expect(updated.done).toBe(true);
+  });
+
+  it("can wait for updates to be persisted up to a specific durability tier", async () => {
+    const project = db.insert(app.projects, { name: "Test Project" });
+    const todo = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      project: project.id,
+    });
+
+    const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
+    expect(pending).toBeInstanceOf(Promise);
+
+    await pending;
+
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    expect(updated.done).toBe(true);
+  });
+
+  it("deletes rows synchronously without returning a promise", async () => {
+    const project = db.insert(app.projects, { name: "Test Project" });
+    const todo = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      project: project.id,
+    });
+
+    const result = db.delete(app.todos, todo.id);
+    expect(result).toBeUndefined();
+
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }));
+    expect(rows).toEqual([]);
+  });
+
+  it("can wait for deletes to be persisted up to a specific durability tier", async () => {
+    const project = await db.insertDurable(
+      app.projects,
+      { name: "Test Project" },
+      { tier: "worker" },
+    );
+    const todo = await db.insertDurable(
+      app.todos,
+      {
+        title: "Test Todo",
+        done: false,
+        tags: ["tag1", "tag2"],
+        project: project.id,
+      },
+      { tier: "worker" },
+    );
+
+    const pending = db.deleteDurable(app.todos, todo.id, { tier: "worker" });
+    expect(pending).toBeInstanceOf(Promise);
+
+    await pending;
+
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    expect(rows).toEqual([]);
   });
 });

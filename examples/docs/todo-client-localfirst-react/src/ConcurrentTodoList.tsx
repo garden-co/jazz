@@ -119,7 +119,7 @@ function ConcurrentTodoResults({
               className="toggle"
             />
             <span>{todo.title}</span>
-            <button className="delete-btn" onClick={() => void db.deleteFrom(app.todos, todo.id)}>
+            <button className="delete-btn" onClick={() => db.delete(app.todos, todo.id)}>
               &times;
             </button>
           </li>

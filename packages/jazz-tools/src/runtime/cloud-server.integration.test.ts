@@ -1286,7 +1286,11 @@ describe("cloud-server integration (Jazz TS)", () => {
       const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
       expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
 
-      await clientA.update(rowId, { done: { type: "Boolean", value: true } }, { tier: "edge" });
+      await clientA.updateDurable(
+        rowId,
+        { done: { type: "Boolean", value: true } },
+        { tier: "edge" },
+      );
       const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
         const row = rows.find((r) => r.id === rowId);
         return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
@@ -1294,7 +1298,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
-      await clientA.delete(rowId, { tier: "edge" });
+      await clientA.deleteDurable(rowId, { tier: "edge" });
       await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
     } finally {
       if (clientA) await clientA.shutdown();
