@@ -216,18 +216,6 @@ function resolveRelationIrOutputTable(node: unknown): string | null {
   return null;
 }
 
-function resolveQueryOutputTable(queryJson: string): string | null {
-  try {
-    const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
-    if (typeof parsed.table === "string") {
-      return parsed.table;
-    }
-    return resolveRelationIrOutputTable(parsed.relation_ir);
-  } catch {
-    return null;
-  }
-}
-
 function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
   if (!Array.isArray(value)) {
     return [];
