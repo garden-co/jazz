@@ -3,8 +3,8 @@ use super::query::{
     ArraySubquerySpec, Condition, Conjunction, JoinSpec, RecursiveHopSpec, RecursiveSpec,
 };
 use super::relation_ir::{
-    JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr, RelExpr,
-    RowIdRef, ValueRef,
+    ColumnRef, JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
+    RelExpr, RowIdRef, ValueRef,
 };
 use super::types::TableName;
 
@@ -28,15 +28,18 @@ struct LinearJoinInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeCorePlan {
     table: TableName,
+    base_scope: String,
     disjuncts: Vec<Conjunction>,
     joins: Vec<JoinSpec>,
     result_element_index: Option<usize>,
     recursive: Option<RecursiveSpec>,
+    project_columns: Option<Vec<ProjectColumn>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionQueryPlan {
     pub table: TableName,
+    pub base_scope: String,
     pub branches: Vec<String>,
     pub disjuncts: Vec<Conjunction>,
     pub joins: Vec<JoinSpec>,
@@ -47,7 +50,7 @@ pub(crate) struct ExecutionQueryPlan {
     pub limit: Option<usize>,
     pub include_deleted: bool,
     pub array_subqueries: Vec<ArraySubquerySpec>,
-    pub select_columns: Option<Vec<String>>,
+    pub project_columns: Option<Vec<ProjectColumn>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +350,32 @@ fn project_columns_to_select(columns: &[ProjectColumn]) -> Option<Vec<String>> {
     Some(select_columns)
 }
 
+fn normalize_project_columns(columns: &[ProjectColumn]) -> Vec<ProjectColumn> {
+    columns
+        .iter()
+        .map(|column| ProjectColumn {
+            alias: column.alias.clone(),
+            expr: match &column.expr {
+                ProjectExpr::Column(column_ref) => ProjectExpr::Column(ColumnRef {
+                    scope: column_ref.scope.clone(),
+                    column: to_runtime_column(&column_ref.column),
+                }),
+                ProjectExpr::RowId(row_id_ref) => ProjectExpr::RowId(*row_id_ref),
+            },
+        })
+        .collect()
+}
+
+fn builder_select_columns_to_project_columns(columns: Vec<String>) -> Vec<ProjectColumn> {
+    columns
+        .into_iter()
+        .map(|column| ProjectColumn {
+            alias: column.clone(),
+            expr: ProjectExpr::Column(ColumnRef::unscoped(column)),
+        })
+        .collect()
+}
+
 fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option<RuntimeCorePlan> {
     let seed_info = extract_linear_join_info(seed)?;
     if !seed_info.joins.is_empty() {
@@ -391,10 +420,12 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
 
             return Some(RuntimeCorePlan {
                 table: seed_info.base_table,
+                base_scope: seed_info.scope_order[0].clone(),
                 disjuncts: seed_info.disjuncts,
                 joins: Vec::new(),
                 result_element_index: None,
                 recursive: Some(recursive),
+                project_columns: None,
             });
         }
     };
@@ -466,10 +497,12 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
 
     Some(RuntimeCorePlan {
         table: seed_info.base_table,
+        base_scope: seed_info.scope_order[0].clone(),
         disjuncts: seed_info.disjuncts,
         joins: Vec::new(),
         result_element_index: None,
         recursive: Some(recursive),
+        project_columns: None,
     })
 }
 
@@ -569,8 +602,9 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             ..
         } => parse_gather_core(seed, step, *max_depth),
         RelExpr::Project { input, columns } => {
+            let normalized_columns = normalize_project_columns(columns);
             if let Some(mut gather_info) = parse_gather_join_info(input) {
-                let mut scope_order = vec![gather_info.plan.table.as_str().to_string()];
+                let mut scope_order = vec![gather_info.plan.base_scope.clone()];
                 scope_order.extend(
                     gather_info
                         .plan
@@ -578,29 +612,27 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
                         .iter()
                         .map(|join| join.effective_name().to_string()),
                 );
-                if let Some(index) = projected_result_element_index(&scope_order, columns) {
+                if let Some(index) =
+                    projected_result_element_index(&scope_order, &normalized_columns)
+                {
                     gather_info.plan.result_element_index = Some(index);
-                } else if !gather_info.plan.joins.is_empty() {
-                    gather_info.plan.result_element_index = Some(gather_info.plan.joins.len());
+                } else {
+                    gather_info.plan.project_columns = Some(normalized_columns);
                 }
                 return Some(gather_info.plan);
             }
 
             let linear = extract_linear_join_info(input)?;
             let result_element_index =
-                if let Some(index) = projected_result_element_index(&linear.scope_order, columns) {
-                    Some(index)
-                } else if !linear.joins.is_empty() {
-                    Some(linear.joins.len())
-                } else {
-                    None
-                };
+                projected_result_element_index(&linear.scope_order, &normalized_columns);
             Some(RuntimeCorePlan {
                 table: linear.base_table,
+                base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
                 joins: linear.joins.clone(),
                 result_element_index,
                 recursive: None,
+                project_columns: result_element_index.is_none().then_some(normalized_columns),
             })
         }
         _ => {
@@ -611,10 +643,12 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             let linear = extract_linear_join_info(core)?;
             Some(RuntimeCorePlan {
                 table: linear.base_table,
+                base_scope: linear.scope_order[0].clone(),
                 disjuncts: linear.disjuncts,
                 joins: linear.joins,
                 result_element_index: None,
                 recursive: None,
+                project_columns: None,
             })
         }
     }
@@ -678,8 +712,13 @@ pub(crate) fn lower_relation_to_execution_plan(
         return None;
     }
 
+    let project_columns = core_plan
+        .project_columns
+        .or_else(|| select_columns.map(builder_select_columns_to_project_columns));
+
     Some(ExecutionQueryPlan {
         table: core_plan.table,
+        base_scope: core_plan.base_scope,
         branches: branches.to_vec(),
         disjuncts: core_plan.disjuncts,
         joins: core_plan.joins,
@@ -690,6 +729,6 @@ pub(crate) fn lower_relation_to_execution_plan(
         limit: envelope.limit,
         include_deleted,
         array_subqueries,
-        select_columns,
+        project_columns,
     })
 }
