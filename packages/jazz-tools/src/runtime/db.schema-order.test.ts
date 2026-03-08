@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, type QueryBuilder, type TableProxy } from "./db.js";
 import type { Value, WasmRow, WasmSchema } from "../drivers/types.js";
-import type { JazzClient } from "./client.js";
+import type { JazzClient, Row } from "./client.js";
 
 class TestDb extends Db {
   constructor(private readonly testClient: JazzClient) {
@@ -31,8 +31,14 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, Value[], { tier?: string }?]) => Promise<string>>(
-      async () => "todo-1",
+    const create = vi.fn<(...args: [string, Value[], { tier?: string }?]) => Promise<Row>>(
+      async () => ({
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+        ],
+      }),
     );
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
@@ -49,7 +55,7 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    await db.insert(table, { title: "Buy milk", done: false });
+    const row = await db.insert(table, { title: "Buy milk", done: false });
 
     expect(create).toHaveBeenCalledWith(
       "todos",
@@ -59,6 +65,11 @@ describe("Db runtime schema order", () => {
       ],
       undefined,
     );
+    expect(row).toEqual({
+      id: "todo-1",
+      title: "Buy milk",
+      done: false,
+    });
   });
 
   it("uses the generated schema order when transforming query results", async () => {
@@ -125,8 +136,14 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, Value[], { tier?: string }?]) => Promise<string>>(
-      async () => "todo-1",
+    const create = vi.fn<(...args: [string, Value[], { tier?: string }?]) => Promise<Row>>(
+      async () => ({
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+        ],
+      }),
     );
     const client = {
       getSchema: () => new Map(),
@@ -143,7 +160,7 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    await db.insert(table, { title: "Buy milk", done: false });
+    const row = await db.insert(table, { title: "Buy milk", done: false });
 
     expect(create).toHaveBeenCalledWith(
       "todos",
@@ -153,6 +170,11 @@ describe("Db runtime schema order", () => {
       ],
       undefined,
     );
+    expect(row).toEqual({
+      id: "todo-1",
+      title: "Buy milk",
+      done: false,
+    });
   });
 
   it("falls back to the generated schema for query results when the runtime schema is missing a table", async () => {

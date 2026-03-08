@@ -44,8 +44,8 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: any): string;
-  insertDurable(table: string, values: any, tier: string): Promise<string>;
+  insert(table: string, values: any): Row;
+  insertDurable(table: string, values: any, tier: string): Promise<Row>;
   update(object_id: string, values: any): void;
   updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   delete(object_id: string): void;
@@ -877,9 +877,13 @@ export class JazzClient {
   /**
    * Insert a new row into a table and wait for durability at the requested tier.
    */
-  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<string> {
+  async create(table: string, values: Value[], options?: WriteDurabilityOptions): Promise<Row> {
     const tier = this.resolveWriteTier(options);
-    return this.runtime.insertDurable(table, values, tier);
+    const row = await this.runtime.insertDurable(table, values, tier);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+    };
   }
 
   /**

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Runtime } from "./client.js";
+import { JazzClient, type Row, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
 import { deriveLocalPrincipalId } from "./client-session.js";
 
@@ -29,6 +29,10 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
+function mockRow(id = "todo-1"): Row {
+  return { id, values: [] };
+}
+
 function makeClient() {
   const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
     [];
@@ -40,7 +44,7 @@ function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    insert: () => "00000000-0000-0000-0000-000000000001",
+    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     update: () => {},
     delete: () => {},
     query: async (
@@ -78,7 +82,7 @@ function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -116,7 +120,7 @@ function makeClient() {
 function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    insert: () => "00000000-0000-0000-0000-000000000001",
+    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     update: () => {},
     delete: () => {},
     query: async () => [],
@@ -124,7 +128,7 @@ function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    insertDurable: async () => "00000000-0000-0000-0000-000000000001",
+    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -448,9 +452,9 @@ describe("JazzClient.forRequest", () => {
 
 describe("JazzClient schema order", () => {
   it("passes create values through in the declared schema order", async () => {
-    const insertDurable = vi.fn(async () => "todo-1");
+    const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
-      insert: () => "todo-1",
+      insert: () => mockRow(),
       update: () => {},
       delete: () => {},
       query: async () => [],
@@ -527,7 +531,7 @@ describe("JazzClient schema order", () => {
     const query = vi.fn(async () => []);
     const createSubscription = vi.fn(() => 0);
     const runtime: Runtime = {
-      insert: () => "todo-1",
+      insert: () => mockRow(),
       update: () => {},
       delete: () => {},
       query,
@@ -535,7 +539,7 @@ describe("JazzClient schema order", () => {
       createSubscription,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => "todo-1",
+      insertDurable: async () => mockRow(),
       updateDurable: async () => {},
       deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
@@ -599,7 +603,7 @@ describe("JazzClient schema order", () => {
 
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
-      insert: () => "todo-1",
+      insert: () => mockRow(),
       update: () => {},
       delete: () => {},
       query: async () => [
@@ -615,7 +619,7 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => "todo-1",
+      insertDurable: async () => mockRow(),
       updateDurable: async () => {},
       deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
@@ -682,7 +686,7 @@ describe("JazzClient schema order", () => {
 
   it("reorders query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
-      insert: () => "todo-1",
+      insert: () => mockRow(),
       update: () => {},
       delete: () => {},
       query: async () => [
@@ -710,7 +714,7 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => "todo-1",
+      insertDurable: async () => mockRow(),
       updateDurable: async () => {},
       deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
@@ -789,7 +793,7 @@ describe("JazzClient schema order", () => {
 
   it("reorders included relation row values to the declared schema order", async () => {
     const runtime: Runtime = {
-      insert: () => "todo-1",
+      insert: () => mockRow(),
       update: () => {},
       delete: () => {},
       query: async () => [
@@ -820,7 +824,7 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => "todo-1",
+      insertDurable: async () => mockRow(),
       updateDurable: async () => {},
       deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
@@ -937,7 +941,7 @@ describe("JazzClient schema order", () => {
   it("reorders subscription deltas back to the declared schema order", async () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
-      insert: () => "todo-1",
+      insert: () => mockRow(),
       update: () => {},
       delete: () => {},
       query: async () => [],
@@ -947,7 +951,7 @@ describe("JazzClient schema order", () => {
         onUpdate = callback as (delta: unknown) => void;
       },
       unsubscribe: () => {},
-      insertDurable: async () => "todo-1",
+      insertDurable: async () => mockRow(),
       updateDurable: async () => {},
       deleteDurable: async () => {},
       onSyncMessageReceived: () => {},

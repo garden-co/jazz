@@ -131,17 +131,8 @@ async fn create_todo(
     ];
 
     match state.client.create("todos", values).await {
-        Ok(row_id) => {
-            let todo = Todo {
-                id: *row_id.uuid(),
-                title: request.title,
-                done: false,
-                description: if description.is_empty() {
-                    None
-                } else {
-                    Some(description)
-                },
-            };
+        Ok((row_id, row_values)) => {
+            let todo = row_to_todo(row_id, &row_values);
 
             // Broadcast to SSE connections
             broadcast_todos(&state).await;

@@ -92,6 +92,19 @@ fn align_values_to_declared_schema(
         .unwrap_or(values)
 }
 
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+) -> Vec<Value> {
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+
+    align_values_to_declared_schema(declared_schema, table, &runtime_table.columns, values)
+}
+
 fn align_query_rows_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
@@ -561,7 +574,7 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
-    ) -> napi::Result<String> {
+    ) -> napi::Result<serde_json::Value> {
         let js_values: Vec<Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let groove_values = convert_values(js_values);
@@ -570,11 +583,20 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let result = core
+        let (object_id, row_values) = core
             .insert(&table, groove_values, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            core.current_schema(),
+            &TableName::new(table.clone()),
+            row_values,
+        );
 
-        Ok(result.uuid().to_string())
+        Ok(serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
     }
 
     #[napi]
@@ -798,30 +820,41 @@ impl NapiRuntime {
     // Persisted CRUD Operations
     // =========================================================================
 
-    #[napi(js_name = "insertDurable", ts_return_type = "Promise<string>")]
+    #[napi(js_name = "insertDurable", ts_return_type = "Promise<any>")]
     pub async fn insert_durable(
         &self,
         table: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
         tier: String,
-    ) -> napi::Result<String> {
+    ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
 
         let js_values: Vec<Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let groove_values = convert_values(js_values);
 
-        let (object_id, receiver) = {
+        let ((object_id, row_values), receiver) = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.insert_persisted(&table, groove_values, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?
+            let ((object_id, row_values), receiver) = core
+                .insert_persisted(&table, groove_values, None, persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            ((object_id, row_values), receiver)
         };
 
         let _ = receiver.await;
-        Ok(object_id.uuid().to_string())
+        Ok(serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
     }
 
     #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
