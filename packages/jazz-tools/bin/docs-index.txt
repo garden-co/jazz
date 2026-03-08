@@ -966,11 +966,11 @@ Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-ga
 
 ### Writing with a durability tier
 
-Use base mutation APIs with `{ tier }` when you need explicit write durability acknowledgement before proceeding:
+Use durable mutation APIs with `{ tier }` when you need explicit write durability acknowledgement before proceeding:
 
 ```ts
 
-  const id = await db.insert(
+  const { id } = await db.insertDurable(
     app.todos,
     {
       title: todoTitle,
@@ -981,8 +981,8 @@ Use base mutation APIs with `{ tier }` when you need explicit write durability a
     { tier: "worker" },
   );
 
-  await db.update(app.todos, id, { done: true }, { tier: "worker" });
-  await db.delete(app.todos, id, { tier: "worker" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "worker" });
+  await db.deleteDurable(app.todos, id, { tier: "worker" });
 }
 ```
 
@@ -1360,13 +1360,13 @@ Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-ga
 
 ### Writing with a durability tier
 
-Use base mutation APIs with `{ tier }` to wait for specific durability tiers:
+Use durable mutation APIs with `{ tier }` to wait for specific durability tiers:
 
 ```ts
 
-  const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
-  await db.update(app.todos, id, { done: true }, { tier: "edge" });
-  await db.delete(app.todos, id, { tier: "global" });
+  const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
+  await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 ```
 
@@ -1751,9 +1751,9 @@ Deep dive: [Reading Data](/docs/reading-data).
 	}
 
 	async function addImportantTodo(todoTitle: string) {
-		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
-		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
-		await db.delete(app.todos, id, { tier: 'global' });
+		const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
+		await db.updateDurable(app.todos, id, { done: true }, { tier: 'edge' });
+		await db.deleteDurable(app.todos, id, { tier: 'global' });
 	}
 
 </script>
@@ -1805,13 +1805,13 @@ Pass a tier as the second argument to `QuerySubscription` to gate initial delive
 
 ### Writing with a durability tier
 
-Use base mutation APIs with `{ tier }` when you need durability guarantees before continuing:
+Use durable mutation APIs with `{ tier }` when you need durability guarantees before continuing:
 
 ```ts
 	async function addImportantTodo(todoTitle: string) {
-		const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
-		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
-		await db.delete(app.todos, id, { tier: 'global' });
+		const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
+		await db.updateDurable(app.todos, id, { done: true }, { tier: 'edge' });
+		await db.deleteDurable(app.todos, id, { tier: 'global' });
 	}
 ```
 
@@ -2395,7 +2395,7 @@ async function toggleTodo(todo: { id: string; done: boolean }) {
 }
 
 async function removeTodo(id: string) {
-  await db.deleteFrom(app.todos, id);
+  db.delete(app.todos, id);
 }
 ```
 
@@ -2424,13 +2424,13 @@ Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-ga
 
 ### Writing with a durability tier
 
-Use base mutation APIs with `{ tier }` to wait for specific durability tiers:
+Use durable mutation APIs with `{ tier }` to wait for specific durability tiers:
 
 ```ts
 
-  const id = await db.insert(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
-  await db.update(app.todos, id, { done: true }, { tier: "edge" });
-  await db.deleteFrom(app.todos, id, { tier: "global" });
+  const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
+  await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 ```
 
@@ -3364,7 +3364,7 @@ async function toggleTodo(todo: { id: string; done: boolean }) {
 }
 
 async function removeTodo(id: string) {
-  await db.deleteFrom(app.todos, id);
+  db.delete(app.todos, id);
 }
 ```
 
@@ -3487,7 +3487,7 @@ In practical terms:
 
     ```ts
 
-  const id = await db.insert(
+  const { id } = await db.insertDurable(
     app.todos,
     {
       title: "Write docs with durability tier",
@@ -3498,8 +3498,8 @@ In practical terms:
     { tier: "edge" },
   );
 
-  await db.update(app.todos, id, { done: true }, { tier: "global" });
-  await db.delete(app.todos, id, { tier: "global" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "global" });
+  await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 ```
 

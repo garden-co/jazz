@@ -175,10 +175,10 @@ other edge nodes will see it once their edge fetches the update from the global 
 
 ```ts
 // Remote clients will see this eventually — no timing guarantee on delivery
-await db.update(app.tasks, id, { done: true, completedBy: userId });
+db.update(app.tasks, id, { done: true, completedBy: userId });
 
 // Remote clients on this edge see this as soon as the promise resolves
-await db.update(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
+await db.updateDurable(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
 ```
 
 If remote clients are not reacting to a write promptly, check whether the tier is `"edge"` or
