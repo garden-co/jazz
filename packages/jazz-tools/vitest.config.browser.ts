@@ -4,7 +4,12 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 
+const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
+
 export default defineConfig({
+  define: {
+    __JAZZ_REALISTIC_BROWSER_SCENARIOS__: JSON.stringify(realisticBrowserScenarios),
+  },
   plugins: [wasm(), topLevelAwait()],
   server: {
     fs: {
