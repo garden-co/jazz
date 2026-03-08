@@ -58,13 +58,13 @@ function createRuntimeMock(): {
   const removeServerCalls = { count: 0 };
 
   const runtime: Runtime = {
-    insert: () => "id",
+    insert: () => ({ id: "id", values: [] }),
     update: () => undefined,
     delete: () => undefined,
     query: async () => [],
     subscribe: () => 1,
     unsubscribe: () => undefined,
-    insertDurable: async () => "id",
+    insertDurable: async () => ({ id: "id", values: [] }),
     updateDurable: async () => undefined,
     deleteDurable: async () => undefined,
     createSubscription: () => 1,

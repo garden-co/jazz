@@ -7,10 +7,11 @@ import DurabilityTiersTable from "../partials/quickstarts/durability-tiers-table
 
 ## Local-First Writes
 
-`insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
+`insert`, `update`, and `delete` apply immediately in the local runtime.
 That keeps UI latency low because local state updates do not wait for any network hop.
 
-Mutation methods return promises that resolve when the requested durability tier is reached.
+`insertDurable`, `updateDurable`, and `deleteDurable` return promises that
+resolve when the requested durability tier is reached.
 
 ## Mutating from Framework Context
 
@@ -99,9 +100,12 @@ operation the system converges quickly.
 
 ### API Reference
 
-- `insert(table, data, options?)`
-- `update(table, id, data, options?)`
-- `deleteFrom(table, id, options?)`
+- `insert(table, data)`
+- `update(table, id, data)`
+- `delete(table, id)`
+- `insertDurable(table, data, { tier })`
+- `updateDurable(table, id, data, options?)`
+- `deleteDurable(table, id, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
 
 Defaults:
@@ -171,10 +175,10 @@ other edge nodes will see it once their edge fetches the update from the global 
 
 ```ts
 // Remote clients will see this eventually — no timing guarantee on delivery
-await db.update(app.tasks, id, { done: true, completedBy: userId });
+db.update(app.tasks, id, { done: true, completedBy: userId });
 
 // Remote clients on this edge see this as soon as the promise resolves
-await db.update(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
+await db.updateDurable(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
 ```
 
 If remote clients are not reacting to a write promptly, check whether the tier is `"edge"` or

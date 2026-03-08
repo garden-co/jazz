@@ -27,7 +27,7 @@ npm run build              # Schema codegen + production build
 
 ## How it works
 
-**State sync** is entirely handled by Jazz. Every beat, instrument change, BPM update, and participant rename is a synchronous local write (`db.insert`, `db.update`, `db.deleteFrom`). Jazz replicates the change to all connected peers in the background. The UI is driven by `QuerySubscription` reactive queries — no polling, no manual state management.
+**State sync** is entirely handled by Jazz. Every beat, instrument change, BPM update, and participant rename is a synchronous local write (`db.insert`, `db.update`, `db.delete`). Jazz replicates the change to all connected peers in the background. The UI is driven by `QuerySubscription` reactive queries — no polling, no manual state management.
 
 **Synchronized playback** is also scheduled through Jazz. All peers need to start their Tone.js transport at exactly the same moment. When a user hits play, a future timestamp (in server epoch time) is written to `jam.transport_start` via Jazz. All peers receive the update, convert it to their local clock using a measured offset, and schedule Tone.js to start at that instant. The offset is tracked by `ClockSync`, which connects to the Jazz WebSocket and computes a smoothed estimate of the difference between local `performance.now()` and server epoch time.
 

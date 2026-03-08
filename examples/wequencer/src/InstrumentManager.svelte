@@ -31,7 +31,7 @@
 	}
 
 	function removeInstrument(id: string) {
-		db.deleteFrom(app.instruments, id);
+		db.delete(app.instruments, id);
 	}
 </script>
 

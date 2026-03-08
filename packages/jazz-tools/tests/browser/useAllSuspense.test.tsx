@@ -468,7 +468,7 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    const userId = await client.db.insert(users, { name: "Owner", team_id: undefined });
+    const { id: userId } = await client.db.insert(users, { name: "Owner", team_id: undefined });
     await client.db.insert(todos, {
       title: "owned-todo",
       done: false,
@@ -508,8 +508,8 @@ describe("useAllSuspense browser integration", () => {
       "expected suspense rows mount for hop query",
     );
 
-    const orgId = await client.db.insert(orgs, { name: "Hop Org" });
-    const teamId = await client.db.insert(teams, {
+    const { id: orgId } = await client.db.insert(orgs, { name: "Hop Org" });
+    const { id: teamId } = await client.db.insert(teams, {
       name: "Hop Team",
       org_id: orgId,
       parent_id: undefined,
@@ -554,12 +554,12 @@ describe("useAllSuspense browser integration", () => {
       "expected suspense rows mount for gather query",
     );
 
-    const rootId = await client.db.insert(teams, {
+    const { id: rootId } = await client.db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const midId = await client.db.insert(teams, {
+    const { id: midId } = await client.db.insert(teams, {
       name: "mid",
       org_id: undefined,
       parent_id: rootId,
