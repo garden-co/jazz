@@ -77,8 +77,8 @@ export async function writeTodoCrud(db: Db, todoId: string) {
     owner_id: EXAMPLE_OWNER_ID,
     project: EXAMPLE_PROJECT_ID,
   });
-  await db.update(app.todos, todoId, { done: true });
-  await db.deleteFrom(app.todos, todoId);
+  db.update(app.todos, todoId, { done: true });
+  db.delete(app.todos, todoId);
 }
 // #endregion writing-crud-ts
 
@@ -95,7 +95,7 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
     { tier: "edge" },
   );
 
-  await db.update(app.todos, id, { done: true }, { tier: "global" });
-  await db.deleteFrom(app.todos, id, { tier: "global" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "global" });
+  await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 // #endregion writing-durability-tier-ts

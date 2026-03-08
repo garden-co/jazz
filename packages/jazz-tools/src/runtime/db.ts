@@ -6,8 +6,8 @@
  *
  * Key design:
  * - createDb() is async (pre-loads WASM module)
- * - insert is sync (local-first immediate write, no durability wait)
- * - insertDurable/update/deleteFrom are async (durability-aware, return Promises)
+ * - insert/update/delete are sync (local-first immediate writes, no durability wait)
+ * - insertDurable/updateDurable/deleteDurable are async (durability-aware, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
@@ -348,8 +348,8 @@ function isLeaderDebugEnabled(): boolean {
  *
  * // Mutations
  * const inserted = db.insert(app.todos, { title: "Buy milk", done: false });
- * await db.update(app.todos, inserted.id, { done: true });
- * await db.deleteFrom(app.todos, inserted.id);
+ * db.update(app.todos, inserted.id, { done: true });
+ * db.delete(app.todos, inserted.id);
  *
  * // Async queries (need storage I/O)
  * const todos = await db.all(app.todos.where({ done: false }));
@@ -1021,9 +1021,18 @@ export class Db {
   }
 
   /**
+   * Update an existing row without waiting for durability.
+   */
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+    const client = this.getClient(table._schema);
+    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    client.update(id, updates);
+  }
+
+  /**
    * Update an existing row and wait for durability at the requested tier.
    */
-  async update<T, Init>(
+  async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
@@ -1037,20 +1046,28 @@ export class Db {
     );
     await this.ensureBridgeReady();
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await client.update(id, updates, options);
+    await client.updateDurable(id, updates, options);
+  }
+
+  /**
+   * Delete a row without waiting for durability.
+   */
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+    const client = this.getClient(table._schema);
+    client.delete(id);
   }
 
   /**
    * Delete a row and wait for durability at the requested tier.
    */
-  async deleteFrom<T, Init>(
+  async deleteDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
-    await client.delete(id, options);
+    await client.deleteDurable(id, options);
   }
 
   /**
@@ -1275,7 +1292,8 @@ function isBrowser(): boolean {
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the WASM module.
- * After creation, mutations (insert/update/deleteFrom) are async and return Promises.
+ * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
+ * Use the `*Durable` variants when you need a Promise that resolves at a durability tier.
  *
  * In browser environments, automatically uses a dedicated worker for
  * OPFS persistence. In Node.js, uses in-memory storage.

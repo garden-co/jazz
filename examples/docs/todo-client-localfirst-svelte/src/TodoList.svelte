@@ -22,7 +22,7 @@
 
 	let title = $state('');
 
-	async function handleSubmit(e: SubmitEvent) {
+	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!title.trim()) return;
 		// #region writing-insert-svelte
@@ -32,20 +32,20 @@
 	}
 
 	// #region writing-mutations-svelte
-	async function toggleTodo(todo: { id: string; done: boolean }) {
-		await db.update(app.todos, todo.id, { done: !todo.done });
+	function toggleTodo(todo: { id: string; done: boolean }) {
+		db.update(app.todos, todo.id, { done: !todo.done });
 	}
 
-	async function removeTodo(id: string) {
-		await db.deleteFrom(app.todos, id);
+	function removeTodo(id: string) {
+		db.delete(app.todos, id);
 	}
 	// #endregion writing-mutations-svelte
 
 	// #region writing-durability-svelte
 	async function addImportantTodo(todoTitle: string) {
 		const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: 'edge' });
-		await db.update(app.todos, id, { done: true }, { tier: 'edge' });
-		await db.deleteFrom(app.todos, id, { tier: 'global' });
+		await db.updateDurable(app.todos, id, { done: true }, { tier: 'edge' });
+		await db.deleteDurable(app.todos, id, { tier: 'global' });
 	}
 	// #endregion writing-durability-svelte
 </script>

@@ -869,7 +869,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B1 updates", i, updateCount);
       const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
       const t0 = performance.now();
-      await db.update(tasksTable, taskId, {
+      db.update(tasksTable, taskId, {
         priority: 1 + rng.nextInt(4),
         status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
         updated_at: nowMicros(),
@@ -881,7 +881,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportLoopProgress("B1 deletes", i, deleteCount);
       const id = insertedCommentIds[i];
       const t0 = performance.now();
-      await db.deleteFrom(commentsTable, id);
+      db.delete(commentsTable, id);
       (latencies.delete_sync ||= []).push(performance.now() - t0);
     }
 
