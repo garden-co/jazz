@@ -97,9 +97,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          payload=$(jq -n \
+            --arg stack "${{ github.event.inputs.stack }}" \
+            --arg image_tag "${{ steps.meta.outputs.tag }}" \
+            '{event_type: "cloud-server-image-updated", client_payload: {stack: $stack, image_tag: $image_tag}}')
+
           gh api repos/${{ github.repository }}/dispatches \
-            -f event_type=cloud-server-image-updated \
-            -f client_payload="{\"stack\":\"${{ github.event.inputs.stack }}\",\"image_tag\":\"${{ steps.meta.outputs.tag }}\"}"
+            --method POST \
+            --input - <<<"$payload"
 
       - name: Summary
         run: |
