@@ -150,7 +150,7 @@ function generateQueryBuilderClass(
     : `${interfaceName}Selected<S>`;
 
   lines.push(
-    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends keyof ${interfaceName} = keyof ${interfaceName}> implements QueryBuilder<${rowType}> {`,
+    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends keyof ${interfaceName} | "*" = keyof ${interfaceName}> implements QueryBuilder<${rowType}> {`,
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
@@ -194,7 +194,7 @@ function generateQueryBuilderClass(
 
   // select() method
   lines.push(
-    `  select<NewS extends keyof ${interfaceName}>(...columns: [NewS, ...NewS[]]): ${interfaceName}QueryBuilder<I, NewS> {`,
+    `  select<NewS extends keyof ${interfaceName} | "*">(...columns: [NewS, ...NewS[]]): ${interfaceName}QueryBuilder<I, NewS> {`,
   );
   lines.push(`    const clone = this._clone<I, NewS>();`);
   lines.push(`    clone._selectColumns = [...columns] as string[];`);
@@ -358,7 +358,7 @@ function generateQueryBuilderClass(
 
   // _clone() method
   lines.push(
-    `  private _clone<CloneI extends ${includeConstraint} = I, CloneS extends keyof ${interfaceName} = S>(): ${interfaceName}QueryBuilder<CloneI, CloneS> {`,
+    `  private _clone<CloneI extends ${includeConstraint} = I, CloneS extends keyof ${interfaceName} | "*" = S>(): ${interfaceName}QueryBuilder<CloneI, CloneS> {`,
   );
   lines.push(`    const clone = new ${interfaceName}QueryBuilder<CloneI, CloneS>();`);
   lines.push(`    clone._conditions = [...this._conditions];`);

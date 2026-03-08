@@ -83,6 +83,15 @@ function normalizeOrderBy(value: unknown): Array<[string, "asc" | "desc"]> {
   );
 }
 
+function normalizeSelect(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const select = value.filter((column): column is string => typeof column === "string");
+  return select.includes("*") ? [] : select;
+}
+
 function normalizeGather(value: unknown): BuiltGather | undefined {
   const maxDepth =
     isPlainObject(value) && typeof value.max_depth === "number" ? value.max_depth : NaN;
@@ -154,9 +163,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       table: typeof raw.table === "string" ? raw.table : undefined,
       conditions: normalizeConditions(raw.conditions),
       includes: normalizeIncludeEntries(raw.includes),
-      select: Array.isArray(raw.select)
-        ? raw.select.filter((column): column is string => typeof column === "string")
-        : [],
+      select: normalizeSelect(raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
       offset: typeof raw.offset === "number" ? raw.offset : undefined,
@@ -198,9 +205,7 @@ export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): Normal
     table: typeof value.table === "string" && value.table.length > 0 ? value.table : fallbackTable,
     conditions: normalizeConditions(value.conditions),
     includes: normalizeIncludeEntries(value.includes),
-    select: Array.isArray(value.select)
-      ? value.select.filter((column): column is string => typeof column === "string")
-      : [],
+    select: normalizeSelect(value.select),
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
     offset: typeof value.offset === "number" ? value.offset : undefined,
