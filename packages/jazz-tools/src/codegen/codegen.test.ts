@@ -810,9 +810,9 @@ describe("generateTypes with relations", () => {
     expect(output).toContain("? RelationInclude extends true");
     expect(output).toContain("? User");
     expect(output).toContain(
-      ": RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude>",
+      ': RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude, infer QuerySelect extends keyof User | "*">',
     );
-    expect(output).toContain("? UserWithIncludes<QueryInclude>");
+    expect(output).toContain("? UserSelectedWithIncludes<QueryInclude, QuerySelect>");
     expect(output).toContain(": RelationInclude extends UserInclude");
     expect(output).toContain("? UserWithIncludes<RelationInclude>");
     expect(output).toContain(
@@ -820,13 +820,28 @@ describe("generateTypes with relations", () => {
     );
     expect(output).toContain("? Todo[]");
     expect(output).toContain(
-      ": RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude>",
+      ': RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude, infer QuerySelect extends keyof Todo | "*">',
     );
-    expect(output).toContain("? TodoWithIncludes<QueryInclude>[]");
+    expect(output).toContain("? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]");
     expect(output).toContain(": RelationInclude extends TodoInclude");
     expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
     expect(output).not.toContain("WithIncludesFor<");
     expect(output).not.toContain("WithIncludesArray<");
+  });
+
+  it("generates selection helper types", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users"), title: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain('export type TodoSelected<S extends keyof Todo | "*" = keyof Todo>');
+    expect(output).toContain('"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>');
+    expect(output).toContain(
+      'export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends keyof Todo | "*" = keyof Todo>',
+    );
+    expect(output).toContain("TodoSelected<S> & Omit<TodoWithIncludes<I>, keyof Todo>");
   });
 
   it("avoids collapsing nested array includes to never when selectors are optional", () => {
@@ -978,11 +993,14 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "export class TodoQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<Todo> {",
+      'export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends keyof Todo | "*" = keyof Todo> implements QueryBuilder<TodoSelected<S>> {',
     );
-    expect(output).toContain("declare readonly _rowType: Todo;");
+    expect(output).toContain("declare readonly _rowType: TodoSelected<S>;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
+    expect(output).toContain(
+      'select<NewS extends keyof Todo | "*">(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS>',
+    );
     expect(output).toContain("orderBy(column: keyof Todo");
     expect(output).toContain("limit(n: number)");
     expect(output).toContain("offset(n: number)");
@@ -998,9 +1016,9 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<TodoWithIncludes<I>> {",
+      'export class TodoQueryBuilder<I extends TodoInclude = {}, S extends keyof Todo | "*" = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {',
     );
-    expect(output).toContain("declare readonly _rowType: TodoWithIncludes<I>;");
+    expect(output).toContain("declare readonly _rowType: TodoSelectedWithIncludes<I, S>;");
   });
 
   it("generates include method for tables with relations", () => {
@@ -1011,7 +1029,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
-    expect(output).toContain("const clone = this._clone<I & NewI>();");
+    expect(output).toContain("const clone = this._clone<I & NewI, S>();");
     expect(output).not.toContain("as unknown as TodoQueryBuilder<I & NewI>");
   });
 
@@ -1061,11 +1079,14 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("table: this._table,");
     expect(output).toContain("conditions: this._conditions,");
     expect(output).toContain("includes: this._includes,");
+    expect(output).toContain("select: this._selectColumns,");
     expect(output).toContain("orderBy: this._orderBys,");
     expect(output).toContain("limit: this._limitVal,");
     expect(output).toContain("offset: this._offsetVal,");
     expect(output).toContain("hops: this._hops,");
     expect(output).toContain("gather: this._gatherVal,");
+    expect(output).toContain("toJSON(): unknown {");
+    expect(output).toContain("return JSON.parse(this._build());");
   });
 
   it("generates private _clone method for immutability", () => {
@@ -1075,10 +1096,13 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "private _clone<CloneI extends Record<string, never> = I>(): TodoQueryBuilder<CloneI> {",
+      'private _clone<CloneI extends Record<string, never> = I, CloneS extends keyof Todo | "*" = S>(): TodoQueryBuilder<CloneI, CloneS> {',
     );
-    expect(output).toContain("const clone = new TodoQueryBuilder<CloneI>();");
+    expect(output).toContain("const clone = new TodoQueryBuilder<CloneI, CloneS>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
+    expect(output).toContain(
+      "clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;",
+    );
     expect(output).toContain("clone._hops = [...this._hops];");
     expect(output).toContain("clone._gatherVal = this._gatherVal");
   });

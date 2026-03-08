@@ -145,10 +145,12 @@ function generateQueryBuilderClass(
 
   // Determine Include type - use the interface if it exists, otherwise empty object
   const includeConstraint = hasRelations ? `${interfaceName}Include` : "Record<string, never>";
-  const rowType = hasRelations ? `${interfaceName}WithIncludes<I>` : interfaceName;
+  const rowType = hasRelations
+    ? `${interfaceName}SelectedWithIncludes<I, S>`
+    : `${interfaceName}Selected<S>`;
 
   lines.push(
-    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}> implements QueryBuilder<${rowType}> {`,
+    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends keyof ${interfaceName} | "*" = keyof ${interfaceName}> implements QueryBuilder<${rowType}> {`,
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
@@ -157,6 +159,7 @@ function generateQueryBuilderClass(
   lines.push(`  declare readonly _initType: ${interfaceName}Init;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
   lines.push(`  private _includes: Partial<${includeConstraint}> = {};`);
+  lines.push(`  private _selectColumns?: string[];`);
   lines.push(`  private _orderBys: Array<[string, "asc" | "desc"]> = [];`);
   lines.push(`  private _limitVal?: number;`);
   lines.push(`  private _offsetVal?: number;`);
@@ -171,7 +174,7 @@ function generateQueryBuilderClass(
   lines.push(``);
 
   // where() method
-  lines.push(`  where(conditions: ${whereInputInterface}): ${interfaceName}QueryBuilder<I> {`);
+  lines.push(`  where(conditions: ${whereInputInterface}): ${interfaceName}QueryBuilder<I, S> {`);
   lines.push(`    const clone = this._clone();`);
   lines.push(`    for (const [key, value] of Object.entries(conditions)) {`);
   lines.push(`      if (value === undefined) continue;`);
@@ -189,13 +192,23 @@ function generateQueryBuilderClass(
   lines.push(`  }`);
   lines.push(``);
 
+  // select() method
+  lines.push(
+    `  select<NewS extends keyof ${interfaceName} | "*">(...columns: [NewS, ...NewS[]]): ${interfaceName}QueryBuilder<I, NewS> {`,
+  );
+  lines.push(`    const clone = this._clone<I, NewS>();`);
+  lines.push(`    clone._selectColumns = [...columns] as string[];`);
+  lines.push(`    return clone;`);
+  lines.push(`  }`);
+  lines.push(``);
+
   // include() method - only if table has relations
   if (hasRelations) {
     const includeInterface = interfaceName + "Include";
     lines.push(
-      `  include<NewI extends ${includeInterface}>(relations: NewI): ${interfaceName}QueryBuilder<I & NewI> {`,
+      `  include<NewI extends ${includeInterface}>(relations: NewI): ${interfaceName}QueryBuilder<I & NewI, S> {`,
     );
-    lines.push(`    const clone = this._clone<I & NewI>();`);
+    lines.push(`    const clone = this._clone<I & NewI, S>();`);
     lines.push(`    clone._includes = { ...this._includes, ...relations };`);
     lines.push(`    return clone;`);
     lines.push(`  }`);
@@ -204,7 +217,7 @@ function generateQueryBuilderClass(
 
   // orderBy() method
   lines.push(
-    `  orderBy(column: keyof ${interfaceName}, direction: "asc" | "desc" = "asc"): ${interfaceName}QueryBuilder<I> {`,
+    `  orderBy(column: keyof ${interfaceName}, direction: "asc" | "desc" = "asc"): ${interfaceName}QueryBuilder<I, S> {`,
   );
   lines.push(`    const clone = this._clone();`);
   lines.push(`    clone._orderBys.push([column as string, direction]);`);
@@ -213,7 +226,7 @@ function generateQueryBuilderClass(
   lines.push(``);
 
   // limit() method
-  lines.push(`  limit(n: number): ${interfaceName}QueryBuilder<I> {`);
+  lines.push(`  limit(n: number): ${interfaceName}QueryBuilder<I, S> {`);
   lines.push(`    const clone = this._clone();`);
   lines.push(`    clone._limitVal = n;`);
   lines.push(`    return clone;`);
@@ -221,7 +234,7 @@ function generateQueryBuilderClass(
   lines.push(``);
 
   // offset() method
-  lines.push(`  offset(n: number): ${interfaceName}QueryBuilder<I> {`);
+  lines.push(`  offset(n: number): ${interfaceName}QueryBuilder<I, S> {`);
   lines.push(`    const clone = this._clone();`);
   lines.push(`    clone._offsetVal = n;`);
   lines.push(`    return clone;`);
@@ -230,7 +243,7 @@ function generateQueryBuilderClass(
 
   if (hasRelations) {
     const relationUnion = tableRels.map((rel) => `"${rel.name}"`).join(" | ");
-    lines.push(`  hopTo(relation: ${relationUnion}): ${interfaceName}QueryBuilder<I> {`);
+    lines.push(`  hopTo(relation: ${relationUnion}): ${interfaceName}QueryBuilder<I, S> {`);
     lines.push(`    const clone = this._clone();`);
     lines.push(`    clone._hops.push(relation);`);
     lines.push(`    return clone;`);
@@ -243,7 +256,7 @@ function generateQueryBuilderClass(
   lines.push(`    start: ${whereInputInterface};`);
   lines.push(`    step: (ctx: { current: string }) => QueryBuilder<unknown>;`);
   lines.push(`    maxDepth?: number;`);
-  lines.push(`  }): ${interfaceName}QueryBuilder<I> {`);
+  lines.push(`  }): ${interfaceName}QueryBuilder<I, S> {`);
   lines.push(`    if (options.start === undefined) {`);
   lines.push(`      throw new Error("gather(...) requires start where conditions.");`);
   lines.push(`    }`);
@@ -329,6 +342,7 @@ function generateQueryBuilderClass(
   lines.push(`      table: this._table,`);
   lines.push(`      conditions: this._conditions,`);
   lines.push(`      includes: this._includes,`);
+  lines.push(`      select: this._selectColumns,`);
   lines.push(`      orderBy: this._orderBys,`);
   lines.push(`      limit: this._limitVal,`);
   lines.push(`      offset: this._offsetVal,`);
@@ -337,14 +351,21 @@ function generateQueryBuilderClass(
   lines.push(`    });`);
   lines.push(`  }`);
   lines.push(``);
+  lines.push(`  toJSON(): unknown {`);
+  lines.push(`    return JSON.parse(this._build());`);
+  lines.push(`  }`);
+  lines.push(``);
 
   // _clone() method
   lines.push(
-    `  private _clone<CloneI extends ${includeConstraint} = I>(): ${interfaceName}QueryBuilder<CloneI> {`,
+    `  private _clone<CloneI extends ${includeConstraint} = I, CloneS extends keyof ${interfaceName} | "*" = S>(): ${interfaceName}QueryBuilder<CloneI, CloneS> {`,
   );
-  lines.push(`    const clone = new ${interfaceName}QueryBuilder<CloneI>();`);
+  lines.push(`    const clone = new ${interfaceName}QueryBuilder<CloneI, CloneS>();`);
   lines.push(`    clone._conditions = [...this._conditions];`);
   lines.push(`    clone._includes = { ...this._includes };`);
+  lines.push(
+    `    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;`,
+  );
   lines.push(`    clone._orderBys = [...this._orderBys];`);
   lines.push(`    clone._limitVal = this._limitVal;`);
   lines.push(`    clone._offsetVal = this._offsetVal;`);
