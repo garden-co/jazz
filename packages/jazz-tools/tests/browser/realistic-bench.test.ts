@@ -16,6 +16,8 @@ import b4Json from "../../../../benchmarks/realistic/scenarios/b4_server_fanout_
 import b5Json from "../../../../benchmarks/realistic/scenarios/b5_server_permission_recursive.json";
 import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
 
+declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
+
 type PersistenceTier = "worker" | "edge" | "core";
 
 function durabilityOptions(tier: PersistenceTier): { tier: "worker" | "edge" | "global" } {
@@ -231,14 +233,8 @@ const b3 = b3Json as unknown as B3Scenario;
 const b4 = b4Json as unknown as B4Scenario;
 const b5 = b5Json as unknown as B5Scenario;
 const b6 = b6Json as unknown as B6Scenario;
-const browserEnv =
-  (
-    globalThis as typeof globalThis & {
-      process?: { env?: Record<string, string | undefined> };
-    }
-  ).process?.env ?? {};
 const browserScenarioSelection = new Set(
-  (browserEnv.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "")
+  (__JAZZ_REALISTIC_BROWSER_SCENARIOS__ ?? "")
     .split(",")
     .map((value) => value.trim().toUpperCase())
     .filter(Boolean),
