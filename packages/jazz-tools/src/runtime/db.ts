@@ -83,10 +83,6 @@ function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
 }
 
-function isMemoryDriver(driver?: StorageDriver): boolean {
-  return resolveStorageDriver(driver).type === "memory";
-}
-
 /**
  * Interface that QueryBuilder classes implement.
  * Generated builders expose these internal properties for Db to use.
