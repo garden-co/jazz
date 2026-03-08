@@ -329,7 +329,7 @@ impl R1State {
 
     fn seed_dataset(&mut self, profile: &ProfileConfig) {
         for user_idx in 0..profile.users {
-            let user_id = self
+            let (user_id, _row_values) = self
                 .runtime
                 .insert(
                     "users",
@@ -345,7 +345,7 @@ impl R1State {
 
         for org_idx in 0..profile.organizations {
             let created_at = self.bump_timestamp();
-            let org_id = self
+            let (org_id, _row_values) = self
                 .runtime
                 .insert(
                     "organizations",
@@ -383,7 +383,7 @@ impl R1State {
         for project_idx in 0..profile.projects {
             let org_id = self.organizations[project_idx % self.organizations.len()];
             let updated_at = self.bump_timestamp();
-            let project_id = self
+            let (project_id, _row_values) = self
                 .runtime
                 .insert(
                     "projects",
@@ -410,7 +410,7 @@ impl R1State {
             };
             let priority = ((task_idx % 5) + 1) as i32;
             let updated_at = self.bump_timestamp();
-            let task_id = self
+            let (task_id, _row_values) = self
                 .runtime
                 .insert(
                     "tasks",
@@ -592,7 +592,7 @@ impl R1State {
             }
         };
 
-        let rows = block_on(self.runtime.query(query, None, None)).expect("read query");
+        let rows = block_on(self.runtime.query(query, None)).expect("read query");
         rows.len()
     }
 
@@ -607,7 +607,7 @@ impl R1State {
         };
         let updated_at = self.bump_timestamp();
 
-        let task_id = self
+        let (task_id, _row_values) = self
             .runtime
             .insert(
                 "tasks",
@@ -700,7 +700,7 @@ fn seed_project_board_dataset<S: Storage>(
     };
 
     for user_idx in 0..profile.users {
-        let user_id = runtime
+        let (user_id, _row_values) = runtime
             .insert(
                 "users",
                 vec![
@@ -714,7 +714,7 @@ fn seed_project_board_dataset<S: Storage>(
     }
 
     for org_idx in 0..profile.organizations {
-        let org_id = runtime
+        let (org_id, _row_values) = runtime
             .insert(
                 "organizations",
                 vec![
@@ -749,7 +749,7 @@ fn seed_project_board_dataset<S: Storage>(
 
     for project_idx in 0..profile.projects {
         let org_id = organizations[project_idx % organizations.len()];
-        let project_id = runtime
+        let (project_id, _row_values) = runtime
             .insert(
                 "projects",
                 vec![
@@ -774,7 +774,7 @@ fn seed_project_board_dataset<S: Storage>(
             _ => "done",
         };
         let priority = ((task_idx % 5) + 1) as i32;
-        let task_id = runtime
+        let (task_id, _row_values) = runtime
             .insert(
                 "tasks",
                 vec![
@@ -1067,7 +1067,7 @@ impl FanoutR4State {
             .filter_eq("project_id", Value::Uuid(project_id))
             .limit(10_000)
             .build();
-        let rows = block_on(self.writer.runtime.query(query, None, None)).expect("load hot tasks");
+        let rows = block_on(self.writer.runtime.query(query, None)).expect("load hot tasks");
         rows.into_iter().map(|(object_id, _)| object_id).collect()
     }
 
@@ -1158,7 +1158,7 @@ impl PermissionR5State {
             timestamp: 1_770_000_000_000_000,
         };
 
-        let alice_root = state
+        let (alice_root, _row_values) = state
             .runtime
             .insert(
                 "folders",
@@ -1173,7 +1173,7 @@ impl PermissionR5State {
         let mut shared_folders = vec![alice_root];
         let mut parent = alice_root;
         for idx in 0..scenario.shared_chain_depth {
-            let folder_id = state
+            let (folder_id, _row_values) = state
                 .runtime
                 .insert(
                     "folders",
@@ -1193,7 +1193,7 @@ impl PermissionR5State {
             for doc_idx in 0..scenario.docs_per_folder {
                 let updated_at = state.next_timestamp();
                 let owner_id = if doc_idx % 8 == 0 { "alice" } else { "bob" };
-                let doc_id = state
+                let (doc_id, _row_values) = state
                     .runtime
                     .insert(
                         "documents",
@@ -1214,7 +1214,7 @@ impl PermissionR5State {
             }
         }
 
-        let private_root = state
+        let (private_root, _row_values) = state
             .runtime
             .insert(
                 "folders",
@@ -1228,7 +1228,7 @@ impl PermissionR5State {
             .expect("seed private root folder");
         for doc_idx in 0..scenario.denied_docs {
             let updated_at = state.next_timestamp();
-            let doc_id = state
+            let (doc_id, _row_values) = state
                 .runtime
                 .insert(
                     "documents",
@@ -1291,11 +1291,8 @@ impl PermissionR5State {
             .order_by_desc("updated_at")
             .limit(200)
             .build();
-        let rows = block_on(
-            self.runtime
-                .query(query, Some(self.session_alice.clone()), None),
-        )
-        .expect("permission query");
+        let rows = block_on(self.runtime.query(query, Some(self.session_alice.clone())))
+            .expect("permission query");
         rows.len()
     }
 
@@ -1520,7 +1517,7 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
                     .build();
 
                 let query_start = Instant::now();
-                let rows = block_on(runtime.query(query, None, None)).expect("cold-load query");
+                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
                 let query_elapsed = query_start.elapsed();
 
                 runtime.flush_storage();

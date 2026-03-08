@@ -106,20 +106,28 @@ Current browser scenarios:
 
 ## CI / Runner
 
-- Workflow: `/Users/anselm/.codex/worktrees/f472/jazz2-clean/.github/workflows/benchmarks.yml`
-- AWS setup: `/Users/anselm/.codex/worktrees/f472/jazz2-clean/benchmarks/realistic/aws_runner_setup.md`
+- Workflow: `.github/workflows/benchmarks.yml`
+- AWS setup: `benchmarks/realistic/aws_runner_setup.md`
 
 Artifacts include `manifest.json` as a stable ingestion entrypoint:
 
 - native: `bench-out/native/manifest.json`
 - browser: `bench-out/browser/manifest.json`
 
-The workflow also has a `site` job that:
+The workflow currently:
+
+- runs on `main` pushes and nightly schedule
+- runs on PRs only when the PR has the `benchmark` label
+- records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`)
+- records browser outputs when the browser suite runs
+
+The `site` job:
 
 - pulls the benchmark artifacts for that run
 - updates `history/bench_history.json` with absolute metrics
 - rebuilds `site/index.html` + `site/history.json`
 - uploads `site/` as an artifact
+- posts a markdown comparison report back to labeled PRs
 - commits refreshed history/site back to `main` when the workflow itself runs on `main`
 
 ## Delta Rendering (Local)
@@ -138,6 +146,7 @@ Notes:
 - Script: `benchmarks/realistic/render_deltas.mjs`
 - It auto-discovers `manifest.json` recursively under `--base` and `--head`.
 - It compares the newest native/browser manifests found in each tree.
+- For history-backed markdown reports in CI, use `benchmarks/realistic/render_history_report.mjs`.
 
 ## Static Site (Local + Vercel)
 
@@ -157,5 +166,7 @@ pnpm bench:realistic:build-site -- \
 For Vercel hosting:
 
 - set project root directory to `benchmarks/realistic/site`
+- keep [vercel.json](/Users/anselm/.codex/worktrees/30d1/jazz2/benchmarks/realistic/site/vercel.json) in that directory so routing stays explicit
 - use no install command and no build command (prebuilt static files)
+- framework preset: `Other`
 - deploy from `main` so each benchmark CI run refreshes the dashboard automatically

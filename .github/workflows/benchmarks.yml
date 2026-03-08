@@ -12,31 +12,55 @@ on:
         required: false
         default: false
         type: boolean
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled]
+  push:
+    branches: [main]
   schedule:
-    # Nightly UTC
     - cron: "0 5 * * *"
 
 concurrency:
-  # Prevent overlapping benchmark runs on the same dedicated runner pool.
   group: realistic-benchmarks
   cancel-in-progress: false
 
 env:
   BENCH_PROFILE: ${{ github.event.inputs.profile || 's' }}
+  BENCH_BRANCH: ${{ github.head_ref || github.ref_name }}
+  BENCH_REF: ${{ github.ref }}
+  BENCH_SHA: ${{ github.sha }}
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   native:
-    name: Native Bench (SurrealKV)
+    name: Native Bench (Example + Criterion)
+    if: >-
+      ${{
+        (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
+      }}
     runs-on: [self-hosted, linux, x64, jazz-bench]
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
 
       - name: Collect host metadata
         run: |
@@ -48,8 +72,9 @@ jobs:
             "run_id": "${GITHUB_RUN_ID}",
             "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "repository": "${GITHUB_REPOSITORY}",
-            "sha": "${GITHUB_SHA}",
-            "ref": "${GITHUB_REF}",
+            "sha": "${BENCH_SHA}",
+            "ref": "${BENCH_REF}",
+            "branch": "${BENCH_BRANCH}",
             "profile": "${BENCH_PROFILE}",
             "runner_name": "${RUNNER_NAME}",
             "runner_os": "${RUNNER_OS}",
@@ -59,6 +84,12 @@ jobs:
           rustc -V > bench-out/native/rustc.txt
           uname -a > bench-out/native/uname.txt
           lscpu > bench-out/native/lscpu.txt
+
+      - name: Build native benchmark binaries
+        run: |
+          set -euo pipefail
+          cargo build --release -p jazz-tools --features client --example realistic_bench
+          cargo bench -p jazz-tools --features surrealkv --bench realistic_phase1 --no-run
 
       - name: Run W1 (interactive)
         run: |
@@ -76,6 +107,18 @@ jobs:
             --scenario benchmarks/realistic/scenarios/w4_cold_start.json \
             > bench-out/native/w4_cold_start.json
 
+      - name: Run realistic Criterion suite
+        run: |
+          set -euo pipefail
+          cargo bench -p jazz-tools --features surrealkv --bench realistic_phase1
+
+      - name: Export Criterion artifacts
+        run: |
+          set -euo pipefail
+          node benchmarks/realistic/export_criterion.mjs \
+            --out bench-out/native/criterion_realistic_phase1.json \
+            --summary-md bench-out/native/criterion_realistic_phase1.md
+
       - name: Build native manifest
         run: |
           set -euo pipefail
@@ -84,12 +127,15 @@ jobs:
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha "${GITHUB_SHA}" \
-            --arg ref "${GITHUB_REF}" \
+            --arg sha "${BENCH_SHA}" \
+            --arg ref "${BENCH_REF}" \
+            --arg branch "${BENCH_BRANCH}" \
             --arg profile "${BENCH_PROFILE}" \
             --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg w1_sha256 "$(sha256sum bench-out/native/w1_interactive.json | awk '{print $1}')" \
             --arg w4_sha256 "$(sha256sum bench-out/native/w4_cold_start.json | awk '{print $1}')" \
+            --arg criterion_json_sha256 "$(sha256sum bench-out/native/criterion_realistic_phase1.json | awk '{print $1}')" \
+            --arg criterion_md_sha256 "$(sha256sum bench-out/native/criterion_realistic_phase1.md | awk '{print $1}')" \
             '{
               kind: "realistic-bench-native",
               generated_at: $generated_at,
@@ -99,6 +145,7 @@ jobs:
               repository: $repository,
               sha: $sha,
               ref: $ref,
+              branch: $branch,
               profile: $profile,
               files: [
                 { path: "metadata.json" },
@@ -106,7 +153,9 @@ jobs:
                 { path: "uname.txt" },
                 { path: "lscpu.txt" },
                 { path: "w1_interactive.json", sha256: $w1_sha256 },
-                { path: "w4_cold_start.json", sha256: $w4_sha256 }
+                { path: "w4_cold_start.json", sha256: $w4_sha256 },
+                { path: "criterion_realistic_phase1.json", sha256: $criterion_json_sha256 },
+                { path: "criterion_realistic_phase1.md", sha256: $criterion_md_sha256 }
               ]
             }' > bench-out/native/manifest.json
 
@@ -119,15 +168,30 @@ jobs:
 
   browser:
     name: Browser Bench (TS + OPFS)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_browser }}
+    if: >-
+      ${{
+        (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
+        && (
+          github.event_name != 'workflow_dispatch'
+          || inputs.include_browser
+        )
+      }}
     runs-on: [self-hosted, linux, x64, jazz-bench]
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
       - uses: actions/setup-node@v6
@@ -147,8 +211,9 @@ jobs:
             "run_id": "${GITHUB_RUN_ID}",
             "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "repository": "${GITHUB_REPOSITORY}",
-            "sha": "${GITHUB_SHA}",
-            "ref": "${GITHUB_REF}",
+            "sha": "${BENCH_SHA}",
+            "ref": "${BENCH_REF}",
+            "branch": "${BENCH_BRANCH}",
             "profile": "${BENCH_PROFILE}",
             "runner_name": "${RUNNER_NAME}",
             "runner_os": "${RUNNER_OS}",
@@ -185,8 +250,9 @@ jobs:
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha "${GITHUB_SHA}" \
-            --arg ref "${GITHUB_REF}" \
+            --arg sha "${BENCH_SHA}" \
+            --arg ref "${BENCH_REF}" \
+            --arg branch "${BENCH_BRANCH}" \
             --arg profile "${BENCH_PROFILE}" \
             --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg realistic_sha256 "$(sha256sum bench-out/browser/realistic.json | awk '{print $1}')" \
@@ -200,6 +266,7 @@ jobs:
               repository: $repository,
               sha: $sha,
               ref: $ref,
+              branch: $branch,
               profile: $profile,
               files: [
                 { path: "metadata.json" },
@@ -223,10 +290,16 @@ jobs:
     name: Build Benchmark Site
     runs-on: ubuntu-latest
     needs: [native, browser]
-    if: ${{ always() && needs.native.result == 'success' && (needs.browser.result == 'success' || needs.browser.result == 'skipped') }}
+    if: >-
+      ${{
+        always()
+        && needs.native.result == 'success'
+        && (needs.browser.result == 'success' || needs.browser.result == 'skipped')
+      }}
     permissions:
       actions: read
       contents: write
+      issues: write
 
     steps:
       - uses: actions/checkout@v6
@@ -244,7 +317,7 @@ jobs:
           path: site-input/native
 
       - name: Download browser artifacts
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_browser }}
+        if: ${{ needs.browser.result == 'success' }}
         uses: actions/download-artifact@v5
         with:
           name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
@@ -270,12 +343,64 @@ jobs:
             --history benchmarks/realistic/history/bench_history.json \
             --out benchmarks/realistic/site
 
+      - name: Render PR benchmark report
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out
+          node benchmarks/realistic/render_history_report.mjs \
+            --history benchmarks/realistic/history/bench_history.json \
+            --base-branch main \
+            --head-branch "${BENCH_BRANCH}" \
+            --out bench-out/pr-report.md
+          cat bench-out/pr-report.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload site artifacts
         uses: actions/upload-artifact@v4
         with:
           name: realistic-site-${{ github.run_id }}-${{ github.run_attempt }}
           path: benchmarks/realistic/site
           if-no-files-found: error
+
+      - name: Update PR benchmark comment
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        env:
+          REPORT_PATH: bench-out/pr-report.md
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- realistic-bench-report -->";
+            const body = `${marker}\n${fs.readFileSync(process.env.REPORT_PATH, "utf8")}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === "github-actions[bot]"
+                && typeof comment.body === "string"
+                && comment.body.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
 
       - name: Commit updated history and site
         if: ${{ github.ref == 'refs/heads/main' }}
