@@ -1,5 +1,5 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
@@ -7,45 +7,65 @@ function uniqueDbName(label: string): string {
 }
 
 describe("TS Insert API", () => {
-  const dbs: Db[] = [];
+  let db: Db;
 
-  function track(db: Db): Db {
-    dbs.push(db);
-    return db;
-  }
+  beforeEach(async () => {
+    db = await createDb({
+      appId: "test-app",
+      driver: { type: "persistent", dbName: uniqueDbName("insert-row-shape") },
+    });
+  });
 
   afterEach(async () => {
-    for (const db of dbs) {
-      try {
-        await db.shutdown();
-      } catch {
-        // Best effort
-      }
-    }
-    dbs.length = 0;
+    await db.shutdown();
   });
 
   it("returns the inserted row", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("insert-row-shape") },
-      }),
-    );
-
-    const project = await db.insert(app.projects, { name: "Test Project" });
+    const project = db.insert(app.projects, { name: "Test Project" });
 
     expect(project).toEqual({
       id: expect.any(String),
       name: "Test Project",
     });
 
-    const todo = await db.insert(app.todos, {
+    const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: true,
       tags: ["tag1", "tag2"],
       project: project.id,
     });
+
+    expect(todo).toEqual({
+      id: expect.any(String),
+      title: "Test Todo",
+      done: true,
+      tags: ["tag1", "tag2"],
+      project: project.id,
+    });
+  });
+
+  it("can wait for row to be persisted up to a specific durability tier", async () => {
+    const project = await db.insertDurable(
+      app.projects,
+      { name: "Test Project" },
+      { tier: "worker" },
+    );
+
+    expect(project).toEqual({
+      id: expect.any(String),
+      name: "Test Project",
+    });
+
+    const todo = await db.insertDurable(
+      app.todos,
+      {
+        title: "Test Todo",
+        done: true,
+        tags: ["tag1", "tag2"],
+        project: project.id,
+      },
+      { tier: "worker" },
+    );
 
     expect(todo).toEqual({
       id: expect.any(String),
