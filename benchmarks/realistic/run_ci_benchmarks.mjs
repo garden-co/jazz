@@ -82,6 +82,13 @@ function rel(file) {
   return path.relative(process.cwd(), file);
 }
 
+function fileSafeId(value) {
+  return String(value)
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -230,8 +237,11 @@ function failureNote(result) {
     .filter(Boolean);
   for (const line of lines) {
     if (
+      line.startsWith("Caused by:") ||
+      line.startsWith("ReferenceError:") ||
       line.startsWith("Error:") ||
       line.includes("Unhandled Error") ||
+      line.includes("Failed to import test file") ||
       line.includes("Executable doesn't exist")
     ) {
       return line;
@@ -259,6 +269,9 @@ async function runNativeBenchmark(benchmark, args) {
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
     const tempOutputFile = `${outputFile}.partial`;
+    const profilePath =
+      benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
+    const env = { ...process.env, ...(benchmark.env ?? {}) };
     fs.rmSync(tempOutputFile, { force: true });
     const command = [
       "cargo",
@@ -272,17 +285,65 @@ async function runNativeBenchmark(benchmark, args) {
       "realistic_bench",
       "--",
       "--profile",
-      `benchmarks/realistic/profiles/${args.profile}.json`,
+      profilePath,
       "--scenario",
       benchmark.scenario_path,
     ];
+    let prepareDurationMs = null;
+    let prepareLogPath = null;
+
+    if (benchmark.prepare_seed) {
+      const fixtureDir = path.resolve(args.outDir, "fixtures", fileSafeId(benchmark.id));
+      const seedStateFile = path.join(fixtureDir, "seed_state.json");
+      const prepareLogFile = `${logFile}.prepare`;
+      prepareLogPath = rel(prepareLogFile);
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
+      mkdirp(fixtureDir);
+
+      const prepareCommand = [
+        ...command,
+        "--data-dir",
+        fixtureDir,
+        "--seed-state",
+        seedStateFile,
+        "--prepare-only",
+      ];
+      console.log(`\n==> ${benchmark.label} (prepare)`);
+      console.log(shellQuote(prepareCommand));
+      const prepareResult = await runCommand({
+        command: prepareCommand,
+        cwd: process.cwd(),
+        env,
+        timeoutSeconds: args.timeoutSeconds,
+        logFile: prepareLogFile,
+      });
+      prepareDurationMs = prepareResult.durationMs;
+      const prepareStatus = statusForRun(prepareResult);
+      if (prepareStatus !== "passed") {
+        return summarizeBenchmark(benchmark, prepareStatus, prepareResult.durationMs, {
+          command,
+          prepare_command: prepareCommand,
+          scenario_path: benchmark.scenario_path,
+          profile_path: profilePath,
+          output_path: null,
+          log_path: rel(logFile),
+          prepare_log_path: prepareLogPath,
+          exit_code: prepareResult.code,
+          signal: prepareResult.signal,
+          timeout_seconds: args.timeoutSeconds,
+          note: failureNote(prepareResult) ?? "Seed preparation failed.",
+        });
+      }
+
+      command.push("--data-dir", fixtureDir, "--seed-state", seedStateFile, "--reuse-seed");
+    }
 
     console.log(`\n==> ${benchmark.label}`);
     console.log(shellQuote(command));
     const result = await runCommand({
       command,
       cwd: process.cwd(),
-      env: process.env,
+      env,
       timeoutSeconds: args.timeoutSeconds,
       stdoutFile: tempOutputFile,
       logFile,
@@ -300,6 +361,9 @@ async function runNativeBenchmark(benchmark, args) {
     return summarizeBenchmark(benchmark, finalStatus, result.durationMs, {
       command,
       scenario_path: benchmark.scenario_path,
+      profile_path: profilePath,
+      prepare_duration_ms: prepareDurationMs,
+      prepare_log_path: prepareLogPath,
       output_path: fileExists ? rel(outputFile) : null,
       log_path: rel(logFile),
       exit_code: result.code,
@@ -330,7 +394,7 @@ async function runNativeBenchmark(benchmark, args) {
   const result = await runCommand({
     command,
     cwd: process.cwd(),
-    env: process.env,
+    env: { ...process.env, ...(benchmark.env ?? {}) },
     timeoutSeconds: args.timeoutSeconds,
     logFile,
     streamStdoutToConsole: true,
@@ -363,6 +427,7 @@ async function runBrowserBenchmark(benchmark, args) {
   const command = ["pnpm", "--dir", "packages/jazz-tools", "run", "bench:realistic:browser"];
   const env = {
     ...process.env,
+    ...(benchmark.env ?? {}),
     JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
   };
 
