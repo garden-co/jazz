@@ -219,6 +219,35 @@ describe("TS Query API", () => {
         _canEdit: true,
       },
     ]);
+
+    const readableOnly = await db.all(
+      app.todos.where({ _canRead: true }).select("title", "_canRead").orderBy("title", "asc"),
+    );
+
+    expect(readableOnly).toEqual([
+      {
+        id: editableId,
+        title: "Draft docs",
+        _canRead: true,
+      },
+      {
+        id: lockedId,
+        title: "Shipped docs",
+        _canRead: true,
+      },
+    ]);
+
+    const deletableOnly = await db.all(
+      app.todos.where({ _canDelete: true }).select("title", "_canDelete").orderBy("title", "asc"),
+    );
+
+    expect(deletableOnly).toEqual([
+      {
+        id: editableId,
+        title: "Draft docs",
+        _canDelete: true,
+      },
+    ]);
   });
 
   it("include builders can project nested relation columns", async () => {

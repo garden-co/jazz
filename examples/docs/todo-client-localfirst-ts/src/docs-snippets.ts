@@ -72,11 +72,17 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 
 // #region reading-magic-columns-ts
 export async function readTodoPermissionIntrospection(db: Db) {
-  return db.all(app.todos.select("title", "_canRead", "_canEdit").orderBy("title", "asc"));
+  return db.all(
+    app.todos.select("title", "_canRead", "_canEdit", "_canDelete").orderBy("title", "asc"),
+  );
 }
 
 export async function readEditableTodos(db: Db) {
   return db.all(app.todos.where({ _canEdit: true }).select("title", "_canEdit"));
+}
+
+export async function readDeletableTodos(db: Db) {
+  return db.all(app.todos.where({ _canDelete: true }).select("title", "_canDelete"));
 }
 // #endregion reading-magic-columns-ts
 

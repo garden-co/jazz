@@ -227,6 +227,7 @@ Permission introspection columns are computed for the current session and are om
 - `_canRead` reflects whether the current session can read the row. Since read policies already
   gate which rows appear, returned rows will usually show `_canRead: true`.
 - `_canEdit` reflects whether the current session passes the row's `UPDATE USING` policy.
+- `_canDelete` reflects whether the current session passes the row's `DELETE USING` policy.
 - Without a session, permission introspection columns return `null`.
 
 <include cwd lang="ts">
