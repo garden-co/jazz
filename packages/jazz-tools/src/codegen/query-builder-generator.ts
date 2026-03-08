@@ -8,6 +8,7 @@
  */
 
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
+import { PERMISSION_INTROSPECTION_COLUMNS } from "../magic-columns.js";
 import { tableNameToInterface } from "./type-generator.js";
 import type { Relation } from "./relation-analyzer.js";
 
@@ -123,6 +124,9 @@ export function generateWhereInputTypesWithMapper(
       const type = columnToWhereInputType(col, columnTypeToTs);
       lines.push(`  ${col.name}?: ${type};`);
     }
+    for (const magicColumn of PERMISSION_INTROSPECTION_COLUMNS) {
+      lines.push(`  ${magicColumn}?: boolean;`);
+    }
     lines.push(`}`);
     lines.push(``);
   }
@@ -140,6 +144,8 @@ function generateQueryBuilderClass(
   const lines: string[] = [];
   const interfaceName = tableNameToInterface(tableName);
   const whereInputInterface = interfaceName + "WhereInput";
+  const selectableColumnType = interfaceName + "SelectableColumn";
+  const orderableColumnType = interfaceName + "OrderableColumn";
   const tableRels = relations.get(tableName) || [];
   const hasRelations = tableRels.length > 0;
 
@@ -150,7 +156,7 @@ function generateQueryBuilderClass(
     : `${interfaceName}Selected<S>`;
 
   lines.push(
-    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends keyof ${interfaceName} | "*" = keyof ${interfaceName}> implements QueryBuilder<${rowType}> {`,
+    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends ${selectableColumnType} = keyof ${interfaceName}> implements QueryBuilder<${rowType}> {`,
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
@@ -194,7 +200,7 @@ function generateQueryBuilderClass(
 
   // select() method
   lines.push(
-    `  select<NewS extends keyof ${interfaceName} | "*">(...columns: [NewS, ...NewS[]]): ${interfaceName}QueryBuilder<I, NewS> {`,
+    `  select<NewS extends ${selectableColumnType}>(...columns: [NewS, ...NewS[]]): ${interfaceName}QueryBuilder<I, NewS> {`,
   );
   lines.push(`    const clone = this._clone<I, NewS>();`);
   lines.push(`    clone._selectColumns = [...columns] as string[];`);
@@ -217,7 +223,7 @@ function generateQueryBuilderClass(
 
   // orderBy() method
   lines.push(
-    `  orderBy(column: keyof ${interfaceName}, direction: "asc" | "desc" = "asc"): ${interfaceName}QueryBuilder<I, S> {`,
+    `  orderBy(column: ${orderableColumnType}, direction: "asc" | "desc" = "asc"): ${interfaceName}QueryBuilder<I, S> {`,
   );
   lines.push(`    const clone = this._clone();`);
   lines.push(`    clone._orderBys.push([column as string, direction]);`);
@@ -358,7 +364,7 @@ function generateQueryBuilderClass(
 
   // _clone() method
   lines.push(
-    `  private _clone<CloneI extends ${includeConstraint} = I, CloneS extends keyof ${interfaceName} | "*" = S>(): ${interfaceName}QueryBuilder<CloneI, CloneS> {`,
+    `  private _clone<CloneI extends ${includeConstraint} = I, CloneS extends ${selectableColumnType} = S>(): ${interfaceName}QueryBuilder<CloneI, CloneS> {`,
   );
   lines.push(`    const clone = new ${interfaceName}QueryBuilder<CloneI, CloneS>();`);
   lines.push(`    clone._conditions = [...this._conditions];`);

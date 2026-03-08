@@ -117,6 +117,7 @@ impl MagicColumnsNode {
                 {
                     for kind in &requests.kinds {
                         let policy = match kind {
+                            MagicColumnKind::CanRead => table_schema.policies.select.using.as_ref(),
                             MagicColumnKind::CanEdit => table_schema.policies.update.using.as_ref(),
                             MagicColumnKind::CanDelete => {
                                 table_schema.policies.effective_delete_using()
@@ -343,6 +344,7 @@ impl MagicColumnsNode {
 
         let evaluator = PolicyContextEvaluator::new(&self.schema, session, &self.branch);
         let operation = match kind {
+            MagicColumnKind::CanRead => Operation::Select,
             MagicColumnKind::CanEdit => Operation::Update,
             MagicColumnKind::CanDelete => Operation::Delete,
         };

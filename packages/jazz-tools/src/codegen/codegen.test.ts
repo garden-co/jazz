@@ -810,7 +810,7 @@ describe("generateTypes with relations", () => {
     expect(output).toContain("? RelationInclude extends true");
     expect(output).toContain("? User");
     expect(output).toContain(
-      ': RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude, infer QuerySelect extends keyof User | "*">',
+      ": RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude, infer QuerySelect extends UserSelectableColumn>",
     );
     expect(output).toContain("? UserSelectedWithIncludes<QueryInclude, QuerySelect>");
     expect(output).toContain(": RelationInclude extends UserInclude");
@@ -820,7 +820,7 @@ describe("generateTypes with relations", () => {
     );
     expect(output).toContain("? Todo[]");
     expect(output).toContain(
-      ': RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude, infer QuerySelect extends keyof Todo | "*">',
+      ": RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude, infer QuerySelect extends TodoSelectableColumn>",
     );
     expect(output).toContain("? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]");
     expect(output).toContain(": RelationInclude extends TodoInclude");
@@ -836,10 +836,24 @@ describe("generateTypes with relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain('export type TodoSelected<S extends keyof Todo | "*" = keyof Todo>');
-    expect(output).toContain('"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>');
     expect(output).toContain(
-      'export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends keyof Todo | "*" = keyof Todo>',
+      'export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*"',
+    );
+    expect(output).toContain(
+      "export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn",
+    );
+    expect(output).toContain("export interface PermissionIntrospectionColumns {");
+    expect(output).toContain("  _canRead: boolean | null;");
+    expect(output).toContain("  _canEdit: boolean | null;");
+    expect(output).toContain("  _canDelete: boolean | null;");
+    expect(output).toContain(
+      "export type TodoSelected<S extends TodoSelectableColumn = keyof Todo>",
+    );
+    expect(output).toContain(
+      '"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>',
+    );
+    expect(output).toContain(
+      "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo>",
     );
     expect(output).toContain("TodoSelected<S> & Omit<TodoWithIncludes<I>, keyof Todo>");
   });
@@ -993,15 +1007,15 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      'export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends keyof Todo | "*" = keyof Todo> implements QueryBuilder<TodoSelected<S>> {',
+      "export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelected<S>> {",
     );
     expect(output).toContain("declare readonly _rowType: TodoSelected<S>;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
     expect(output).toContain(
-      'select<NewS extends keyof Todo | "*">(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS>',
+      "select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS>",
     );
-    expect(output).toContain("orderBy(column: keyof Todo");
+    expect(output).toContain("orderBy(column: TodoOrderableColumn");
     expect(output).toContain("limit(n: number)");
     expect(output).toContain("offset(n: number)");
     expect(output).toContain("gather(options: {");
@@ -1016,7 +1030,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      'export class TodoQueryBuilder<I extends TodoInclude = {}, S extends keyof Todo | "*" = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {',
+      "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {",
     );
     expect(output).toContain("declare readonly _rowType: TodoSelectedWithIncludes<I, S>;");
   });
@@ -1096,7 +1110,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      'private _clone<CloneI extends Record<string, never> = I, CloneS extends keyof Todo | "*" = S>(): TodoQueryBuilder<CloneI, CloneS> {',
+      "private _clone<CloneI extends Record<string, never> = I, CloneS extends TodoSelectableColumn = S>(): TodoQueryBuilder<CloneI, CloneS> {",
     );
     expect(output).toContain("const clone = new TodoQueryBuilder<CloneI, CloneS>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
