@@ -6,6 +6,11 @@ import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
+  server: {
+    fs: {
+      allow: [resolve(__dirname, "../..")],
+    },
+  },
   optimizeDeps: {
     include: ["react/jsx-dev-runtime", "react/jsx-runtime"],
   },

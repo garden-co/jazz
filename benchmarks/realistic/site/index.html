@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jazz Realistic Benchmarks</title>
+    <style>
+      :root {
+        --bg: #f7f9fc;
+        --panel: #ffffff;
+        --ink: #142235;
+        --muted: #53657d;
+        --accent: #0f766e;
+        --border: #d8e1eb;
+        --good: #0a7a3f;
+        --bad: #b42318;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        background: radial-gradient(circle at top right, #d6ece8, var(--bg) 40%);
+        color: var(--ink);
+      }
+      .wrap {
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 28px 20px 40px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 28px;
+      }
+      h2 {
+        margin: 4px 0 10px;
+        font-size: 19px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin: 18px 0 20px;
+      }
+      .card,
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: 0 6px 20px rgba(20, 34, 53, 0.04);
+      }
+      .card {
+        padding: 12px;
+      }
+      .card .k {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .card .v {
+        margin-top: 6px;
+        font-size: 20px;
+        font-weight: 700;
+      }
+      .panel {
+        padding: 14px;
+        margin-top: 12px;
+      }
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+      }
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      select {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        background: #fff;
+        color: var(--ink);
+        font-size: 14px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border-bottom: 1px solid var(--border);
+        padding: 8px 6px;
+        text-align: left;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      td.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .trend-better {
+        color: var(--good);
+        font-weight: 600;
+      }
+      .trend-worse {
+        color: var(--bad);
+        font-weight: 600;
+      }
+      .subtle {
+        color: var(--muted);
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 7px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Jazz Realistic Benchmark Dashboard</h1>
+      <div class="muted">Static page generated in CI from benchmark artifacts.</div>
+
+      <div class="grid" id="summaryCards"></div>
+
+      <section class="panel">
+        <h2>Comparison</h2>
+        <div class="controls">
+          <label
+            >Head Branch
+            <select id="headBranch"></select>
+          </label>
+          <label
+            >Base Branch
+            <select id="baseBranch"></select>
+          </label>
+          <label
+            >Suite
+            <select id="suite"></select>
+          </label>
+          <label
+            >Profile
+            <select id="profile"></select>
+          </label>
+          <label
+            >Scenario
+            <select id="scenario"></select>
+          </label>
+          <label
+            >Metric
+            <select id="metric"></select>
+          </label>
+        </div>
+        <div id="compareMeta" class="muted" style="margin-top: 8px"></div>
+        <div style="overflow: auto; margin-top: 8px">
+          <table id="compareTable">
+            <thead>
+              <tr>
+                <th>Scenario</th>
+                <th>Metric</th>
+                <th class="num">Base</th>
+                <th class="num">Head</th>
+                <th class="num">Delta</th>
+                <th class="num">Delta %</th>
+                <th>Trend</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Regression Watchlist</h2>
+        <div class="muted">
+          Worst per-branch regression versus selected base branch/suite/profile.
+        </div>
+        <div style="overflow: auto; margin-top: 8px">
+          <table id="regressionsTable">
+            <thead>
+              <tr>
+                <th>Branch</th>
+                <th>Scenario</th>
+                <th>Metric</th>
+                <th class="num">Delta %</th>
+                <th>Trend</th>
+                <th>Compared SHA</th>
+                <th>Compared At</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Recent Runs</h2>
+        <div style="overflow: auto">
+          <table id="runsTable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Suite</th>
+                <th>Branch</th>
+                <th>Profile</th>
+                <th>SHA</th>
+                <th>Run</th>
+                <th>Scenarios</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      function byGenerated(a, b) {
+        return Date.parse(b.generated_at || 0) - Date.parse(a.generated_at || 0);
+      }
+      function fmt(n) {
+        if (!Number.isFinite(n)) return "n/a";
+        const abs = Math.abs(n);
+        if (abs >= 1000) return n.toFixed(1);
+        if (abs >= 10) return n.toFixed(2);
+        return n.toFixed(3);
+      }
+      function toPct(delta, base) {
+        if (!Number.isFinite(delta) || !Number.isFinite(base) || base === 0) return NaN;
+        return (delta / base) * 100;
+      }
+      function trend(metric, delta) {
+        if (!Number.isFinite(delta) || delta === 0) return { label: "flat", cls: "subtle" };
+        const higherIsBetter = metric.includes("throughput_ops_per_sec");
+        if (higherIsBetter) {
+          return delta > 0
+            ? { label: "better", cls: "trend-better" }
+            : { label: "worse", cls: "trend-worse" };
+        }
+        const lowerIsBetter = metric.includes("_ms");
+        if (lowerIsBetter) {
+          return delta < 0
+            ? { label: "better", cls: "trend-better" }
+            : { label: "worse", cls: "trend-worse" };
+        }
+        return delta > 0 ? { label: "up", cls: "subtle" } : { label: "down", cls: "subtle" };
+      }
+      function regressionPct(metric, deltaPct) {
+        if (!Number.isFinite(deltaPct)) return NaN;
+        if (metric.includes("throughput_ops_per_sec")) return -deltaPct;
+        if (metric.includes("_ms")) return deltaPct;
+        return deltaPct;
+      }
+      function scenarioMap(run) {
+        const map = new Map();
+        for (const s of run && Array.isArray(run.scenarios) ? run.scenarios : []) {
+          if (s && typeof s.scenario_id === "string") map.set(s.scenario_id, s);
+        }
+        return map;
+      }
+      function runId(run) {
+        return [run.run_id || "?", run.run_attempt || "?"].join("/");
+      }
+      function metricKeysForScenario(scenario) {
+        const keys = ["wall_time_ms", "throughput_ops_per_sec"];
+        const ops =
+          scenario &&
+          scenario.operation_summaries &&
+          typeof scenario.operation_summaries === "object"
+            ? scenario.operation_summaries
+            : {};
+        for (const opName of Object.keys(ops).sort()) {
+          const summary = ops[opName];
+          if (!summary || typeof summary !== "object") continue;
+          if (Number.isFinite(Number(summary.avg_ms))) keys.push("op:" + opName + "/avg_ms");
+          if (Number.isFinite(Number(summary.p95_ms))) keys.push("op:" + opName + "/p95_ms");
+        }
+        return keys;
+      }
+      function metricValue(scenario, metric) {
+        if (!scenario || typeof scenario !== "object") return NaN;
+        if (metric === "wall_time_ms") return Number(scenario.wall_time_ms);
+        if (metric === "throughput_ops_per_sec") return Number(scenario.throughput_ops_per_sec);
+        if (!metric.startsWith("op:")) return NaN;
+        const slash = metric.lastIndexOf("/");
+        if (slash <= 3) return NaN;
+        const opName = metric.slice(3, slash);
+        const field = metric.slice(slash + 1);
+        const summary =
+          scenario.operation_summaries && typeof scenario.operation_summaries === "object"
+            ? scenario.operation_summaries[opName]
+            : null;
+        if (!summary || typeof summary !== "object") return NaN;
+        return Number(summary[field]);
+      }
+      function unique(list) {
+        return [...new Set(list)];
+      }
+
+      async function load() {
+        const res = await fetch("./history.json", { cache: "no-store" });
+        const history = await res.json();
+        const runs = Array.isArray(history.runs) ? [...history.runs].sort(byGenerated) : [];
+
+        const suites = unique(runs.map((r) => r.suite).filter(Boolean)).sort();
+        const branches = unique(runs.map((r) => r.branch).filter(Boolean)).sort();
+        const profiles = unique(runs.map((r) => r.profile).filter(Boolean)).sort();
+
+        const cards = document.getElementById("summaryCards");
+        cards.innerHTML = "";
+        const cardItems = [
+          ["Total Runs", String(runs.length)],
+          ["Suites", String(suites.length)],
+          ["Branches", String(branches.length)],
+          ["Profiles", String(profiles.length)],
+          ["Last Updated", history.updated_at || "n/a"],
+        ];
+        for (const [k, v] of cardItems) {
+          const div = document.createElement("div");
+          div.className = "card";
+          div.innerHTML = '<div class="k">' + k + '</div><div class="v">' + v + "</div>";
+          cards.appendChild(div);
+        }
+
+        const headBranchSel = document.getElementById("headBranch");
+        const baseBranchSel = document.getElementById("baseBranch");
+        const suiteSel = document.getElementById("suite");
+        const profileSel = document.getElementById("profile");
+        const scenarioSel = document.getElementById("scenario");
+        const metricSel = document.getElementById("metric");
+
+        function fillSelect(sel, values, preferred) {
+          sel.innerHTML = "";
+          if (!Array.isArray(values) || values.length === 0) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "n/a";
+            sel.appendChild(opt);
+            return;
+          }
+          for (const value of values) {
+            const opt = document.createElement("option");
+            if (typeof value === "string") {
+              opt.value = value;
+              opt.textContent = value;
+            } else {
+              opt.value = value.value;
+              opt.textContent = value.label;
+            }
+            sel.appendChild(opt);
+          }
+          if (preferred) {
+            const found = values.find((v) => (typeof v === "string" ? v : v.value) === preferred);
+            if (found) sel.value = preferred;
+          }
+        }
+
+        if (runs.length === 0) {
+          fillSelect(headBranchSel, []);
+          fillSelect(baseBranchSel, []);
+          fillSelect(suiteSel, []);
+          fillSelect(profileSel, []);
+          fillSelect(scenarioSel, []);
+          fillSelect(metricSel, []);
+          document.getElementById("compareMeta").textContent = "No benchmark history yet.";
+          return;
+        }
+
+        const latestBranch = runs[0] && runs[0].branch ? runs[0].branch : "main";
+        const preferredHead =
+          latestBranch === "main" && branches.includes("main") && branches.length > 1
+            ? branches.find((b) => b !== "main")
+            : latestBranch;
+        fillSelect(headBranchSel, branches, preferredHead || latestBranch);
+        fillSelect(baseBranchSel, branches, branches.includes("main") ? "main" : branches[0]);
+        fillSelect(suiteSel, suites, suites.includes("native") ? "native" : suites[0]);
+        fillSelect(profileSel, profiles, profiles.includes("s") ? "s" : profiles[0]);
+
+        function runsFor(suite, profile) {
+          return runs.filter((r) => r.suite === suite && r.profile === profile);
+        }
+
+        function latestRun(branch, suite, profile) {
+          return (
+            runs.find((r) => r.branch === branch && r.suite === suite && r.profile === profile) ||
+            null
+          );
+        }
+
+        function collectScenarioIds(filteredRuns) {
+          const ids = [];
+          for (const run of filteredRuns) {
+            for (const scenario of run.scenarios || []) {
+              if (scenario && typeof scenario.scenario_id === "string")
+                ids.push(scenario.scenario_id);
+            }
+          }
+          return unique(ids).sort();
+        }
+
+        function collectMetricKeys(filteredRuns, selectedScenarioId) {
+          const keys = [];
+          for (const run of filteredRuns) {
+            for (const scenario of run.scenarios || []) {
+              if (!scenario || typeof scenario !== "object") continue;
+              if (
+                selectedScenarioId &&
+                selectedScenarioId !== "__all__" &&
+                scenario.scenario_id !== selectedScenarioId
+              ) {
+                continue;
+              }
+              keys.push(...metricKeysForScenario(scenario));
+            }
+          }
+          return unique(keys).sort();
+        }
+
+        function refreshScenarioAndMetricOptions() {
+          const suite = suiteSel.value;
+          const profile = profileSel.value;
+          const filtered = runsFor(suite, profile);
+
+          const currentScenario = scenarioSel.value;
+          const scenarioOptions = [{ value: "__all__", label: "All Scenarios" }].concat(
+            collectScenarioIds(filtered).map((id) => ({ value: id, label: id })),
+          );
+          fillSelect(scenarioSel, scenarioOptions, currentScenario || "__all__");
+
+          const currentMetric = metricSel.value;
+          const metricOptions = [{ value: "__all__", label: "All Metrics" }].concat(
+            collectMetricKeys(filtered, scenarioSel.value).map((metric) => ({
+              value: metric,
+              label: metric,
+            })),
+          );
+          fillSelect(metricSel, metricOptions, currentMetric || "__all__");
+        }
+
+        function comparableRows(baseRun, headRun, selectedScenario, selectedMetric) {
+          const rows = [];
+          if (!baseRun || !headRun) return rows;
+
+          const baseScenarios = scenarioMap(baseRun);
+          const headScenarios = scenarioMap(headRun);
+          const ids = [...baseScenarios.keys()].filter((id) => headScenarios.has(id)).sort();
+
+          for (const scenarioId of ids) {
+            if (selectedScenario !== "__all__" && scenarioId !== selectedScenario) continue;
+            const baseScenario = baseScenarios.get(scenarioId);
+            const headScenario = headScenarios.get(scenarioId);
+
+            const baseMetricKeys = metricKeysForScenario(baseScenario);
+            const headMetricKeys = metricKeysForScenario(headScenario);
+            const keys = baseMetricKeys.filter((k) => headMetricKeys.includes(k)).sort();
+
+            for (const metric of keys) {
+              if (selectedMetric !== "__all__" && metric !== selectedMetric) continue;
+              const baseValue = metricValue(baseScenario, metric);
+              const headValue = metricValue(headScenario, metric);
+              if (!Number.isFinite(baseValue) || !Number.isFinite(headValue)) continue;
+              const delta = headValue - baseValue;
+              const deltaPct = toPct(delta, baseValue);
+              rows.push({
+                scenarioId,
+                metric,
+                baseValue,
+                headValue,
+                delta,
+                deltaPct,
+                trend: trend(metric, delta),
+              });
+            }
+          }
+
+          rows.sort((a, b) => Math.abs(b.deltaPct || 0) - Math.abs(a.deltaPct || 0));
+          return rows;
+        }
+
+        function renderRunsTable() {
+          const tbody = document.querySelector("#runsTable tbody");
+          tbody.innerHTML = "";
+
+          for (const run of runs.slice(0, 60)) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = [
+              "<td>" + (run.generated_at || "n/a") + "</td>",
+              '<td><span class="pill">' + run.suite + "</span></td>",
+              "<td>" + (run.branch || "n/a") + "</td>",
+              "<td>" + (run.profile || "n/a") + "</td>",
+              '<td class="subtle">' + String(run.sha || "n/a").slice(0, 12) + "</td>",
+              "<td>" + runId(run) + "</td>",
+              '<td class="subtle">' +
+                (run.scenarios || []).map((s) => s.scenario_id).join(", ") +
+                "</td>",
+            ].join("");
+            tbody.appendChild(tr);
+          }
+        }
+
+        function renderComparison() {
+          const headBranch = headBranchSel.value;
+          const baseBranch = baseBranchSel.value;
+          const suite = suiteSel.value;
+          const profile = profileSel.value;
+          const selectedScenario = scenarioSel.value || "__all__";
+          const selectedMetric = metricSel.value || "__all__";
+
+          const headRun = latestRun(headBranch, suite, profile);
+          const baseRun = latestRun(baseBranch, suite, profile);
+
+          const meta = document.getElementById("compareMeta");
+          const tbody = document.querySelector("#compareTable tbody");
+          tbody.innerHTML = "";
+
+          if (!headRun || !baseRun) {
+            meta.textContent = "No matching runs for selected branches/suite/profile.";
+            return;
+          }
+
+          meta.textContent =
+            "Base " +
+            (baseRun.generated_at || "n/a") +
+            " (" +
+            String(baseRun.sha || "").slice(0, 12) +
+            ") vs Head " +
+            (headRun.generated_at || "n/a") +
+            " (" +
+            String(headRun.sha || "").slice(0, 12) +
+            ")";
+
+          const rows = comparableRows(baseRun, headRun, selectedScenario, selectedMetric);
+          if (rows.length === 0) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+              '<td colspan="7" class="subtle">No overlapping metrics for this filter.</td>';
+            tbody.appendChild(tr);
+            return;
+          }
+
+          for (const row of rows) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = [
+              "<td>" + row.scenarioId + "</td>",
+              "<td>" + row.metric + "</td>",
+              '<td class="num">' + fmt(row.baseValue) + "</td>",
+              '<td class="num">' + fmt(row.headValue) + "</td>",
+              '<td class="num">' + fmt(row.delta) + "</td>",
+              '<td class="num">' + fmt(row.deltaPct) + "%</td>",
+              '<td class="' + row.trend.cls + '">' + row.trend.label + "</td>",
+            ].join("");
+            tbody.appendChild(tr);
+          }
+        }
+
+        function renderRegressionWatchlist() {
+          const baseBranch = baseBranchSel.value;
+          const suite = suiteSel.value;
+          const profile = profileSel.value;
+          const selectedScenario = scenarioSel.value || "__all__";
+          const selectedMetric = metricSel.value || "__all__";
+
+          const baseRun = latestRun(baseBranch, suite, profile);
+          const tbody = document.querySelector("#regressionsTable tbody");
+          tbody.innerHTML = "";
+
+          if (!baseRun) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+              '<td colspan="7" class="subtle">Base run not found for selected filters.</td>';
+            tbody.appendChild(tr);
+            return;
+          }
+
+          const candidateBranches = branches.filter((branch) => branch !== baseBranch);
+          const rows = [];
+
+          for (const branch of candidateBranches) {
+            const run = latestRun(branch, suite, profile);
+            if (!run) continue;
+
+            const diffs = comparableRows(baseRun, run, selectedScenario, selectedMetric);
+            let worst = null;
+            for (const diff of diffs) {
+              const regression = regressionPct(diff.metric, diff.deltaPct);
+              if (!Number.isFinite(regression)) continue;
+              if (!worst || regression > worst.regression) {
+                worst = { regression, diff };
+              }
+            }
+
+            if (!worst) continue;
+            rows.push({ branch, run, worst });
+          }
+
+          rows.sort((a, b) => b.worst.regression - a.worst.regression);
+          if (rows.length === 0) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = '<td colspan="7" class="subtle">No comparable branch runs yet.</td>';
+            tbody.appendChild(tr);
+            return;
+          }
+
+          for (const entry of rows.slice(0, 25)) {
+            const diff = entry.worst.diff;
+            const tr = document.createElement("tr");
+            tr.innerHTML = [
+              "<td>" + entry.branch + "</td>",
+              "<td>" + diff.scenarioId + "</td>",
+              "<td>" + diff.metric + "</td>",
+              '<td class="num">' + fmt(diff.deltaPct) + "%</td>",
+              '<td class="' + diff.trend.cls + '">' + diff.trend.label + "</td>",
+              '<td class="subtle">' + String(entry.run.sha || "").slice(0, 12) + "</td>",
+              '<td class="subtle">' + (entry.run.generated_at || "n/a") + "</td>",
+            ].join("");
+            tbody.appendChild(tr);
+          }
+        }
+
+        function renderAll() {
+          renderComparison();
+          renderRegressionWatchlist();
+        }
+
+        refreshScenarioAndMetricOptions();
+        renderRunsTable();
+        renderAll();
+
+        [headBranchSel, baseBranchSel].forEach((el) => el.addEventListener("change", renderAll));
+        [suiteSel, profileSel].forEach((el) =>
+          el.addEventListener("change", () => {
+            refreshScenarioAndMetricOptions();
+            renderAll();
+          }),
+        );
+        scenarioSel.addEventListener("change", () => {
+          refreshScenarioAndMetricOptions();
+          renderAll();
+        });
+        metricSel.addEventListener("change", renderAll);
+      }
+
+      load().catch((err) => {
+        document.body.innerHTML =
+          '<pre style="padding:20px;">Failed to load history.json\n' + String(err) + "</pre>";
+      });
+    </script>
+  </body>
+</html>

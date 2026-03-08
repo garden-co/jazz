@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
+import {
+  deriveLocalPrincipalId,
+  deriveLocalPrincipalIdSync,
+  resolveClientSession,
+  resolveClientSessionSync,
+} from "./client-session.js";
 
 function toBase64Url(value: string): string {
   return Buffer.from(value, "utf8")
@@ -73,6 +78,7 @@ describe("client session resolution", () => {
     const expected = `local:${digest.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
 
     expect(await deriveLocalPrincipalId(appId, mode, token)).toBe(expected);
+    expect(deriveLocalPrincipalIdSync(appId, mode, token)).toBe(expected);
 
     const session = await resolveClientSession({
       appId,
@@ -86,10 +92,24 @@ describe("client session resolution", () => {
         local_mode: mode,
       },
     });
+    expect(
+      resolveClientSessionSync({
+        appId,
+        localAuthMode: mode,
+        localAuthToken: token,
+      }),
+    ).toEqual({
+      user_id: expected,
+      claims: {
+        auth_mode: "local",
+        local_mode: mode,
+      },
+    });
   });
 
   it("returns null when no auth is configured", async () => {
     const session = await resolveClientSession({ appId: "no-auth" });
     expect(session).toBeNull();
+    expect(resolveClientSessionSync({ appId: "no-auth" })).toBeNull();
   });
 });

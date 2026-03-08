@@ -23,6 +23,8 @@ export interface InitMessage {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
   adminSecret?: string;
+  /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
+  logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
 /** Forward a sync payload from main thread to worker. */

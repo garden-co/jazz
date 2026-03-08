@@ -1,0 +1,11 @@
+{
+  "id": "B2",
+  "name": "server_reads_sustained",
+  "seed": 20260223,
+  "request_count": 96,
+  "mix": [
+    { "operation": "query_board", "weight": 45 },
+    { "operation": "query_my_work", "weight": 30 },
+    { "operation": "query_task_detail", "weight": 25 }
+  ]
+}

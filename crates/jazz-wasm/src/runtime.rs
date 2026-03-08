@@ -29,11 +29,30 @@ use wasm_bindgen::prelude::*;
 fn init_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        let max_level = wasm_log_level_from_global();
         let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(max_level)
             .with_console_group_spans();
         let _ = wasm_tracing::set_as_global_default_with_config(config);
     });
+}
+
+fn wasm_log_level_from_global() -> tracing::Level {
+    let global = js_sys::global();
+    let key = JsValue::from_str("__JAZZ_WASM_LOG_LEVEL");
+    let maybe_level = js_sys::Reflect::get(&global, &key)
+        .ok()
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_ascii_lowercase());
+
+    match maybe_level.as_deref() {
+        Some("error") => tracing::Level::ERROR,
+        Some("warn") | Some("warning") => tracing::Level::WARN,
+        Some("info") => tracing::Level::INFO,
+        Some("debug") => tracing::Level::DEBUG,
+        Some("trace") => tracing::Level::TRACE,
+        _ => tracing::Level::WARN,
+    }
 }
 
 use jazz_tools::object::ObjectId;
@@ -96,6 +115,16 @@ fn parse_tier(tier: &str) -> Result<DurabilityTier, JsError> {
             "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
             tier
         ))),
+    }
+}
+
+fn parse_session_json(session_json: Option<String>) -> Result<Option<Session>, JsError> {
+    if let Some(json) = session_json {
+        let session = serde_json::from_str::<Session>(&json)
+            .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?;
+        Ok(Some(session))
+    } else {
+        Ok(None)
     }
 }
 
@@ -166,14 +195,7 @@ fn parse_subscription_inputs(
     JsError,
 > {
     let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
-    let session = if let Some(json) = session_json {
-        Some(
-            serde_json::from_str::<Session>(&json)
-                .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
-        )
-    } else {
-        None
-    };
+    let session = parse_session_json(session_json)?;
     let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
     Ok((query, session, durability, propagation))
 }
@@ -245,7 +267,6 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
         _ => "client",
     }
 }
-
 // ============================================================================
 // Type alias
 // ============================================================================
@@ -595,15 +616,7 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
-
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json)
-                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
-            )
-        } else {
-            None
-        };
+        let session = parse_session_json(session_json)?;
 
         let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
 
@@ -653,6 +666,37 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "updated");
+        Ok(())
+    }
+
+    /// Update a row by ObjectId as an explicit session principal.
+    ///
+    /// # Arguments
+    /// * `object_id` - UUID string of target object
+    /// * `values` - Partial update map (`{ columnName: Value }`)
+    /// * `session_json` - Optional JSON-encoded Session used for policy checks
+    #[wasm_bindgen(js_name = updateWithSession)]
+    pub fn update_with_session(
+        &self,
+        object_id: &str,
+        values: JsValue,
+        session_json: Option<String>,
+    ) -> Result<(), JsError> {
+        let _span =
+            debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
+
+        let mut core = self.core.borrow_mut();
+        core.update(oid, updates, session.as_ref())
+            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
+
+        tracing::debug!(object_id, "updated_with_session");
         Ok(())
     }
 

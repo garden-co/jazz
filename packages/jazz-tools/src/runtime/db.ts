@@ -31,6 +31,13 @@ import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 
+type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
+const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
+
+function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
+  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
+}
+
 /**
  * Configuration for creating a Db instance.
  */
@@ -64,6 +71,10 @@ export interface DbConfig {
   localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
+  /** Database name for OPFS persistence (browser only, default: appId) */
+  dbName?: string;
+  /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
+  logLevel?: WasmLogLevel;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -484,6 +495,8 @@ export class Db {
     const key = serializeRuntimeSchema(schema);
 
     if (!this.clients.has(key)) {
+      setGlobalWasmLogLevel(this.config.logLevel);
+
       // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(
         this.wasmModule,
@@ -571,6 +584,7 @@ export class Db {
       localAuthMode: this.config.localAuthMode,
       localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
+      logLevel: this.config.logLevel,
     };
   }
 

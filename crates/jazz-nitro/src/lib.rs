@@ -24,7 +24,7 @@ use groove::query_manager::manager::LocalUpdates;
 use groove::query_manager::parse_query_json;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, SchemaHash, Value};
+use groove::query_manager::types::{RowDescriptor, Schema, SchemaHash, TableName, Value};
 use groove::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
     SyncSender,
@@ -44,6 +44,55 @@ fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, String> {
     let partial: HashMap<String, Value> =
         serde_json::from_str(values_json).map_err(|e| format!("Invalid values JSON: {e}"))?;
     Ok(partial.into_iter().collect())
+}
+
+fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
+    query.joins.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.recursive.is_none()
+        && query.select_columns.is_none()
+        && query.result_element_index.is_none()
+}
+
+fn reorder_values_by_column_name(
+    source_descriptor: &RowDescriptor,
+    target_descriptor: &RowDescriptor,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if values.len() != source_descriptor.columns.len()
+        || source_descriptor.columns.len() != target_descriptor.columns.len()
+    {
+        return None;
+    }
+
+    let mut values_by_column = HashMap::with_capacity(values.len());
+    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
+        values_by_column.insert(column.name, value.clone());
+    }
+
+    let mut reordered_values = Vec::with_capacity(values.len());
+    for column in &target_descriptor.columns {
+        reordered_values.push(values_by_column.remove(&column.name)?);
+    }
+
+    Some(reordered_values)
+}
+
+fn align_row_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+) -> Vec<Value> {
+    let Some(declared_table) = declared_schema.get(table) else {
+        return values;
+    };
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+
+    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
+        .unwrap_or(values)
 }
 
 // ============================================================================
@@ -313,6 +362,7 @@ fn error_json(msg: String) -> String {
 
 pub struct JazzRuntimeImpl {
     core: Mutex<Option<NitroCoreType>>,
+    declared_schema: Mutex<Option<Schema>>,
     upstream_server_id: Mutex<Option<ServerId>>,
 }
 
@@ -326,6 +376,7 @@ impl JazzRuntimeImpl {
     pub fn new() -> Self {
         Self {
             core: Mutex::new(None),
+            declared_schema: Mutex::new(None),
             upstream_server_id: Mutex::new(None),
         }
     }
@@ -354,6 +405,7 @@ impl JazzRuntimeImpl {
     ) -> Result<(), String> {
         let schema: Schema =
             serde_json::from_str(&schema_json).map_err(|e| format!("Invalid schema JSON: {e}"))?;
+        let declared_schema = schema.clone();
 
         let node_tiers = parse_node_durability_tier(tier)?;
 
@@ -379,6 +431,11 @@ impl JazzRuntimeImpl {
 
         let mut guard = self.core.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(core);
+        let mut declared_schema_guard = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *declared_schema_guard = Some(declared_schema);
         Ok(())
     }
 
@@ -472,14 +529,45 @@ impl JazzRuntimeImpl {
         options_json: Option<String>,
     ) -> Result<String, String> {
         let query = parse_query(&query_json)?;
+        let query_for_alignment = query.clone();
         let session = parse_session(session_json)?;
         let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
+        let declared_schema = self
+            .declared_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
-        let fut = self.with_core("query", |core| {
-            core.query_with_propagation(query, session, durability, propagation)
+        let (fut, runtime_schema) = self.with_core("query", |core| {
+            (
+                core.query_with_propagation(query, session, durability, propagation),
+                core.current_schema().clone(),
+            )
         })?;
 
         let results = block_on(fut).map_err(|e| format!("Query failed: {e}"))?;
+        let results = if query_rows_can_be_schema_aligned(&query_for_alignment) {
+            if let Some(schema) = declared_schema.as_ref() {
+                results
+                    .into_iter()
+                    .map(|(id, values)| {
+                        (
+                            id,
+                            align_row_values_to_declared_schema(
+                                schema,
+                                &runtime_schema,
+                                &query_for_alignment.table,
+                                values,
+                            ),
+                        )
+                    })
+                    .collect()
+            } else {
+                results
+            }
+        } else {
+            results
+        };
 
         let rows_json: Vec<serde_json::Value> = results
             .into_iter()
