@@ -117,5 +117,3 @@ jobs:
           else
             echo "Updated existing PR #${PR_NUMBER}"
           fi
-
-          gh pr merge --auto --squash "${BRANCH}"
