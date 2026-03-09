@@ -564,6 +564,23 @@ fn summarize_op(latencies_ms: &[f64]) -> OpSummary {
     }
 }
 
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), DynError> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+            fs::set_permissions(&dst_path, fs::metadata(&src_path)?.permissions())?;
+        }
+    }
+    Ok(())
+}
+
 fn choose_status(rng: &mut Lcg) -> &'static str {
     match rng.next_usize(4) {
         0 => "todo",
@@ -871,13 +888,15 @@ async fn run_w4_cold_start(
     let hot_project = seed.projects[0];
 
     let mut latencies = Vec::with_capacity(cycles);
-    let wall_start = Instant::now();
     progress(format!("W4 start cycles={}", cycles));
 
     for i in 0..cycles {
         progress(format!("W4 cycle {}/{}", i + 1, cycles));
+        let cycle_temp = tempfile::tempdir()?;
+        let cycle_data_dir = cycle_temp.path().join("db");
+        copy_dir_recursive(&data_dir, &cycle_data_dir)?;
         let t0 = Instant::now();
-        let client = connect_client(app_id, data_dir.clone(), None).await?;
+        let client = connect_client(app_id, cycle_data_dir, None).await?;
         let query = QueryBuilder::new("tasks")
             .filter_eq("project_id", Value::Uuid(hot_project))
             .order_by_desc("updated_at")
@@ -887,9 +906,10 @@ async fn run_w4_cold_start(
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         latencies.push(elapsed_ms);
         client.shutdown().await?;
+        drop(cycle_temp);
     }
 
-    let wall_time_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
+    let wall_time_ms = latencies.iter().sum::<f64>();
     let mut operation_summaries = BTreeMap::new();
     operation_summaries.insert("cold_reopen".to_string(), summarize_op(&latencies));
 
