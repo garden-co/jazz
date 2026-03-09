@@ -30,6 +30,12 @@ test-results/
 
 # Generated
 examples/wequencer/walkthrough/*.html
+examples/**/schema/app.ts
+examples/**/schema/migration_*
+examples/**/schema/schema_v*.sql
+# Hand-written docs example migrations (not auto-generated)
+!examples/docs/todo-server-ts/schema/migration_*_example*.ts
+!examples/docs/todo-server-rs/schema/migration_*_example*.sql
 
 # Local data
 data/

@@ -7,11 +7,21 @@
       "outputs": ["dist/**", "target/**", "pkg/**"],
       "env": ["JAZZ_NAPI_RELEASE"]
     },
+    "build:schema": {
+      "dependsOn": ["^build"],
+      "outputs": ["schema/app.ts", "schema/schema_v*.sql", "schema/migration_*"]
+    },
     "docs#build": {
       "dependsOn": [
         "todo-client-localfirst-react#build",
         "todo-client-localfirst-ts#build",
-        "todo-server-ts#build"
+        "todo-server-ts#build",
+        "todo-client-localfirst-expo-docs#build:schema",
+        "todo-client-localfirst-react-docs#build:schema",
+        "todo-client-localfirst-svelte-docs#build:schema",
+        "todo-client-localfirst-ts-docs#build:schema",
+        "todo-client-localfirst-vue-docs#build:schema",
+        "todo-server-ts-docs#build:schema"
       ],
       "outputs": [".next/**", "!.next/cache/**"]
     },

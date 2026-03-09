@@ -9,6 +9,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "build": "jazz-tools build && tsc --noEmit",
+    "build:schema": "node ../../../packages/jazz-tools/dist/cli.js build",
     "test": "tsc --noEmit",
     "prebuild": "expo prebuild --clean",
     "verify:expo:android": "expo prebuild --platform android --clean --no-install --non-interactive",
