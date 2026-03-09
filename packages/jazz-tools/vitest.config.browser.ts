@@ -5,10 +5,12 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
+const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
 
 export default defineConfig({
   define: {
     __JAZZ_REALISTIC_BROWSER_SCENARIOS__: JSON.stringify(realisticBrowserScenarios),
+    __JAZZ_REALISTIC_BROWSER_RUN_ID__: JSON.stringify(realisticBrowserRunId),
   },
   plugins: [wasm(), topLevelAwait()],
   server: {

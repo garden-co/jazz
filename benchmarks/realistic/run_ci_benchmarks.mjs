@@ -470,6 +470,7 @@ async function runNativeBenchmark(benchmark, args) {
     fs.rmSync(outputFile, { force: true });
 
     for (let attemptIndex = 1; attemptIndex <= repeatCount; attemptIndex += 1) {
+      const attemptAppId = `realistic-ci-${fileSafeId(benchmark.id)}-attempt-${attemptIndex}`;
       const attemptOutputFile = path.resolve(
         args.outDir,
         withAttemptSuffix(benchmark.output_path, attemptIndex),
@@ -482,7 +483,7 @@ async function runNativeBenchmark(benchmark, args) {
       let prepareDurationMs = null;
       let prepareLogPath = null;
       let prepareCommand = null;
-      const command = [...baseCommand];
+      const command = [...baseCommand, "--app-id", attemptAppId];
 
       fs.rmSync(tempOutputFile, { force: true });
       fs.rmSync(attemptOutputFile, { force: true });
@@ -698,6 +699,7 @@ async function runBrowserBenchmark(benchmark, args) {
       ...process.env,
       ...(benchmark.env ?? {}),
       JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
+      JAZZ_REALISTIC_BROWSER_RUN_ID: `${fileSafeId(benchmark.id)}-attempt-${attemptIndex}`,
     };
 
     fs.rmSync(attemptOutputFile, { force: true });

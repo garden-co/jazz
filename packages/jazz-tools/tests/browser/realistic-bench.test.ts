@@ -17,6 +17,7 @@ import b5Json from "../../../../benchmarks/realistic/scenarios/b5_server_permiss
 import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
 
 declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
+declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
 
 type PersistenceTier = "worker" | "edge" | "core";
 
@@ -222,8 +223,8 @@ interface ScenarioResult {
   extra: Record<string, unknown>;
 }
 
-const TARGET_TIMING_WINDOW_MS = 12;
-const MAX_BATCHED_TIMING_REPEATS = 24;
+const TARGET_TIMING_WINDOW_MS = 40;
+const MAX_BATCHED_TIMING_REPEATS = 64;
 
 const schema = (schemaJson as { tables: WasmSchema }).tables;
 const profile = profileJson as unknown as ProfileConfig;
@@ -242,6 +243,7 @@ const browserScenarioSelection = new Set(
     .map((value) => value.trim().toUpperCase())
     .filter(Boolean),
 );
+const browserRunId = (__JAZZ_REALISTIC_BROWSER_RUN_ID__ ?? "").trim() || "local";
 
 const usersTable = tableProxy<UserRow, Omit<UserRow, "id">>("users");
 const organizationsTable = tableProxy<OrganizationRow, Omit<OrganizationRow, "id">>(
@@ -321,7 +323,28 @@ function nowMicros(): number {
 }
 
 function uniqueDbName(label: string): string {
-  return `realistic-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `realistic-${browserRunId}-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function hash32(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function benchmarkAppId(label: string): string {
+  const segments = ["a", "b", "c", "d"].map((suffix) =>
+    hash32(`${APP_ID}|${browserRunId}|${label}|${suffix}`).toString(16).padStart(8, "0"),
+  );
+  const s0 = segments[0];
+  const s1 = segments[1];
+  const s2 = segments[2];
+  const s3 = segments[3];
+  const variant = ((parseInt(s2[0], 16) & 0x3) | 0x8).toString(16);
+  return `${s0}-${s1.slice(0, 4)}-4${s1.slice(1, 4)}-${variant}${s2.slice(1, 4)}-${s2.slice(4)}${s3}`;
 }
 
 function summarizeLatencies(values: number[], count = values.length): OpSummary {
@@ -429,6 +452,7 @@ function scaledLargeProfile(input: ProfileConfig, multiplier: number): ProfileCo
 }
 
 async function createServerDb(
+  appId: string,
   dbName: string,
   sub: string,
   claims: Record<string, unknown> = {},
@@ -441,7 +465,7 @@ async function createServerDb(
 ): Promise<Db> {
   const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
   const config: Parameters<typeof createDb>[0] = {
-    appId: APP_ID,
+    appId,
     dbName,
     serverUrl,
     adminSecret: options.includeAdminSecret === false ? undefined : ADMIN_SECRET,
@@ -728,6 +752,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
 async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("W3 start");
   const dbName = uniqueDbName("w3");
+  const appId = benchmarkAppId("w3");
   const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
   const token = await signJwt("realistic-user", JWT_SECRET);
   const rng = new Lcg(w3.seed ^ config.seed);
@@ -736,7 +761,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   let onlineDb: Db | null = null;
 
   try {
-    offlineDb = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+    offlineDb = await createDb({ appId, dbName, logLevel: "warn" });
     const state = await seedDataset(offlineDb, config);
     const targetTaskIdx = rng.nextInt(state.taskIds.length);
     const targetTaskId = state.taskIds[targetTaskIdx];
@@ -761,7 +786,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 
     const reconnectStart = performance.now();
     onlineDb = await createDb({
-      appId: APP_ID,
+      appId,
       dbName,
       serverUrl,
       jwtToken: token,
@@ -834,13 +859,14 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
   const dbName = uniqueDbName("w4");
+  const appId = benchmarkAppId("w4");
   const cycles = Math.min(w4.reopen_cycles, 3);
   progressLog(`W4 start cycles=${cycles}`);
   let db: Db | null = null;
   const latencies: number[] = [];
 
   try {
-    db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+    db = await createDb({ appId, dbName, logLevel: "warn" });
     const state = await seedDataset(db, config);
     const hotProjectId = state.projects[0];
     await db.all(
@@ -859,7 +885,7 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
     for (let i = 0; i < cycles; i += 1) {
       progressLog(`W4 cycle ${i + 1}/${cycles}`);
       const t0 = performance.now();
-      db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+      db = await createDb({ appId, dbName, logLevel: "warn" });
       await db.all(
         query<TaskRow>(
           "tasks",
@@ -895,6 +921,7 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B1 start");
+  const appId = benchmarkAppId("b1");
   const dbName = uniqueDbName("b1");
   const rng = new Lcg(b1.seed ^ config.seed);
   const insertCount = Math.min(b1.insert_count, 96);
@@ -906,7 +933,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
 
   let db: Db | null = null;
   try {
-    db = await createServerDb(dbName, "realistic-b1");
+    db = await createServerDb(appId, dbName, "realistic-b1");
     const state = await seedDataset(db, config);
     const wallStart = performance.now();
     const reportInsertProgress = createProgressReporter("B1 inserts", insertCount);
@@ -985,6 +1012,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B2 start");
+  const appId = benchmarkAppId("b2");
   const dbName = uniqueDbName("b2");
   const rng = new Lcg(b2.seed ^ config.seed);
   const requestCount = Math.min(b2.request_count, 160);
@@ -994,7 +1022,7 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
 
   let db: Db | null = null;
   try {
-    db = await createServerDb(dbName, "realistic-b2");
+    db = await createServerDb(appId, dbName, "realistic-b2");
     const state = await seedDataset(db, config);
 
     const wallStart = performance.now();
@@ -1085,6 +1113,7 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
 }
 
 async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
+  const appId = benchmarkAppId("b3");
   const dbName = uniqueDbName("b3");
   const cycles = Math.min(b3.reopen_cycles, 4);
   const largeConfig = scaledLargeProfile(config, b3.large_multiplier);
@@ -1096,7 +1125,7 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
   let cycleDb: Db | null = null;
 
   try {
-    seedDb = await createServerDb(dbName, "realistic-b3-seed");
+    seedDb = await createServerDb(appId, dbName, "realistic-b3-seed");
     const state = await seedDataset(seedDb, largeConfig);
     const hotProjectId = state.projects[0];
     await seedDb.all(
@@ -1114,7 +1143,7 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
     for (let i = 0; i < cycles; i += 1) {
       progressLog(`B3 cycle ${i + 1}/${cycles}`);
       const t0 = performance.now();
-      cycleDb = await createServerDb(dbName, "realistic-b3-cycle");
+      cycleDb = await createServerDb(appId, dbName, "realistic-b3-cycle");
       await cycleDb.all(
         query<TaskRow>(
           "tasks",
@@ -1159,6 +1188,7 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B4 start");
+  const appId = benchmarkAppId("b4");
   const dbName = uniqueDbName("b4");
   const subscriberCounts = b4.subscriber_counts.map((x) => Math.max(1, Math.min(40, x)));
   const rounds = Math.min(b4.rounds, 8);
@@ -1169,7 +1199,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
   let writer: Db | null = null;
 
   try {
-    writer = await createServerDb(dbName, "realistic-b4-writer");
+    writer = await createServerDb(appId, dbName, "realistic-b4-writer");
     const state = await seedDataset(writer, config);
     const targetTaskId = state.taskIds[0];
     await writer.update(tasksTable, targetTaskId, {
@@ -1620,6 +1650,7 @@ async function seedPermissionDataset(
 
 async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B5 start");
+  const appId = benchmarkAppId("b5");
   const dbPrefix = uniqueDbName("b5");
   const rng = new Lcg(b5.seed ^ config.seed);
   const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
@@ -1665,13 +1696,13 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const deniedLocalToken = `${dbPrefix}-b5-denied-token`;
     const intermediateLocalToken = `${dbPrefix}-b5-intermediate-token`;
     const allowedPrincipalId = await deriveLocalPrincipalId(
-      APP_ID,
+      appId,
       localAuthMode,
       allowedLocalToken,
     );
-    const deniedPrincipalId = await deriveLocalPrincipalId(APP_ID, localAuthMode, deniedLocalToken);
+    const deniedPrincipalId = await deriveLocalPrincipalId(appId, localAuthMode, deniedLocalToken);
     const intermediatePrincipalId = await deriveLocalPrincipalId(
-      APP_ID,
+      appId,
       localAuthMode,
       intermediateLocalToken,
     );
@@ -1693,6 +1724,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     // Seed with a sync-enabled client, then validate with two non-privileged
     // browser clients that authenticate only via local-auth HTTP headers.
     seedDb = await createServerDb(
+      appId,
       `${dbPrefix}-seed`,
       "realistic-b5-seed",
       {},
@@ -1720,6 +1752,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     }
 
     allowedDb = await createServerDb(
+      appId,
       `${dbPrefix}-allowed`,
       "realistic-b5-allowed",
       {},
@@ -1731,6 +1764,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       },
     );
     deniedDb = await createServerDb(
+      appId,
       `${dbPrefix}-denied`,
       "realistic-b5-denied",
       {},
@@ -1863,35 +1897,39 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
         (deniedUpdateIds.length === 0 || rng.nextInt(100) < Math.round(b5.allow_fraction * 100));
       const targetIds = shouldAllow ? allowedUpdateIds : deniedUpdateIds;
       const batchKey = shouldAllow ? "permission_updates_allowed" : "permission_updates_denied";
-      const batch = await measureBatchedLatency(updates - i, async (batchIndex) => {
-        const currentIndex = i + batchIndex;
-        const targetId = targetIds[rng.nextInt(targetIds.length)];
-        try {
-          await allowedDb.update(documentTable, targetId, {
-            body: `b5-update-${currentIndex}`,
-            revision: currentIndex + 1,
-            updated_at: nowMicros(),
-          });
-          if (shouldAllow) {
-            allowedUpdateSuccess += 1;
-          } else {
-            unexpectedAllowedForDenied += 1;
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (shouldAllow) {
-            unexpectedDeniedForAllowed += 1;
-            if (firstAllowedUpdateError == null) {
-              firstAllowedUpdateError = message;
+      const batch = await measureBatchedLatency(
+        updates - i,
+        async (batchIndex) => {
+          const currentIndex = i + batchIndex;
+          const targetId = targetIds[rng.nextInt(targetIds.length)];
+          try {
+            await allowedDb.update(documentTable, targetId, {
+              body: `b5-update-${currentIndex}`,
+              revision: currentIndex + 1,
+              updated_at: nowMicros(),
+            });
+            if (shouldAllow) {
+              allowedUpdateSuccess += 1;
+            } else {
+              unexpectedAllowedForDenied += 1;
             }
-          } else {
-            deniedUpdateRejected += 1;
-            if (firstDeniedUpdateError == null) {
-              firstDeniedUpdateError = message;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (shouldAllow) {
+              unexpectedDeniedForAllowed += 1;
+              if (firstAllowedUpdateError == null) {
+                firstAllowedUpdateError = message;
+              }
+            } else {
+              deniedUpdateRejected += 1;
+              if (firstDeniedUpdateError == null) {
+                firstDeniedUpdateError = message;
+              }
             }
           }
-        }
-      });
+        },
+        { maxRepeats: 1 },
+      );
       (latencies[batchKey] ||= []).push(batch.perOpMs);
       opCounts[batchKey] = (opCounts[batchKey] || 0) + batch.repeats;
       i += batch.repeats;
@@ -1973,6 +2011,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B6 start");
+  const appId = benchmarkAppId("b6");
   const dbName = uniqueDbName("b6");
   const rng = new Lcg(b6.seed ^ config.seed);
   const updateCount = Math.min(b6.update_count, 300);
@@ -1981,7 +2020,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   let db: Db | null = null;
 
   try {
-    db = await createServerDb(dbName, "realistic-b6");
+    db = await createServerDb(appId, dbName, "realistic-b6");
     const state = await seedDataset(db, config);
     const hotTaskCount = Math.max(1, Math.min(state.taskIds.length, b6.hot_task_count));
     const hotTasks = state.taskIds.slice(0, hotTaskCount);
@@ -2046,10 +2085,11 @@ describe("realistic browser benchmark harness", () => {
         {
           id: "W1",
           run: async (): Promise<ScenarioResult> => {
+            const appId = benchmarkAppId("w1");
             const dbName = uniqueDbName("w1");
             let db: Db | null = null;
             try {
-              db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+              db = await createDb({ appId, dbName, logLevel: "warn" });
               const state = await seedDataset(db, cfg);
               return await runW1(db, cfg, state);
             } finally {
