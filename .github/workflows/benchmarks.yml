@@ -453,19 +453,21 @@ jobs:
             echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping preview deploy."
             exit 0
           fi
-          pushd benchmarks/realistic/site >/dev/null
-          deployment_url="$(
+          if ! deployment_url="$(
             npx vercel@latest deploy . \
               --yes \
               --scope garden-co \
               --token "${VERCEL_TOKEN}" \
+              --local-config benchmarks/realistic/site/vercel.json \
               -m benchmark_branch="${BENCH_BRANCH}" \
               -m benchmark_sha="${BENCH_SHA}" \
               -m benchmark_run_id="${GITHUB_RUN_ID}" \
               -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
               | tail -n1
-          )"
-          popd >/dev/null
+          )"; then
+            echo "Vercel preview deploy failed; continuing without preview URL."
+            exit 0
+          fi
           echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
           {
             echo "### Benchmark Preview"
@@ -483,20 +485,22 @@ jobs:
             echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping production deploy."
             exit 0
           fi
-          pushd benchmarks/realistic/site >/dev/null
-          deployment_url="$(
+          if ! deployment_url="$(
             npx vercel@latest deploy . \
               --prod \
               --yes \
               --scope garden-co \
               --token "${VERCEL_TOKEN}" \
+              --local-config benchmarks/realistic/site/vercel.json \
               -m benchmark_branch="${BENCH_BRANCH}" \
               -m benchmark_sha="${BENCH_SHA}" \
               -m benchmark_run_id="${GITHUB_RUN_ID}" \
               -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
               | tail -n1
-          )"
-          popd >/dev/null
+          )"; then
+            echo "Vercel production deploy failed; continuing without production URL."
+            exit 0
+          fi
           echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
           {
             echo "### Benchmark Production Site"
