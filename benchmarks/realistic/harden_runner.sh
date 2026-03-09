@@ -27,19 +27,15 @@ TIMERS_TO_DISABLE=(
   fwupd-refresh.timer
 )
 
-mask_unit_if_present() {
+disable_and_mask_unit() {
   local unit="$1"
-  if systemctl list-unit-files --full --all | grep -Fq "${unit}"; then
-    systemctl disable --now "${unit}" || true
-    systemctl mask "${unit}" || true
-  fi
+  systemctl disable --now "${unit}" || true
+  systemctl mask "${unit}" || true
 }
 
-disable_timer_if_present() {
+disable_timer() {
   local unit="$1"
-  if systemctl list-unit-files --full --all | grep -Fq "${unit}"; then
-    systemctl disable --now "${unit}" || true
-  fi
+  systemctl disable --now "${unit}" || true
 }
 
 set_performance_governor() {
@@ -57,6 +53,12 @@ disable_smt_if_supported() {
   fi
 }
 
+disable_cpu_boost_if_supported() {
+  if [[ -w /sys/devices/system/cpu/cpufreq/boost ]]; then
+    echo 0 > /sys/devices/system/cpu/cpufreq/boost || true
+  fi
+}
+
 install_tuning_unit() {
   cat > /usr/local/sbin/benchmark-runner-tune.sh <<'EOF'
 #!/usr/bin/env bash
@@ -66,6 +68,10 @@ for governor in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
   [[ -f "${governor}" ]] || continue
   echo performance > "${governor}" || true
 done
+
+if [[ -w /sys/devices/system/cpu/cpufreq/boost ]]; then
+  echo 0 > /sys/devices/system/cpu/cpufreq/boost || true
+fi
 
 if [[ -w /sys/devices/system/cpu/smt/control ]]; then
   echo off > /sys/devices/system/cpu/smt/control || true
@@ -93,14 +99,15 @@ EOF
 }
 
 for service in "${SERVICES_TO_DISABLE[@]}"; do
-  mask_unit_if_present "${service}"
+  disable_and_mask_unit "${service}"
 done
 
 for timer in "${TIMERS_TO_DISABLE[@]}"; do
-  disable_timer_if_present "${timer}"
+  disable_timer "${timer}"
 done
 
 set_performance_governor
+disable_cpu_boost_if_supported
 disable_smt_if_supported
 install_tuning_unit
 
@@ -108,5 +115,6 @@ echo "==== tuning summary ===="
 echo "smt_control=$(cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo unavailable)"
 echo "online_cpus=$(cat /sys/devices/system/cpu/online 2>/dev/null || echo unavailable)"
 echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unavailable)"
+echo "boost=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo unavailable)"
 systemctl --no-pager --plain --type=service --state=running | \
   egrep "actions\\.runner|amazon-ssm-agent|chrony|irqbalance|snapd|fwupd|ModemManager|multipathd|udisks2|unattended-upgrades|cron" || true

@@ -35,6 +35,7 @@ Use the checked-in bootstrap script rather than copy-pasting one-off commands:
 sudo RUNNER_TOKEN="<repo registration token>" \
   RUNNER_URL="https://github.com/garden-co/jazz2" \
   RUNNER_USER=ubuntu \
+  INSTALL_SSM_AGENT=1 \
   benchmarks/realistic/bootstrap_runner.sh
 ```
 
