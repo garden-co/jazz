@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js build && tsc",
     "build:schema": "node ../../../packages/jazz-tools/dist/cli.js build",
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
