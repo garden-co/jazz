@@ -12,12 +12,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
+  format_lint:
+    name: format_lint
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
-      # PR validation favors debug N-API builds for speed (release remains in publish paths).
-      JAZZ_NAPI_RELEASE: "0"
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
@@ -25,21 +24,198 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
         with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
-          components: clippy, rustfmt
+          version: 10.14.0
+          run_install: false
 
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          components: clippy, rustfmt
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ci-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before checks)
+        run: sccache --show-stats || true
+
+      - run: pnpm format:check
+      - run: pnpm exec oxlint . --ignore-path .oxlintignore
+      - run: cargo clippy --workspace -- -D warnings
+
+      - name: Show sccache stats (after checks)
+        run: sccache --show-stats || true
+
+  rust_core_tests:
+    name: rust_core_tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [format_lint]
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ci-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before tests)
+        run: sccache --show-stats || true
+
+      - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --exclude jazz-wasm --exclude jazz-napi --exclude jazz-nitro
+
+      - name: Show sccache stats (after tests)
+        run: sccache --show-stats || true
+
+  rust_core_build:
+    name: rust_core_build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [rust_core_tests]
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ci-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before build)
+        run: sccache --show-stats || true
+
+      - run: cargo build -p jazz-tools --bin jazz-tools --features cli
+      - run: cargo build -p jazz-cloud-server
+
+      - name: Show sccache stats (after build)
+        run: sccache --show-stats || true
+
+      - name: Pack rust core debug binaries
+        run: |
+          mkdir -p dist
+          tar -czf dist/rust-core-debug-binaries.tgz -C target/debug jazz-tools jazz-cloud-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-core-debug-binaries
+          path: dist/rust-core-debug-binaries.tgz
+          if-no-files-found: error
+
+  wasm:
+    name: wasm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [rust_core_build]
+    timeout-minutes: 25
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -48,6 +224,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+
       - uses: taiki-e/install-action@v2
         with:
           tool: sccache
@@ -55,26 +232,309 @@ jobs:
       - name: Mount sccache sticky disk
         uses: useblacksmith/stickydisk@v1
         with:
-          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          key: ci-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
-      - name: Show sccache stats (before build)
-        run: sccache --show-stats || true
 
-      - run: pnpm format:check
-      - run: pnpm lint
-      - run: pnpm build
-      - name: Show sccache stats (after pnpm build)
-        run: sccache --show-stats || true
-      - run: cargo clippy --workspace -- -D warnings
-      - name: Show sccache stats (after clippy)
-        run: sccache --show-stats || true
       - name: Mount Playwright sticky disk
         uses: useblacksmith/stickydisk@v1
         with:
           key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
+
       - run: pnpm exec playwright install chromium
-      - run: pnpm test
-      - run: pnpm --filter jazz-tools test:browser
-      - name: Show sccache stats (after tests)
+
+      - name: Show sccache stats (before wasm build)
         run: sccache --show-stats || true
+
+      - run: pnpm --filter jazz-wasm build
+      - run: wasm-pack test --node crates/jazz-wasm
+      - run: RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' wasm-pack test --headless --chrome crates/jazz-wasm
+
+      - name: Show sccache stats (after wasm tests)
+        run: sccache --show-stats || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          if-no-files-found: error
+
+  napi_linux:
+    name: napi_linux
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [rust_core_build]
+    timeout-minutes: 20
+    env:
+      JAZZ_NAPI_RELEASE: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: x86_64-unknown-linux-gnu
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ci-napi-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before napi build)
+        run: sccache --show-stats || true
+
+      - run: pnpm --filter jazz-napi exec napi build --platform --target x86_64-unknown-linux-gnu
+
+      - name: Show sccache stats (after napi build)
+        run: sccache --show-stats || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-napi-linux-x64-gnu
+          path: |
+            crates/jazz-napi/jazz-napi.linux-x64-gnu.node
+            crates/jazz-napi/index.js
+            crates/jazz-napi/index.d.ts
+          if-no-files-found: error
+
+  rn_android_smoke:
+    name: rn_android_smoke
+    runs-on: ubuntu-24.04
+    needs: [rust_core_build]
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Install/build React Native Android prerequisites
+        env:
+          JAZZ_RN_PLATFORM: android
+          JAZZ_RN_ANDROID_TARGETS: aarch64-linux-android
+        run: pnpm run ensure:rust-toolchain
+
+      - run: pnpm --filter jazz-rn exec ubrn build android --targets aarch64-linux-android --and-generate --release
+      - run: test -f crates/jazz-rn/android/src/main/jniLibs/arm64-v8a/libjazz_rn.a
+      - run: pnpm --filter jazz-rn test
+
+  js_build_test:
+    name: js_build_test
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [rust_core_build, wasm, napi_linux, rn_android_smoke]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-core-debug-binaries
+          path: dist
+
+      - run: |
+          mkdir -p target/debug
+          tar -xzf dist/rust-core-debug-binaries.tgz -C target/debug
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-napi-linux-x64-gnu
+          path: crates/jazz-napi
+
+      - name: Mount Playwright sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/ms-playwright
+
+      - run: pnpm exec playwright install chromium
+
+      - run: pnpm -r --if-present --filter "./packages/**" --filter "./examples/**" --filter "./examples/docs/**" --filter "./docs" run build
+      - run: pnpm -r --if-present --filter "./packages/**" --filter "./examples/**" --filter "./examples/docs/**" --filter "./docs" run test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jazz-tools-dist
+          path: packages/jazz-tools/dist
+          if-no-files-found: error
+
+  inspector_e2e:
+    name: inspector_e2e
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [js_build_test]
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-core-debug-binaries
+          path: dist
+
+      - run: |
+          mkdir -p target/debug
+          tar -xzf dist/rust-core-debug-binaries.tgz -C target/debug
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-napi-linux-x64-gnu
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-tools-dist
+          path: packages/jazz-tools
+
+      - name: Mount Playwright sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/ms-playwright
+
+      - run: pnpm exec playwright install chromium
+      - run: pnpm --filter inspector test:browser
+
+  wequencer_e2e:
+    name: wequencer_e2e
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [js_build_test]
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-core-debug-binaries
+          path: dist
+
+      - run: |
+          mkdir -p target/debug
+          tar -xzf dist/rust-core-debug-binaries.tgz -C target/debug
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-napi-linux-x64-gnu
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jazz-tools-dist
+          path: packages/jazz-tools
+
+      - name: Mount Playwright sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/ms-playwright
+
+      - run: pnpm exec playwright install chromium
+      - run: pnpm --filter wequencer test:e2e
