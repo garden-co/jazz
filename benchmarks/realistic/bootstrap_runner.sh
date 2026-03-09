@@ -8,6 +8,7 @@ RUNNER_LABELS="${RUNNER_LABELS:-jazz-bench}"
 RUNNER_VERSION="${RUNNER_VERSION:-}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 INSTALL_WASM_PACK="${INSTALL_WASM_PACK:-1}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -z "${RUNNER_TOKEN}" ]]; then
   echo "RUNNER_TOKEN is required" >&2
@@ -110,3 +111,7 @@ fi
   cd "${RUNNER_DIR}"
   ./svc.sh start
 )
+
+if [[ "${SKIP_HARDENING:-0}" != "1" && -x "${SCRIPT_DIR}/harden_runner.sh" ]]; then
+  "${SCRIPT_DIR}/harden_runner.sh"
+fi
