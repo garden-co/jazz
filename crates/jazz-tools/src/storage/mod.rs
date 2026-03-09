@@ -39,6 +39,25 @@ pub enum StorageError {
     IoError(String),
 }
 
+/// Direction for ordered index scans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IndexScanDirection {
+    Ascending,
+    Descending,
+}
+
+/// Parameters for an ordered index scan.
+#[derive(Debug, Clone, Copy)]
+pub struct OrderedIndexScan<'a> {
+    pub table: &'a str,
+    pub column: &'a str,
+    pub branch: &'a str,
+    pub start: Bound<&'a Value>,
+    pub end: Bound<&'a Value>,
+    pub direction: IndexScanDirection,
+    pub take: Option<usize>,
+}
+
 // ============================================================================
 // LoadedBranch - Branch data returned from storage
 // ============================================================================
@@ -260,6 +279,9 @@ pub trait Storage {
         end: Bound<&Value>,
     ) -> Vec<ObjectId>;
 
+    /// Ordered scan with optional bounds and count limit.
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId>;
+
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
 
@@ -401,6 +423,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).index_range(table, column, branch, start, end)
     }
 
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId> {
+        (**self).index_scan_ordered(scan)
+    }
+
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         (**self).index_scan_all(table, column, branch)
     }
@@ -427,6 +453,12 @@ type IndexKey = (String, String, String);
 
 /// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
 type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
+
+fn sort_object_ids(ids: &HashSet<ObjectId>) -> Vec<ObjectId> {
+    let mut ordered: Vec<_> = ids.iter().copied().collect();
+    ordered.sort_unstable();
+    ordered
+}
 
 /// In-memory Storage for testing and main-thread use.
 ///
@@ -854,8 +886,72 @@ impl Storage for MemoryStorage {
 
         index
             .range((start_bound, end_bound))
-            .flat_map(|(_, ids)| ids.iter().copied())
+            .flat_map(|(_, ids)| sort_object_ids(ids))
             .collect()
+    }
+
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId> {
+        let key = (
+            scan.table.to_string(),
+            scan.column.to_string(),
+            scan.branch.to_string(),
+        );
+        let Some(index) = self.indices.get(&key) else {
+            return Vec::new();
+        };
+
+        let start_bound = match scan.start {
+            Bound::Included(v) if is_double_zero(v) => {
+                Bound::Included(encode_value(&Value::Double(-0.0)))
+            }
+            Bound::Excluded(v) if is_double_zero(v) => {
+                Bound::Excluded(encode_value(&Value::Double(0.0)))
+            }
+            Bound::Included(v) => Bound::Included(encode_value(v)),
+            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_bound = match scan.end {
+            Bound::Included(v) if is_double_zero(v) => {
+                Bound::Included(encode_value(&Value::Double(0.0)))
+            }
+            Bound::Excluded(v) if is_double_zero(v) => {
+                Bound::Excluded(encode_value(&Value::Double(-0.0)))
+            }
+            Bound::Included(v) => Bound::Included(encode_value(v)),
+            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        let mut results = Vec::new();
+        let mut push_ids = |ids: &HashSet<ObjectId>| {
+            for id in sort_object_ids(ids) {
+                results.push(id);
+                if scan.take.is_some_and(|limit| results.len() >= limit) {
+                    return true;
+                }
+            }
+            false
+        };
+
+        match scan.direction {
+            IndexScanDirection::Ascending => {
+                for (_, ids) in index.range((start_bound, end_bound)) {
+                    if push_ids(ids) {
+                        break;
+                    }
+                }
+            }
+            IndexScanDirection::Descending => {
+                for (_, ids) in index.range((start_bound, end_bound)).rev() {
+                    if push_ids(ids) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
@@ -863,7 +959,7 @@ impl Storage for MemoryStorage {
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
-        index.values().flat_map(|ids| ids.iter().copied()).collect()
+        index.values().flat_map(sort_object_ids).collect()
     }
 }
 
@@ -1045,6 +1141,51 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row30));
         assert!(results.contains(&row35));
+    }
+
+    #[test]
+    fn memory_storage_index_scan_ordered_respects_direction_and_take() {
+        let mut storage = MemoryStorage::new();
+
+        let row20 = ObjectId::new();
+        let row25a = ObjectId::new();
+        let row25b = ObjectId::new();
+        let row30 = ObjectId::new();
+
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(20), row20)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row25b)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row25a)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(30), row30)
+            .unwrap();
+
+        let asc = storage.index_scan_ordered(OrderedIndexScan {
+            table: "users",
+            column: "age",
+            branch: "main",
+            start: Bound::Included(&Value::Integer(25)),
+            end: Bound::Unbounded,
+            direction: IndexScanDirection::Ascending,
+            take: Some(3),
+        });
+        assert_eq!(asc, vec![row25a, row25b, row30]);
+
+        let desc = storage.index_scan_ordered(OrderedIndexScan {
+            table: "users",
+            column: "age",
+            branch: "main",
+            start: Bound::Unbounded,
+            end: Bound::Included(&Value::Integer(25)),
+            direction: IndexScanDirection::Descending,
+            take: Some(3),
+        });
+        assert_eq!(desc, vec![row25a, row25b, row20]);
     }
 
     #[test]

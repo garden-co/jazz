@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use crate::object::{BranchName, ObjectId};
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
-use crate::storage::Storage;
+use crate::storage::{IndexScanDirection, Storage};
 
 use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::array_subquery::{ArraySubqueryNode, Correlate};
@@ -19,6 +19,7 @@ use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::graph_nodes::materialize::MaterializeNode;
+use super::graph_nodes::ordered_pagination::{OrderedPaginationNode, OrderedPaginationNodeConfig};
 use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::graph_nodes::project::ProjectNode;
@@ -31,13 +32,14 @@ use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
+use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,7 @@ pub enum GraphNode {
     Alias(AliasNode),
     Join(JoinNode),
     Materialize(MaterializeNode),
+    OrderedPagination(OrderedPaginationNode),
     Project(ProjectNode),
     SelectElement(SelectElementNode),
     RecursiveRelation(RecursiveRelationNode),
@@ -105,6 +108,8 @@ pub struct QueryGraph {
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
     pub index_scan_nodes: Vec<(NodeId, TableName, ColumnName)>, // (node_id, table, column)
+    /// Ordered pagination source nodes for this query.
+    pub ordered_scan_nodes: Vec<(NodeId, TableName, ColumnName)>,
     /// Array subquery nodes and their inner tables (for marking dirty on inner table updates).
     pub array_subquery_tables: Vec<(NodeId, TableName)>, // (node_id, inner_table)
     /// PolicyFilter nodes and their INHERITS-referenced tables (for marking dirty on table updates).
@@ -173,6 +178,24 @@ fn natural_row_projection_element_index(
     None
 }
 
+#[derive(Debug, Clone)]
+struct OrderedPaginationPlan {
+    column: String,
+    start: Bound<Value>,
+    end: Bound<Value>,
+    direction: IndexScanDirection,
+}
+
+struct OrderedPaginationCompileContext<'a> {
+    plan: &'a ExecutionQueryPlan,
+    branches: &'a [String],
+    branch_schema_map: &'a HashMap<String, SchemaHash>,
+    schema_context: &'a SchemaContext,
+    schema: &'a Schema,
+    session: Option<Session>,
+    select_policy: Option<PolicyExpr>,
+}
+
 impl QueryGraph {
     pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
@@ -182,12 +205,90 @@ impl QueryGraph {
             pagination_node: None,
             table,
             index_scan_nodes: Vec::new(),
+            ordered_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
             policy_filter_tables: Vec::new(),
             recursive_relation_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
         }
+    }
+
+    fn compile_ordered_pagination_plan(
+        ctx: OrderedPaginationCompileContext<'_>,
+        descriptor: RowDescriptor,
+        ordered_plan: OrderedPaginationPlan,
+    ) -> Option<Self> {
+        let OrderedPaginationCompileContext {
+            plan,
+            branches,
+            branch_schema_map,
+            schema_context,
+            schema,
+            session,
+            select_policy,
+        } = ctx;
+
+        let branch = branches.first()?.clone();
+        let branch_schema_hash = branch_schema_map.get(&branch).copied();
+        let translated_column = if let Some(target_hash) = branch_schema_hash {
+            if target_hash != schema_context.current_hash {
+                translate_column_for_index(
+                    schema_context,
+                    plan.table.as_str(),
+                    &ordered_plan.column,
+                    &target_hash,
+                )
+                .unwrap_or_else(|| ordered_plan.column.clone())
+            } else {
+                ordered_plan.column.clone()
+            }
+        } else {
+            ordered_plan.column.clone()
+        };
+        let scan_column_name = ColumnName::new(&translated_column);
+
+        let mut graph = QueryGraph::new(plan.table, descriptor.clone());
+        let mut ordered_node = OrderedPaginationNode::new(OrderedPaginationNodeConfig {
+            table: plan.table,
+            column: scan_column_name,
+            branch,
+            start: ordered_plan.start,
+            end: ordered_plan.end,
+            direction: ordered_plan.direction,
+            limit: plan.limit,
+            offset: plan.offset,
+            descriptor: descriptor.clone(),
+        });
+        if let (Some(session), Some(policy)) = (session, select_policy)
+            && policy != PolicyExpr::True
+        {
+            ordered_node = ordered_node.with_policy(policy, session, schema.clone());
+        }
+        let dependency_tables = ordered_node.policy_dependency_tables().to_vec();
+        let ordered_id = graph.add_node(GraphNode::OrderedPagination(ordered_node));
+        graph
+            .ordered_scan_nodes
+            .push((ordered_id, plan.table, scan_column_name));
+        for table in dependency_tables {
+            graph.policy_filter_tables.push((ordered_id, table));
+        }
+        graph.pagination_node = Some(ordered_id);
+
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let materialize_node = MaterializeNode::new_all(tuple_desc.clone());
+        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
+        graph.add_edge(materialize_id, ordered_id);
+
+        graph.combined_descriptor = descriptor.clone();
+        let output_tuple_desc =
+            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
+        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, materialize_id);
+        graph.output_node = output_id;
+
+        Some(graph)
     }
 
     /// Mark a node as dirty using the bitmap.
@@ -275,9 +376,17 @@ impl QueryGraph {
     /// current query result locally.
     pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
         if let Some(node_id) = self.pagination_node
-            && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
+            && let Some(node) = self.get_node(node_id)
         {
-            return self.scope_from_tuples(limit_offset.sync_input_tuples());
+            match node {
+                GraphNode::LimitOffset(limit_offset) => {
+                    return self.scope_from_tuples(limit_offset.sync_input_tuples());
+                }
+                GraphNode::OrderedPagination(ordered) => {
+                    return self.scope_from_tuples(ordered.sync_input_tuples());
+                }
+                _ => {}
+            }
         }
 
         self.contributing_object_ids()
@@ -448,6 +557,25 @@ impl QueryGraph {
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
         let select_policy = table_schema.policies.select.using.clone();
+
+        if let Some(ordered_plan) =
+            ordered_pagination_plan_for_execution_plan(plan, &descriptor, &branches)
+        {
+            return Self::compile_ordered_pagination_plan(
+                OrderedPaginationCompileContext {
+                    plan,
+                    branches: &branches,
+                    branch_schema_map: &branch_schema_map,
+                    schema_context,
+                    schema,
+                    session,
+                    select_policy,
+                },
+                descriptor,
+                ordered_plan,
+            );
+        }
+
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
@@ -1377,6 +1505,14 @@ impl QueryGraph {
                 t.as_str() == table && (c.as_str() == column || c.as_str() == "_id")
             })
             .map(|(node_id, _, _)| *node_id)
+            .chain(
+                self.ordered_scan_nodes
+                    .iter()
+                    .filter(|(_, t, c)| {
+                        t.as_str() == table && (c.as_str() == column || c.as_str() == "_id")
+                    })
+                    .map(|(node_id, _, _)| *node_id),
+            )
             .collect();
         for node_id in affected {
             self.mark_dirty(node_id);
@@ -1399,6 +1535,17 @@ impl QueryGraph {
                     None
                 }
             })
+            .chain(
+                self.ordered_scan_nodes
+                    .iter()
+                    .filter_map(|(node_id, t, _)| {
+                        if t.as_str() == table {
+                            Some(*node_id)
+                        } else {
+                            None
+                        }
+                    }),
+            )
             .collect();
 
         for node_id in affected_index_scans {
@@ -1480,6 +1627,10 @@ impl QueryGraph {
             .iter()
             .any(|(_, t, _)| t.as_str() == table)
             || self
+                .ordered_scan_nodes
+                .iter()
+                .any(|(_, t, _)| t.as_str() == table)
+            || self
                 .array_subquery_tables
                 .iter()
                 .any(|(_, t)| t.as_str() == table)
@@ -1498,6 +1649,10 @@ impl QueryGraph {
         self.index_scan_nodes
             .iter()
             .any(|(_, t, c)| t.as_str() == table && c.as_str() == column)
+            || self
+                .ordered_scan_nodes
+                .iter()
+                .any(|(_, t, c)| t.as_str() == table && c.as_str() == column)
     }
 
     /// Mark a row ID as updated for content checking.
@@ -1616,6 +1771,7 @@ impl QueryGraph {
         for node_id in order {
             let node_type = match self.get_node(node_id) {
                 Some(GraphNode::IndexScan(_)) => "IndexScan",
+                Some(GraphNode::OrderedPagination(_)) => "OrderedPagination",
                 Some(GraphNode::Union(_)) => "Union",
                 Some(GraphNode::Alias(_)) => "Alias",
                 Some(GraphNode::Join(_)) => "Join",
@@ -1637,6 +1793,25 @@ impl QueryGraph {
                 Some(GraphNode::IndexScan(_)) => {
                     if let Some(GraphNode::IndexScan(scan_node)) = self.get_node_mut(node_id) {
                         let delta = SourceNode::scan(scan_node, &ctx);
+                        tracing::debug!(
+                            node_id = node_id.0,
+                            node_type,
+                            added = delta.added.len(),
+                            removed = delta.removed.len(),
+                            "graph node evaluated"
+                        );
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::OrderedPagination(_)) => {
+                    if let Some(GraphNode::OrderedPagination(scan_node)) =
+                        self.get_node_mut(node_id)
+                    {
+                        let delta = if scan_node.has_policy() {
+                            scan_node.scan_with_context(&ctx, &mut row_loader)
+                        } else {
+                            SourceNode::scan(scan_node, &ctx)
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -1939,6 +2114,21 @@ impl QueryGraph {
                 Some(GraphNode::Output(_)) => {
                     let input_node = self.get_inputs(node_id).first().copied();
                     let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
+                        Some(GraphNode::Materialize(mat_node)) => {
+                            let source_node = self.get_inputs(dep).first().copied();
+                            source_node.and_then(|source_id| match self.get_node(source_id) {
+                                Some(GraphNode::OrderedPagination(source_node)) => Some(
+                                    source_node
+                                        .windowed_tuples()
+                                        .iter()
+                                        .filter_map(|tuple| {
+                                            mat_node.current_tuples().get(tuple).cloned()
+                                        })
+                                        .collect(),
+                                ),
+                                _ => None,
+                            })
+                        }
                         Some(GraphNode::LimitOffset(lo_node)) => {
                             Some(lo_node.windowed_tuples().to_vec())
                         }
@@ -2463,6 +2653,127 @@ fn condition_to_scan(cond: &Condition) -> ScanCondition {
     }
 }
 
+fn ordered_pagination_plan_for_execution_plan(
+    plan: &ExecutionQueryPlan,
+    descriptor: &RowDescriptor,
+    branches: &[String],
+) -> Option<OrderedPaginationPlan> {
+    if plan.limit.is_none() && plan.offset == 0 {
+        return None;
+    }
+    if plan.include_deleted
+        || plan.project_columns.is_some()
+        || !plan.array_subqueries.is_empty()
+        || plan.recursive.is_some()
+        || branches.len() != 1
+        || plan.disjuncts.len() != 1
+    {
+        return None;
+    }
+
+    let (column, direction) = if plan.order_by.is_empty() {
+        ("_id".to_string(), IndexScanDirection::Ascending)
+    } else if plan.order_by.len() == 1 {
+        let (column, direction) = &plan.order_by[0];
+        (
+            if column == "id" {
+                "_id".to_string()
+            } else {
+                column.clone()
+            },
+            match direction {
+                SortDirection::Ascending => IndexScanDirection::Ascending,
+                SortDirection::Descending => IndexScanDirection::Descending,
+            },
+        )
+    } else {
+        return None;
+    };
+
+    if column != "_id" && descriptor.column_index(&column).is_none() {
+        return None;
+    }
+
+    let disjunct = plan.disjuncts.first()?;
+    if !disjunct.is_fully_covered_by_index(&column) {
+        return None;
+    }
+
+    let (start, end) = bounds_for_ordered_scan(disjunct, &column)?;
+
+    Some(OrderedPaginationPlan {
+        column,
+        start,
+        end,
+        direction,
+    })
+}
+
+fn bounds_for_ordered_scan(
+    conjunction: &Conjunction,
+    column: &str,
+) -> Option<(Bound<Value>, Bound<Value>)> {
+    let mut lower: Option<Bound<Value>> = None;
+    let mut upper: Option<Bound<Value>> = None;
+    let mut exact: Option<Value> = None;
+
+    for condition in &conjunction.conditions {
+        if condition.column() != column {
+            return None;
+        }
+
+        match condition {
+            Condition::Eq { value, .. } => {
+                if lower.is_some() || upper.is_some() || exact.is_some() {
+                    return None;
+                }
+                exact = Some(value.clone());
+            }
+            Condition::Gt { value, .. } => {
+                if lower.is_some() || exact.is_some() {
+                    return None;
+                }
+                lower = Some(Bound::Excluded(value.clone()));
+            }
+            Condition::Ge { value, .. } => {
+                if lower.is_some() || exact.is_some() {
+                    return None;
+                }
+                lower = Some(Bound::Included(value.clone()));
+            }
+            Condition::Lt { value, .. } => {
+                if upper.is_some() || exact.is_some() {
+                    return None;
+                }
+                upper = Some(Bound::Excluded(value.clone()));
+            }
+            Condition::Le { value, .. } => {
+                if upper.is_some() || exact.is_some() {
+                    return None;
+                }
+                upper = Some(Bound::Included(value.clone()));
+            }
+            Condition::Between { min, max, .. } => {
+                if lower.is_some() || upper.is_some() || exact.is_some() {
+                    return None;
+                }
+                lower = Some(Bound::Included(min.clone()));
+                upper = Some(Bound::Included(max.clone()));
+            }
+            _ => return None,
+        }
+    }
+
+    if let Some(value) = exact {
+        return Some((Bound::Included(value.clone()), Bound::Included(value)));
+    }
+
+    Some((
+        lower.unwrap_or(Bound::Unbounded),
+        upper.unwrap_or(Bound::Unbounded),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2471,7 +2782,10 @@ mod tests {
         ColumnRef, JoinCondition, KeyRef, OrderByExpr, OrderDirection, PredicateCmpOp,
         PredicateExpr, ProjectColumn, ProjectExpr, RelExpr, RowIdRef, ValueRef,
     };
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+    use crate::query_manager::session::Session;
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema, Value,
+    };
 
     fn test_schema() -> Schema {
         let mut schema = Schema::new();
@@ -2541,9 +2855,148 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: IndexScan -> Materialize -> Sort -> LimitOffset -> Output
-        // (no Filter because no WHERE clause)
-        assert_eq!(graph.nodes.len(), 5);
+        // Optimized path: OrderedPagination -> Materialize -> Output
+        assert_eq!(graph.nodes.len(), 3);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::OrderedPagination(_)))
+        );
+    }
+
+    #[test]
+    fn compile_query_with_multi_column_sort_keeps_fallback_path() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .order_by("score")
+            .order_by("name")
+            .limit(10)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::OrderedPagination(_)))
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::Sort(_)))
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::LimitOffset(_)))
+        );
+    }
+
+    #[test]
+    fn compile_query_with_same_column_filter_and_sort_uses_ordered_pagination() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_ge("score", Value::Integer(50))
+            .order_by("score")
+            .limit(3)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::OrderedPagination(_)))
+        );
+    }
+
+    #[test]
+    fn compile_query_with_true_select_policy_and_session_uses_ordered_pagination() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema {
+                columns: RowDescriptor::new(vec![
+                    ColumnDescriptor::new("title", ColumnType::Text),
+                    ColumnDescriptor::new("done", ColumnType::Boolean),
+                ]),
+                policies: TablePolicies::new().with_select(PolicyExpr::True),
+            },
+        );
+
+        let query = QueryBuilder::new("todos").order_by("id").limit(50).build();
+        let session = Session::new("user-1");
+        let schema_context = QueryGraph::default_schema_context(&schema);
+
+        let graph = QueryGraph::try_compile_with_schema_context(
+            &query,
+            &schema,
+            Some(session),
+            &schema_context,
+        )
+        .unwrap();
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::OrderedPagination(_)))
+        );
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::PolicyFilter(_)))
+        );
+    }
+
+    #[test]
+    fn compile_query_with_select_policy_and_session_uses_ordered_pagination() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("documents"),
+            TableSchema {
+                columns: RowDescriptor::new(vec![
+                    ColumnDescriptor::new("title", ColumnType::Text),
+                    ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ]),
+                policies: TablePolicies::new()
+                    .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            },
+        );
+
+        let query = QueryBuilder::new("documents")
+            .order_by("id")
+            .limit(50)
+            .build();
+        let session = Session::new("alice");
+        let schema_context = QueryGraph::default_schema_context(&schema);
+
+        let graph = QueryGraph::try_compile_with_schema_context(
+            &query,
+            &schema,
+            Some(session),
+            &schema_context,
+        )
+        .unwrap();
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::OrderedPagination(_)))
+        );
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|c| matches!(c.node, GraphNode::PolicyFilter(_)))
+        );
     }
 
     #[test]

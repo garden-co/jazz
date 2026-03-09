@@ -110,6 +110,59 @@ fn execute_query(
 }
 
 #[test]
+fn paginated_query_with_select_policy_returns_visible_rows_only() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            policies: TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        },
+    );
+
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    for idx in 0..3 {
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text(format!("Alice {}", idx)),
+                Value::Text("alice".into()),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text(format!("Bob {}", idx)),
+                Value::Text("bob".into()),
+            ],
+        )
+        .unwrap();
+    }
+
+    let query = qm.query("documents").order_by("id").limit(2).build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+    for (_, values) in results {
+        assert_eq!(values[1], Value::Text("alice".into()));
+    }
+}
+
+#[test]
 fn insert_json_preserves_original_text() {
     let sync_manager = SyncManager::new();
     let schema = json_documents_schema(None);
@@ -536,6 +589,50 @@ fn query_with_sort_and_limit() {
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
+    assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
+}
+
+#[test]
+fn query_with_same_column_filter_sort_and_limit() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Charlie".into()), Value::Integer(75)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Diana".into()), Value::Integer(60)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(60))
+        .order_by("score")
+        .limit(2)
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].1[0], Value::Text("Diana".into())); // 60
     assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
 }
 

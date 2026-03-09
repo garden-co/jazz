@@ -254,6 +254,45 @@ pub(crate) fn raw_internal_child_for_key(
     Ok(right_child)
 }
 
+pub(crate) fn raw_internal_child_before_key(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<PageId, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Internal {
+        return Err(BTreeError::Corrupt("expected internal page".to_string()));
+    }
+
+    let key_count = header.item_count as usize;
+    let slots_bytes = internal_slots_bytes(key_count)?;
+    if header.payload.len() < slots_bytes {
+        return Err(BTreeError::Corrupt(
+            "internal page payload shorter than slot directory".to_string(),
+        ));
+    }
+
+    let mut lo = 0usize;
+    let mut hi = key_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let (key_off, key_len, _) = internal_slot(header.payload, key_count, mid)?;
+        let current_key = slice_payload(header.payload, key_off, key_len, "internal key")?;
+        if current_key < key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if lo == 0 {
+        return read_u64_at(header.payload, 0, "internal left child");
+    }
+
+    let (_, _, right_child) = internal_slot(header.payload, key_count, lo - 1)?;
+    Ok(right_child)
+}
+
 pub(crate) fn raw_leaf_find_value<'a>(
     raw: &'a [u8],
     expected_page_size: usize,
@@ -292,8 +331,34 @@ pub(crate) fn raw_leaf_find_value<'a>(
     Ok(None)
 }
 
+pub(crate) fn raw_leaf_first_key(
+    raw: &[u8],
+    expected_page_size: usize,
+) -> Result<Option<&[u8]>, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Leaf {
+        return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+    }
+
+    let entry_count = header.item_count as usize;
+    if entry_count == 0 {
+        return Ok(None);
+    }
+
+    let slots_bytes = leaf_slots_bytes(entry_count)?;
+    if header.payload.len() < slots_bytes {
+        return Err(BTreeError::Corrupt(
+            "leaf page payload shorter than slot directory".to_string(),
+        ));
+    }
+
+    let (key_off, key_len, _) = leaf_slot(header.payload, entry_count, 0)?;
+    slice_payload(header.payload, key_off, key_len, "leaf key").map(Some)
+}
+
 /// Scan a leaf page for key-value pairs in the range [start, end).
 /// Calls the `visit` function for each key-value pair in the range.
+/// Return `Ok(false)` from `visit` to stop the scan immediately.
 /// If the end of the range (or the limit of results) is reached, the function returns None.
 /// Otherwise, the function returns the next page ID so the caller can continue scanning.
 pub(crate) fn raw_leaf_scan<'a>(
@@ -302,7 +367,7 @@ pub(crate) fn raw_leaf_scan<'a>(
     start: &[u8],
     end: &[u8],
     limit: usize,
-    mut visit: impl FnMut(&'a [u8], ValueCellRef<'a>) -> Result<(), BTreeError>,
+    mut visit: impl FnMut(&'a [u8], ValueCellRef<'a>) -> Result<bool, BTreeError>,
 ) -> Result<Option<PageId>, BTreeError> {
     let header = parse_header(raw, expected_page_size, false)?;
     if header.kind != PageKind::Leaf {
@@ -376,7 +441,9 @@ pub(crate) fn raw_leaf_scan<'a>(
             break;
         }
         let value = parse_leaf_value_cell_at(payload, value_off)?;
-        visit(key, value)?;
+        if !visit(key, value)? {
+            return Ok(None);
+        }
         emitted += 1;
         slot_base += LEAF_SLOT_BYTES;
     }
@@ -385,6 +452,68 @@ pub(crate) fn raw_leaf_scan<'a>(
         Ok(None)
     } else {
         Ok(header.next_page_id)
+    }
+}
+
+pub(crate) fn raw_leaf_scan_reverse(
+    raw: &[u8],
+    expected_page_size: usize,
+    start: &[u8],
+    end: &[u8],
+    mut visit: impl FnMut(&[u8]) -> Result<bool, BTreeError>,
+) -> Result<Option<Vec<u8>>, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Leaf {
+        return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+    }
+
+    let entry_count = header.item_count as usize;
+    let payload = header.payload;
+    let slots_bytes = leaf_slots_bytes(entry_count)?;
+    if payload.len() < slots_bytes {
+        return Err(BTreeError::Corrupt(
+            "leaf page payload shorter than slot directory".to_string(),
+        ));
+    }
+
+    if entry_count == 0 {
+        return Ok(None);
+    }
+
+    let mut lo = 0usize;
+    let mut hi = entry_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let (key_off, key_len, _) = leaf_slot(payload, entry_count, mid)?;
+        let current_key = slice_payload(payload, key_off, key_len, "leaf key")?;
+        if current_key < end {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    let Some(first_key) = raw_leaf_first_key(raw, expected_page_size)? else {
+        return Ok(None);
+    };
+
+    let mut idx = lo;
+    while idx > 0 {
+        idx -= 1;
+        let (key_off, key_len, _) = leaf_slot(payload, entry_count, idx)?;
+        let key = slice_payload(payload, key_off, key_len, "leaf key")?;
+        if key < start {
+            return Ok(None);
+        }
+        if !visit(key)? {
+            return Ok(None);
+        }
+    }
+
+    if first_key <= start {
+        Ok(None)
+    } else {
+        Ok(Some(first_key.to_vec()))
     }
 }
 
@@ -1432,6 +1561,17 @@ mod tests {
         .expect("encode sample leaf")
     }
 
+    fn sample_internal_page() -> Vec<u8> {
+        encode_page(
+            &Page::Internal {
+                keys: vec![b"m".to_vec(), b"t".to_vec()],
+                children: vec![10, 20, 30],
+            },
+            4096,
+        )
+        .expect("encode sample internal")
+    }
+
     #[test]
     fn leaf_page_round_trip() {
         let page = Page::Leaf {
@@ -1583,7 +1723,7 @@ mod tests {
         let mut visited = Vec::<Vec<u8>>::new();
         let next = raw_leaf_scan(&raw, 4096, b"a", b"z", 0, |key, _| {
             visited.push(key.to_vec());
-            Ok(())
+            Ok(true)
         })
         .expect("scan");
         assert_eq!(next, None);
@@ -1596,7 +1736,7 @@ mod tests {
         let mut visited = Vec::<Vec<u8>>::new();
         let next = raw_leaf_scan(&raw, 4096, b"b", b"d", 10, |key, _| {
             visited.push(key.to_vec());
-            Ok(())
+            Ok(true)
         })
         .expect("scan");
         assert_eq!(visited, vec![b"b".to_vec(), b"c".to_vec()]);
@@ -1609,7 +1749,7 @@ mod tests {
         let mut visited = Vec::<Vec<u8>>::new();
         let next = raw_leaf_scan(&raw, 4096, b"b", b"z", 10, |key, _| {
             visited.push(key.to_vec());
-            Ok(())
+            Ok(true)
         })
         .expect("scan");
         assert_eq!(visited, vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]);
@@ -1622,10 +1762,69 @@ mod tests {
         let mut visited = Vec::<Vec<u8>>::new();
         let next = raw_leaf_scan(&raw, 4096, b"a", b"z", 2, |key, _| {
             visited.push(key.to_vec());
-            Ok(())
+            Ok(true)
         })
         .expect("scan");
         assert_eq!(visited, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn raw_internal_child_before_key_uses_strict_upper_bound() {
+        let raw = sample_internal_page();
+        assert_eq!(
+            raw_internal_child_before_key(&raw, 4096, b"m").expect("child before m"),
+            10
+        );
+        assert_eq!(
+            raw_internal_child_before_key(&raw, 4096, b"q").expect("child before q"),
+            20
+        );
+        assert_eq!(
+            raw_internal_child_before_key(&raw, 4096, b"z").expect("child before z"),
+            30
+        );
+    }
+
+    #[test]
+    fn raw_leaf_scan_reverse_honors_bounds() {
+        let raw = sample_leaf_page(Some(77));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan_reverse(&raw, 4096, b"b", b"d", |key| {
+            visited.push(key.to_vec());
+            Ok(true)
+        })
+        .expect("reverse scan");
+        assert_eq!(visited, vec![b"c".to_vec(), b"b".to_vec()]);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn raw_leaf_scan_reverse_returns_previous_upper_bound_when_leaf_is_exhausted() {
+        let raw = sample_leaf_page(Some(77));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan_reverse(&raw, 4096, b"", b"z", |key| {
+            visited.push(key.to_vec());
+            Ok(true)
+        })
+        .expect("reverse scan");
+        assert_eq!(
+            visited,
+            vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec(),]
+        );
+        assert_eq!(next, Some(b"a".to_vec()));
+    }
+
+    #[test]
+    fn raw_leaf_scan_reverse_stops_when_visitor_requests_it() {
+        let raw = sample_leaf_page(Some(77));
+        let mut visited = Vec::<Vec<u8>>::new();
+        let next = raw_leaf_scan_reverse(&raw, 4096, b"", b"z", |key| {
+            visited.push(key.to_vec());
+            Ok(visited.len() < 2)
+        })
+        .expect("reverse scan");
+        assert_eq!(visited, vec![b"d".to_vec(), b"c".to_vec()]);
         assert_eq!(next, None);
     }
 }

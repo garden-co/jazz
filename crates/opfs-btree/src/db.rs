@@ -6,7 +6,8 @@ use crate::file::SyncFile;
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
     ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
-    raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan,
+    raw_internal_child_before_key, raw_internal_child_for_key, raw_leaf_delete_in_place,
+    raw_leaf_find_value, raw_leaf_first_key, raw_leaf_scan, raw_leaf_scan_reverse,
     raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
@@ -322,7 +323,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                         },
                     };
                     staged.push((key.to_vec(), staged_value));
-                    Ok(())
+                    Ok(true)
                 },
             )?;
             let staged_entries = staged;
@@ -345,6 +346,82 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         Ok(out)
+    }
+
+    pub fn scan_range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        mut visit: impl FnMut(&[u8]) -> Result<bool, BTreeError>,
+    ) -> Result<(), BTreeError> {
+        if start >= end {
+            return Ok(());
+        }
+
+        let mut current = self.find_leaf_page_id(start)?;
+        let mut visited = OpfsSet::default();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
+            }
+
+            self.ensure_page_loaded(page_id)?;
+            let raw = self.raw_page_bytes(page_id)?;
+            current = raw_leaf_scan(
+                raw,
+                self.options.page_size,
+                start,
+                end,
+                usize::MAX,
+                |key, _| visit(key),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn scan_range_reverse(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        mut visit: impl FnMut(&[u8]) -> Result<bool, BTreeError>,
+    ) -> Result<(), BTreeError> {
+        if start >= end {
+            return Ok(());
+        }
+
+        let mut current_upper_bound = end.to_vec();
+        let mut current = self.find_leaf_page_id_before(end)?;
+        let mut visited = OpfsSet::default();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "reverse scan revisited a leaf page".to_string(),
+                ));
+            }
+
+            self.ensure_page_loaded(page_id)?;
+            let raw = self.raw_page_bytes(page_id)?;
+            let Some(next_upper_bound) = raw_leaf_scan_reverse(
+                raw,
+                self.options.page_size,
+                start,
+                &current_upper_bound,
+                |key| visit(key),
+            )?
+            else {
+                break;
+            };
+
+            current_upper_bound = next_upper_bound;
+            current = self.find_leaf_page_id_before(&current_upper_bound)?;
+        }
+
+        Ok(())
     }
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
@@ -973,6 +1050,46 @@ impl<F: SyncFile> OpfsBTree<F> {
                 PageKind::Internal => {
                     let raw = self.raw_page_bytes(current)?;
                     current = raw_internal_child_for_key(raw, self.options.page_size, key)?;
+                }
+                PageKind::Overflow => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected overflow page {} in tree path",
+                        current
+                    )));
+                }
+                PageKind::Freelist => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected freelist page {} in tree path",
+                        current
+                    )));
+                }
+            }
+        }
+    }
+
+    fn find_leaf_page_id_before(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        let mut current = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        loop {
+            self.ensure_page_loaded(current)?;
+            let raw_kind = {
+                let raw = self.raw_page_bytes(current)?;
+                raw_page_kind(raw, self.options.page_size)?
+            };
+            match raw_kind {
+                PageKind::Leaf => {
+                    let raw = self.raw_page_bytes(current)?;
+                    let first_key = raw_leaf_first_key(raw, self.options.page_size)?;
+                    return Ok(first_key
+                        .filter(|first_key| *first_key < key)
+                        .map(|_| current));
+                }
+                PageKind::Internal => {
+                    let raw = self.raw_page_bytes(current)?;
+                    current = raw_internal_child_before_key(raw, self.options.page_size, key)?;
                 }
                 PageKind::Overflow => {
                     return Err(BTreeError::Corrupt(format!(
@@ -1878,6 +1995,118 @@ mod tests {
 
         tree.delete(b"b").expect("delete b");
         assert_eq!(tree.get(b"b").expect("get b after delete"), None);
+    }
+
+    #[test]
+    fn scan_range_stops_when_visitor_requests_it() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")] {
+            tree.put(key, value).expect("put");
+        }
+
+        let mut visited = Vec::new();
+        tree.scan_range(b"a", b"z", |key| {
+            visited.push(key.to_vec());
+            Ok(visited.len() < 2)
+        })
+        .expect("scan range");
+
+        assert_eq!(visited, vec![b"a".to_vec(), b"b".to_vec()]);
+    }
+
+    #[test]
+    fn scan_range_reverse_single_leaf_descends_in_key_order() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")] {
+            tree.put(key, value).expect("put");
+        }
+
+        let mut visited = Vec::new();
+        tree.scan_range_reverse(b"a", b"z", |key| {
+            visited.push(key.to_vec());
+            Ok(true)
+        })
+        .expect("reverse scan");
+
+        assert_eq!(
+            visited,
+            vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec(), b"a".to_vec(),]
+        );
+    }
+
+    #[test]
+    fn scan_range_reverse_respects_exclusive_upper_bound() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")] {
+            tree.put(key, value).expect("put");
+        }
+
+        let mut visited = Vec::new();
+        tree.scan_range_reverse(b"b", b"d", |key| {
+            visited.push(key.to_vec());
+            Ok(true)
+        })
+        .expect("reverse scan");
+
+        assert_eq!(visited, vec![b"c".to_vec(), b"b".to_vec()]);
+    }
+
+    #[test]
+    fn scan_range_reverse_spans_multiple_leaves() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        for i in 0..2_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("v{:05}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+
+        let mut visited = Vec::new();
+        tree.scan_range_reverse(b"k00500", b"k00900", |key| {
+            visited.push(String::from_utf8(key.to_vec()).expect("utf8 key"));
+            Ok(true)
+        })
+        .expect("reverse scan");
+
+        let expected: Vec<String> = (500..900).rev().map(|i| format!("k{:05}", i)).collect();
+        assert_eq!(visited, expected);
+    }
+
+    #[test]
+    fn scan_range_reverse_stops_when_visitor_requests_it() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        for i in 0..2_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("v{:05}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+
+        let mut visited = Vec::new();
+        tree.scan_range_reverse(b"k00500", b"k00900", |key| {
+            visited.push(String::from_utf8(key.to_vec()).expect("utf8 key"));
+            Ok(visited.len() < 5)
+        })
+        .expect("reverse scan");
+
+        assert_eq!(
+            visited,
+            vec![
+                "k00899".to_string(),
+                "k00898".to_string(),
+                "k00897".to_string(),
+                "k00896".to_string(),
+                "k00895".to_string(),
+            ]
+        );
     }
 
     #[test]
