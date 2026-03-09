@@ -189,7 +189,7 @@ function UseAllProbe<T extends { id: string }>({
   query,
   pick,
 }: {
-  query: QueryBuilder<T>;
+  query?: QueryBuilder<T>;
   pick: (row: T) => string;
 }) {
   const rows = useAllSuspense(query);
@@ -635,6 +635,61 @@ describe("useAllSuspense browser integration", () => {
       () => getText("rows").includes("done-task") && !getText("rows").includes("open-task"),
       5000,
       "expected updated query to show only done task",
+    );
+  });
+
+  it("stays suspended when query is missing and resumes once query is provided", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("missing-query"),
+        driver: { type: "persistent", dbName: uniqueId("missing-query") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "late-query-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    function MissingThenSetSuspenseQueryProbe() {
+      const [useQuery, setUseQuery] = React.useState(false);
+      const query = useQuery ? makeQuery<Todo>("todos", {}) : undefined;
+
+      return (
+        <>
+          <button data-testid="set-query" onClick={() => setUseQuery(true)}>
+            set-query
+          </button>
+          <React.Suspense fallback={<div data-testid="rows-fallback">pending</div>}>
+            <UseAllProbe query={query} pick={(row: Todo) => row.title} />
+          </React.Suspense>
+        </>
+      );
+    }
+
+    render(
+      <JazzProvider client={client}>
+        <MissingThenSetSuspenseQueryProbe />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => hasTestId("rows-fallback") && !hasTestId("rows"),
+      5000,
+      "expected suspense fallback while query is missing",
+    );
+
+    const setQueryButton = container?.querySelector('[data-testid="set-query"]');
+    expect(setQueryButton).toBeTruthy();
+    await userEvent.click(setQueryButton as HTMLElement);
+
+    await waitForCondition(
+      () => hasTestId("rows") && getText("rows").includes("late-query-task"),
+      5000,
+      "expected suspense hook to resolve after query is provided",
     );
   });
 });

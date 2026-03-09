@@ -87,6 +87,18 @@ useEffect(() => {
 }, [rows]);
 ```
 
+### Running queries conditionally
+
+There are some cases where you want to defer running a query. This could happen if the query depends on an input the user hasn't provided yet,
+or on the output of a previous query. In these cases, you can pass `undefined` to `useAll` to defer the query until the condition is met.
+
+```ts
+const [filter, setFilter] = useState<string | null>(null);
+const rows = useAll(filter ? app.todos.where({ title: { contains: filter } }) : undefined);
+```
+
+When an undefined query is passed to `useAll`, it will return `undefined` until the query is provided.
+
 ### React Suspense and Transitions
 
 The docs React example app includes a Suspense-based list that keeps the previous result visible
