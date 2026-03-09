@@ -79,11 +79,26 @@ function byGenerated(a, b) {
   return Date.parse(b.generated_at ?? "") - Date.parse(a.generated_at ?? "");
 }
 
+function scenarioVariant(scenario) {
+  return scenario?.extra?.benchmark_id ?? scenario?.topology ?? "";
+}
+
+function scenarioKey(scenario) {
+  return [scenario?.scenario_id ?? "unknown", scenarioVariant(scenario)].join("::");
+}
+
+function scenarioLabel(scenario) {
+  const parts = [scenario?.scenario_id ?? "unknown"];
+  const variant = scenarioVariant(scenario);
+  if (variant) parts.push(variant);
+  return parts.join(" / ");
+}
+
 function scenarioMap(run) {
   const map = new Map();
   for (const scenario of run?.scenarios ?? []) {
     if (scenario && typeof scenario.scenario_id === "string") {
-      map.set(scenario.scenario_id, scenario);
+      map.set(scenarioKey(scenario), scenario);
     }
   }
   return map;
@@ -118,12 +133,48 @@ function metricValue(scenario, metric) {
   return Number(scenario?.operation_summaries?.[opName]?.[field]);
 }
 
+function metricNoise(metric, scenario) {
+  const noise = scenario?.extra?.noise;
+  if (!noise || typeof noise !== "object") return null;
+  if (metric === "wall_time_ms" || metric === "throughput_ops_per_sec") {
+    return noise.metrics?.[metric] ?? null;
+  }
+  if (!metric.startsWith("op:")) return null;
+  const slash = metric.lastIndexOf("/");
+  if (slash <= 3) return null;
+  const opName = metric.slice(3, slash);
+  const field = metric.slice(slash + 1);
+  return noise.operations?.[opName]?.[field] ?? null;
+}
+
+function metricNoisePct(metric, scenario) {
+  const descriptor = metricNoise(metric, scenario);
+  if (!descriptor || typeof descriptor !== "object") return Number.NaN;
+  if (Number.isFinite(Number(descriptor.relative_half_width_pct))) {
+    return Number(descriptor.relative_half_width_pct);
+  }
+  const candidates = [descriptor.cv_pct, descriptor.rel_mad_pct]
+    .map((value) => Number(value))
+    .filter(Number.isFinite);
+  if (candidates.length === 0) return Number.NaN;
+  return Math.max(...candidates);
+}
+
+function combinedNoisePct(metric, baseScenario, headScenario) {
+  const parts = [metricNoisePct(metric, baseScenario), metricNoisePct(metric, headScenario)].filter(
+    Number.isFinite,
+  );
+  if (parts.length === 0) return Number.NaN;
+  return Math.sqrt(parts.reduce((sum, value) => sum + value * value, 0));
+}
+
 function toPct(delta, base) {
   if (!Number.isFinite(delta) || !Number.isFinite(base) || base === 0) return Number.NaN;
   return (delta / base) * 100;
 }
 
-function trend(metric, delta) {
+function trend(metric, delta, significant) {
+  if (!significant) return "noise";
   if (!Number.isFinite(delta) || delta === 0) return "flat";
   if (metric.includes("throughput_ops_per_sec")) return delta > 0 ? "better" : "worse";
   if (metric.includes("_ms")) return delta < 0 ? "better" : "worse";
@@ -136,6 +187,12 @@ function fmt(value) {
   if (abs >= 1000) return value.toFixed(1);
   if (abs >= 10) return value.toFixed(2);
   return value.toFixed(3);
+}
+
+function fmtPct(value) {
+  if (!Number.isFinite(value)) return "n/a";
+  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+  return `${sign}${fmt(Math.abs(value))}%`;
 }
 
 function latestRun(runs, branch, suite, profile) {
@@ -165,19 +222,34 @@ function comparableRows(baseRun, headRun) {
       const headValue = metricValue(headScenario, metric);
       if (!Number.isFinite(baseValue) || !Number.isFinite(headValue)) continue;
       const delta = headValue - baseValue;
+      const deltaPct = toPct(delta, baseValue);
+      const noisePct = combinedNoisePct(metric, baseScenario, headScenario);
+      const signalMarginPct =
+        Number.isFinite(noisePct) && Number.isFinite(deltaPct)
+          ? Math.abs(deltaPct) - noisePct
+          : Number.NaN;
+      const significant = Number.isFinite(signalMarginPct) ? signalMarginPct > 0 : true;
       rows.push({
-        scenarioId,
+        scenarioId: scenarioLabel(baseScenario),
         metric,
         baseValue,
         headValue,
         delta,
-        deltaPct: toPct(delta, baseValue),
-        trend: trend(metric, delta),
+        deltaPct,
+        noisePct,
+        signalMarginPct,
+        significant,
+        trend: trend(metric, delta, significant),
       });
     }
   }
 
-  rows.sort((a, b) => Math.abs(b.deltaPct || 0) - Math.abs(a.deltaPct || 0));
+  rows.sort((a, b) => {
+    const aScore = Number.isFinite(a.signalMarginPct) ? a.signalMarginPct : -1;
+    const bScore = Number.isFinite(b.signalMarginPct) ? b.signalMarginPct : -1;
+    if (aScore !== bScore) return bScore - aScore;
+    return Math.abs(b.deltaPct || 0) - Math.abs(a.deltaPct || 0);
+  });
   return rows;
 }
 
@@ -233,11 +305,11 @@ function render(history, args) {
         continue;
       }
 
-      sections.push(`| Scenario | Metric | Base | Head | Delta | Delta % | Trend |`);
-      sections.push(`|---|---|---:|---:|---:|---:|---|`);
+      sections.push(`| Scenario | Metric | Base | Head | Delta % | Noise | Signal | Trend |`);
+      sections.push(`|---|---|---:|---:|---:|---:|---|---|`);
       for (const row of rows.slice(0, args.limit)) {
         sections.push(
-          `| ${row.scenarioId} | ${row.metric} | ${fmt(row.baseValue)} | ${fmt(row.headValue)} | ${fmt(row.delta)} | ${fmt(row.deltaPct)}% | ${row.trend} |`,
+          `| ${row.scenarioId} | ${row.metric} | ${fmt(row.baseValue)} | ${fmt(row.headValue)} | ${fmtPct(row.deltaPct)} | ${fmtPct(row.noisePct)} | ${Number.isFinite(row.signalMarginPct) ? fmtPct(row.signalMarginPct) : "n/a"} | ${row.trend} |`,
         );
       }
       sections.push(``);

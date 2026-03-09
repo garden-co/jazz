@@ -6,7 +6,9 @@ import { spawn } from "node:child_process";
 import {
   benchmarksForSuite,
   DEFAULT_BENCHMARK_TIMEOUT_SECONDS,
+  DEFAULT_NOISE_REPEAT_COUNT,
   readSkipSet,
+  repeatCountForBenchmark,
   skipIds,
 } from "./ci_benchmarks.mjs";
 
@@ -22,6 +24,7 @@ function printHelp() {
     --out-dir bench-out/native \\
     [--profile s] \\
     [--skip-set benchmarks/realistic/ci_skip_set.json] \\
+    [--repeat-count 3] \\
     [--timeout-seconds 60]
 `);
 }
@@ -32,6 +35,7 @@ function parseArgs(argv) {
     outDir: "",
     profile: "s",
     skipSet: "benchmarks/realistic/ci_skip_set.json",
+    repeatCount: DEFAULT_NOISE_REPEAT_COUNT,
     timeoutSeconds: DEFAULT_BENCHMARK_TIMEOUT_SECONDS,
   };
 
@@ -54,6 +58,10 @@ function parseArgs(argv) {
       out.skipSet = argv[++i] ?? "";
       continue;
     }
+    if (arg === "--repeat-count") {
+      out.repeatCount = Number(argv[++i] ?? String(DEFAULT_NOISE_REPEAT_COUNT));
+      continue;
+    }
     if (arg === "--timeout-seconds") {
       out.timeoutSeconds = Number(argv[++i] ?? String(DEFAULT_BENCHMARK_TIMEOUT_SECONDS));
       continue;
@@ -69,6 +77,9 @@ function parseArgs(argv) {
   if (!out.outDir) fail("--out-dir is required");
   if (!Number.isFinite(out.timeoutSeconds) || out.timeoutSeconds < 1) {
     fail("--timeout-seconds must be a number >= 1");
+  }
+  if (!Number.isFinite(out.repeatCount) || out.repeatCount < 1) {
+    fail("--repeat-count must be a number >= 1");
   }
 
   return out;
@@ -89,6 +100,11 @@ function fileSafeId(value) {
     .toLowerCase();
 }
 
+function withAttemptSuffix(file, attemptIndex) {
+  const parsed = path.parse(file);
+  return path.join(parsed.dir, `${parsed.name}.attempt_${attemptIndex}${parsed.ext}`);
+}
+
 function isoNow() {
   return new Date().toISOString();
 }
@@ -106,6 +122,163 @@ function shellQuote(parts) {
       return `'${String(part).replace(/'/g, `'\\''`)}'`;
     })
     .join(" ");
+}
+
+function readJsonIfExists(file) {
+  if (!file || !fs.existsSync(file)) return null;
+  const raw = fs.readFileSync(file, "utf8").trim();
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+function cloneJson(value) {
+  if (value == null) return {};
+  return JSON.parse(JSON.stringify(value));
+}
+
+function mean(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function sampleStddev(values, avg) {
+  if (values.length <= 1) return 0;
+  const variance = values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function medianAbsoluteDeviation(values, center) {
+  const deviations = values.map((value) => Math.abs(value - center));
+  return median(deviations);
+}
+
+function summarizeSamples(values) {
+  const nums = values.map((value) => Number(value)).filter(Number.isFinite);
+  if (nums.length === 0) return null;
+  const avg = mean(nums);
+  const med = median(nums);
+  const stddev = sampleStddev(nums, avg);
+  const mad = medianAbsoluteDeviation(nums, med);
+  return {
+    sample_count: nums.length,
+    samples: nums,
+    median: med,
+    mean: avg,
+    min: Math.min(...nums),
+    max: Math.max(...nums),
+    stddev,
+    cv_pct: avg === 0 ? null : (Math.abs(stddev) / Math.abs(avg)) * 100,
+    mad,
+    rel_mad_pct: med === 0 ? null : (Math.abs(mad) / Math.abs(med)) * 100,
+  };
+}
+
+function metricNoisePct(noiseMetric) {
+  if (!noiseMetric || typeof noiseMetric !== "object") return null;
+  if (Number.isFinite(Number(noiseMetric.relative_half_width_pct))) {
+    return Number(noiseMetric.relative_half_width_pct);
+  }
+  const candidates = [noiseMetric.cv_pct, noiseMetric.rel_mad_pct]
+    .map((value) => Number(value))
+    .filter(Number.isFinite);
+  if (candidates.length === 0) return null;
+  return Math.max(...candidates);
+}
+
+function scenarioNoiseMetric(scenario, metric) {
+  const noise = scenario?.extra?.noise;
+  if (!noise || typeof noise !== "object") return null;
+  if (metric === "wall_time_ms" || metric === "throughput_ops_per_sec") {
+    return noise.metrics?.[metric] ?? null;
+  }
+  if (!metric.startsWith("op:")) return null;
+  const slash = metric.lastIndexOf("/");
+  if (slash <= 3) return null;
+  const opName = metric.slice(3, slash);
+  const field = metric.slice(slash + 1);
+  return noise.operations?.[opName]?.[field] ?? null;
+}
+
+function scenarioNoiseSummary(scenario) {
+  const wallNoisePct = metricNoisePct(scenarioNoiseMetric(scenario, "wall_time_ms"));
+  const repeatsCompleted = Number(scenario?.extra?.noise?.repeats_completed);
+  if (!Number.isFinite(wallNoisePct) || !Number.isFinite(repeatsCompleted)) return null;
+  return `${repeatsCompleted} runs, wall noise ±${wallNoisePct.toFixed(1)}%`;
+}
+
+function aggregateScenarioAttempts(template, scenarios, requestedRepeatCount) {
+  const extra = cloneJson(template?.extra ?? {});
+  const metricStats = {};
+
+  const wallStats = summarizeSamples(scenarios.map((scenario) => scenario?.wall_time_ms));
+  if (wallStats) metricStats.wall_time_ms = wallStats;
+  const throughputStats = summarizeSamples(
+    scenarios.map((scenario) => scenario?.throughput_ops_per_sec),
+  );
+  if (throughputStats) metricStats.throughput_ops_per_sec = throughputStats;
+
+  const operationNames = [
+    ...new Set(scenarios.flatMap((scenario) => Object.keys(scenario?.operation_summaries ?? {}))),
+  ].sort();
+  const operationSummaries = {};
+  const operationNoise = {};
+
+  for (const opName of operationNames) {
+    const counts = summarizeSamples(
+      scenarios.map((scenario) => scenario?.operation_summaries?.[opName]?.count),
+    );
+    const summary = {};
+    const noiseSummary = {};
+    if (counts) {
+      summary.count = Math.round(counts.median);
+    }
+
+    for (const field of ["avg_ms", "p50_ms", "p95_ms", "p99_ms"]) {
+      const stats = summarizeSamples(
+        scenarios.map((scenario) => scenario?.operation_summaries?.[opName]?.[field]),
+      );
+      if (!stats) continue;
+      summary[field] = stats.median;
+      noiseSummary[field] = stats;
+    }
+
+    if (Object.keys(summary).length > 0) {
+      operationSummaries[opName] = summary;
+      if (Object.keys(noiseSummary).length > 0) {
+        operationNoise[opName] = noiseSummary;
+      }
+    }
+  }
+
+  extra.noise = {
+    source: "repeated_runs",
+    estimator: "median",
+    repeats_requested: requestedRepeatCount,
+    repeats_completed: scenarios.length,
+    metrics: metricStats,
+    operations: operationNoise,
+  };
+
+  const totalOperations = summarizeSamples(scenarios.map((scenario) => scenario?.total_operations));
+
+  return {
+    ...cloneJson(template),
+    total_operations: totalOperations
+      ? Math.round(totalOperations.median)
+      : (template?.total_operations ?? null),
+    wall_time_ms: wallStats ? wallStats.median : (template?.wall_time_ms ?? null),
+    throughput_ops_per_sec: throughputStats
+      ? throughputStats.median
+      : (template?.throughput_ops_per_sec ?? null),
+    operation_summaries: operationSummaries,
+    extra,
+  };
 }
 
 function createLineBuffer(onLine) {
@@ -268,16 +441,12 @@ function stripAnsi(value) {
 }
 
 async function runNativeBenchmark(benchmark, args) {
-  const logFile = path.resolve(args.outDir, benchmark.log_path);
-
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
-    const tempOutputFile = `${outputFile}.partial`;
     const profilePath =
       benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
     const env = { ...process.env, ...(benchmark.env ?? {}) };
-    fs.rmSync(tempOutputFile, { force: true });
-    const command = [
+    const baseCommand = [
       "cargo",
       "run",
       "--release",
@@ -293,92 +462,173 @@ async function runNativeBenchmark(benchmark, args) {
       "--scenario",
       benchmark.scenario_path,
     ];
-    let prepareDurationMs = null;
-    let prepareLogPath = null;
+    const repeatCount = repeatCountForBenchmark(benchmark, args.repeatCount);
+    const attempts = [];
+    const scenarios = [];
+    let totalDurationMs = 0;
 
-    if (benchmark.prepare_seed) {
-      const fixtureDir = path.resolve(args.outDir, "fixtures", fileSafeId(benchmark.id));
-      const seedStateFile = path.join(fixtureDir, "seed_state.json");
-      const prepareLogFile = `${logFile}.prepare`;
-      prepareLogPath = rel(prepareLogFile);
-      fs.rmSync(fixtureDir, { recursive: true, force: true });
-      mkdirp(fixtureDir);
+    fs.rmSync(outputFile, { force: true });
 
-      const prepareCommand = [
-        ...command,
-        "--data-dir",
-        fixtureDir,
-        "--seed-state",
-        seedStateFile,
-        "--prepare-only",
-      ];
-      console.log(`\n==> ${benchmark.label} (prepare)`);
-      console.log(shellQuote(prepareCommand));
-      const prepareResult = await runCommand({
-        command: prepareCommand,
+    for (let attemptIndex = 1; attemptIndex <= repeatCount; attemptIndex += 1) {
+      const attemptOutputFile = path.resolve(
+        args.outDir,
+        withAttemptSuffix(benchmark.output_path, attemptIndex),
+      );
+      const tempOutputFile = `${attemptOutputFile}.partial`;
+      const logFile = path.resolve(
+        args.outDir,
+        withAttemptSuffix(benchmark.log_path, attemptIndex),
+      );
+      let prepareDurationMs = null;
+      let prepareLogPath = null;
+      let prepareCommand = null;
+      const command = [...baseCommand];
+
+      fs.rmSync(tempOutputFile, { force: true });
+      fs.rmSync(attemptOutputFile, { force: true });
+
+      if (benchmark.prepare_seed) {
+        const fixtureDir = path.resolve(
+          args.outDir,
+          "fixtures",
+          fileSafeId(benchmark.id),
+          `attempt_${attemptIndex}`,
+        );
+        const seedStateFile = path.join(fixtureDir, "seed_state.json");
+        const prepareLogFile = `${logFile}.prepare`;
+        prepareLogPath = rel(prepareLogFile);
+        fs.rmSync(fixtureDir, { recursive: true, force: true });
+        mkdirp(fixtureDir);
+
+        prepareCommand = [
+          ...command,
+          "--data-dir",
+          fixtureDir,
+          "--seed-state",
+          seedStateFile,
+          "--prepare-only",
+        ];
+        console.log(`\n==> ${benchmark.label} (prepare ${attemptIndex}/${repeatCount})`);
+        console.log(shellQuote(prepareCommand));
+        const prepareResult = await runCommand({
+          command: prepareCommand,
+          cwd: process.cwd(),
+          env,
+          timeoutSeconds: args.timeoutSeconds,
+          logFile: prepareLogFile,
+        });
+        prepareDurationMs = prepareResult.durationMs;
+        totalDurationMs += prepareResult.durationMs;
+        const prepareStatus = statusForRun(prepareResult);
+        if (prepareStatus !== "passed") {
+          attempts.push({
+            attempt: attemptIndex,
+            status: prepareStatus,
+            duration_ms: prepareResult.durationMs,
+            prepare_duration_ms: prepareDurationMs,
+            prepare_log_path: prepareLogPath,
+            exit_code: prepareResult.code,
+            signal: prepareResult.signal,
+            output_path: null,
+            log_path: rel(logFile),
+            note: failureNote(prepareResult) ?? "Seed preparation failed.",
+          });
+          return summarizeBenchmark(benchmark, prepareStatus, totalDurationMs, {
+            command: baseCommand,
+            scenario_path: benchmark.scenario_path,
+            profile_path: profilePath,
+            output_path: null,
+            log_path: rel(logFile),
+            timeout_seconds: args.timeoutSeconds,
+            repeat_count: repeatCount,
+            completed_attempts: scenarios.length,
+            attempts,
+            note: failureNote(prepareResult) ?? "Seed preparation failed.",
+          });
+        }
+
+        command.push("--data-dir", fixtureDir, "--seed-state", seedStateFile, "--reuse-seed");
+      }
+
+      console.log(`\n==> ${benchmark.label} (${attemptIndex}/${repeatCount})`);
+      console.log(shellQuote(command));
+      const result = await runCommand({
+        command,
         cwd: process.cwd(),
         env,
         timeoutSeconds: args.timeoutSeconds,
-        logFile: prepareLogFile,
+        stdoutFile: tempOutputFile,
+        logFile,
       });
-      prepareDurationMs = prepareResult.durationMs;
-      const prepareStatus = statusForRun(prepareResult);
-      if (prepareStatus !== "passed") {
-        return summarizeBenchmark(benchmark, prepareStatus, prepareResult.durationMs, {
-          command,
-          prepare_command: prepareCommand,
+      totalDurationMs += result.durationMs;
+
+      const status = statusForRun(result);
+      const tempExists = fs.existsSync(tempOutputFile) && fs.statSync(tempOutputFile).size > 0;
+      if (status === "passed" && tempExists) {
+        fs.renameSync(tempOutputFile, attemptOutputFile);
+      } else {
+        fs.rmSync(tempOutputFile, { force: true });
+      }
+
+      const scenario = readJsonIfExists(attemptOutputFile);
+      const finalStatus =
+        status === "passed" && scenario && typeof scenario === "object"
+          ? "passed"
+          : status === "passed"
+            ? "failed"
+            : status;
+      attempts.push({
+        attempt: attemptIndex,
+        status: finalStatus,
+        duration_ms: result.durationMs,
+        prepare_duration_ms: prepareDurationMs,
+        prepare_log_path: prepareLogPath,
+        prepare_command: prepareCommand,
+        exit_code: result.code,
+        signal: result.signal,
+        output_path: finalStatus === "passed" ? rel(attemptOutputFile) : null,
+        log_path: rel(logFile),
+        note:
+          finalStatus === "failed" && status === "passed" && !scenario
+            ? "Benchmark completed without emitting JSON output."
+            : failureNote(result),
+      });
+
+      if (finalStatus !== "passed") {
+        return summarizeBenchmark(benchmark, finalStatus, totalDurationMs, {
+          command: baseCommand,
           scenario_path: benchmark.scenario_path,
           profile_path: profilePath,
           output_path: null,
           log_path: rel(logFile),
-          prepare_log_path: prepareLogPath,
-          exit_code: prepareResult.code,
-          signal: prepareResult.signal,
           timeout_seconds: args.timeoutSeconds,
-          note: failureNote(prepareResult) ?? "Seed preparation failed.",
+          repeat_count: repeatCount,
+          completed_attempts: scenarios.length,
+          attempts,
+          note: attempts.at(-1)?.note ?? failureNote(result),
         });
       }
 
-      command.push("--data-dir", fixtureDir, "--seed-state", seedStateFile, "--reuse-seed");
+      scenarios.push(scenario);
     }
 
-    console.log(`\n==> ${benchmark.label}`);
-    console.log(shellQuote(command));
-    const result = await runCommand({
-      command,
-      cwd: process.cwd(),
-      env,
-      timeoutSeconds: args.timeoutSeconds,
-      stdoutFile: tempOutputFile,
-      logFile,
-    });
-
-    const status = statusForRun(result);
-    const tempExists = fs.existsSync(tempOutputFile) && fs.statSync(tempOutputFile).size > 0;
-    if (status === "passed" && tempExists) {
-      fs.renameSync(tempOutputFile, outputFile);
-    } else {
-      fs.rmSync(tempOutputFile, { force: true });
-    }
-    const fileExists = fs.existsSync(outputFile) && fs.statSync(outputFile).size > 0;
-    const finalStatus = status === "passed" && !fileExists ? "failed" : status;
-    return summarizeBenchmark(benchmark, finalStatus, result.durationMs, {
-      command,
+    const aggregatedScenario = aggregateScenarioAttempts(scenarios[0], scenarios, repeatCount);
+    writeJson(outputFile, aggregatedScenario);
+    return summarizeBenchmark(benchmark, "passed", totalDurationMs, {
+      command: baseCommand,
       scenario_path: benchmark.scenario_path,
       profile_path: profilePath,
-      prepare_duration_ms: prepareDurationMs,
-      prepare_log_path: prepareLogPath,
-      output_path: fileExists ? rel(outputFile) : null,
-      log_path: rel(logFile),
-      exit_code: result.code,
-      signal: result.signal,
+      output_path: rel(outputFile),
       timeout_seconds: args.timeoutSeconds,
-      note:
-        finalStatus === "failed" && status === "passed" && !fileExists
-          ? "Benchmark completed without emitting JSON output."
-          : failureNote(result),
+      repeat_count: repeatCount,
+      completed_attempts: scenarios.length,
+      attempts,
+      note: scenarioNoiseSummary(aggregatedScenario),
+      scenario: aggregatedScenario,
     });
   }
+
+  const logFile = path.resolve(args.outDir, benchmark.log_path);
 
   const command = [
     "cargo",
@@ -429,61 +679,100 @@ function parseBrowserReport(lines) {
 }
 
 async function runBrowserBenchmark(benchmark, args) {
-  const logFile = path.resolve(args.outDir, benchmark.log_path);
   const outputFile = path.resolve(args.outDir, benchmark.output_path);
   const command = ["pnpm", "--dir", "packages/jazz-tools", "run", "bench:realistic:browser"];
-  const env = {
-    ...process.env,
-    ...(benchmark.env ?? {}),
-    JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
-  };
+  const repeatCount = repeatCountForBenchmark(benchmark, args.repeatCount);
+  const attempts = [];
+  const scenarios = [];
+  let totalDurationMs = 0;
 
-  console.log(`\n==> ${benchmark.label}`);
-  console.log(`JAZZ_REALISTIC_BROWSER_SCENARIOS=${benchmark.scenario_id} ${shellQuote(command)}`);
-  const result = await runCommand({
-    command,
-    cwd: process.cwd(),
-    env,
-    timeoutSeconds: args.timeoutSeconds,
-    logFile,
-    streamStdoutToConsole: true,
-  });
+  fs.rmSync(outputFile, { force: true });
 
-  const status = statusForRun(result);
-  let scenario = null;
-  let note = null;
-  if (status === "passed") {
-    try {
-      const report = parseBrowserReport(result.stdoutLines);
-      const scenarios = Array.isArray(report?.scenarios) ? report.scenarios : [];
-      scenario = scenarios.find((entry) => entry?.scenario_id === benchmark.scenario_id) ?? null;
-      if (!scenario) {
-        note = `Browser report did not include scenario ${benchmark.scenario_id}.`;
-      } else {
-        mkdirp(path.dirname(outputFile));
-        fs.writeFileSync(outputFile, `${JSON.stringify(scenario, null, 2)}\n`);
-      }
-    } catch (error) {
-      note = error instanceof Error ? error.message : String(error);
-    }
-  }
+  for (let attemptIndex = 1; attemptIndex <= repeatCount; attemptIndex += 1) {
+    const logFile = path.resolve(args.outDir, withAttemptSuffix(benchmark.log_path, attemptIndex));
+    const attemptOutputFile = path.resolve(
+      args.outDir,
+      withAttemptSuffix(benchmark.output_path, attemptIndex),
+    );
+    const env = {
+      ...process.env,
+      ...(benchmark.env ?? {}),
+      JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
+    };
 
-  return summarizeBenchmark(
-    benchmark,
-    status === "passed" && !scenario ? "failed" : status,
-    result.durationMs,
-    {
+    fs.rmSync(attemptOutputFile, { force: true });
+    console.log(`\n==> ${benchmark.label} (${attemptIndex}/${repeatCount})`);
+    console.log(`JAZZ_REALISTIC_BROWSER_SCENARIOS=${benchmark.scenario_id} ${shellQuote(command)}`);
+    const result = await runCommand({
       command,
-      scenario_id: benchmark.scenario_id,
-      output_path: scenario ? rel(outputFile) : null,
+      cwd: process.cwd(),
+      env,
+      timeoutSeconds: args.timeoutSeconds,
+      logFile,
+      streamStdoutToConsole: true,
+    });
+    totalDurationMs += result.durationMs;
+
+    const status = statusForRun(result);
+    let scenario = null;
+    let note = null;
+    if (status === "passed") {
+      try {
+        const report = parseBrowserReport(result.stdoutLines);
+        const reportedScenarios = Array.isArray(report?.scenarios) ? report.scenarios : [];
+        scenario =
+          reportedScenarios.find((entry) => entry?.scenario_id === benchmark.scenario_id) ?? null;
+        if (!scenario) {
+          note = `Browser report did not include scenario ${benchmark.scenario_id}.`;
+        } else {
+          writeJson(attemptOutputFile, scenario);
+        }
+      } catch (error) {
+        note = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const finalStatus = status === "passed" && !scenario ? "failed" : status;
+    attempts.push({
+      attempt: attemptIndex,
+      status: finalStatus,
+      duration_ms: result.durationMs,
+      output_path: scenario ? rel(attemptOutputFile) : null,
       log_path: rel(logFile),
       exit_code: result.code,
       signal: result.signal,
-      timeout_seconds: args.timeoutSeconds,
       note: note ?? failureNote(result),
-      scenario,
-    },
-  );
+    });
+
+    if (finalStatus !== "passed" || !scenario) {
+      return summarizeBenchmark(benchmark, finalStatus, totalDurationMs, {
+        command,
+        scenario_id: benchmark.scenario_id,
+        output_path: null,
+        timeout_seconds: args.timeoutSeconds,
+        repeat_count: repeatCount,
+        completed_attempts: scenarios.length,
+        attempts,
+        note: attempts.at(-1)?.note ?? failureNote(result),
+      });
+    }
+
+    scenarios.push(scenario);
+  }
+
+  const aggregatedScenario = aggregateScenarioAttempts(scenarios[0], scenarios, repeatCount);
+  writeJson(outputFile, aggregatedScenario);
+  return summarizeBenchmark(benchmark, "passed", totalDurationMs, {
+    command,
+    scenario_id: benchmark.scenario_id,
+    output_path: rel(outputFile),
+    timeout_seconds: args.timeoutSeconds,
+    repeat_count: repeatCount,
+    completed_attempts: scenarios.length,
+    attempts,
+    note: scenarioNoiseSummary(aggregatedScenario),
+    scenario: aggregatedScenario,
+  });
 }
 
 function countByStatus(results) {
@@ -494,12 +783,13 @@ function countByStatus(results) {
   return counts;
 }
 
-function summaryMarkdown(suite, results, timeoutSeconds) {
+function summaryMarkdown(suite, results, timeoutSeconds, repeatCount) {
   const counts = countByStatus(results);
   const lines = [];
   lines.push(`## ${suite === "native" ? "Native" : "Browser"} benchmark status`);
   lines.push("");
   lines.push(`Budget per benchmark: ${timeoutSeconds}s`);
+  lines.push(`Repeated scenario benchmarks: ${repeatCount}x`);
   lines.push(
     `Passed: ${counts.get("passed") ?? 0}, timed out: ${counts.get("timed_out") ?? 0}, failed: ${counts.get("failed") ?? 0}, configured skip: ${counts.get("skipped_configured") ?? 0}`,
   );
@@ -569,11 +859,15 @@ async function main() {
     generated_at: generatedAt,
     suite: args.suite,
     profile: args.profile,
+    repeat_count: args.repeatCount,
     timeout_seconds: args.timeoutSeconds,
     benchmarks: results,
   };
   writeJson(statusFile, statusPayload);
-  fs.writeFileSync(summaryFile, summaryMarkdown(args.suite, results, args.timeoutSeconds));
+  fs.writeFileSync(
+    summaryFile,
+    summaryMarkdown(args.suite, results, args.timeoutSeconds, args.repeatCount),
+  );
   writeJson(skipCandidatesFile, {
     version: 1,
     generated_at: generatedAt,

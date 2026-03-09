@@ -30,6 +30,7 @@ env:
   BENCH_REF: ${{ github.ref }}
   BENCH_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   BENCH_TIMEOUT_SECONDS: "60"
+  BENCH_REPEAT_COUNT: "3"
   VERCEL_ORG_ID: team_xiRKInFi7lBd1gTqyAGuzmkC
   VERCEL_PROJECT_ID: prj_RfjK9XUx0HaHkxGmvsMrPJhhuZVG
 
@@ -102,6 +103,7 @@ jobs:
             --out-dir bench-out/native \
             --profile "${BENCH_PROFILE}" \
             --skip-set benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
             --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
       - name: Export Criterion artifacts
@@ -252,6 +254,7 @@ jobs:
             --out-dir bench-out/browser \
             --profile "${BENCH_PROFILE}" \
             --skip-set benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
             --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
       - name: Publish browser execution summary

@@ -158,6 +158,8 @@ function estimateMetrics(benchmarkJson, estimatesJson) {
   return {
     mean_ns: meanNs,
     mean_ms: meanNs / 1e6,
+    mean_ci_low_ms: Number.isFinite(ciLowerNs) ? ciLowerNs / 1e6 : null,
+    mean_ci_high_ms: Number.isFinite(ciUpperNs) ? ciUpperNs / 1e6 : null,
     iter_per_sec: iterPerSec,
     iter_per_sec_ci_low: iterPerSecCiLow,
     iter_per_sec_ci_high: iterPerSecCiHigh,
