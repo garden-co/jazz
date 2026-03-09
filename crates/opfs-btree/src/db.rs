@@ -2503,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn failpoint_sweep_reports_recovery_outcomes_across_growth_and_checkpoint() {
+    fn failpoint_sweep_requires_clean_recovery_for_every_step() {
         test_failpoints::clear();
 
         let (max_step, crash_key, crash_value) = {
@@ -2517,8 +2517,9 @@ mod tests {
         assert!(max_step > 0, "expected at least one failpoint site");
         test_failpoints::clear();
 
-        let mut corrupt_sites = Vec::new();
-        let mut other_sites = Vec::new();
+        let mut committed_steps = 0usize;
+        let mut rolled_back_steps = 0usize;
+        let mut failures = Vec::new();
         for step in 1..=max_step {
             let (mut tree, stable, mut next_seed) = prepare_growth_base_fixture();
             test_failpoints::arm(step);
@@ -2527,70 +2528,86 @@ mod tests {
                 apply_pending_growth(&mut tree, stable, &mut next_seed)
                     .and_then(|_| tree.checkpoint())
             }));
+            let hit_sites = test_failpoints::hit_sites();
+            let site = hit_sites
+                .get(step.saturating_sub(1))
+                .copied()
+                .or_else(|| hit_sites.last().copied())
+                .unwrap_or("<no-site-recorded>");
             match run {
                 Ok(Err(err)) => {
-                    assert!(
-                        err.to_string().contains("simulated failpoint"),
-                        "unexpected failpoint error: {err}"
-                    );
+                    if !err.to_string().contains("simulated failpoint") {
+                        failures.push(format!(
+                            "step {step}: {site} -> unexpected error during run: {err}"
+                        ));
+                    }
                 }
                 Err(payload) => {
                     let message = panic_message(payload);
-                    assert!(
-                        message.contains("simulated failpoint"),
-                        "unexpected panic payload: {message}"
-                    );
+                    if !message.contains("simulated failpoint") {
+                        failures.push(format!(
+                            "step {step}: {site} -> unexpected panic during run: {message}"
+                        ));
+                    }
                 }
-                Ok(Ok(())) => panic!("armed failpoint should abort growth or checkpoint"),
+                Ok(Ok(())) => failures.push(format!(
+                    "step {step}: {site} -> armed failpoint did not abort growth/checkpoint"
+                )),
             }
-            let site = test_failpoints::hit_sites()
-                .last()
-                .copied()
-                .expect("failpoint site recorded");
             test_failpoints::clear();
 
             let file = tree.into_file();
             let outcome = match OpfsBTree::open(file, small_options()) {
                 Ok(mut reopened) => match reopened.get(crash_key.as_bytes()) {
-                    Ok(Some(value)) if value == crash_value.as_bytes() => "committed",
-                    Ok(None) => "rolled_back",
+                    Ok(Some(value)) if value == crash_value.as_bytes() => {
+                        committed_steps = committed_steps.saturating_add(1);
+                        "committed".to_string()
+                    }
+                    Ok(None) => {
+                        rolled_back_steps = rolled_back_steps.saturating_add(1);
+                        "rolled_back".to_string()
+                    }
                     Err(BTreeError::Corrupt(message))
                         if message.contains("out of bounds for total_pages") =>
                     {
-                        corrupt_sites.push((step, site));
-                        "corrupt-out-of-bounds"
+                        let detail =
+                            format!("step {step}: {site} -> corrupt-out-of-bounds ({message})");
+                        failures.push(detail.clone());
+                        detail
                     }
                     Err(error) => {
-                        other_sites.push((step, site, format!("read error: {error}")));
-                        "other-read-error"
+                        let detail = format!("step {step}: {site} -> read error: {error}");
+                        failures.push(detail.clone());
+                        detail
                     }
                     Ok(Some(value)) => {
-                        other_sites.push((
-                            step,
-                            site,
-                            format!("unexpected value: {}", String::from_utf8_lossy(&value)),
-                        ));
-                        "unexpected-value"
+                        let detail = format!(
+                            "step {step}: {site} -> unexpected value: {}",
+                            String::from_utf8_lossy(&value)
+                        );
+                        failures.push(detail.clone());
+                        detail
                     }
                 },
                 Err(error) => {
-                    other_sites.push((step, site, format!("open error: {error}")));
-                    "open-error"
+                    let detail = format!("step {step}: {site} -> open error: {error}");
+                    failures.push(detail.clone());
+                    detail
                 }
             };
 
             println!("failpoint step {step}: {site} -> {outcome}");
         }
 
-        println!("corrupt failpoint sites: {corrupt_sites:?}");
-        if !other_sites.is_empty() {
-            println!("other failpoint outcomes: {other_sites:?}");
+        if !failures.is_empty() {
+            panic!(
+                "failpoint sweep found {} failing step(s); committed={}, rolled_back={}\n{}",
+                failures.len(),
+                committed_steps,
+                rolled_back_steps,
+                failures.join("\n")
+            );
         }
-
-        assert!(
-            !corrupt_sites.is_empty(),
-            "expected the failpoint sweep to find at least one unrecoverable site"
-        );
     }
 
     #[test]
