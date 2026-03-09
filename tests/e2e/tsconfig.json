@@ -8,5 +8,11 @@
     "skipLibCheck": true,
     "types": ["node", "@playwright/test", "vite/client"]
   },
-  "include": ["playwright.config.ts", "src/**/*.ts", "src/**/*.tsx", "cases/offline-storage/App.tsx", "vite.config.ts"]
+  "include": [
+    "playwright.config.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "cases/offline-storage/App.tsx",
+    "vite.config.ts"
+  ]
 }
