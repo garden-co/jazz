@@ -1771,6 +1771,63 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct SuperblockCrashFile {
+        inner: MemoryFile,
+        page_size: usize,
+        crash_superblock_writes: Rc<RefCell<bool>>,
+    }
+
+    impl SuperblockCrashFile {
+        fn new(page_size: usize) -> Self {
+            Self {
+                inner: MemoryFile::new(),
+                page_size,
+                crash_superblock_writes: Rc::new(RefCell::new(false)),
+            }
+        }
+
+        fn arm_superblock_crash(&self) {
+            *self.crash_superblock_writes.borrow_mut() = true;
+        }
+
+        fn disarm_superblock_crash(&self) {
+            *self.crash_superblock_writes.borrow_mut() = false;
+        }
+
+        fn memory_file(&self) -> MemoryFile {
+            self.inner.clone()
+        }
+    }
+
+    impl SyncFile for SuperblockCrashFile {
+        fn len(&self) -> Result<u64, BTreeError> {
+            self.inner.len()
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+            let superblock_bytes = (2 * self.page_size) as u64;
+            if *self.crash_superblock_writes.borrow() && offset < superblock_bytes {
+                return Err(BTreeError::Io(
+                    "simulated crash before superblock swap".to_string(),
+                ));
+            }
+            self.inner.write_all_at(offset, buf)
+        }
+
+        fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+            self.inner.truncate(len)
+        }
+
+        fn flush(&self) -> Result<(), BTreeError> {
+            self.inner.flush()
+        }
+    }
+
     fn corrupt_slot(file: &MemoryFile, slot: SuperblockSlot, page_size: usize) {
         let offset = slot.byte_offset(page_size) + 8;
         file.write_all_at(offset, &[0xFF, 0x00, 0xAA, 0x55])
@@ -2163,6 +2220,83 @@ mod tests {
             Some(b"v1".to_vec())
         );
         assert_eq!(reopened.get(b"ephemeral").expect("get ephemeral"), None);
+    }
+
+    #[test]
+    fn crash_between_data_flush_and_superblock_swap_can_expose_out_of_bounds_page_id() {
+        let options = small_options();
+        let file = SuperblockCrashFile::new(options.page_size);
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        let mut next_seed = 0u32;
+        loop {
+            let key = format!("base-{next_seed:05}");
+            let value = format!("value-{next_seed:05}");
+            tree.put(key.as_bytes(), value.as_bytes())
+                .expect("seed put");
+            next_seed += 1;
+
+            let Some(root_page_id) = tree.root_page_id else {
+                continue;
+            };
+            if tree.page_kind(root_page_id).expect("root kind") == PageKind::Internal {
+                break;
+            }
+        }
+
+        tree.checkpoint().expect("checkpoint stable tree");
+        let stable = tree.checkpoint_state();
+        let stable_root = tree.root_page_id.expect("stable root");
+        assert_eq!(
+            tree.page_kind(stable_root).expect("stable root kind"),
+            PageKind::Internal
+        );
+
+        let mut crash_key = None;
+        while tree.total_pages == stable.total_pages || tree.root_page_id != Some(stable_root) {
+            let key = format!("tail-{next_seed:05}");
+            let value = format!("value-{next_seed:05}");
+            tree.put(key.as_bytes(), value.as_bytes())
+                .expect("growth put");
+            next_seed += 1;
+
+            if tree.total_pages > stable.total_pages && tree.root_page_id == Some(stable_root) {
+                crash_key = Some(key);
+                break;
+            }
+        }
+
+        let crash_key = crash_key.expect("insert that allocates a new child page");
+        assert!(
+            tree.total_pages > stable.total_pages,
+            "expected tree growth beyond stable checkpoint"
+        );
+
+        file.arm_superblock_crash();
+        let err = tree
+            .checkpoint()
+            .expect_err("simulated crash during checkpoint");
+        assert!(
+            err.to_string()
+                .contains("simulated crash before superblock swap"),
+            "unexpected checkpoint error: {err}"
+        );
+        file.disarm_superblock_crash();
+
+        let mut reopened =
+            OpfsBTree::open(file.memory_file(), options).expect("reopen after simulated crash");
+        let recovered = reopened.checkpoint_state();
+        assert_eq!(recovered.total_pages, stable.total_pages);
+        assert_eq!(recovered.root_page_id, stable.root_page_id);
+
+        let err = reopened
+            .get(crash_key.as_bytes())
+            .expect_err("mixed checkpoint generations should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("out of bounds for total_pages"),
+            "unexpected reopen error: {message}"
+        );
     }
 
     #[test]
