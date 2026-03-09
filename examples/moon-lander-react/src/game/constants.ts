@@ -98,8 +98,5 @@ export const DEPOSIT_COLOURS: Record<FuelType, string> = {
   octagon: COLOURS.purple,
 };
 
-// DB sync
-export const DB_SYNC_INTERVAL_MS = 200;
-
 // Staleness
 export const STALE_THRESHOLD_S = 180; // 3 minutes
