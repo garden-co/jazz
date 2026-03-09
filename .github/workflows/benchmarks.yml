@@ -453,12 +453,16 @@ jobs:
             echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping preview deploy."
             exit 0
           fi
+          deploy_root="$(mktemp -d)"
+          trap 'rm -rf "${deploy_root}"' EXIT
+          mkdir -p "${deploy_root}/benchmarks/realistic"
+          cp -R benchmarks/realistic/site "${deploy_root}/benchmarks/realistic/site"
           if ! deployment_url="$(
-            npx vercel@latest deploy . \
+            npx vercel@latest deploy "${deploy_root}" \
               --yes \
               --scope garden-co \
               --token "${VERCEL_TOKEN}" \
-              --local-config benchmarks/realistic/site/vercel.json \
+              --local-config "${deploy_root}/benchmarks/realistic/site/vercel.json" \
               -m benchmark_branch="${BENCH_BRANCH}" \
               -m benchmark_sha="${BENCH_SHA}" \
               -m benchmark_run_id="${GITHUB_RUN_ID}" \
@@ -466,6 +470,14 @@ jobs:
               | tail -n1
           )"; then
             echo "Vercel preview deploy failed; continuing without preview URL."
+            exit 0
+          fi
+          if ! npx vercel@latest inspect "${deployment_url}" \
+            --wait \
+            --timeout 5m \
+            --scope garden-co \
+            --token "${VERCEL_TOKEN}" >/dev/null; then
+            echo "Vercel preview deployment did not reach Ready; continuing without preview URL."
             exit 0
           fi
           echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
@@ -485,13 +497,17 @@ jobs:
             echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping production deploy."
             exit 0
           fi
+          deploy_root="$(mktemp -d)"
+          trap 'rm -rf "${deploy_root}"' EXIT
+          mkdir -p "${deploy_root}/benchmarks/realistic"
+          cp -R benchmarks/realistic/site "${deploy_root}/benchmarks/realistic/site"
           if ! deployment_url="$(
-            npx vercel@latest deploy . \
+            npx vercel@latest deploy "${deploy_root}" \
               --prod \
               --yes \
               --scope garden-co \
               --token "${VERCEL_TOKEN}" \
-              --local-config benchmarks/realistic/site/vercel.json \
+              --local-config "${deploy_root}/benchmarks/realistic/site/vercel.json" \
               -m benchmark_branch="${BENCH_BRANCH}" \
               -m benchmark_sha="${BENCH_SHA}" \
               -m benchmark_run_id="${GITHUB_RUN_ID}" \
@@ -499,6 +515,14 @@ jobs:
               | tail -n1
           )"; then
             echo "Vercel production deploy failed; continuing without production URL."
+            exit 0
+          fi
+          if ! npx vercel@latest inspect "${deployment_url}" \
+            --wait \
+            --timeout 5m \
+            --scope garden-co \
+            --token "${VERCEL_TOKEN}" >/dev/null; then
+            echo "Vercel production deployment did not reach Ready; continuing without production URL."
             exit 0
           fi
           echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
