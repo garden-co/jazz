@@ -43,6 +43,7 @@ This script handles the details that bit us on the first live setup:
 - enables `corepack` as `root` so `pnpm` shims can be written under `/usr/bin`
 - uses `/var/lib/cloud/data/instance-id` for naming, which works with IMDSv2 required
 - installs the GitHub runner service after `config.sh`, which is when current releases generate `svc.sh`
+- applies `benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
 
 ## 3. Register the GitHub runner
 
@@ -60,7 +61,21 @@ Use these labels:
 
 ## 4. Pin machine behavior for stability
 
-Use performance governor:
+Use the checked-in hardening script for the deterministic baseline:
+
+```bash
+sudo benchmarks/realistic/harden_runner.sh
+```
+
+It currently does three concrete things:
+
+- disables SMT in-guest when `/sys/devices/system/cpu/smt/control` is available
+- disables noisy background services and timers (`irqbalance`, `snapd`, `fwupd`, `ModemManager`, `multipathd`, `udisks2`, `unattended-upgrades`, `cron`, apt timers)
+- installs a one-shot `benchmark-runner-tuning.service` so SMT-off and performance governor are re-applied on boot
+
+If you need a lighter-touch machine for debugging, skip this step or run bootstrap with `SKIP_HARDENING=1`.
+
+You can still try the performance governor manually:
 
 ```bash
 sudo cpupower frequency-set -g performance || true
