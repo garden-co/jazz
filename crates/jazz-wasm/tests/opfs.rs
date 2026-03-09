@@ -64,12 +64,14 @@ async fn cleanup_opfs(db_name: &str) {
 fn insert_todo(runtime: &WasmRuntime, title: &str, completed: bool) -> String {
     let wasm_values = vec![Value::Text(title.to_string()), Value::Boolean(completed)];
     let values = serde_wasm_bindgen::to_value(&wasm_values).unwrap();
-    runtime.insert("todos", values).unwrap()
+    let inserted = runtime.insert("todos", values).unwrap();
+    let inserted: serde_json::Value = serde_wasm_bindgen::from_value(inserted).unwrap();
+    inserted["id"].as_str().unwrap().to_string()
 }
 
 async fn query_todos(runtime: &WasmRuntime) -> Vec<serde_json::Value> {
     let query_json = make_query_json();
-    let promise = runtime.query(&query_json, None, None).unwrap();
+    let promise = runtime.query(&query_json, None, None, None).unwrap();
     let result = wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
     let rows: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     rows
@@ -77,7 +79,7 @@ async fn query_todos(runtime: &WasmRuntime) -> Vec<serde_json::Value> {
 
 async fn query_todos_filtered(runtime: &WasmRuntime) -> Vec<serde_json::Value> {
     let query_json = make_filter_query_json();
-    let promise = runtime.query(&query_json, None, None).unwrap();
+    let promise = runtime.query(&query_json, None, None, None).unwrap();
     let result = wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
     let rows: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     rows
@@ -88,10 +90,17 @@ async fn opfs_crud_round_trip() {
     let db_name = "test_crud";
     cleanup_opfs(db_name).await;
 
-    let runtime =
-        WasmRuntime::open_persistent(test_schema_json(), "test-app", "dev", "main", db_name, None)
-            .await
-            .unwrap();
+    let runtime = WasmRuntime::open_persistent(
+        test_schema_json(),
+        "test-app",
+        "dev",
+        "main",
+        db_name,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
 
     // Insert a todo
     let id = insert_todo(&runtime, "Buy milk", false);
@@ -130,6 +139,7 @@ async fn opfs_persistence_across_reopen() {
             "main",
             db_name,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -150,6 +160,7 @@ async fn opfs_persistence_across_reopen() {
             "main",
             db_name,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -171,10 +182,17 @@ async fn opfs_index_operations() {
     let db_name = "test_index";
     cleanup_opfs(db_name).await;
 
-    let runtime =
-        WasmRuntime::open_persistent(test_schema_json(), "test-app", "dev", "main", db_name, None)
-            .await
-            .unwrap();
+    let runtime = WasmRuntime::open_persistent(
+        test_schema_json(),
+        "test-app",
+        "dev",
+        "main",
+        db_name,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
 
     // Insert todos with different completed states
     insert_todo(&runtime, "Done 1", true);
@@ -204,10 +222,17 @@ async fn opfs_runtime_core_e2e() {
     let db_name = "test_e2e";
     cleanup_opfs(db_name).await;
 
-    let runtime =
-        WasmRuntime::open_persistent(test_schema_json(), "test-app", "dev", "main", db_name, None)
-            .await
-            .unwrap();
+    let runtime = WasmRuntime::open_persistent(
+        test_schema_json(),
+        "test-app",
+        "dev",
+        "main",
+        db_name,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
 
     // Insert
     let id = insert_todo(&runtime, "Original", false);
