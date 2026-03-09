@@ -176,7 +176,7 @@ function UseAllProbe<T extends { id: string }>({
   query,
   pick,
 }: {
-  query: QueryBuilder<T>;
+  query?: QueryBuilder<T>;
   pick: (row: T) => string;
 }) {
   const rows = useAll(query);
@@ -586,6 +586,58 @@ describe("useAll browser integration", () => {
       () => getText("rows").includes("done-task") && !getText("rows").includes("open-task"),
       5000,
       "expected updated query to show only done task",
+    );
+  });
+
+  it("returns undefined when query is missing and a result when the query is provided later", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("missing-query"),
+        driver: { type: "persistent", dbName: uniqueId("missing-query") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "late-query-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    function MissingThenSetQueryProbe() {
+      const [useQuery, setUseQuery] = React.useState(false);
+      const query = useQuery ? makeQuery<Todo>("todos", {}) : undefined;
+      return (
+        <>
+          <button data-testid="set-query" onClick={() => setUseQuery(true)}>
+            set-query
+          </button>
+          <UseAllProbe query={query} pick={(row) => row.title} />
+        </>
+      );
+    }
+
+    render(
+      <JazzProvider client={client}>
+        <MissingThenSetQueryProbe />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(
+      () => getText("rows") === "pending",
+      5000,
+      "expected pending text when query is missing",
+    );
+
+    const setQueryButton = container?.querySelector('[data-testid="set-query"]');
+    expect(setQueryButton).toBeTruthy();
+    await userEvent.click(setQueryButton as HTMLElement);
+
+    await waitForCondition(
+      () => getText("rows").includes("late-query-task"),
+      5000,
+      "expected rows to load after query is provided",
     );
   });
 });
