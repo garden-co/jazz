@@ -379,15 +379,19 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${PR_NUMBER}" ]; then
             previous_run_id="$(
               gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/benchmarks.yml/runs?branch=${BENCH_BRANCH}&status=success&per_page=20" \
-                --jq '.workflow_runs[] | select(.id != '"${GITHUB_RUN_ID}"') | select(.event == "pull_request") | select(any(.pull_requests[]?; .number == '"${PR_NUMBER}"')) | .id' \
-                | head -n1
+                --jq '[.workflow_runs[]
+                  | select(.id != '"${GITHUB_RUN_ID}"')
+                  | select(.event == "pull_request")
+                  | select(any(.pull_requests[]?; .number == '"${PR_NUMBER}"'))
+                  | .id][0] // empty'
             )"
 
             if [ -n "${previous_run_id}" ]; then
               previous_artifact="$(
                 gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${previous_run_id}/artifacts" \
-                  --jq '.artifacts[] | select(.expired == false and (.name | startswith("realistic-site-"))) | .name' \
-                  | head -n1
+                  --jq '[.artifacts[]
+                    | select(.expired == false and (.name | startswith("realistic-site-")))
+                    | .name][0] // empty'
               )"
 
               if [ -n "${previous_artifact}" ]; then
