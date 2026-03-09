@@ -106,8 +106,11 @@ export type CanvasWithIncludes<I extends CanvasInclude = {}> = Canvas & {
   strokesViaCanvas?: NonNullable<I["strokesViaCanvas"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Stroke[]
-      : RelationInclude extends StrokeQueryBuilder<infer QueryInclude extends StrokeInclude>
-        ? StrokeWithIncludes<QueryInclude>[]
+      : RelationInclude extends StrokeQueryBuilder<
+            infer QueryInclude extends StrokeInclude,
+            infer QuerySelect extends keyof Stroke | "*"
+          >
+        ? StrokeSelectedWithIncludes<QueryInclude, QuerySelect>[]
         : RelationInclude extends StrokeInclude
           ? StrokeWithIncludes<RelationInclude>[]
           : never
@@ -118,13 +121,38 @@ export type StrokeWithIncludes<I extends StrokeInclude = {}> = Stroke & {
   canvas?: NonNullable<I["canvas"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Canvas
-      : RelationInclude extends CanvasQueryBuilder<infer QueryInclude extends CanvasInclude>
-        ? CanvasWithIncludes<QueryInclude>
+      : RelationInclude extends CanvasQueryBuilder<
+            infer QueryInclude extends CanvasInclude,
+            infer QuerySelect extends keyof Canvas | "*"
+          >
+        ? CanvasSelectedWithIncludes<QueryInclude, QuerySelect>
         : RelationInclude extends CanvasInclude
           ? CanvasWithIncludes<RelationInclude>
           : never
     : never;
 };
+
+export type UserSelected<S extends keyof User | "*" = keyof User> = "*" extends S
+  ? User
+  : Pick<User, Extract<S | "id", keyof User>>;
+
+export type CanvasSelected<S extends keyof Canvas | "*" = keyof Canvas> = "*" extends S
+  ? Canvas
+  : Pick<Canvas, Extract<S | "id", keyof Canvas>>;
+
+export type CanvasSelectedWithIncludes<
+  I extends CanvasInclude = {},
+  S extends keyof Canvas | "*" = keyof Canvas,
+> = CanvasSelected<S> & Omit<CanvasWithIncludes<I>, keyof Canvas>;
+
+export type StrokeSelected<S extends keyof Stroke | "*" = keyof Stroke> = "*" extends S
+  ? Stroke
+  : Pick<Stroke, Extract<S | "id", keyof Stroke>>;
+
+export type StrokeSelectedWithIncludes<
+  I extends StrokeInclude = {},
+  S extends keyof Stroke | "*" = keyof Stroke,
+> = StrokeSelected<S> & Omit<StrokeWithIncludes<I>, keyof Stroke>;
 
 export const wasmSchema: WasmSchema = {
   users: {
@@ -263,13 +291,17 @@ export const wasmSchema: WasmSchema = {
   },
 };
 
-export class UserQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<User> {
+export class UserQueryBuilder<
+  I extends Record<string, never> = {},
+  S extends keyof User | "*" = keyof User,
+> implements QueryBuilder<UserSelected<S>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: User;
+  declare readonly _rowType: UserSelected<S>;
   declare readonly _initType: UserInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<Record<string, never>> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -282,7 +314,7 @@ export class UserQueryBuilder<I extends Record<string, never> = {}> implements Q
     step_hops: string[];
   };
 
-  where(conditions: UserWhereInput): UserQueryBuilder<I> {
+  where(conditions: UserWhereInput): UserQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -299,19 +331,25 @@ export class UserQueryBuilder<I extends Record<string, never> = {}> implements Q
     return clone;
   }
 
-  orderBy(column: keyof User, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I> {
+  select<NewS extends keyof User | "*">(...columns: [NewS, ...NewS[]]): UserQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  orderBy(column: keyof User, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): UserQueryBuilder<I> {
+  limit(n: number): UserQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): UserQueryBuilder<I> {
+  offset(n: number): UserQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
@@ -321,7 +359,7 @@ export class UserQueryBuilder<I extends Record<string, never> = {}> implements Q
     start: UserWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): UserQueryBuilder<I> {
+  }): UserQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -403,6 +441,7 @@ export class UserQueryBuilder<I extends Record<string, never> = {}> implements Q
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -411,10 +450,18 @@ export class UserQueryBuilder<I extends Record<string, never> = {}> implements Q
     });
   }
 
-  private _clone<CloneI extends Record<string, never> = I>(): UserQueryBuilder<CloneI> {
-    const clone = new UserQueryBuilder<CloneI>();
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends Record<string, never> = I,
+    CloneS extends keyof User | "*" = S,
+  >(): UserQueryBuilder<CloneI, CloneS> {
+    const clone = new UserQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -430,15 +477,17 @@ export class UserQueryBuilder<I extends Record<string, never> = {}> implements Q
   }
 }
 
-export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBuilder<
-  CanvasWithIncludes<I>
-> {
+export class CanvasQueryBuilder<
+  I extends CanvasInclude = {},
+  S extends keyof Canvas | "*" = keyof Canvas,
+> implements QueryBuilder<CanvasSelectedWithIncludes<I, S>> {
   readonly _table = "canvases";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: CanvasWithIncludes<I>;
+  declare readonly _rowType: CanvasSelectedWithIncludes<I, S>;
   declare readonly _initType: CanvasInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<CanvasInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -451,7 +500,7 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBu
     step_hops: string[];
   };
 
-  where(conditions: CanvasWhereInput): CanvasQueryBuilder<I> {
+  where(conditions: CanvasWhereInput): CanvasQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -468,31 +517,39 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBu
     return clone;
   }
 
-  include<NewI extends CanvasInclude>(relations: NewI): CanvasQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Canvas | "*">(
+    ...columns: [NewS, ...NewS[]]
+  ): CanvasQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends CanvasInclude>(relations: NewI): CanvasQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Canvas, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I> {
+  orderBy(column: keyof Canvas, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): CanvasQueryBuilder<I> {
+  limit(n: number): CanvasQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): CanvasQueryBuilder<I> {
+  offset(n: number): CanvasQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "strokesViaCanvas"): CanvasQueryBuilder<I> {
+  hopTo(relation: "strokesViaCanvas"): CanvasQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -502,7 +559,7 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBu
     start: CanvasWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): CanvasQueryBuilder<I> {
+  }): CanvasQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -584,6 +641,7 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBu
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -592,10 +650,18 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBu
     });
   }
 
-  private _clone<CloneI extends CanvasInclude = I>(): CanvasQueryBuilder<CloneI> {
-    const clone = new CanvasQueryBuilder<CloneI>();
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends CanvasInclude = I,
+    CloneS extends keyof Canvas | "*" = S,
+  >(): CanvasQueryBuilder<CloneI, CloneS> {
+    const clone = new CanvasQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -611,15 +677,17 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}> implements QueryBu
   }
 }
 
-export class StrokeQueryBuilder<I extends StrokeInclude = {}> implements QueryBuilder<
-  StrokeWithIncludes<I>
-> {
+export class StrokeQueryBuilder<
+  I extends StrokeInclude = {},
+  S extends keyof Stroke | "*" = keyof Stroke,
+> implements QueryBuilder<StrokeSelectedWithIncludes<I, S>> {
   readonly _table = "strokes";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: StrokeWithIncludes<I>;
+  declare readonly _rowType: StrokeSelectedWithIncludes<I, S>;
   declare readonly _initType: StrokeInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<StrokeInclude> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -632,7 +700,7 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}> implements QueryBu
     step_hops: string[];
   };
 
-  where(conditions: StrokeWhereInput): StrokeQueryBuilder<I> {
+  where(conditions: StrokeWhereInput): StrokeQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -649,31 +717,39 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}> implements QueryBu
     return clone;
   }
 
-  include<NewI extends StrokeInclude>(relations: NewI): StrokeQueryBuilder<I & NewI> {
-    const clone = this._clone<I & NewI>();
+  select<NewS extends keyof Stroke | "*">(
+    ...columns: [NewS, ...NewS[]]
+  ): StrokeQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends StrokeInclude>(relations: NewI): StrokeQueryBuilder<I & NewI, S> {
+    const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Stroke, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I> {
+  orderBy(column: keyof Stroke, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): StrokeQueryBuilder<I> {
+  limit(n: number): StrokeQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): StrokeQueryBuilder<I> {
+  offset(n: number): StrokeQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "canvas"): StrokeQueryBuilder<I> {
+  hopTo(relation: "canvas"): StrokeQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -683,7 +759,7 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}> implements QueryBu
     start: StrokeWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): StrokeQueryBuilder<I> {
+  }): StrokeQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -765,6 +841,7 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}> implements QueryBu
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -773,10 +850,18 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}> implements QueryBu
     });
   }
 
-  private _clone<CloneI extends StrokeInclude = I>(): StrokeQueryBuilder<CloneI> {
-    const clone = new StrokeQueryBuilder<CloneI>();
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends StrokeInclude = I,
+    CloneS extends keyof Stroke | "*" = S,
+  >(): StrokeQueryBuilder<CloneI, CloneS> {
+    const clone = new StrokeQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;

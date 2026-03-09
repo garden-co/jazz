@@ -25,7 +25,6 @@ function defaultConfig(
   const appId = overrides.appId ?? readEnvAppId() ?? "019cba1b-f59e-7a51-a88b-e1ab571cc672";
   const serverUrl = overrides.serverUrl ?? readEnvServerUrl() ?? "http://127.0.0.1:1625";
   const adminSecret = overrides.adminSecret ?? readEnvAdminSecret();
-  const serverPathPrefix = `/apps/${appId}`;
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
@@ -33,7 +32,6 @@ function defaultConfig(
     env: "dev",
     userBranch: "main",
     serverUrl,
-    serverPathPrefix,
     localAuthMode: active.localAuthMode,
     localAuthToken: active.localAuthToken,
     adminSecret,

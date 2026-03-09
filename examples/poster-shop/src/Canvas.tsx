@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-import { app, Canvas as CanvasModel } from "../schema/app.js";
+import { app, Canvas as CanvasModel, Stroke } from "../schema/app.js";
 import { getRandomName } from "./profileName.js";
+import { debounce } from "./utils.js";
 
 type Point = { x: number; y: number };
 const CANVAS_WIDTH = 900;
 const CANVAS_HEIGHT = 520;
+
+const DRAW_BROADCAST_DEBOUNCE_MS = 16;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -34,24 +37,6 @@ function colorForUser(userId: string): string {
   const lightness = (hash >>> 16) % 80; // 0% - 80%
 
   return `hsl(${hue} ${saturation}% ${lightness}%)`;
-}
-
-function parsePoints(input: unknown): Point[] {
-  if (!Array.isArray(input)) return [];
-  const parsed: Point[] = [];
-  for (const entry of input) {
-    if (
-      typeof entry === "object" &&
-      entry !== null &&
-      "x" in entry &&
-      "y" in entry &&
-      typeof entry.x === "number" &&
-      typeof entry.y === "number"
-    ) {
-      parsed.push({ x: entry.x, y: entry.y });
-    }
-  }
-  return parsed;
 }
 
 function drawStroke(
@@ -99,18 +84,12 @@ function useGetOrCreateCanvas(): CanvasModel | undefined {
   const db = useDb();
   const canvases = useAll(app.canvases.orderBy("created_at", "asc"));
   const activeCanvas = canvases?.[0];
-  const creatingCanvasRef = useRef(false);
   useEffect(() => {
     if (!canvases || activeCanvas) return;
-    creatingCanvasRef.current = true;
-    void db
-      .insert(app.canvases, {
-        name: "Main canvas",
-        created_at: new Date().toISOString(),
-      })
-      .finally(() => {
-        creatingCanvasRef.current = false;
-      });
+    db.insert(app.canvases, {
+      name: "Main canvas",
+      created_at: new Date().toISOString(),
+    });
   }, [db, canvases]);
   return activeCanvas;
 }
@@ -121,39 +100,31 @@ function useGetOrCreateUser(): string | null {
   const userId = session?.user_id ?? null;
   // TODO avoid fetching all users! -> add filter + `enabled`
   const users = useAll(app.users);
-  const creatingUsersRef = useRef(new Set<string>());
   useEffect(() => {
     if (!userId || !users) return;
     const userExists = users.some((user) => user.user_id === userId);
     if (userExists) {
-      creatingUsersRef.current.delete(userId);
       return;
     }
-    if (creatingUsersRef.current.has(userId)) return;
-
-    creatingUsersRef.current.add(userId);
-    void db
-      .insert(app.users, {
-        user_id: userId,
-        name: getRandomName(),
-        created_at: new Date().toISOString(),
-      })
-      .catch(() => {
-        creatingUsersRef.current.delete(userId);
-      });
+    db.insert(app.users, {
+      user_id: userId,
+      name: getRandomName(),
+      created_at: new Date().toISOString(),
+    });
   }, [db, userId, users]);
   return userId;
 }
 
 export function Canvas() {
   const db = useDb();
-  const strokes = useAll(app.strokes.orderBy("created_at", "asc")) ?? [];
   const activeCanvas = useGetOrCreateCanvas();
+  // TODO return only strokes for the active canvas
+  const strokes = useAll(app.strokes.orderBy("created_at", "asc")) ?? [];
   const userId = useGetOrCreateUser();
   const userColor = userId ? colorForUser(userId) : "#333";
   const collaboratorIds = [...new Set(strokes.map((stroke) => stroke.user_id))];
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [draftPoints, setDraftPoints] = useState<Point[]>([]);
+  const [inProgressStroke, setInProgressStroke] = useState<Stroke | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -173,47 +144,62 @@ export function Canvas() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     for (const stroke of strokes) {
-      const points = parsePoints(stroke.points);
-      drawStroke(ctx, points, colorForUser(stroke.user_id), scaleX, scaleY);
+      drawStroke(ctx, stroke.points, colorForUser(stroke.user_id), scaleX, scaleY);
     }
 
-    if (draftPoints.length > 0) {
-      drawStroke(ctx, draftPoints, userColor, scaleX, scaleY);
+    if (inProgressStroke) {
+      drawStroke(ctx, inProgressStroke.points, userColor, scaleX, scaleY);
     }
-  }, [draftPoints, strokes, userColor]);
+  }, [inProgressStroke, strokes, userColor]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!userId || !activeCanvas) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     canvas.setPointerCapture(event.pointerId);
-    setDraftPoints([toCanvasPoint(canvas, event)]);
+    const initialPoint = toCanvasPoint(canvas, event);
+
+    const newStroke = db.insert(app.strokes, {
+      canvas_id: activeCanvas.id,
+      user_id: userId,
+      points: [initialPoint],
+      created_at: new Date().toISOString(),
+    });
+    setInProgressStroke(newStroke);
   };
 
+  // Update strokes 60 times per second at most (may be less during rapid mouse movement)
+  const debouncedUpdateStroke = useCallback(
+    debounce((stroke: Stroke, newPoint: Point) => {
+      db.update(app.strokes, stroke.id, {
+        points: [...stroke.points, newPoint],
+      });
+    }, DRAW_BROADCAST_DEBOUNCE_MS),
+    [db],
+  );
+
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (draftPoints.length === 0) return;
+    if (!inProgressStroke) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const next = toCanvasPoint(canvas, event);
-    setDraftPoints((prev) => [...prev, next]);
+    const newPoint = toCanvasPoint(canvas, event);
+    setInProgressStroke((prev) => {
+      if (!prev) return null;
+      const points = [...prev.points, newPoint];
+      return { ...inProgressStroke, points };
+    });
+    debouncedUpdateStroke(inProgressStroke, newPoint);
   };
 
   const endStroke = (pointerId: number | null) => {
-    const points = draftPoints;
+    if (!inProgressStroke) return;
     if (pointerId !== null) {
       const canvas = canvasRef.current;
       if (canvas?.hasPointerCapture(pointerId)) {
         canvas.releasePointerCapture(pointerId);
       }
     }
-    setDraftPoints([]);
-    if (!activeCanvas || !userId || points.length < 2) return;
-    db.insert(app.strokes, {
-      canvas_id: activeCanvas.id,
-      user_id: userId,
-      points,
-      created_at: new Date().toISOString(),
-    });
+    setInProgressStroke(null);
   };
 
   return (
