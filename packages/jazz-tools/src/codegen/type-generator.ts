@@ -204,17 +204,22 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
  * Generate WithIncludes types for type-safe include results.
  *
  * Example output:
- *   export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
- *     project?: NonNullable<I["project"]> extends infer RelationInclude
- *       ? RelationInclude extends true
- *         ? Project
- *         : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
- *           ? ProjectWithIncludes<QueryInclude>
- *           : RelationInclude extends ProjectInclude
- *             ? ProjectWithIncludes<RelationInclude>
- *             : never
- *       : never;
- *   };
+ *   type TodoIncludedRelations<I extends TodoInclude = {}> =
+ *     ("project" extends keyof I
+ *       ? (NonNullable<I["project"]> extends infer RelationInclude
+ *           ? RelationInclude extends true
+ *             ? { project?: Project }
+ *             : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
+ *               ? { project?: ProjectWithIncludes<QueryInclude> }
+ *               : RelationInclude extends ProjectInclude
+ *                 ? { project?: ProjectWithIncludes<RelationInclude> }
+ *                 : {}
+ *           : {})
+ *       : {}) &
+ *     {};
+ *
+ *   export type TodoWithIncludes<I extends TodoInclude = {}> =
+ *     Omit<Todo, Extract<keyof I, keyof TodoRelations>> & TodoIncludedRelations<I>;
  */
 function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
   const lines: string[] = [];
@@ -224,16 +229,15 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
 
     const baseInterface = tableNameToInterface(tableName);
     const includeInterface = baseInterface + "Include";
+    const relationsInterface = baseInterface + "Relations";
+    const includedRelationsType = baseInterface + "IncludedRelations";
 
-    lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = ${baseInterface} & {`,
-    );
+    lines.push(`type ${includedRelationsType}<I extends ${includeInterface} = {}> =`);
     for (const rel of rels) {
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
       const targetQueryBuilder = targetInterface + "QueryBuilder";
       const targetWithIncludes = targetInterface + "WithIncludes";
-      const includeSelector = `NonNullable<I["${rel.name}"]>`;
       const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
       const queryBuilderSelectedType = rel.isArray
         ? `${targetInterface}SelectedWithIncludes<QueryInclude, QuerySelect>[]`
@@ -242,19 +246,25 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
         ? `${targetWithIncludes}<RelationInclude>[]`
         : `${targetWithIncludes}<RelationInclude>`;
 
-      lines.push(`  ${rel.name}?: ${includeSelector} extends infer RelationInclude`);
-      lines.push(`    ? RelationInclude extends true`);
-      lines.push(`      ? ${trueType}`);
+      lines.push(`  ("${rel.name}" extends keyof I`);
+      lines.push(`    ? (NonNullable<I["${rel.name}"]> extends infer RelationInclude`);
+      lines.push(`        ? RelationInclude extends true`);
+      lines.push(`          ? { ${rel.name}?: ${trueType} }`);
       lines.push(
-        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}, infer QuerySelect extends keyof ${targetInterface} | "*">`,
+        `          : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}, infer QuerySelect extends keyof ${targetInterface} | "*">`,
       );
-      lines.push(`        ? ${queryBuilderSelectedType}`);
-      lines.push(`        : RelationInclude extends ${targetInclude}`);
-      lines.push(`          ? ${nestedIncludeType}`);
-      lines.push(`          : never`);
-      lines.push(`    : never;`);
+      lines.push(`            ? { ${rel.name}?: ${queryBuilderSelectedType} }`);
+      lines.push(`            : RelationInclude extends ${targetInclude}`);
+      lines.push(`              ? { ${rel.name}?: ${nestedIncludeType} }`);
+      lines.push(`              : {}`);
+      lines.push(`        : {})`);
+      lines.push(`    : {}) &`);
     }
-    lines.push(`};`);
+    lines.push(`  {};`);
+    lines.push(``);
+    lines.push(
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = Omit<${baseInterface}, Extract<keyof I, keyof ${relationsInterface}>> & ${includedRelationsType}<I>;`,
+    );
     lines.push(``);
   }
 
@@ -267,7 +277,6 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
   for (const tableName of Object.keys(schema)) {
     const baseInterface = tableNameToInterface(tableName);
     const includeInterface = baseInterface + "Include";
-    const withIncludesType = baseInterface + "WithIncludes";
     const hasRelations = (relations.get(tableName) ?? []).length > 0;
 
     lines.push(
@@ -277,7 +286,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = ${baseInterface}Selected<S> & Omit<${withIncludesType}<I>, keyof ${baseInterface}>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Relations>> & ${baseInterface}IncludedRelations<I>;`,
       );
       lines.push("");
     }
