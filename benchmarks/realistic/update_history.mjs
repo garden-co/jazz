@@ -112,6 +112,19 @@ function scenarioSummary(scenario) {
 
 function criterionScenarioSummary(benchmark) {
   const metrics = benchmark?.metrics ?? {};
+  const wallPoint = Number(metrics.mean_ms);
+  const wallLow = Number(metrics.mean_ci_low_ms);
+  const wallHigh = Number(metrics.mean_ci_high_ms);
+  const throughputPoint = Number(metrics.elems_per_sec ?? metrics.iter_per_sec);
+  const throughputLow = Number(metrics.elems_per_sec_ci_low ?? metrics.iter_per_sec_ci_low);
+  const throughputHigh = Number(metrics.elems_per_sec_ci_high ?? metrics.iter_per_sec_ci_high);
+  const relativeHalfWidthPct = (point, low, high) => {
+    if (!Number.isFinite(point) || point === 0) return null;
+    const lowerWidth = Number.isFinite(low) ? Math.abs(point - low) / Math.abs(point) : null;
+    const upperWidth = Number.isFinite(high) ? Math.abs(high - point) / Math.abs(point) : null;
+    const width = Math.max(lowerWidth ?? 0, upperWidth ?? 0);
+    return Number.isFinite(width) ? width * 100 : null;
+  };
   return {
     scenario_id: benchmark.scenario_id ?? benchmark.full_id ?? "unknown",
     scenario_name: benchmark.scenario_name ?? benchmark.benchmark_id ?? benchmark.full_id ?? null,
@@ -129,6 +142,26 @@ function criterionScenarioSummary(benchmark) {
       iter_per_sec_ci_high: metrics.iter_per_sec_ci_high ?? null,
       elems_per_sec_ci_low: metrics.elems_per_sec_ci_low ?? null,
       elems_per_sec_ci_high: metrics.elems_per_sec_ci_high ?? null,
+      noise: {
+        source: "criterion_confidence_interval",
+        estimator: "mean",
+        metrics: {
+          wall_time_ms: {
+            ci_low: Number.isFinite(wallLow) ? wallLow : null,
+            ci_high: Number.isFinite(wallHigh) ? wallHigh : null,
+            relative_half_width_pct: relativeHalfWidthPct(wallPoint, wallLow, wallHigh),
+          },
+          throughput_ops_per_sec: {
+            ci_low: Number.isFinite(throughputLow) ? throughputLow : null,
+            ci_high: Number.isFinite(throughputHigh) ? throughputHigh : null,
+            relative_half_width_pct: relativeHalfWidthPct(
+              throughputPoint,
+              throughputLow,
+              throughputHigh,
+            ),
+          },
+        },
+      },
     },
   };
 }
