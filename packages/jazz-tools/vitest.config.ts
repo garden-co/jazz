@@ -40,7 +40,7 @@ export default defineConfig({
     environment: "node",
     // Use forks pool to avoid Vite's module resolution issues with node: builtins
     pool: "forks",
-    include: ["src/**/*.test.ts", "tests/ts-dsl/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "tests/ts-dsl/**/*.test.ts", "tests/codegen/**/*.test.ts"],
     exclude: ["tests/browser/**", "node_modules/**"],
     server: {
       deps: {
