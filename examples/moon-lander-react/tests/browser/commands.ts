@@ -214,6 +214,23 @@ const FRESH_APP_ID = "00000000-0000-0000-0000-000000000004"; // APP_ID_MULTI
 
 const freshServers = new Map<string, LocalJazzServerHandle>();
 
+// Ensure all fresh servers and isolated pages are cleaned up even if a test
+// times out before its finally block runs.
+export async function cleanupAll(): Promise<void> {
+  await Promise.all([
+    ...[...freshServers.values()].map((h) => h.stop().catch(() => {})),
+    ...[...isolatedPages.values()].map((e) => e.context.close().catch(() => {})),
+  ]);
+  freshServers.clear();
+  isolatedPages.clear();
+}
+
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => {
+    cleanupAll().finally(() => process.exit(0));
+  });
+}
+
 export const startFreshTestServer: BrowserCommand<[label: string]> = async (_ctx, label) => {
   const port = await findFreePort();
   const handle = await startLocalJazzServer({
