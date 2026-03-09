@@ -2,20 +2,25 @@
  * Unit tests for Moon Lander — SyncManager.
  *
  * Tests the SyncManager class which owns all DB write state:
- *   - Event queuing (collectDeposit, refuel, shareFuel, burstDeposit, sendMessage)
- *   - Player state sync (insert on first flush, update on subsequent)
+ *   - Immediate writes (collectDeposit, refuel, shareFuel, burstDeposit, sendMessage)
+ *   - Player state sync (insert on first settle, update on state change)
  *   - Deposit reconciliation (once on settle)
  *   - Release of stale deposits on restart
  *
- * Uses a thin db mock (same pattern as moon-lander-writes.test.tsx).
- * Timer is advanced manually via vi.advanceTimersByTime().
+ * Writes are fire-and-forget. Tests use flushPromises() to let pending
+ * async operations settle before asserting.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { PlayerInit, FuelDeposit } from "../../schema/app.js";
 import type { FuelType } from "../../src/game/constants.js";
 import { SyncManager, DEPOSITS_PER_TYPE, type SyncInputs } from "../../src/jazz/SyncManager.js";
-import { DB_SYNC_INTERVAL_MS, FUEL_TYPES } from "../../src/game/constants.js";
+import { FUEL_TYPES } from "../../src/game/constants.js";
+
+/** Flush all pending microtasks and macrotasks queued before this call. */
+function flushPromises(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -119,59 +124,27 @@ function emptyInputs(): SyncInputs {
 // ---------------------------------------------------------------------------
 
 describe("SyncManager", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   // =========================================================================
-  // 1. Construction and destruction
+  // 1. Lifecycle
   // =========================================================================
 
   describe("lifecycle", () => {
-    it("starts a flush interval on construction", () => {
+    it("constructs without errors and destroy is a no-op", () => {
       const { db } = mockDb();
       const sync = new SyncManager(db, "alice");
-
-      // Advance past one interval — flush should fire
-      vi.advanceTimersByTime(DB_SYNC_INTERVAL_MS + 10);
-
-      // No state to sync, so no DB calls, but no errors either
       sync.destroy();
-    });
-
-    it("destroy stops the interval", () => {
-      const { db, inserts } = mockDb();
-      const sync = new SyncManager(db, "alice");
-
-      // Queue a message
-      sync.sendMessage("hello");
-      sync.setInputs({ ...emptyInputs(), settled: true });
-
-      // Destroy before the interval fires
-      sync.destroy();
-
-      vi.advanceTimersByTime(DB_SYNC_INTERVAL_MS * 5);
-
-      // Nothing should have been flushed
-      expect(inserts).toHaveLength(0);
     });
   });
 
   // =========================================================================
-  // 2. Event queuing
+  // 2. Immediate writes
   //
-  //   Each event method pushes to a queue. The queue is drained on flush.
-  //   One interval tick = one flush.
-  //
-  //   Queue a few events → advance timer → verify DB calls.
+  //   Each event method fires a DB call immediately (fire-and-forget).
+  //   flushPromises() lets the async operations settle.
   // =========================================================================
 
-  describe("event queuing and flush", () => {
-    it("flushes deposit collections", async () => {
+  describe("immediate writes", () => {
+    it("writes deposit collection immediately", async () => {
       const { db, updates } = mockDb();
       const sync = new SyncManager(db, "alice");
       sync.setInputs({ ...emptyInputs(), settled: true });
@@ -179,7 +152,7 @@ describe("SyncManager", () => {
       sync.collectDeposit("dep-1");
       sync.collectDeposit("dep-2");
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       expect(updates).toHaveLength(2);
       expect(updates[0].id).toBe("dep-1");
@@ -190,7 +163,7 @@ describe("SyncManager", () => {
       sync.destroy();
     });
 
-    it("flushes refuels by releasing a collected deposit", async () => {
+    it("refuel releases a collected deposit immediately", async () => {
       const { db, inserts, deletes } = mockDb();
       const sync = new SyncManager(db, "alice");
 
@@ -210,7 +183,7 @@ describe("SyncManager", () => {
 
       sync.refuel("circle" as FuelType);
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       // Should delete the old deposit and insert a new uncollected one
       const deleteCall = deletes.find((d) => d.id === "dep-circle-1");
@@ -226,7 +199,7 @@ describe("SyncManager", () => {
       sync.destroy();
     });
 
-    it("flushes bursts by releasing a collected deposit", async () => {
+    it("burstDeposit releases a collected deposit immediately", async () => {
       const { db, inserts, deletes } = mockDb();
       const sync = new SyncManager(db, "alice");
 
@@ -246,9 +219,8 @@ describe("SyncManager", () => {
 
       sync.burstDeposit("triangle");
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
-      // Should delete the old deposit and insert a new uncollected one
       const deleteCall = deletes.find((d) => d.id === "dep-tri-1");
       expect(deleteCall).toBeTruthy();
 
@@ -261,7 +233,7 @@ describe("SyncManager", () => {
       sync.destroy();
     });
 
-    it("flushes fuel shares by rewriting collectedBy", async () => {
+    it("shareFuel rewrites collectedBy immediately", async () => {
       const { db, updates } = mockDb();
       const sync = new SyncManager(db, "alice");
 
@@ -280,7 +252,7 @@ describe("SyncManager", () => {
 
       sync.shareFuel("hexagon", "bob-uuid");
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const shareUpdate = updates.find((u) => u.id === "dep-hex-1");
       expect(shareUpdate).toBeTruthy();
@@ -289,7 +261,7 @@ describe("SyncManager", () => {
       sync.destroy();
     });
 
-    it("flushes chat messages", async () => {
+    it("sendMessage inserts immediately", async () => {
       const { db, inserts } = mockDb();
       const sync = new SyncManager(db, "alice");
       sync.setInputs({ ...emptyInputs(), settled: true });
@@ -297,9 +269,8 @@ describe("SyncManager", () => {
       sync.sendMessage("hello moon");
       sync.sendMessage("need hexagon!");
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
-      // Two chat message inserts
       const chatInserts = inserts.filter((i) => (i.data as any).message !== undefined);
       expect(chatInserts).toHaveLength(2);
       expect(chatInserts[0].data.message).toBe("hello moon");
@@ -309,20 +280,19 @@ describe("SyncManager", () => {
       sync.destroy();
     });
 
-    it("queues are drained after flush (no double processing)", async () => {
+    it("each event fires exactly one write (no double processing)", async () => {
       const { db, updates } = mockDb();
       const sync = new SyncManager(db, "alice");
       sync.setInputs({ ...emptyInputs(), settled: true });
 
       sync.collectDeposit("dep-1");
 
-      // First flush
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
-      expect(updates).toHaveLength(1);
+      await flushPromises();
+      expect(updates.filter((u) => u.id === "dep-1")).toHaveLength(1);
 
-      // Second flush — queue should be empty
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
-      expect(updates).toHaveLength(1); // no new updates
+      // No further writes without another event
+      await flushPromises();
+      expect(updates.filter((u) => u.id === "dep-1")).toHaveLength(1);
 
       sync.destroy();
     });
@@ -331,9 +301,9 @@ describe("SyncManager", () => {
   // =========================================================================
   // 3. Player state sync
   //
-  //   First flush with state + settled + no existing row → insert
-  //   Subsequent flush with changed state → update
-  //   No change → no write
+  //   setInputs with known row → writes immediately when dbRowId first resolves
+  //   settled + no row → insert
+  //   No meaningful change → no write
   // =========================================================================
 
   describe("player state sync", () => {
@@ -346,19 +316,18 @@ describe("SyncManager", () => {
       sync.setInputs({
         ...emptyInputs(),
         settled: true,
-        localPlayerRows: [], // no existing row
+        localPlayerRows: [],
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
-      // Should have inserted a player row
       const playerInsert = inserts.find((i) => (i.data as any).playerId === "alice-uuid");
       expect(playerInsert).toBeTruthy();
 
       sync.destroy();
     });
 
-    it("updates an existing player row when state changes", async () => {
+    it("updates an existing player row when dbRowId resolves", async () => {
       const { db, updates } = mockDb();
       const sync = new SyncManager(db, "alice");
 
@@ -370,8 +339,7 @@ describe("SyncManager", () => {
         localPlayerRows: [{ id: "existing-row-1" }],
       });
 
-      // First flush — should update (no lastSynced yet)
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const playerUpdate = updates.find((u) => u.id === "existing-row-1");
       expect(playerUpdate).toBeTruthy();
@@ -391,12 +359,16 @@ describe("SyncManager", () => {
         localPlayerRows: [{ id: "existing-row-1" }],
       });
 
-      // First flush — should update
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
       const firstCount = updates.length;
 
-      // Second flush with same state — should skip
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      // Call setInputs again with same state — no new write
+      sync.setInputs({
+        ...emptyInputs(),
+        settled: true,
+        localPlayerRows: [{ id: "existing-row-1" }],
+      });
+      await flushPromises();
       expect(updates.length).toBe(firstCount);
 
       sync.destroy();
@@ -410,13 +382,12 @@ describe("SyncManager", () => {
       sync.updateState(state);
       sync.setInputs({
         ...emptyInputs(),
-        settled: false, // not settled yet
+        settled: false,
         localPlayerRows: [],
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
-      // No insert or update should have happened
       const playerInsert = inserts.find((i) => (i.data as any).playerId === "alice-uuid");
       expect(playerInsert).toBeUndefined();
 
@@ -427,8 +398,7 @@ describe("SyncManager", () => {
   // =========================================================================
   // 4. Deposit reconciliation
   //
-  //   Reconciliation runs exactly once, when settled becomes true.
-  //   After that, subsequent flushes do not re-reconcile.
+  //   Fires exactly once when settled becomes true.
   // =========================================================================
 
   describe("deposit reconciliation", () => {
@@ -436,7 +406,6 @@ describe("SyncManager", () => {
       const { db, inserts } = mockDb();
       const sync = new SyncManager(db, "alice");
 
-      // No uncollected deposits → should insert DEPOSITS_PER_TYPE per type
       sync.setInputs({
         ...emptyInputs(),
         settled: true,
@@ -444,16 +413,16 @@ describe("SyncManager", () => {
         perTypeLimits: FUEL_TYPES.map(() => DEPOSITS_PER_TYPE),
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const expectedInserts = FUEL_TYPES.length * DEPOSITS_PER_TYPE;
-      // Filter to deposit inserts (have fuelType)
       const depositInserts = inserts.filter((i) => (i.data as any).fuelType !== undefined);
       expect(depositInserts.length).toBe(expectedInserts);
 
-      // Second flush — should NOT reconcile again
+      // Second setInputs with settled — should NOT reconcile again
       const countAfterFirst = inserts.length;
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      sync.setInputs({ ...emptyInputs(), settled: true, uncollectedDeposits: [] });
+      await flushPromises();
       expect(inserts.length).toBe(countAfterFirst);
 
       sync.destroy();
@@ -463,12 +432,9 @@ describe("SyncManager", () => {
       const { db, inserts } = mockDb();
       const sync = new SyncManager(db, "alice");
 
-      sync.setInputs({
-        ...emptyInputs(),
-        settled: false,
-      });
+      sync.setInputs({ ...emptyInputs(), settled: false });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const depositInserts = inserts.filter((i) => (i.data as any).fuelType !== undefined);
       expect(depositInserts).toHaveLength(0);
@@ -504,7 +470,7 @@ describe("SyncManager", () => {
         localPlayerRows: [{ id: "row-1" }],
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const releaseUpdate = updates.find((u) => u.id === "stale-1");
       expect(releaseUpdate).toBeTruthy();
@@ -533,7 +499,7 @@ describe("SyncManager", () => {
         localPlayerRows: [{ id: "row-1" }],
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const releaseUpdate = updates.find((u) => u.id === "stale-2");
       expect(releaseUpdate).toBeTruthy();
@@ -561,9 +527,8 @@ describe("SyncManager", () => {
         localPlayerRows: [{ id: "row-1" }],
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
-      // The only updates should be for player state, not deposit release
       const releaseUpdate = updates.find((u) => u.id === "kept-1" && u.data.collected === false);
       expect(releaseUpdate).toBeUndefined();
 
@@ -578,7 +543,7 @@ describe("SyncManager", () => {
         fuelType: "circle",
         id: "other-1",
         collected: true,
-        collectedBy: "bob", // not alice
+        collectedBy: "bob",
       });
 
       sync.updateState(makePlayer({ mode: "start" }));
@@ -589,7 +554,7 @@ describe("SyncManager", () => {
         localPlayerRows: [{ id: "row-1" }],
       });
 
-      await vi.advanceTimersByTimeAsync(DB_SYNC_INTERVAL_MS + 10);
+      await flushPromises();
 
       const releaseUpdate = updates.find((u) => u.id === "other-1" && u.data.collected === false);
       expect(releaseUpdate).toBeUndefined();
@@ -599,7 +564,7 @@ describe("SyncManager", () => {
   });
 
   // =========================================================================
-  // 6. setInputs and latestState
+  // 6. State accessors
   // =========================================================================
 
   describe("state accessors", () => {
