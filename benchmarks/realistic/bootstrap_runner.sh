@@ -8,11 +8,16 @@ RUNNER_LABELS="${RUNNER_LABELS:-jazz-bench}"
 RUNNER_VERSION="${RUNNER_VERSION:-}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 INSTALL_WASM_PACK="${INSTALL_WASM_PACK:-1}"
+INSTALL_SSM_AGENT="${INSTALL_SSM_AGENT:-auto}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -z "${RUNNER_TOKEN}" ]]; then
   echo "RUNNER_TOKEN is required" >&2
   exit 1
+fi
+
+if ! id -u "${RUNNER_USER}" >/dev/null 2>&1; then
+  useradd --create-home --shell /bin/bash "${RUNNER_USER}"
 fi
 
 RUNNER_HOME="$(eval echo "~${RUNNER_USER}")"
@@ -22,18 +27,46 @@ RUNNER_NAME="${RUNNER_NAME:-benchmark-runner-$(cat "${INSTANCE_ID_FILE}" 2>/dev/
 
 export DEBIAN_FRONTEND=noninteractive
 
+should_install_ssm_agent=0
+case "${INSTALL_SSM_AGENT}" in
+  1|true|yes)
+    should_install_ssm_agent=1
+    ;;
+  0|false|no)
+    should_install_ssm_agent=0
+    ;;
+  auto)
+    if {
+      [[ -r /sys/devices/virtual/dmi/id/sys_vendor ]] &&
+      grep -qi "amazon" /sys/devices/virtual/dmi/id/sys_vendor;
+    } || {
+      [[ -r /sys/devices/virtual/dmi/id/product_name ]] &&
+      grep -qi "amazon" /sys/devices/virtual/dmi/id/product_name;
+    }; then
+      should_install_ssm_agent=1
+    fi
+    ;;
+  *)
+    echo "INSTALL_SSM_AGENT must be one of: auto, 0, 1" >&2
+    exit 1
+    ;;
+esac
+
 apt-get update
 apt-get install -y \
   build-essential curl git jq unzip ca-certificates pkg-config libssl-dev \
   xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 \
   libasound2t64 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
   libxrandr2 libgtk-3-0 libpango-1.0-0 libcairo2 libatspi2.0-0 \
-  linux-tools-common linux-tools-generic snapd
+  linux-tools-common linux-tools-generic
 
-systemctl enable --now snapd.socket || true
-snap wait system seed.loaded || true
-snap install amazon-ssm-agent --classic || true
-systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+if [[ "${should_install_ssm_agent}" == "1" ]]; then
+  apt-get install -y snapd
+  systemctl enable --now snapd.socket || true
+  snap wait system seed.loaded || true
+  snap install amazon-ssm-agent --classic || true
+  systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+fi
 
 sudo -u "${RUNNER_USER}" -H bash -lc '
   set -euo pipefail
