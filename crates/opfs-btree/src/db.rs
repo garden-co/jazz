@@ -95,6 +95,20 @@ macro_rules! test_failpoint {
     ($site:literal) => {};
 }
 
+#[cfg(test)]
+macro_rules! test_failpoint_panic {
+    ($site:literal) => {
+        if let Err(err) = test_failpoints::hit($site) {
+            panic!("{err}");
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! test_failpoint_panic {
+    ($site:literal) => {};
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
     pub page_size: usize,
@@ -194,9 +208,12 @@ enum StagedValue {
 impl<F: SyncFile> OpfsBTree<F> {
     pub fn open(file: F, options: BTreeOptions) -> Result<Self, BTreeError> {
         options.validate()?;
+        test_failpoint!("open:start");
 
         let a = read_slot(&file, SuperblockSlot::A, options.page_size)?;
+        test_failpoint!("open:after-read-slot-a");
         let b = read_slot(&file, SuperblockSlot::B, options.page_size)?;
+        test_failpoint!("open:after-read-slot-b");
         let file_len = file.len()?;
 
         let (active_slot, active) = choose_active(a, b).unwrap_or((
@@ -242,6 +259,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         if tree.active.root_page_id != 0 {
             tree.root_page_id = Some(tree.active.root_page_id);
             tree.ensure_page_loaded(tree.active.root_page_id)?;
+            test_failpoint!("open:after-root-load");
             match tree.page_kind(tree.active.root_page_id)? {
                 PageKind::Leaf | PageKind::Internal => {}
                 PageKind::Overflow | PageKind::Freelist => {
@@ -254,8 +272,10 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
         if tree.active.freelist_head_page_id != 0 {
             tree.load_freelist_from_disk(tree.active.freelist_head_page_id)?;
+            test_failpoint!("open:after-freelist-load");
         }
         tree.sanitize_free_pages();
+        test_failpoint!("open:end");
 
         Ok(tree)
     }
@@ -1121,6 +1141,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn read_page_raw_from_disk(&self, page_id: PageId) -> Result<Vec<u8>, BTreeError> {
+        test_failpoint!("read_page_raw_from_disk:start");
         if page_id < 2 || page_id >= self.total_pages {
             return Err(BTreeError::Corrupt(format!(
                 "page id {} out of bounds for total_pages {}",
@@ -1134,7 +1155,9 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut raw = vec![0u8; self.options.page_size];
         self.file.read_exact_at(offset, &mut raw)?;
+        test_failpoint!("read_page_raw_from_disk:after-read");
         let _ = validate_page(&raw, self.options.page_size)?;
+        test_failpoint!("read_page_raw_from_disk:after-validate");
         Ok(raw)
     }
 
@@ -1307,16 +1330,20 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn set_dirty_page(&mut self, page_id: PageId, page: Page) -> Result<(), BTreeError> {
+        test_failpoint!("set_dirty_page:start");
         let raw = encode_page(&page, self.options.page_size)?;
         self.pages.insert(page_id, raw);
         self.mark_dirty_loaded_page(page_id);
+        test_failpoint!("set_dirty_page:after-mark-dirty");
         Ok(())
     }
 
     fn set_dirty_blob_page(&mut self, page_id: PageId, raw: Vec<u8>) {
+        test_failpoint_panic!("set_dirty_blob_page:start");
         self.pages.insert(page_id, raw);
         self.blob_pages.insert(page_id);
         self.mark_dirty_loaded_page(page_id);
+        test_failpoint_panic!("set_dirty_blob_page:after-mark-dirty");
     }
 
     fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
@@ -1418,8 +1445,10 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn alloc_page(&mut self) -> PageId {
+        test_failpoint_panic!("alloc_page:start");
         while let Some(page_id) = self.free_pages.pop() {
             if self.free_set.remove(&page_id) {
+                test_failpoint_panic!("alloc_page:reused");
                 tracing::trace!(page_id, reused = true, "alloc_page");
                 return page_id;
             }
@@ -1427,11 +1456,13 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let page_id = self.total_pages;
         self.total_pages = self.total_pages.saturating_add(1);
+        test_failpoint_panic!("alloc_page:fresh");
         tracing::trace!(page_id, reused = false, "alloc_page");
         page_id
     }
 
     fn alloc_extent_pages(&mut self, page_count: usize) -> Result<PageId, BTreeError> {
+        test_failpoint!("alloc_extent_pages:start");
         if page_count == 0 {
             return Err(BTreeError::InvalidOptions(
                 "extent page_count must be > 0".to_string(),
@@ -1471,6 +1502,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     reused = true,
                     "alloc_extent_pages"
                 );
+                test_failpoint!("alloc_extent_pages:reused");
                 return Ok(run_start);
             }
         }
@@ -1488,20 +1520,24 @@ impl<F: SyncFile> OpfsBTree<F> {
             reused = false,
             "alloc_extent_pages"
         );
+        test_failpoint!("alloc_extent_pages:fresh");
         Ok(start)
     }
 
     fn alloc_page_near(&mut self, preferred: PageId) -> PageId {
+        test_failpoint_panic!("alloc_page_near:start");
         for delta in 1..=ALLOC_NEAR_WINDOW {
             if let Some(hi) = preferred.checked_add(delta)
                 && self.free_set.remove(&hi)
             {
+                test_failpoint_panic!("alloc_page_near:reused-hi");
                 return hi;
             }
             if let Some(lo) = preferred.checked_sub(delta)
                 && lo >= 2
                 && self.free_set.remove(&lo)
             {
+                test_failpoint_panic!("alloc_page_near:reused-lo");
                 return lo;
             }
         }
@@ -1509,9 +1545,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         if preferred.saturating_add(1) == self.total_pages {
             let page_id = self.total_pages;
             self.total_pages = self.total_pages.saturating_add(1);
+            test_failpoint_panic!("alloc_page_near:appended");
             return page_id;
         }
 
+        test_failpoint_panic!("alloc_page_near:fallback");
         self.alloc_page()
     }
 
@@ -1710,6 +1748,7 @@ fn read_slot<F: SyncFile>(
     slot: SuperblockSlot,
     page_size: usize,
 ) -> Result<Option<Superblock>, BTreeError> {
+    test_failpoint!("read_slot:start");
     let offset = slot.byte_offset(page_size);
     let needed = offset.saturating_add(page_size as u64);
     if file.len()? < needed {
@@ -1718,12 +1757,16 @@ fn read_slot<F: SyncFile>(
 
     let mut page = vec![0u8; page_size];
     file.read_exact_at(offset, &mut page)?;
+    test_failpoint!("read_slot:after-read");
     if page.iter().all(|b| *b == 0) {
         return Ok(None);
     }
 
     match Superblock::decode_from_page(&page, page_size) {
-        Ok(sb) => Ok(Some(sb)),
+        Ok(sb) => {
+            test_failpoint!("read_slot:after-decode");
+            Ok(Some(sb))
+        }
         Err(_) => Ok(None),
     }
 }
@@ -1734,14 +1777,17 @@ fn write_slot<F: SyncFile>(
     page_size: usize,
     sb: Superblock,
 ) -> Result<(), BTreeError> {
+    test_failpoint!("write_slot:start");
     let required_file_len = (2 * page_size) as u64;
     if file.len()? < required_file_len {
         file.truncate(required_file_len)?;
+        test_failpoint!("write_slot:after-truncate");
     }
 
     let mut page = vec![0u8; page_size];
     sb.encode_into_page(&mut page)?;
     file.write_all_at(slot.byte_offset(page_size), &page)?;
+    test_failpoint!("write_slot:after-write");
     Ok(())
 }
 
@@ -1919,7 +1965,17 @@ mod tests {
             .expect("corrupt slot bytes");
     }
 
-    fn prepare_pending_growth_fixture() -> (OpfsBTree<MemoryFile>, CheckpointState, String) {
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+            (*message).to_string()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    }
+
+    fn prepare_growth_base_fixture() -> (OpfsBTree<MemoryFile>, CheckpointState, u32) {
         let options = small_options();
         let file = MemoryFile::new();
         let mut tree = OpfsBTree::open(file, options).expect("open tree");
@@ -1948,15 +2004,28 @@ mod tests {
             PageKind::Internal
         );
 
-        let crash_key = loop {
+        (tree, stable, next_seed)
+    }
+
+    fn apply_pending_growth(
+        tree: &mut OpfsBTree<MemoryFile>,
+        stable: CheckpointState,
+        next_seed: &mut u32,
+    ) -> Result<(String, String), BTreeError> {
+        let stable_root = tree.root_page_id.expect("stable root");
+        assert_eq!(
+            tree.page_kind(stable_root).expect("stable root kind"),
+            PageKind::Internal
+        );
+
+        let (crash_key, crash_value) = loop {
             let key = format!("tail-{next_seed:05}");
             let value = format!("value-{next_seed:05}");
-            tree.put(key.as_bytes(), value.as_bytes())
-                .expect("growth put");
-            next_seed += 1;
+            tree.put(key.as_bytes(), value.as_bytes())?;
+            *next_seed += 1;
 
             if tree.total_pages > stable.total_pages && tree.root_page_id == Some(stable_root) {
-                break key;
+                break (key, value);
             }
         };
 
@@ -1965,7 +2034,7 @@ mod tests {
             "expected tree growth beyond stable checkpoint"
         );
 
-        (tree, stable, crash_key)
+        Ok((crash_key, crash_value))
     }
 
     #[test]
@@ -2434,30 +2503,46 @@ mod tests {
     }
 
     #[test]
-    fn failpoint_sweep_finds_checkpoint_recovery_gap() {
+    fn failpoint_sweep_reports_recovery_outcomes_across_growth_and_checkpoint() {
         test_failpoints::clear();
 
-        let max_step = {
-            let (mut tree, _, _) = prepare_pending_growth_fixture();
+        let (max_step, crash_key, crash_value) = {
+            let (mut tree, stable, mut next_seed) = prepare_growth_base_fixture();
             test_failpoints::clear();
+            let (crash_key, crash_value) =
+                apply_pending_growth(&mut tree, stable, &mut next_seed).expect("baseline growth");
             tree.checkpoint().expect("baseline checkpoint");
-            test_failpoints::step_count()
+            (test_failpoints::step_count(), crash_key, crash_value)
         };
         assert!(max_step > 0, "expected at least one failpoint site");
         test_failpoints::clear();
 
-        let mut observed = None;
+        let mut corrupt_sites = Vec::new();
+        let mut other_sites = Vec::new();
         for step in 1..=max_step {
-            let (mut tree, stable, crash_key) = prepare_pending_growth_fixture();
+            let (mut tree, stable, mut next_seed) = prepare_growth_base_fixture();
             test_failpoints::arm(step);
 
-            let err = tree
-                .checkpoint()
-                .expect_err("armed failpoint should abort checkpoint");
-            assert!(
-                err.to_string().contains("simulated failpoint"),
-                "unexpected failpoint error: {err}"
-            );
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                apply_pending_growth(&mut tree, stable, &mut next_seed)
+                    .and_then(|_| tree.checkpoint())
+            }));
+            match run {
+                Ok(Err(err)) => {
+                    assert!(
+                        err.to_string().contains("simulated failpoint"),
+                        "unexpected failpoint error: {err}"
+                    );
+                }
+                Err(payload) => {
+                    let message = panic_message(payload);
+                    assert!(
+                        message.contains("simulated failpoint"),
+                        "unexpected panic payload: {message}"
+                    );
+                }
+                Ok(Ok(())) => panic!("armed failpoint should abort growth or checkpoint"),
+            }
             let site = test_failpoints::hit_sites()
                 .last()
                 .copied()
@@ -2465,37 +2550,46 @@ mod tests {
             test_failpoints::clear();
 
             let file = tree.into_file();
-            let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
-            let recovered = reopened.checkpoint_state();
-            if recovered.total_pages != stable.total_pages
-                || recovered.root_page_id != stable.root_page_id
-            {
-                continue;
-            }
-
-            match reopened.get(crash_key.as_bytes()) {
-                Err(BTreeError::Corrupt(message))
-                    if message.contains("out of bounds for total_pages") =>
-                {
-                    observed = Some((step, site));
-                    break;
+            let outcome = match OpfsBTree::open(file, small_options()) {
+                Ok(mut reopened) => match reopened.get(crash_key.as_bytes()) {
+                    Ok(Some(value)) if value == crash_value.as_bytes() => "committed",
+                    Ok(None) => "rolled_back",
+                    Err(BTreeError::Corrupt(message))
+                        if message.contains("out of bounds for total_pages") =>
+                    {
+                        corrupt_sites.push((step, site));
+                        "corrupt-out-of-bounds"
+                    }
+                    Err(error) => {
+                        other_sites.push((step, site, format!("read error: {error}")));
+                        "other-read-error"
+                    }
+                    Ok(Some(value)) => {
+                        other_sites.push((
+                            step,
+                            site,
+                            format!("unexpected value: {}", String::from_utf8_lossy(&value)),
+                        ));
+                        "unexpected-value"
+                    }
+                },
+                Err(error) => {
+                    other_sites.push((step, site, format!("open error: {error}")));
+                    "open-error"
                 }
-                _ => {}
-            }
+            };
+
+            println!("failpoint step {step}: {site} -> {outcome}");
         }
 
-        let (step, site) =
-            observed.expect("sweep should find a failpoint that reproduces the recovery gap");
+        println!("corrupt failpoint sites: {corrupt_sites:?}");
+        if !other_sites.is_empty() {
+            println!("other failpoint outcomes: {other_sites:?}");
+        }
+
         assert!(
-            [
-                "write_pages_to_disk:after-run-write",
-                "write_pages_to_disk:end",
-                "checkpoint:after-write-pages",
-                "checkpoint:after-data-flush",
-                "checkpoint_superblock:start",
-            ]
-            .contains(&site),
-            "unexpected corrupting failpoint site {site} at step {step}"
+            !corrupt_sites.is_empty(),
+            "expected the failpoint sweep to find at least one unrecoverable site"
         );
     }
 
