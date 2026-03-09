@@ -222,6 +222,9 @@ interface ScenarioResult {
   extra: Record<string, unknown>;
 }
 
+const TARGET_TIMING_WINDOW_MS = 12;
+const MAX_BATCHED_TIMING_REPEATS = 24;
+
 const schema = (schemaJson as { tables: WasmSchema }).tables;
 const profile = profileJson as unknown as ProfileConfig;
 const w1 = w1Json as unknown as W1Scenario;
@@ -321,7 +324,7 @@ function uniqueDbName(label: string): string {
   return `realistic-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function summarizeLatencies(values: number[]): OpSummary {
+function summarizeLatencies(values: number[], count = values.length): OpSummary {
   if (values.length === 0) {
     return { count: 0, avg_ms: 0, p50_ms: 0, p95_ms: 0, p99_ms: 0 };
   }
@@ -332,11 +335,54 @@ function summarizeLatencies(values: number[]): OpSummary {
   };
   const avg = sorted.reduce((sum, x) => sum + x, 0) / sorted.length;
   return {
-    count: sorted.length,
+    count,
     avg_ms: avg,
     p50_ms: at(0.5),
     p95_ms: at(0.95),
     p99_ms: at(0.99),
+  };
+}
+
+function createProgressReporter(label: string, total: number): (done: number) => void {
+  const step = Math.max(1, Math.floor(total / 4));
+  let next = step;
+  return (done: number): void => {
+    while (done >= next && next < total) {
+      progressLog(`${label}: ${Math.min(done, total)}/${total}`);
+      next += step;
+    }
+  };
+}
+
+async function measureBatchedLatency(
+  remaining: number,
+  runOnce: (batchIndex: number) => Promise<void>,
+  options: {
+    minWindowMs?: number;
+    maxRepeats?: number;
+  } = {},
+): Promise<{ repeats: number; elapsedMs: number; perOpMs: number }> {
+  const minWindowMs = options.minWindowMs ?? TARGET_TIMING_WINDOW_MS;
+  const maxRepeats = Math.max(
+    1,
+    Math.min(remaining, options.maxRepeats ?? MAX_BATCHED_TIMING_REPEATS),
+  );
+
+  const startedAt = performance.now();
+  let repeats = 0;
+  while (repeats < maxRepeats) {
+    await runOnce(repeats);
+    repeats += 1;
+    if (repeats >= 1 && performance.now() - startedAt >= minWindowMs) {
+      break;
+    }
+  }
+
+  const elapsedMs = performance.now() - startedAt;
+  return {
+    repeats,
+    elapsedMs,
+    perOpMs: elapsedMs / Math.max(1, repeats),
   };
 }
 
@@ -553,105 +599,109 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
   const rng = new Lcg(w1.seed ^ config.seed);
   const weights = w1.mix.map((x) => x.weight);
   const latencies: Record<string, number[]> = {};
+  const opCounts: Record<string, number> = {};
+  const reportProgress = createProgressReporter("W1 progress", operationCount);
 
   const wallStart = performance.now();
-  for (let i = 0; i < operationCount; i += 1) {
-    const step = Math.max(1, Math.floor(operationCount / 5));
-    if (i > 0 && i % step === 0) progressLog(`W1 progress ${i}/${operationCount}`);
+  for (let i = 0; i < operationCount; ) {
     const op = w1.mix[rng.pickWeightedIndex(weights)].operation;
-    const t0 = performance.now();
-    switch (op) {
-      case "query_board": {
-        const project = state.projects[rng.nextInt(state.hotProjectCount)];
-        await db.all(
-          query<TaskRow>(
-            "tasks",
-            [{ column: "project_id", op: "eq", value: project }],
-            [["updated_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        break;
+    const batch = await measureBatchedLatency(operationCount - i, async (batchIndex) => {
+      const currentIndex = i + batchIndex;
+      switch (op) {
+        case "query_board": {
+          const project = state.projects[rng.nextInt(state.hotProjectCount)];
+          await db.all(
+            query<TaskRow>(
+              "tasks",
+              [{ column: "project_id", op: "eq", value: project }],
+              [["updated_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          break;
+        }
+        case "query_my_work": {
+          const assignee = state.users[rng.nextInt(state.users.length)];
+          await db.all(
+            query<TaskRow>(
+              "tasks",
+              [
+                { column: "assignee_id", op: "eq", value: assignee },
+                { column: "status", op: "eq", value: "in_progress" },
+              ],
+              [["updated_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          break;
+        }
+        case "query_task_detail": {
+          const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+          await db.all(
+            query<CommentRow>(
+              "task_comments",
+              [{ column: "task_id", op: "eq", value: taskId }],
+              [["created_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          await db.all(
+            query<ActivityRow>(
+              "activity_events",
+              [{ column: "task_id", op: "eq", value: taskId }],
+              [["created_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          break;
+        }
+        case "update_task_status": {
+          const taskIdx = rng.nextInt(state.taskIds.length);
+          await db.update(tasksTable, state.taskIds[taskIdx], {
+            status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
+            priority: 1 + rng.nextInt(4),
+            assignee_id: state.users[rng.nextInt(state.users.length)],
+            updated_at: nowMicros(),
+          });
+          break;
+        }
+        case "insert_comment": {
+          const taskIdx = rng.nextInt(state.taskIds.length);
+          await db.insert(commentsTable, {
+            task_id: state.taskIds[taskIdx],
+            author_id: state.users[rng.nextInt(state.users.length)],
+            body: `interactive comment ${currentIndex}`,
+            created_at: nowMicros(),
+          });
+          state.commentsPerTask[taskIdx] += 1;
+          break;
+        }
+        case "update_project_meta": {
+          const projectIdx = rng.nextInt(state.projects.length);
+          await db.update(projectsTable, state.projects[projectIdx], {
+            name: `Project ${projectIdx} v${currentIndex}`,
+            updated_at: nowMicros(),
+          });
+          break;
+        }
+        default:
+          throw new Error(`Unknown operation in W1 mix: ${op}`);
       }
-      case "query_my_work": {
-        const assignee = state.users[rng.nextInt(state.users.length)];
-        await db.all(
-          query<TaskRow>(
-            "tasks",
-            [
-              { column: "assignee_id", op: "eq", value: assignee },
-              { column: "status", op: "eq", value: "in_progress" },
-            ],
-            [["updated_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        break;
-      }
-      case "query_task_detail": {
-        const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
-        await db.all(
-          query<CommentRow>(
-            "task_comments",
-            [{ column: "task_id", op: "eq", value: taskId }],
-            [["created_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        await db.all(
-          query<ActivityRow>(
-            "activity_events",
-            [{ column: "task_id", op: "eq", value: taskId }],
-            [["created_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        break;
-      }
-      case "update_task_status": {
-        const taskIdx = rng.nextInt(state.taskIds.length);
-        await db.update(tasksTable, state.taskIds[taskIdx], {
-          status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
-          priority: 1 + rng.nextInt(4),
-          assignee_id: state.users[rng.nextInt(state.users.length)],
-          updated_at: nowMicros(),
-        });
-        break;
-      }
-      case "insert_comment": {
-        const taskIdx = rng.nextInt(state.taskIds.length);
-        await db.insert(commentsTable, {
-          task_id: state.taskIds[taskIdx],
-          author_id: state.users[rng.nextInt(state.users.length)],
-          body: `interactive comment ${i}`,
-          created_at: nowMicros(),
-        });
-        state.commentsPerTask[taskIdx] += 1;
-        break;
-      }
-      case "update_project_meta": {
-        const projectIdx = rng.nextInt(state.projects.length);
-        await db.update(projectsTable, state.projects[projectIdx], {
-          name: `Project ${projectIdx} v${i}`,
-          updated_at: nowMicros(),
-        });
-        break;
-      }
-      default:
-        throw new Error(`Unknown operation in W1 mix: ${op}`);
-    }
-    const elapsed = performance.now() - t0;
-    (latencies[op] ||= []).push(elapsed);
+    });
+    (latencies[op] ||= []).push(batch.perOpMs);
+    opCounts[op] = (opCounts[op] || 0) + batch.repeats;
+    i += batch.repeats;
+    reportProgress(i);
   }
   const wallMs = performance.now() - wallStart;
 
   const operation_summaries: Record<string, OpSummary> = {};
   for (const [op, samples] of Object.entries(latencies)) {
-    operation_summaries[op] = summarizeLatencies(samples);
+    operation_summaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
   }
 
   return {
@@ -852,52 +902,65 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
   const deleteCount = Math.min(b1.delete_count, insertCount);
   const insertedCommentIds: string[] = [];
   const latencies: Record<string, number[]> = {};
+  const opCounts: Record<string, number> = {};
 
   let db: Db | null = null;
   try {
     db = await createServerDb(dbName, "realistic-b1");
     const state = await seedDataset(db, config);
     const wallStart = performance.now();
+    const reportInsertProgress = createProgressReporter("B1 inserts", insertCount);
+    const reportUpdateProgress = createProgressReporter("B1 updates", updateCount);
+    const reportDeleteProgress = createProgressReporter("B1 deletes", deleteCount);
 
-    for (let i = 0; i < insertCount; i += 1) {
-      reportLoopProgress("B1 inserts", i, insertCount);
-      const taskIdx = rng.nextInt(state.taskIds.length);
-      const t0 = performance.now();
-      const { id } = await db.insert(commentsTable, {
-        task_id: state.taskIds[taskIdx],
-        author_id: state.users[rng.nextInt(state.users.length)],
-        body: `b1_insert_comment_${i}`,
-        created_at: nowMicros(),
+    for (let i = 0; i < insertCount; ) {
+      const batch = await measureBatchedLatency(insertCount - i, async (batchIndex) => {
+        const currentIndex = i + batchIndex;
+        const taskIdx = rng.nextInt(state.taskIds.length);
+        const { id } = await db.insert(commentsTable, {
+          task_id: state.taskIds[taskIdx],
+          author_id: state.users[rng.nextInt(state.users.length)],
+          body: `b1_insert_comment_${currentIndex}`,
+          created_at: nowMicros(),
+        });
+        insertedCommentIds.push(id);
       });
-      insertedCommentIds.push(id);
-      (latencies.insert_sync ||= []).push(performance.now() - t0);
+      (latencies.insert_sync ||= []).push(batch.perOpMs);
+      opCounts.insert_sync = (opCounts.insert_sync || 0) + batch.repeats;
+      i += batch.repeats;
+      reportInsertProgress(i);
     }
 
-    for (let i = 0; i < updateCount; i += 1) {
-      reportLoopProgress("B1 updates", i, updateCount);
-      const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
-      const t0 = performance.now();
-      db.update(tasksTable, taskId, {
-        priority: 1 + rng.nextInt(4),
-        status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
-        updated_at: nowMicros(),
+    for (let i = 0; i < updateCount; ) {
+      const batch = await measureBatchedLatency(updateCount - i, async () => {
+        const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+        await db.update(tasksTable, taskId, {
+          priority: 1 + rng.nextInt(4),
+          status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
+          updated_at: nowMicros(),
+        });
       });
-      (latencies.update_sync ||= []).push(performance.now() - t0);
+      (latencies.update_sync ||= []).push(batch.perOpMs);
+      opCounts.update_sync = (opCounts.update_sync || 0) + batch.repeats;
+      i += batch.repeats;
+      reportUpdateProgress(i);
     }
 
-    for (let i = 0; i < deleteCount; i += 1) {
-      reportLoopProgress("B1 deletes", i, deleteCount);
-      const id = insertedCommentIds[i];
-      const t0 = performance.now();
-      db.delete(commentsTable, id);
-      (latencies.delete_sync ||= []).push(performance.now() - t0);
+    for (let i = 0; i < deleteCount; ) {
+      const batch = await measureBatchedLatency(deleteCount - i, async (batchIndex) => {
+        await db.delete(commentsTable, insertedCommentIds[i + batchIndex]);
+      });
+      (latencies.delete_sync ||= []).push(batch.perOpMs);
+      opCounts.delete_sync = (opCounts.delete_sync || 0) + batch.repeats;
+      i += batch.repeats;
+      reportDeleteProgress(i);
     }
 
     const wallMs = performance.now() - wallStart;
     const totalOperations = insertCount + updateCount + deleteCount;
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
-      operationSummaries[op] = summarizeLatencies(samples);
+      operationSummaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
     }
 
     return {
@@ -927,6 +990,7 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
   const requestCount = Math.min(b2.request_count, 160);
   const weights = b2.mix.map((x) => x.weight);
   const latencies: Record<string, number[]> = {};
+  const opCounts: Record<string, number> = {};
 
   let db: Db | null = null;
   try {
@@ -934,68 +998,72 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
     const state = await seedDataset(db, config);
 
     const wallStart = performance.now();
-    for (let i = 0; i < requestCount; i += 1) {
-      reportLoopProgress("B2 reads", i, requestCount);
+    const reportProgress = createProgressReporter("B2 reads", requestCount);
+    for (let i = 0; i < requestCount; ) {
       const op = b2.mix[rng.pickWeightedIndex(weights)].operation;
-      const t0 = performance.now();
-      switch (op) {
-        case "query_board": {
-          const project = state.projects[rng.nextInt(state.hotProjectCount)];
-          await db.all(
-            query<TaskRow>(
-              "tasks",
-              [{ column: "project_id", op: "eq", value: project }],
-              [["updated_at", "desc"]],
-              200,
-            ),
-          );
-          break;
+      const batch = await measureBatchedLatency(requestCount - i, async () => {
+        switch (op) {
+          case "query_board": {
+            const project = state.projects[rng.nextInt(state.hotProjectCount)];
+            await db.all(
+              query<TaskRow>(
+                "tasks",
+                [{ column: "project_id", op: "eq", value: project }],
+                [["updated_at", "desc"]],
+                200,
+              ),
+            );
+            break;
+          }
+          case "query_my_work": {
+            const assignee = state.users[rng.nextInt(state.users.length)];
+            await db.all(
+              query<TaskRow>(
+                "tasks",
+                [
+                  { column: "assignee_id", op: "eq", value: assignee },
+                  { column: "status", op: "eq", value: "in_progress" },
+                ],
+                [["updated_at", "desc"]],
+                200,
+              ),
+            );
+            break;
+          }
+          case "query_task_detail": {
+            const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+            await db.all(
+              query<CommentRow>(
+                "task_comments",
+                [{ column: "task_id", op: "eq", value: taskId }],
+                [["created_at", "desc"]],
+                200,
+              ),
+            );
+            await db.all(
+              query<ActivityRow>(
+                "activity_events",
+                [{ column: "task_id", op: "eq", value: taskId }],
+                [["created_at", "desc"]],
+                200,
+              ),
+            );
+            break;
+          }
+          default:
+            throw new Error(`Unknown operation in B2 mix: ${op}`);
         }
-        case "query_my_work": {
-          const assignee = state.users[rng.nextInt(state.users.length)];
-          await db.all(
-            query<TaskRow>(
-              "tasks",
-              [
-                { column: "assignee_id", op: "eq", value: assignee },
-                { column: "status", op: "eq", value: "in_progress" },
-              ],
-              [["updated_at", "desc"]],
-              200,
-            ),
-          );
-          break;
-        }
-        case "query_task_detail": {
-          const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
-          await db.all(
-            query<CommentRow>(
-              "task_comments",
-              [{ column: "task_id", op: "eq", value: taskId }],
-              [["created_at", "desc"]],
-              200,
-            ),
-          );
-          await db.all(
-            query<ActivityRow>(
-              "activity_events",
-              [{ column: "task_id", op: "eq", value: taskId }],
-              [["created_at", "desc"]],
-              200,
-            ),
-          );
-          break;
-        }
-        default:
-          throw new Error(`Unknown operation in B2 mix: ${op}`);
-      }
-      (latencies[op] ||= []).push(performance.now() - t0);
+      });
+      (latencies[op] ||= []).push(batch.perOpMs);
+      opCounts[op] = (opCounts[op] || 0) + batch.repeats;
+      i += batch.repeats;
+      reportProgress(i);
     }
     const wallMs = performance.now() - wallStart;
 
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
-      operationSummaries[op] = summarizeLatencies(samples);
+      operationSummaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
     }
 
     return {
@@ -1771,55 +1839,63 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     let firstDeniedUpdateError: string | null = null;
 
     const wallStart = performance.now();
-    for (let i = 0; i < reads; i += 1) {
-      reportLoopProgress("B5 reads", i, reads);
-      const t0 = performance.now();
-      if (i % 2 === 0) {
-        await allowedDb.all(documentsQuery);
-      } else {
-        await allowedDb.all(foldersQuery);
-      }
-      (latencies.permission_reads ||= []).push(performance.now() - t0);
+    const opCounts: Record<string, number> = {};
+    const reportReadProgress = createProgressReporter("B5 reads", reads);
+    const reportUpdateProgress = createProgressReporter("B5 updates", updates);
+
+    for (let i = 0; i < reads; ) {
+      const batch = await measureBatchedLatency(reads - i, async (batchIndex) => {
+        if ((i + batchIndex) % 2 === 0) {
+          await allowedDb.all(documentsQuery);
+        } else {
+          await allowedDb.all(foldersQuery);
+        }
+      });
+      (latencies.permission_reads ||= []).push(batch.perOpMs);
+      opCounts.permission_reads = (opCounts.permission_reads || 0) + batch.repeats;
+      i += batch.repeats;
+      reportReadProgress(i);
     }
 
-    for (let i = 0; i < updates; i += 1) {
-      reportLoopProgress("B5 updates", i, updates);
+    for (let i = 0; i < updates; ) {
       const shouldAllow =
         hasAllowedUpdateCandidates &&
         (deniedUpdateIds.length === 0 || rng.nextInt(100) < Math.round(b5.allow_fraction * 100));
-      const targetId = shouldAllow
-        ? allowedUpdateIds[rng.nextInt(allowedUpdateIds.length)]
-        : deniedUpdateIds[rng.nextInt(deniedUpdateIds.length)];
-      const t0 = performance.now();
-      try {
-        await allowedDb.update(documentTable, targetId, {
-          body: `b5-update-${i}`,
-          revision: i + 1,
-          updated_at: nowMicros(),
-        });
-        if (shouldAllow) {
-          allowedUpdateSuccess += 1;
-          (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
-        } else {
-          unexpectedAllowedForDenied += 1;
-          (latencies.permission_updates_denied ||= []).push(performance.now() - t0);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (shouldAllow) {
-          unexpectedDeniedForAllowed += 1;
-          if (firstAllowedUpdateError == null) {
-            firstAllowedUpdateError = message;
+      const targetIds = shouldAllow ? allowedUpdateIds : deniedUpdateIds;
+      const batchKey = shouldAllow ? "permission_updates_allowed" : "permission_updates_denied";
+      const batch = await measureBatchedLatency(updates - i, async (batchIndex) => {
+        const currentIndex = i + batchIndex;
+        const targetId = targetIds[rng.nextInt(targetIds.length)];
+        try {
+          await allowedDb.update(documentTable, targetId, {
+            body: `b5-update-${currentIndex}`,
+            revision: currentIndex + 1,
+            updated_at: nowMicros(),
+          });
+          if (shouldAllow) {
+            allowedUpdateSuccess += 1;
+          } else {
+            unexpectedAllowedForDenied += 1;
           }
-          (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
-        } else {
-          deniedUpdateRejected += 1;
-          if (firstDeniedUpdateError == null) {
-            firstDeniedUpdateError = message;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (shouldAllow) {
+            unexpectedDeniedForAllowed += 1;
+            if (firstAllowedUpdateError == null) {
+              firstAllowedUpdateError = message;
+            }
+          } else {
+            deniedUpdateRejected += 1;
+            if (firstDeniedUpdateError == null) {
+              firstDeniedUpdateError = message;
+            }
           }
-          (latencies.permission_updates_denied ||= []).push(performance.now() - t0);
         }
-      }
+      });
+      (latencies[batchKey] ||= []).push(batch.perOpMs);
+      opCounts[batchKey] = (opCounts[batchKey] || 0) + batch.repeats;
+      i += batch.repeats;
+      reportUpdateProgress(i);
     }
     const wallMs = performance.now() - wallStart;
 
@@ -1842,7 +1918,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
 
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
-      operationSummaries[op] = summarizeLatencies(samples);
+      operationSummaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
     }
 
     return {
@@ -1901,6 +1977,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   const rng = new Lcg(b6.seed ^ config.seed);
   const updateCount = Math.min(b6.update_count, 300);
   const latencies: number[] = [];
+  let measuredUpdates = 0;
   let db: Db | null = null;
 
   try {
@@ -1911,17 +1988,22 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
     const beforeBytes = await storageUsageBytes();
 
     const wallStart = performance.now();
-    for (let i = 0; i < updateCount; i += 1) {
-      reportLoopProgress("B6 hotspot updates", i, updateCount);
-      const taskId = hotTasks[rng.nextInt(hotTasks.length)];
-      const t0 = performance.now();
-      await db.update(tasksTable, taskId, {
-        title: `Hotspot ${taskId.slice(0, 8)} rev ${i}`,
-        priority: 1 + (i % 4),
-        status: ["todo", "in_progress", "review", "done"][i % 4],
-        updated_at: nowMicros(),
+    const reportProgress = createProgressReporter("B6 hotspot updates", updateCount);
+    for (let i = 0; i < updateCount; ) {
+      const batch = await measureBatchedLatency(updateCount - i, async (batchIndex) => {
+        const currentIndex = i + batchIndex;
+        const taskId = hotTasks[rng.nextInt(hotTasks.length)];
+        await db.update(tasksTable, taskId, {
+          title: `Hotspot ${taskId.slice(0, 8)} rev ${currentIndex}`,
+          priority: 1 + (currentIndex % 4),
+          status: ["todo", "in_progress", "review", "done"][currentIndex % 4],
+          updated_at: nowMicros(),
+        });
       });
-      latencies.push(performance.now() - t0);
+      latencies.push(batch.perOpMs);
+      measuredUpdates += batch.repeats;
+      i += batch.repeats;
+      reportProgress(i);
     }
     const wallMs = performance.now() - wallStart;
     const afterBytes = await storageUsageBytes();
@@ -1939,7 +2021,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
       wall_time_ms: wallMs,
       throughput_ops_per_sec: updateCount / Math.max(0.001, wallMs / 1000),
       operation_summaries: {
-        hotspot_update_sync: summarizeLatencies(latencies),
+        hotspot_update_sync: summarizeLatencies(latencies, measuredUpdates),
       },
       extra: {
         hot_task_count: hotTaskCount,
