@@ -791,6 +791,20 @@ function buildHtml() {
       return styleValue ? ' style="' + escapeHtml(styleValue) + '"' : "";
     }
 
+    function inlineTitleAttr(titleValue) {
+      return titleValue ? ' title="' + escapeHtml(titleValue) + '"' : "";
+    }
+
+    function deltaTooltip(row) {
+      if (!Number.isFinite(row?.noisePct)) return "";
+      const parts = ["Noise floor: " + formatNoisePct(row.noisePct)];
+      if (Number.isFinite(row?.signalMarginPct)) {
+        parts.push("Signal margin: " + formatPct(row.signalMarginPct));
+      }
+      parts.push(row?.significant ? "Above noise floor" : "Within noise floor");
+      return parts.join(" • ");
+    }
+
     function scenarioColumnCount(container) {
       if (!container) return 1;
       const width = container.clientWidth || window.innerWidth || 0;
@@ -1133,28 +1147,26 @@ function buildHtml() {
           return;
         }
 
-        cards.forEach((card, index) => {
-          const article = document.createElement("article");
-          article.className = "scenario-card";
-          const metricRowsHtml = card.metricRows
-            .map((row) => {
-              const descriptor = row.descriptor;
-              const headValueWithUnit = formatMetricValue(row.metric, row.headValue) + metricUnitSuffix(descriptor);
-              const deltaLabel = Number.isFinite(row.noisePct)
-                ? formatPct(row.deltaPct) + ", " + formatNoisePct(row.noisePct)
-                : formatPct(row.deltaPct);
-              return [
-                '<div class="metric-row">',
-                '  <div class="metric-name">' + escapeHtml(metricLabelText(descriptor)) + ":</div>",
-                '  <div class="metric-line">',
-                '    <span class="metric-value">' + escapeHtml(formatMetricValue(row.metric, row.baseValue)) + "</span>",
-                '    <span class="metric-arrow">→</span>',
-                '    <span class="metric-value">' + escapeHtml(headValueWithUnit) + "</span>",
-                '    <span class="metric-delta ' + row.deltaClass + '"' + inlineStyleAttr(row.deltaStyle) + '>(' + escapeHtml(deltaLabel) + ")</span>",
-                "  </div>",
-                "</div>",
-              ].join("");
-            })
+	        cards.forEach((card) => {
+	          const article = document.createElement("article");
+	          article.className = "scenario-card";
+	          const metricRowsHtml = card.metricRows
+	            .map((row) => {
+	              const descriptor = row.descriptor;
+	              const headValueWithUnit = formatMetricValue(row.metric, row.headValue) + metricUnitSuffix(descriptor);
+	              const deltaLabel = formatPct(row.deltaPct);
+	              return [
+	                '<div class="metric-row">',
+	                '  <div class="metric-name">' + escapeHtml(metricLabelText(descriptor)) + ":</div>",
+	                '  <div class="metric-line">',
+	                '    <span class="metric-value">' + escapeHtml(formatMetricValue(row.metric, row.baseValue)) + "</span>",
+	                '    <span class="metric-arrow">→</span>',
+	                '    <span class="metric-value">' + escapeHtml(headValueWithUnit) + "</span>",
+	                '    <span class="metric-delta ' + row.deltaClass + '"' + inlineStyleAttr(row.deltaStyle) + inlineTitleAttr(deltaTooltip(row)) + '>(' + escapeHtml(deltaLabel) + ")</span>",
+	                "  </div>",
+	                "</div>",
+	              ].join("");
+	            })
             .join("");
 
           const subtitleParts = [];
@@ -1234,7 +1246,7 @@ function buildHtml() {
             "<td>" + escapeHtml(suiteLabel(diff.suite)) + "</td>",
             "<td>" + escapeHtml(diff.scenarioId) + "</td>",
             "<td>" + escapeHtml(diff.descriptor.label) + "</td>",
-            '<td class="num ' + diff.deltaClass + '"' + inlineStyleAttr(diff.deltaStyle) + ">" + escapeHtml(Number.isFinite(diff.noisePct) ? formatPct(diff.deltaPct) + " / " + formatNoisePct(diff.noisePct) : formatPct(diff.deltaPct)) + "</td>",
+            '<td class="num ' + diff.deltaClass + '"' + inlineStyleAttr(diff.deltaStyle) + inlineTitleAttr(deltaTooltip(diff)) + ">" + escapeHtml(formatPct(diff.deltaPct)) + "</td>",
             '<td class="muted">' + escapeHtml(String(entry.snapshot.sha || "").slice(0, 12)) + "</td>",
             '<td class="muted">' + escapeHtml(entry.snapshot.generated_at || "n/a") + "</td>",
           ].join("");
