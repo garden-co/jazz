@@ -10,7 +10,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
 use jazz_wasm::types::Value;
-use jazz_wasm::WasmRuntime;
+use jazz_wasm::{WasmQueryBuilder, WasmRuntime};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -26,15 +26,20 @@ fn test_schema_json() -> &'static str {
 }
 
 fn make_query_json() -> String {
-    r#"{"table": "todos"}"#.to_string()
+    WasmQueryBuilder::new("todos")
+        .branch("main")
+        .build()
+        .unwrap()
 }
 
 fn make_filter_query_json() -> String {
-    r#"{
-        "table": "todos",
-        "disjuncts": [{"conditions": [{"Eq": {"column": "completed", "value": {"Boolean": true}}}]}]
-    }"#
-    .to_string()
+    let value = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
+    WasmQueryBuilder::new("todos")
+        .branch("main")
+        .filter_eq("completed", value)
+        .unwrap()
+        .build()
+        .unwrap()
 }
 
 /// Helper to remove OPFS files. Ignores errors if files don't exist.
