@@ -82,7 +82,7 @@ function CollaboratorBadge({ userId, isMe }: { userId: string; isMe: boolean }) 
 
 function useGetOrCreateCanvas(): CanvasModel | undefined {
   const db = useDb();
-  const canvases = useAll(app.canvases.orderBy("created_at", "asc"));
+  const canvases = useAll(app.canvases.orderBy("created_at", "asc"), { tier: "global" });
   const activeCanvas = canvases?.[0];
   useEffect(() => {
     if (!canvases || activeCanvas) return;
@@ -98,11 +98,12 @@ function useGetOrCreateUser(): string | null {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
-  // TODO avoid fetching all users! -> add filter + `enabled`
-  const users = useAll(app.users);
+  const users = useAll(userId ? app.users.where({ user_id: { eq: userId } }) : undefined, {
+    tier: "global",
+  });
   useEffect(() => {
-    if (!userId || !users) return;
-    const userExists = users.some((user) => user.user_id === userId);
+    if (!users) return;
+    const userExists = users[0] !== undefined;
     if (userExists) {
       return;
     }
@@ -118,8 +119,12 @@ function useGetOrCreateUser(): string | null {
 export function Canvas() {
   const db = useDb();
   const activeCanvas = useGetOrCreateCanvas();
-  // TODO return only strokes for the active canvas
-  const strokes = useAll(app.strokes.orderBy("created_at", "asc")) ?? [];
+  const strokes =
+    useAll(
+      activeCanvas
+        ? app.strokes.where({ canvas_id: { eq: activeCanvas.id } }).orderBy("created_at", "asc")
+        : undefined,
+    ) ?? [];
   const userId = useGetOrCreateUser();
   const userColor = userId ? colorForUser(userId) : "#333";
   const collaboratorIds = [...new Set(strokes.map((stroke) => stroke.user_id))];
