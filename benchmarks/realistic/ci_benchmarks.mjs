@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 export const DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 60;
+export const DEFAULT_NOISE_REPEAT_COUNT = 3;
 
 export const NATIVE_BENCHMARKS = [
   {
@@ -233,4 +234,12 @@ export function readSkipSet(file) {
 
 export function skipIds(skipSet) {
   return new Set((skipSet?.entries ?? []).map((entry) => entry.id));
+}
+
+export function repeatCountForBenchmark(benchmark, requestedCount = DEFAULT_NOISE_REPEAT_COUNT) {
+  if (!benchmark || typeof benchmark !== "object") return 1;
+  if (benchmark.kind === "native-example" || benchmark.kind === "browser-scenario") {
+    return Math.max(1, Number(requestedCount) || DEFAULT_NOISE_REPEAT_COUNT);
+  }
+  return 1;
 }
