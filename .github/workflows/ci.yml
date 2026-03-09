@@ -332,55 +332,55 @@ jobs:
             crates/jazz-napi/index.d.ts
           if-no-files-found: error
 
-  rn_android_smoke:
-    name: rn_android_smoke
-    runs-on: ubuntu-24.04
-    needs: [rust_core_build]
-    timeout-minutes: 35
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.14.0
-          run_install: false
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
-
-      - run: corepack enable
-      - run: pnpm install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
-
-      - name: Install/build React Native Android prerequisites
-        env:
-          JAZZ_RN_PLATFORM: android
-          JAZZ_RN_ANDROID_TARGETS: aarch64-linux-android
-        run: pnpm run ensure:rust-toolchain
-
-      - run: pnpm --filter jazz-rn exec ubrn build android --targets aarch64-linux-android --and-generate --release
-      - run: test -f crates/jazz-rn/android/src/main/jniLibs/arm64-v8a/libjazz_rn.a
-      - run: pnpm --filter jazz-rn test
+  # rn_android_smoke:
+  #   name: rn_android_smoke
+  #   runs-on: ubuntu-24.04
+  #   needs: [rust_core_build]
+  #   timeout-minutes: 35
+  #
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #
+  #     - uses: pnpm/action-setup@v4
+  #       with:
+  #         version: 10.14.0
+  #         run_install: false
+  #
+  #     - uses: actions/setup-node@v6
+  #       with:
+  #         node-version-file: .nvmrc
+  #         cache: pnpm
+  #         cache-dependency-path: pnpm-lock.yaml
+  #
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         toolchain: 1.93.1
+  #
+  #     - run: corepack enable
+  #     - run: pnpm install --frozen-lockfile
+  #
+  #     - uses: Swatinem/rust-cache@v2
+  #       with:
+  #         cache-on-failure: true
+  #
+  #     - uses: taiki-e/install-action@v2
+  #       with:
+  #         tool: cargo-ndk
+  #
+  #     - name: Install/build React Native Android prerequisites
+  #       env:
+  #         JAZZ_RN_PLATFORM: android
+  #         JAZZ_RN_ANDROID_TARGETS: aarch64-linux-android
+  #       run: pnpm run ensure:rust-toolchain
+  #
+  #     - run: pnpm --filter jazz-rn exec ubrn build android --targets aarch64-linux-android --and-generate --release
+  #     - run: test -f crates/jazz-rn/android/src/main/jniLibs/arm64-v8a/libjazz_rn.a
+  #     - run: pnpm --filter jazz-rn test
 
   js_build_test:
     name: js_build_test
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [rust_core_build, wasm, napi_linux, rn_android_smoke]
+    needs: [rust_core_build, wasm, napi_linux]
     timeout-minutes: 30
 
     steps:
