@@ -67,63 +67,10 @@ jobs:
       - name: Show sccache stats (after checks)
         run: sccache --show-stats || true
 
-  rust_core_tests:
-    name: rust_core_tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [format_lint]
-    timeout-minutes: 20
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 8G
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.14.0
-          run_install: false
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
-
-      - run: corepack enable
-      - run: pnpm install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ci-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
-          path: /home/runner/.cache/sccache
-
-      - name: Show sccache stats (before tests)
-        run: sccache --show-stats || true
-
-      - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --exclude jazz-wasm --exclude jazz-napi --exclude jazz-nitro
-
-      - name: Show sccache stats (after tests)
-        run: sccache --show-stats || true
-
   rust_core_build:
     name: rust_core_build
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [rust_core_tests]
+    needs: [format_lint]
     timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
@@ -184,6 +131,68 @@ jobs:
           name: rust-core-debug-binaries
           path: dist/rust-core-debug-binaries.tgz
           if-no-files-found: error
+
+  rust_core_tests:
+    name: rust_core_tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [rust_core_build]
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-core-debug-binaries
+          path: dist
+
+      - run: |
+          mkdir -p target/debug
+          tar -xzf dist/rust-core-debug-binaries.tgz -C target/debug
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ci-sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before tests)
+        run: sccache --show-stats || true
+
+      - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --exclude jazz-wasm --exclude jazz-napi --exclude jazz-nitro
+
+      - name: Show sccache stats (after tests)
+        run: sccache --show-stats || true
 
   wasm:
     name: wasm
