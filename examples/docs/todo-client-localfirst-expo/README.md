@@ -7,7 +7,7 @@ Expo example for local-first todos using `jazz-tools/react-native` + `jazz-rn`.
 - This app uses native code (`jazz-rn`), so use a development build (`expo run:ios` / `expo run:android`).
 - It does **not** run in Expo Go.
 - Keep `jazz-rn` as a **direct app dependency** so React Native codegen discovers `JazzRnSpec` during prebuild.
-- RN storage is SurrealKV-backed. You can optionally pass `dataPath` in `JazzProvider` config to pick a specific file path.
+- RN storage is Fjall-backed. You can optionally pass `dataPath` in `JazzProvider` config to pick a specific file path.
 - Start a Jazz server first (for example: `jazz-tools server <APP_ID> --port 1625`).
 - Server URL defaults:
   - iOS simulator: `http://127.0.0.1:1625`

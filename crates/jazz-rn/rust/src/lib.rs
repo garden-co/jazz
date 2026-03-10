@@ -27,7 +27,7 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
     SyncManager, SyncPayload,
@@ -261,7 +261,7 @@ impl SyncSender for RnSyncSender {
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<SurrealKvStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<FjallStorage, RnScheduler, RnSyncSender>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
@@ -314,14 +314,14 @@ impl RnRuntime {
                     })
                     .collect();
                 let mut default_path = std::env::temp_dir();
-                default_path.push(format!("{sanitized_app_id}.surrealkv"));
+                default_path.push(format!("{sanitized_app_id}.fjall"));
                 default_path.to_string_lossy().into_owned()
             });
             let storage =
-                SurrealKvStorage::open(&resolved_data_path, cache_size_bytes).map_err(|e| {
+                FjallStorage::open(&resolved_data_path, cache_size_bytes).map_err(|e| {
                     JazzRnError::Runtime {
                         message: format!(
-                            "Failed to open SurrealKV storage at '{}': {:?}",
+                            "Failed to open Fjall storage at '{}': {:?}",
                             resolved_data_path, e
                         ),
                     }

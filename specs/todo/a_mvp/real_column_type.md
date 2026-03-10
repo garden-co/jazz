@@ -112,7 +112,7 @@ Files:
 
 - `crates/jazz-tools/src/storage/mod.rs` (MemoryStorage)
 - `crates/jazz-tools/src/storage/opfs_btree.rs` (OpfsBTreeStorage)
-- `crates/jazz-tools/src/storage/surrealkv.rs` (SurrealKvStorage)
+- `crates/jazz-tools/src/storage/fjall.rs` (FjallStorage)
 - Or, if index operations are shared via `storage_core`, the adjustment may live there.
 
 Add a helper for IEEE 754 negative zero adjustment:

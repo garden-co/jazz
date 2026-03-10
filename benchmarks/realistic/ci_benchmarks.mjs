@@ -82,12 +82,12 @@ export const NATIVE_BENCHMARKS = [
     },
   },
   {
-    id: "native-criterion:r3_cold_load_surrealkv",
+    id: "native-criterion:r3_cold_load_fjall",
     suite: "native",
-    label: "Criterion R3 cold-load SurrealKV",
+    label: "Criterion R3 cold-load Fjall",
     kind: "criterion",
-    log_path: "logs/criterion_r3_cold_load_surrealkv.log",
-    criterion_filter: "realistic_phase1/cold_load_surrealkv",
+    log_path: "logs/criterion_r3_cold_load_fjall.log",
+    criterion_filter: "realistic_phase1/cold_load_fjall",
     env: {
       JAZZ_REALISTIC_VARIANT: "ci",
     },

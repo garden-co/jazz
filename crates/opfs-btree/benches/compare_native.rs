@@ -15,12 +15,7 @@ use opfs_btree::{
     BTreeOptions as OpfsBTreeOptions, OpfsBTree as OpfsBTreeDb, StdFile as OpfsStdFile,
 };
 use rocksdb::{Direction, IteratorMode, Options as RocksOptions, WriteOptions};
-use surrealkv::{
-    Durability as SurrealDurability, LSMIterator, Mode as SurrealMode,
-    Transaction as SurrealTransaction, Tree as SurrealTree, TreeBuilder as SurrealTreeBuilder,
-};
 use tempfile::TempDir;
-use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 const DEFAULT_VALUE_SIZES: [usize; 3] = [32, 256, 4096];
 const DEFAULT_KEY_COUNT: usize = 5_000;
@@ -438,123 +433,6 @@ impl Engine for FjallEngine {
     }
 }
 
-struct SurrealKvEngine {
-    tree: SurrealTree,
-    runtime: TokioRuntime,
-    write_txn: Option<SurrealTransaction>,
-    read_txn: Option<SurrealTransaction>,
-}
-
-impl SurrealKvEngine {
-    fn open(path: &Path) -> Self {
-        let runtime = TokioRuntimeBuilder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("build surrealkv tokio runtime");
-        let tree = {
-            let _guard = runtime.enter();
-            SurrealTreeBuilder::new()
-                .with_path(path.join("surrealkv"))
-                .with_level_count(4)
-                .with_max_memtable_size(256 * 1024 * 1024)
-                .without_compression()
-                .build()
-                .expect("open surrealkv")
-        };
-        Self {
-            tree,
-            runtime,
-            write_txn: None,
-            read_txn: None,
-        }
-    }
-
-    fn ensure_write_txn(&mut self) -> &mut SurrealTransaction {
-        if self.write_txn.is_none() {
-            let txn = {
-                let _guard = self.runtime.enter();
-                self.tree
-                    .begin()
-                    .expect("begin surrealkv write txn")
-                    .with_durability(SurrealDurability::Eventual)
-            };
-            self.write_txn = Some(txn);
-        }
-        self.write_txn.as_mut().expect("surrealkv write txn")
-    }
-
-    fn ensure_read_txn(&mut self) -> &mut SurrealTransaction {
-        if self.read_txn.is_none() {
-            let txn = {
-                let _guard = self.runtime.enter();
-                self.tree
-                    .begin_with_mode(SurrealMode::ReadOnly)
-                    .expect("begin surrealkv read txn")
-            };
-            self.read_txn = Some(txn);
-        }
-        self.read_txn.as_mut().expect("surrealkv read txn")
-    }
-}
-
-impl Engine for SurrealKvEngine {
-    fn put(&mut self, key: &[u8], value: &[u8]) {
-        self.read_txn = None;
-        self.ensure_write_txn()
-            .set(key, value)
-            .expect("surrealkv set");
-    }
-
-    fn delete(&mut self, key: &[u8]) {
-        self.read_txn = None;
-        self.ensure_write_txn()
-            .delete(key)
-            .expect("surrealkv delete");
-    }
-
-    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        if self.write_txn.is_some() {
-            self.finish_writes();
-        }
-        self.ensure_read_txn().get(key).expect("surrealkv get")
-    }
-
-    fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        self.get_opt(key).expect("surrealkv key present")
-    }
-
-    fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
-        if self.write_txn.is_some() {
-            self.finish_writes();
-        }
-
-        let txn = self.ensure_read_txn();
-        let mut iter = txn.range(start, end).expect("surrealkv range");
-        let mut has_more = iter.seek_first().expect("surrealkv seek_first");
-
-        let mut seen = 0usize;
-        let mut checksum = 0u64;
-        while has_more && iter.valid() && seen < limit {
-            let value = iter.value().expect("surrealkv iter value");
-            checksum = checksum.wrapping_add(value.first().copied().unwrap_or(0) as u64);
-            seen += 1;
-            has_more = iter.next().expect("surrealkv iter next");
-        }
-
-        checksum.wrapping_add(seen as u64)
-    }
-
-    fn finish_writes(&mut self) {
-        self.read_txn = None;
-        if let Some(mut txn) = self.write_txn.take() {
-            self.runtime
-                .block_on(async { txn.commit().await })
-                .expect("surrealkv commit");
-        }
-    }
-}
-
 fn key(i: usize) -> Vec<u8> {
     format!("k{i:08}").into_bytes()
 }
@@ -610,12 +488,6 @@ fn engine_factories(
             Box::new(|path| Box::new(RocksDbEngine::open(path))),
         ));
     }
-    if engine_enabled("surrealkv") {
-        out.push((
-            "surrealkv",
-            Box::new(|path| Box::new(SurrealKvEngine::open(path))),
-        ));
-    }
     if engine_enabled("fjall") {
         out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
     }
@@ -642,12 +514,6 @@ fn cold_read_engine_factories(
         out.push((
             "rocksdb",
             Box::new(|path| Box::new(RocksDbEngine::open(path))),
-        ));
-    }
-    if engine_enabled("surrealkv") {
-        out.push((
-            "surrealkv",
-            Box::new(|path| Box::new(SurrealKvEngine::open(path))),
         ));
     }
     if engine_enabled("fjall") {

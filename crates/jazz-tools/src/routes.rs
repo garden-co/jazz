@@ -801,7 +801,7 @@ mod tests {
     };
     use jazz_tools::runtime_tokio::TokioRuntime;
     use jazz_tools::schema_manager::{AppId, SchemaManager};
-    use jazz_tools::storage::SurrealKvStorage;
+    use jazz_tools::storage::FjallStorage;
     use jazz_tools::sync_manager::{
         ClientId, DurabilityTier, InboxEntry, QueryId, QueryPropagation, Source, SyncManager,
         SyncPayload,
@@ -829,9 +829,8 @@ mod tests {
         schema: jazz_tools::query_manager::types::Schema,
     ) -> (TempDir, Arc<ServerState>) {
         let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.surrealkv");
-        let storage =
-            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
         let sync_manager = SyncManager::new()
             .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
@@ -877,9 +876,8 @@ mod tests {
     #[tokio::test]
     async fn schema_handler_requires_admin_secret() {
         let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.surrealkv");
-        let storage =
-            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
         let sync_manager = SyncManager::new()
             .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
