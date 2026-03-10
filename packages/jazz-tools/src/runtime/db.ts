@@ -953,6 +953,10 @@ export class Db {
     return structuredClone(this.config);
   }
 
+  setDevMode(enabled: boolean): void {
+    this.config.devMode = enabled;
+  }
+
   getActiveQuerySubscriptions(): ActiveQuerySubscriptionTrace[] {
     return Array.from(this.activeQuerySubscriptionTraces.values())
       .filter((trace) => trace.visibility === "public")

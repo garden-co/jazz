@@ -93,6 +93,27 @@ function waitForEvent(
 }
 
 describe("attachDevTools active query subscription bridge", () => {
+  it("enables db devMode when attaching", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const fakeDb = {
+      config: {
+        appId: "devtools-test",
+      },
+      setDevMode: vi.fn(function (this: { config: { devMode?: boolean } }, enabled: boolean) {
+        this.config.devMode = enabled;
+      }),
+      clients: new Map([["default", {}]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+
+    expect(fakeDb.setDevMode).toHaveBeenCalledWith(true);
+  });
+
   it("returns snapshots and pushes updates", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
@@ -126,6 +147,7 @@ describe("attachDevTools active query subscription bridge", () => {
         appId: "devtools-test",
         devMode: true,
       },
+      setDevMode: vi.fn(),
       clients: new Map([["default", {}]]),
       getActiveQuerySubscriptions: vi.fn(() => currentSubscriptions),
       onActiveQuerySubscriptionsChange: vi.fn(
