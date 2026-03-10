@@ -11,7 +11,7 @@ use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, V
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::storage::FjallStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
 use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
@@ -31,7 +31,7 @@ pub struct ExternalIdentityRow {
 
 /// Persistent storage for external identity -> principal mappings.
 pub struct ExternalIdentityStore {
-    runtime: TokioRuntime<SurrealKvStorage>,
+    runtime: TokioRuntime<FjallStorage>,
 }
 
 impl ExternalIdentityStore {
@@ -63,8 +63,8 @@ impl ExternalIdentityStore {
         )
         .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
 
-        let db_path = meta_dir.join("jazz.surrealkv");
-        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+        let db_path = meta_dir.join("jazz.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
         let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
@@ -188,7 +188,7 @@ impl ExternalIdentityStore {
 
 /// Server state shared across request handlers.
 pub struct ServerState {
-    pub runtime: TokioRuntime<SurrealKvStorage>,
+    pub runtime: TokioRuntime<FjallStorage>,
     #[allow(dead_code)]
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
@@ -234,8 +234,8 @@ pub async fn run(
     let sync_tx_clone = sync_tx.clone();
 
     // Create persistent storage
-    let db_path = format!("{}/jazz.surrealkv", data_dir);
-    let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+    let db_path = Path::new(data_dir).join("jazz.fjall");
+    let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024)
         .map_err(|e| format!("Failed to open storage: {:?}", e))?;
 
     rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)

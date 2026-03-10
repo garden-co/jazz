@@ -27,11 +27,11 @@ HashMap-backed, used for tests and the browser main thread (acts as cache of wor
 
 > `crates/groove/src/storage/mod.rs:200+`
 
-### SurrealKvStorage (native)
+### FjallStorage (native)
 
-Native server/CLI/client processes use SurrealKV for durable local storage.
+Native server/CLI/client processes use Fjall for durable local storage.
 
-> `crates/groove/src/storage/surrealkv.rs`
+> `crates/groove/src/storage/fjall.rs`
 
 ### OpfsBTreeStorage (browser worker)
 
@@ -60,7 +60,7 @@ Storage performance tracking currently lives with the storage crates:
 
 - `crates/opfs-btree/BENCHMARK_OVERVIEW.md` consolidates current OPFS/native benchmark baselines and engine comparisons.
 - `crates/opfs-btree/src/wasm_bench.rs` + `crates/opfs-btree/wasm-bench/run-opfs-bench.cjs` cover browser OPFS scenarios.
-- `crates/opfs-btree/benches/compare_native.rs` runs cross-engine native comparisons (including `surrealkv` and `fjall` columns when enabled).
+- `crates/opfs-btree/benches/compare_native.rs` runs cross-engine native comparisons (including `fjall` and `fjall` columns when enabled).
 
 ## Deployment Topology
 
@@ -81,7 +81,7 @@ The browser case is the interesting one. We can't block the main thread on stora
 └──────────────────┬───────────────────────────────────┘
                    │ HTTP/SSE
                    ▼
-           Edge Server (Groove + SurrealKvStorage)
+           Edge Server (Groove + FjallStorage)
 ```
 
 OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Workers — no need for async storage abstractions.
@@ -91,9 +91,9 @@ OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Work
 
 ### Native (Node.js / Rust)
 
-Single process, no worker needed. SurrealKvStorage backed by regular files.
+Single process, no worker needed. FjallStorage backed by regular files.
 
-> `crates/groove-tokio/src/lib.rs` (TokioRuntime with SurrealKvStorage)
+> `crates/groove-tokio/src/lib.rs` (TokioRuntime with FjallStorage)
 
 ## Platform Bindings
 
@@ -103,7 +103,7 @@ NAPI bindings exposing RuntimeCore to Node.js via TokioRuntime.
 
 Current runtime modes:
 
-- `new NapiRuntime(..., dataPath, ...)` for persistent SurrealKV storage.
+- `new NapiRuntime(..., dataPath, ...)` for persistent Fjall storage.
 - `NapiRuntime.inMemory(...)` for non-persistent in-memory storage.
 
 > `crates/jazz-napi/`

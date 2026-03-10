@@ -683,11 +683,11 @@ mod tests {
 
     use axum::body;
     use axum::routing::get;
-    use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
-    use groove::runtime_tokio::TokioRuntime;
-    use groove::schema_manager::{AppId, SchemaManager};
-    use groove::storage::SurrealKvStorage;
-    use groove::sync_manager::{ClientId, DurabilityTier, SyncManager, SyncPayload};
+    use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use jazz_tools::runtime_tokio::TokioRuntime;
+    use jazz_tools::schema_manager::{AppId, SchemaManager};
+    use jazz_tools::storage::FjallStorage;
+    use jazz_tools::sync_manager::{ClientId, DurabilityTier, SyncManager, SyncPayload};
     use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::{RwLock, broadcast};
@@ -699,9 +699,8 @@ mod tests {
     #[tokio::test]
     async fn schema_handler_requires_admin_secret() {
         let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.surrealkv");
-        let storage =
-            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
         let sync_manager = SyncManager::new()
             .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
@@ -781,9 +780,8 @@ mod tests {
     #[tokio::test]
     async fn schema_handlers_return_hashes_and_requested_schema() {
         let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.surrealkv");
-        let storage =
-            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
         let schema = SchemaBuilder::new()
             .table(

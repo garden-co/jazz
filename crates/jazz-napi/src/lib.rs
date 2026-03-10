@@ -1,11 +1,11 @@
 //! jazz-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<SurrealKvStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<FjallStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `SurrealKvStorage` provides persistent on-disk storage
+//! - `FjallStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
@@ -31,7 +31,7 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::{MemoryStorage, Storage, SurrealKvStorage};
+use jazz_tools::storage::{FjallStorage, MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
@@ -517,7 +517,7 @@ pub struct NapiRuntime {
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with SurrealKV-backed persistent storage.
+    /// Create a new NapiRuntime with Fjall-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -528,9 +528,9 @@ impl NapiRuntime {
         data_path: String,
         tier: Option<String>,
     ) -> napi::Result<Self> {
-        // Create SurrealKvStorage
+        // Create Fjall storage
         let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = SurrealKvStorage::open(&data_path, cache_size)
+        let storage = FjallStorage::open(&data_path, cache_size)
             .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))?;
 
         build_napi_runtime(

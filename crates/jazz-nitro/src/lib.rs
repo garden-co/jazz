@@ -1,12 +1,12 @@
 //! jazz-nitro — React Native (Nitro Modules) binding for Jazz runtime.
 //!
-//! Provides `JazzRuntimeImpl` wrapping `RuntimeCore<SurrealKvStorage>` via Nitro's
+//! Provides `JazzRuntimeImpl` wrapping `RuntimeCore<FjallStorage>` via Nitro's
 //! Rust FFI bridge. The generated `HybridJazzRuntimeSpec` trait defines the FFI
 //! surface; this crate provides the implementation.
 //!
 //! # Architecture
 //!
-//! - `SurrealKvStorage` provides persistent on-disk storage
+//! - `FjallStorage` provides persistent on-disk storage
 //! - `NitroScheduler` implements `Scheduler` via a JS callback
 //! - `NitroSyncSender` implements `SyncSender` via a JS callback
 //! - `JazzRuntimeImpl` wraps `Mutex<Option<RuntimeCore<...>>>`
@@ -30,7 +30,7 @@ use groove::runtime_core::{
     SyncSender,
 };
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::SurrealKvStorage;
+use groove::storage::FjallStorage;
 use groove::sync_manager::QueryPropagation;
 use groove::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
@@ -267,7 +267,7 @@ fn build_delta_json(
 
 // ============================================================================
 
-type NitroCoreType = RuntimeCore<SurrealKvStorage, NitroScheduler, NitroSyncSender>;
+type NitroCoreType = RuntimeCore<FjallStorage, NitroScheduler, NitroSyncSender>;
 type TickCallback = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
 type SyncCallback = Arc<Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>>;
 
@@ -420,8 +420,8 @@ impl JazzRuntimeImpl {
                 .map_err(|e| format!("Failed to create SchemaManager: {e}"))?;
 
         let cache_size = 64 * 1024 * 1024; // 64MB
-        let storage = SurrealKvStorage::open(&data_path, cache_size)
-            .map_err(|e| format!("Failed to open SurrealKV at '{data_path}': {e:?}"))?;
+        let storage = FjallStorage::open(&data_path, cache_size)
+            .map_err(|e| format!("Failed to open Fjall storage at '{data_path}': {e:?}"))?;
 
         let scheduler = NitroScheduler::new();
         let sync_sender = NitroSyncSender::new();

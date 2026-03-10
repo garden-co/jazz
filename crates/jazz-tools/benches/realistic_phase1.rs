@@ -1,11 +1,11 @@
 use std::fs;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -19,16 +19,16 @@ use jazz_tools::query_manager::types::{
 };
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+use jazz_tools::storage::FjallStorage;
 use jazz_tools::storage::MemoryStorage;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use jazz_tools::storage::Storage;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
 use serde::Deserialize;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
@@ -71,7 +71,7 @@ struct R2ScenarioConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct R3ScenarioConfig {
     id: String,
     seed: u64,
@@ -144,7 +144,7 @@ struct R2Scenario {
 }
 
 #[derive(Debug, Clone)]
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct R3Scenario {
     id: String,
     seed: u64,
@@ -286,13 +286,13 @@ struct PermissionR5State {
     timestamp: u64,
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct SeededProjectBoard {
     projects: Vec<ObjectId>,
     active_tasks: Vec<ObjectId>,
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct ColdLoadSeededDb {
     _tempdir: TempDir,
     db_path: PathBuf,
@@ -681,7 +681,7 @@ impl R1State {
     }
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn seed_project_board_dataset<S: Storage>(
     runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
     profile: &ProfileConfig,
@@ -849,22 +849,19 @@ fn seed_project_board_dataset<S: Storage>(
     }
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 impl ColdLoadSeededDb {
     fn new(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
         let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
-        let db_path = tempdir.path().join("r3_cold_load.surrealkv");
+        let db_path = tempdir.path().join("r3_cold_load.fjall");
 
         let seeded = {
-            let mut runtime = create_surrealkv_runtime(
-                project_board_schema(),
-                &db_path,
-                scenario.cache_size_bytes,
-            );
+            let mut runtime =
+                create_fjall_runtime(project_board_schema(), &db_path, scenario.cache_size_bytes);
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
             runtime.flush_storage();
-            runtime.storage().close().expect("close seeded surrealkv");
+            runtime.storage().close().expect("close seeded fjall");
             seeded
         };
 
@@ -1483,18 +1480,18 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_surrealkv.json");
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
     let seeded = ColdLoadSeededDb::new(&profile, &scenario);
     let benchmark_name = format!(
-        "{}_{}_surrealkv",
+        "{}_{}_fjall",
         scenario.id.to_lowercase(),
         profile.id.to_lowercase()
     );
 
-    let mut group = c.benchmark_group("realistic_phase1/cold_load_surrealkv");
+    let mut group = c.benchmark_group("realistic_phase1/cold_load_fjall");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
     group.throughput(Throughput::Elements(1));
@@ -1505,7 +1502,7 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
         |b, _scenario| {
             b.iter(|| {
                 let open_start = Instant::now();
-                let mut runtime = create_surrealkv_runtime(
+                let mut runtime = create_fjall_runtime(
                     project_board_schema(),
                     &seeded.db_path,
                     seeded.cache_size_bytes,
@@ -1524,10 +1521,7 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
                 let query_elapsed = query_start.elapsed();
 
                 runtime.flush_storage();
-                runtime
-                    .storage()
-                    .close()
-                    .expect("close cold-load surrealkv");
+                runtime.storage().close().expect("close cold-load fjall");
 
                 black_box(open_elapsed);
                 black_box(query_elapsed);
@@ -1539,8 +1533,8 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(all(feature = "surrealkv", not(target_arch = "wasm32"))))]
-fn realistic_r3_cold_load_surrealkv(_c: &mut Criterion) {}
+#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
+fn realistic_r3_cold_load_fjall(_c: &mut Criterion) {}
 
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
@@ -1710,7 +1704,7 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
     }
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn load_r3_scenario(path: &str) -> R3Scenario {
     let raw: R3ScenarioConfig = load_json(path);
     R3Scenario {
@@ -1804,12 +1798,12 @@ fn create_runtime(schema: Schema) -> BenchRuntime {
     )
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-fn create_surrealkv_runtime(
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn create_fjall_runtime(
     schema: Schema,
     db_path: &Path,
     cache_size_bytes: usize,
-) -> RuntimeCore<SurrealKvStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<FjallStorage, NoopScheduler, VecSyncSender> {
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(
         sync_manager,
@@ -1822,7 +1816,7 @@ fn create_surrealkv_runtime(
 
     RuntimeCore::new(
         schema_manager,
-        SurrealKvStorage::open(db_path, cache_size_bytes).expect("open surrealkv for benchmark"),
+        FjallStorage::open(db_path, cache_size_bytes).expect("open fjall storage for benchmark"),
         NoopScheduler,
         VecSyncSender::new(),
     )
@@ -1942,7 +1936,7 @@ criterion_group!(
     realistic_r2_reads,
     realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn,
-    realistic_r3_cold_load_surrealkv,
+    realistic_r3_cold_load_fjall,
     realistic_r4_fanout_updates,
     realistic_r5_permission_recursive,
     realistic_r6_permission_write_heavy,
