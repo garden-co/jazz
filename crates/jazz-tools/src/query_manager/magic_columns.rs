@@ -1,3 +1,5 @@
+pub const RESERVED_MAGIC_COLUMN_PREFIX: char = '$';
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MagicColumnKind {
     CanRead,
@@ -26,4 +28,8 @@ pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
 
 pub fn is_magic_column_name(name: &str) -> bool {
     magic_column_kind(name).is_some()
+}
+
+pub fn is_reserved_magic_column_name(name: &str) -> bool {
+    name.starts_with(RESERVED_MAGIC_COLUMN_PREFIX)
 }

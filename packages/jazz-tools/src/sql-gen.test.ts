@@ -61,6 +61,19 @@ describe("schemaToSql", () => {
 `);
   });
 
+  it("rejects reserved magic-column namespace in schema columns", () => {
+    expect(() =>
+      schemaToSql({
+        tables: [
+          {
+            name: "todos",
+            columns: [{ name: "$canRead", sqlType: "BOOLEAN", nullable: false }],
+          },
+        ],
+      }),
+    ).toThrow(/reserved for magic columns/i);
+  });
+
   it("handles all column types", () => {
     resetCollectedState();
     table("test", {
@@ -339,6 +352,18 @@ describe("lensToSql", () => {
       `ALTER TABLE todos RENAME COLUMN old_name TO new_name;
 `,
     );
+  });
+
+  it("rejects reserved magic-column namespace in introduced lens columns", () => {
+    expect(() =>
+      lensToSql(
+        {
+          table: "todos",
+          operations: [{ type: "introduce", column: "$canRead", sqlType: "BOOLEAN", value: false }],
+        },
+        "fwd",
+      ),
+    ).toThrow(/reserved for magic columns/i);
   });
 
   it("handles drop operations", () => {

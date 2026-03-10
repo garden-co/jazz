@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 
 use crate::query_manager::{
+    magic_columns::is_reserved_magic_column_name,
     policy::{CmpOp, Operation, PolicyExpr, PolicyValue},
     types::{
         ColumnDescriptor, ColumnName, ColumnType, OperationPolicy, RowDescriptor, Schema,
@@ -809,6 +810,7 @@ impl Parser {
 
     fn parse_column_def(&mut self) -> Result<ColumnDescriptor, SqlParseError> {
         let name = self.expect_ident()?;
+        validate_user_column_name(&name)?;
         let column_type = self.parse_column_type()?;
 
         let mut nullable = true;
@@ -854,6 +856,7 @@ impl Parser {
         &mut self,
     ) -> Result<(ColumnDescriptor, Value), SqlParseError> {
         let name = self.expect_ident()?;
+        validate_user_column_name(&name)?;
         let column_type = self.parse_column_type()?;
 
         let mut nullable = true;
@@ -1006,6 +1009,7 @@ impl Parser {
                 let old_name = self.expect_ident()?;
                 self.expect(&Token::To)?;
                 let new_name = self.expect_ident()?;
+                validate_user_column_name(&new_name)?;
 
                 // Optional semicolon
                 if self.peek() == Some(&Token::Semicolon) {
@@ -1054,6 +1058,17 @@ fn is_valid_reference_column_type(column_type: &ColumnType) -> bool {
         } => matches!(element_type.as_ref(), ColumnType::Uuid),
         _ => false,
     }
+}
+
+fn validate_user_column_name(name: &str) -> Result<(), SqlParseError> {
+    if is_reserved_magic_column_name(name) {
+        return Err(SqlParseError::SyntaxError(format!(
+            "column name '{}' is reserved for magic columns; names starting with '$' are not allowed in user schemas",
+            name
+        )));
+    }
+
+    Ok(())
 }
 
 fn validate_schema_references(schema: &Schema) -> Result<(), SqlParseError> {
@@ -1694,6 +1709,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_schema_rejects_reserved_magic_column_namespace() {
+        let sql = r#"
+            CREATE TABLE todos (
+                "$canRead" BOOLEAN NOT NULL
+            );
+        "#;
+
+        let err = parse_schema(sql).unwrap_err();
+        assert!(matches!(err, SqlParseError::SyntaxError(_)));
+        assert!(err.to_string().contains("reserved for magic columns"));
+    }
+
+    #[test]
     fn parse_nullable_columns() {
         let sql = r#"
             CREATE TABLE users (
@@ -1937,6 +1965,41 @@ mod tests {
                 assert_eq!(new_name, "email_address");
             }
             _ => panic!("Expected RenameColumn"),
+        }
+    }
+
+    #[test]
+    fn parse_lens_rejects_reserved_magic_column_add() {
+        let sql = r#"ALTER TABLE users ADD COLUMN "$canRead" BOOLEAN DEFAULT FALSE;"#;
+
+        let err = parse_lens(sql).unwrap_err();
+        assert!(matches!(err, SqlParseError::SyntaxError(_)));
+        assert!(err.to_string().contains("reserved for magic columns"));
+    }
+
+    #[test]
+    fn parse_lens_rejects_reserved_magic_column_rename_target() {
+        let sql = r#"ALTER TABLE users RENAME COLUMN email TO "$canRead";"#;
+
+        let err = parse_lens(sql).unwrap_err();
+        assert!(matches!(err, SqlParseError::SyntaxError(_)));
+        assert!(err.to_string().contains("reserved for magic columns"));
+    }
+
+    #[test]
+    fn parse_lens_allows_dropping_reserved_magic_column() {
+        let sql = r#"ALTER TABLE users DROP COLUMN "$legacy";"#;
+
+        let transform = parse_lens(sql).unwrap();
+        assert_eq!(transform.ops.len(), 1);
+        assert!(transform.has_drafts());
+
+        match &transform.ops[0] {
+            LensOp::RemoveColumn { table, column, .. } => {
+                assert_eq!(table, "users");
+                assert_eq!(column, "$legacy");
+            }
+            _ => panic!("Expected RemoveColumn"),
         }
     }
 
