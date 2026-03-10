@@ -445,6 +445,7 @@ export async function attachDevTools(
 ): Promise<DevToolsAttachment> {
   const resolved = await Promise.resolve(clientOrDb as Promise<{ db: Db }> | { db: Db } | Db);
   const db = resolveDb(resolved as Db | { db: Db });
+  db.setDevMode(true);
   const dbConfig = resolveBridgeDbConfig(db);
   return hookRegistration(db, { wasmSchema, dbConfig: dbConfig ?? undefined });
 }
