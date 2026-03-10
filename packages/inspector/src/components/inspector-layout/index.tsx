@@ -1,9 +1,11 @@
 import { NavLink, Outlet } from "react-router";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
+import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./index.module.css";
 
 export function InspectorLayout() {
   const standaloneContext = useStandaloneContext();
+  const { runtime } = useDevtoolsContext();
 
   return (
     <main className={styles.root}>
@@ -17,14 +19,16 @@ export function InspectorLayout() {
           >
             Data Explorer
           </NavLink>
-          <NavLink
-            to="/live-query"
-            className={({ isActive }) =>
-              `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
-            }
-          >
-            Live Query
-          </NavLink>
+          {runtime === "extension" ? (
+            <NavLink
+              to="/live-query"
+              className={({ isActive }) =>
+                `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
+              }
+            >
+              Live Query
+            </NavLink>
+          ) : null}
         </nav>
         {standaloneContext ? (
           <div className={styles.topBarActions}>

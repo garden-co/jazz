@@ -9,6 +9,7 @@ export {
   type QueryExecutionOptions,
   type QueryInput,
   type QueryPropagation,
+  type QueryVisibility,
   type RequestLike,
   type Row,
   type Runtime,
@@ -21,6 +22,7 @@ export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transpor
 export {
   createDb,
   Db,
+  type ActiveQuerySubscriptionTrace,
   type DbConfig,
   type QueryBuilder,
   type QueryOptions,
