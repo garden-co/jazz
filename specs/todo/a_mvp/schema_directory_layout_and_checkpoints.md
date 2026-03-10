@@ -26,7 +26,9 @@ schema/
 └── migrations/
     ├── migration_v1_v2_101ec784deec_ba2b07e7513e.ts
     ├── migration_v1_v2_fwd_101ec784deec_ba2b07e7513e.sql
-    └── migration_v1_v2_bwd_101ec784deec_ba2b07e7513e.sql
+    ├── migration_v1_v2_bwd_101ec784deec_ba2b07e7513e.sql
+    ├── migration_wip_fwd.sql   ← auto-regenerated each build, deleted at checkpoint
+    └── migration_wip_bwd.sql   ← auto-regenerated each build, deleted at checkpoint
 ```
 
 ### Files to change
@@ -49,16 +51,18 @@ schema/
 **`jazz-tools build` (default)**
 
 - Regenerates `current.sql` and `app.ts`.
-- Does **not** create any new file in `versions/` or `migrations/`.
-- Compares the hash of `current.sql` against the hash of the highest-version file in `versions/` (the last checkpoint). If they differ, prints:
+- Does **not** create any new file in `versions/`.
+- Compares the hash of `current.sql` against the hash of the highest-version file in `versions/` (the last checkpoint). If they differ:
+  - Regenerates `migrations/migration_wip_fwd.sql` and `migrations/migration_wip_bwd.sql` — a single migration from the last checkpoint to the current schema. These are always machine-owned and overwritten on every build; developers should not edit them.
+  - Prints:
 
-  ```
-  Schema has changed since last checkpoint.
-  Run `jazz-tools build --checkpoint` to save this version and generate
-  migrations so old clients can migrate to the current schema.
-  ```
+    ```
+    Schema has changed since last checkpoint.
+    Run `jazz-tools build --checkpoint` to save this version and generate
+    migrations so old clients can migrate to the current schema.
+    ```
 
-  If `versions/` is empty (no checkpoint exists yet) the message is suppressed.
+  If `versions/` is empty (no checkpoint exists yet) the wip migration and message are suppressed.
 
 **`jazz-tools build --checkpoint`**
 
@@ -68,6 +72,7 @@ schema/
   - Determines baseline: the highest-version file in `versions/`, or the empty schema if `versions/` is empty.
   - Writes `versions/schema_v{N}_{hash}.sql` (N = last checkpoint version + 1, or 1 for the first checkpoint).
   - Generates `migrations/migration_v{N-1}_v{N}_*.{ts,sql}` for the baseline → current transition.
+  - Deletes `migrations/migration_wip_fwd.sql` and `migrations/migration_wip_bwd.sql` if present.
 
 The baseline is implicit — always the highest version number in `versions/`. No pointer file needed. The existing `parse_versioned_schema_filename()` logic already extracts version numbers.
 
@@ -98,6 +103,8 @@ In `packages/jazz-tools/src/cli.ts`, pass `--checkpoint` to the Rust binary when
 3. `--checkpoint` with changed schema → new `versions/schema_v{N}_*.sql` and `migrations/migration_v*` files.
 4. `--checkpoint` with unchanged schema → "Schema unchanged" message, no new files.
 5. First-ever checkpoint (empty `versions/`) → `schema_v1_*.sql` + initial migration.
-6. Existing Rust tests for `SchemaDirectory` pass with updated paths.
+6. Default build with schema changed since last checkpoint → `migration_wip_fwd.sql` / `migration_wip_bwd.sql` regenerated.
+7. `--checkpoint` → wip migration files deleted, versioned migration created.
+8. Existing Rust tests for `SchemaDirectory` pass with updated paths.
 
 > **Files:** `crates/jazz-tools/src/schema_manager/files.rs`, `crates/jazz-tools/src/commands/build.rs`, `crates/jazz-tools/src/main.rs`, `packages/jazz-tools/src/cli.ts`, `specs/status-quo/schema_files.md`
