@@ -188,64 +188,64 @@ describe("TS Query API", () => {
     });
 
     const projected = await db.all(
-      app.todos.select("title", "_canRead", "_canEdit", "_canDelete").orderBy("title", "asc"),
+      app.todos.select("title", "$canRead", "$canEdit", "$canDelete").orderBy("title", "asc"),
     );
 
     expect(projected).toEqual([
       {
         id: editableId,
         title: "Draft docs",
-        _canRead: true,
-        _canEdit: true,
-        _canDelete: true,
+        $canRead: true,
+        $canEdit: true,
+        $canDelete: true,
       },
       {
         id: lockedId,
         title: "Shipped docs",
-        _canRead: true,
-        _canEdit: false,
-        _canDelete: false,
+        $canRead: true,
+        $canEdit: false,
+        $canDelete: false,
       },
     ]);
 
     const editableOnly = await db.all(
-      app.todos.where({ _canEdit: true }).select("title", "_canEdit").orderBy("title", "asc"),
+      app.todos.where({ $canEdit: true }).select("title", "$canEdit").orderBy("title", "asc"),
     );
 
     expect(editableOnly).toEqual([
       {
         id: editableId,
         title: "Draft docs",
-        _canEdit: true,
+        $canEdit: true,
       },
     ]);
 
     const readableOnly = await db.all(
-      app.todos.where({ _canRead: true }).select("title", "_canRead").orderBy("title", "asc"),
+      app.todos.where({ $canRead: true }).select("title", "$canRead").orderBy("title", "asc"),
     );
 
     expect(readableOnly).toEqual([
       {
         id: editableId,
         title: "Draft docs",
-        _canRead: true,
+        $canRead: true,
       },
       {
         id: lockedId,
         title: "Shipped docs",
-        _canRead: true,
+        $canRead: true,
       },
     ]);
 
     const deletableOnly = await db.all(
-      app.todos.where({ _canDelete: true }).select("title", "_canDelete").orderBy("title", "asc"),
+      app.todos.where({ $canDelete: true }).select("title", "$canDelete").orderBy("title", "asc"),
     );
 
     expect(deletableOnly).toEqual([
       {
         id: editableId,
         title: "Draft docs",
-        _canDelete: true,
+        $canDelete: true,
       },
     ]);
   });

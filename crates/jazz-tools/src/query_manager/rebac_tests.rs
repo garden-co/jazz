@@ -1860,7 +1860,7 @@ fn magic_columns_reactively_track_update_and_delete_permissions() {
 
     let query = qm
         .query("protected")
-        .select(&["data", "_canRead", "_canEdit", "_canDelete"])
+        .select(&["data", "$canRead", "$canEdit", "$canDelete"])
         .build();
     let sub_id = qm
         .subscribe_with_session(query, Some(Session::new("alice")), None)
@@ -1919,9 +1919,9 @@ fn magic_columns_reactively_track_update_and_delete_permissions() {
         &[Value::Text("updated".into())],
         Some(&Session::new("alice")),
     )
-    .expect("magic _canEdit should match actual update permission");
+    .expect("magic $canEdit should match actual update permission");
     qm.delete_with_session(&mut storage, protected.row_id, Some(&Session::new("alice")))
-        .expect("magic _canDelete should match actual delete permission");
+        .expect("magic $canDelete should match actual delete permission");
 }
 
 #[test]
@@ -1938,7 +1938,7 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
 
     let projected_query = qm
         .query("protected")
-        .select(&["data", "_canRead", "_canEdit", "_canDelete"])
+        .select(&["data", "$canRead", "$canEdit", "$canDelete"])
         .build();
     let projected_sub = qm
         .subscribe_with_session(projected_query, None, None)
@@ -1968,7 +1968,7 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
 
     let filtered_query = qm
         .query("protected")
-        .filter_eq("_canDelete", Value::Boolean(true))
+        .filter_eq("$canDelete", Value::Boolean(true))
         .build();
     let filtered_sub = qm
         .subscribe_with_session(filtered_query, Some(Session::new("alice")), None)
