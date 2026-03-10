@@ -178,8 +178,7 @@ export class SubscriptionsOrchestrator {
     options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const normalizedOptions = normalizeQueryOptions(options);
-    const key = `${this.config.appId}:${serializeQueryOptions(normalizedOptions)}:${query._build()}`;
+    const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
       options,
@@ -342,29 +341,9 @@ export class SubscriptionsOrchestrator {
   }
 }
 
-function normalizeQueryOptions(options?: QueryOptions): QueryOptions | undefined {
-  if (!options) {
-    return undefined;
-  }
-
-  const normalized: QueryOptions = {};
-
-  if (options.tier !== undefined) {
-    normalized.tier = options.tier;
-  }
-  if (options.localUpdates !== undefined && options.localUpdates !== "immediate") {
-    normalized.localUpdates = options.localUpdates;
-  }
-  if (options.propagation !== undefined && options.propagation !== "full") {
-    normalized.propagation = options.propagation;
-  }
-
-  return Object.keys(normalized).length > 0 ? normalized : undefined;
-}
-
 function serializeQueryOptions(options?: QueryOptions): string {
   if (!options) {
-    return "default";
+    return "{}";
   }
 
   return JSON.stringify(options);

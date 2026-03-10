@@ -208,25 +208,6 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U07b makeQueryKey reuses the default key for empty/default-equivalent options", async () => {
-    const harness = createUnitHarness("app-so-u07b");
-    const query = makeQuery();
-
-    try {
-      const defaultKey = harness.manager.makeQueryKey(query);
-      const emptyKey = harness.manager.makeQueryKey(query, {});
-      const normalizedKey = harness.manager.makeQueryKey(query, {
-        localUpdates: "immediate",
-        propagation: "full",
-      });
-
-      expect(emptyKey).toBe(defaultKey);
-      expect(normalizedKey).toBe(defaultKey);
-    } finally {
-      await harness.manager.shutdown();
-    }
-  });
-
   it("SO-U07c makeQueryKey changes when localUpdates or propagation changes", async () => {
     const harness = createUnitHarness("app-so-u07c");
     const query = makeQuery();
@@ -258,8 +239,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
   it("SO-U09 getCacheEntry returns stable identity for same key", async () => {
     const harness = createUnitHarness();
     try {
-      const options = { localUpdates: "immediate" } satisfies QueryOptions;
-      const key = harness.manager.makeQueryKey(makeQuery(), options);
+      const key = harness.manager.makeQueryKey(makeQuery(), {});
       const first = harness.manager.getCacheEntry<Todo>(key);
       const second = harness.manager.getCacheEntry<Todo>(
         harness.manager.makeQueryKey(makeQuery(), {}),
