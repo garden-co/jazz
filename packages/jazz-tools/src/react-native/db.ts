@@ -2,7 +2,6 @@ import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import { Db as RuntimeDb, type DbConfig as RuntimeDbConfig } from "../runtime/db.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
-import { analyzeRelations } from "../codegen/relation-analyzer.js";
 
 export interface DbConfig extends RuntimeDbConfig {
   dataPath?: string;
@@ -21,12 +20,13 @@ export class Db extends RuntimeDb {
     const key = JSON.stringify(schema);
 
     if (!this.nativeClients.has(key)) {
+      const tier = this.nativeConfig.tier ?? "worker";
       const runtime = createJazzRnRuntime({
         schema,
         appId: this.nativeConfig.appId,
         env: this.nativeConfig.env,
         userBranch: this.nativeConfig.userBranch,
-        tier: this.nativeConfig.tier,
+        tier,
         dataPath: this.nativeConfig.dataPath,
       });
 
@@ -41,7 +41,7 @@ export class Db extends RuntimeDb {
         localAuthMode: this.nativeConfig.localAuthMode,
         localAuthToken: this.nativeConfig.localAuthToken,
         adminSecret: this.nativeConfig.adminSecret,
-        tier: this.nativeConfig.tier,
+        tier,
         defaultDurabilityTier: "worker",
       });
 

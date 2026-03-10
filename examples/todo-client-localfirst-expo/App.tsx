@@ -11,6 +11,10 @@ import {
 } from "react-native";
 import { TodoList } from "./src/TodoList";
 
+declare const process: {
+  env: Record<string, string | undefined>;
+};
+
 type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 type LocalAuthMode = Extract<JazzProviderClientConfig["localAuthMode"], "anonymous" | "demo">;
 
@@ -23,13 +27,47 @@ const defaultServerUrl = Platform.select({
 });
 
 const defaultAppId = "00000000-0000-0000-0000-000000000002";
-const envVars = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
-  ?.env;
-const envAppId = envVars?.EXPO_PUBLIC_JAZZ_APP_ID;
-const envServerUrl = envVars?.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const envAdminSecret = envVars?.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
-const envLocalMode = envVars?.EXPO_PUBLIC_JAZZ_LOCAL_MODE;
-const envLocalToken = envVars?.EXPO_PUBLIC_JAZZ_LOCAL_TOKEN;
+type ExpoPublicEnvKey =
+  | "EXPO_PUBLIC_JAZZ_APP_ID"
+  | "EXPO_PUBLIC_JAZZ_SERVER_URL"
+  | "EXPO_PUBLIC_JAZZ_ADMIN_SECRET"
+  | "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
+  | "EXPO_PUBLIC_JAZZ_LOCAL_TOKEN";
+
+const runtimeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+  .process?.env;
+
+function readExpoPublicEnv(key: ExpoPublicEnvKey): string | undefined {
+  // Keep direct process.env access so Expo can statically inline values at bundle time.
+  const bundledValue =
+    key === "EXPO_PUBLIC_JAZZ_APP_ID"
+      ? typeof process !== "undefined"
+        ? process.env.EXPO_PUBLIC_JAZZ_APP_ID
+        : undefined
+      : key === "EXPO_PUBLIC_JAZZ_SERVER_URL"
+        ? typeof process !== "undefined"
+          ? process.env.EXPO_PUBLIC_JAZZ_SERVER_URL
+          : undefined
+        : key === "EXPO_PUBLIC_JAZZ_ADMIN_SECRET"
+          ? typeof process !== "undefined"
+            ? process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET
+            : undefined
+          : key === "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
+            ? typeof process !== "undefined"
+              ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_MODE
+              : undefined
+            : typeof process !== "undefined"
+              ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_TOKEN
+              : undefined;
+
+  return bundledValue ?? runtimeEnv?.[key];
+}
+
+const envAppId = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_APP_ID");
+const envServerUrl = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_SERVER_URL");
+const envAdminSecret = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_ADMIN_SECRET");
+const envLocalMode = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_LOCAL_MODE");
+const envLocalToken = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_LOCAL_TOKEN");
 
 const syntheticAuthCache = new Map<string, ReturnType<typeof getActiveSyntheticAuth>>();
 
