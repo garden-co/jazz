@@ -891,7 +891,7 @@ async fn run_w4_cold_start(
     progress(format!("W4 start cycles={}", cycles));
 
     for i in 0..cycles {
-        progress(format!("W4 cycle {}/{}", i + 1, cycles));
+        report_loop_progress("W4 cycles", i, cycles);
         let cycle_temp = tempfile::tempdir()?;
         let cycle_data_dir = cycle_temp.path().join("db");
         copy_dir_recursive(&data_dir, &cycle_data_dir)?;

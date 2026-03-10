@@ -225,6 +225,21 @@ interface ScenarioResult {
 
 const TARGET_TIMING_WINDOW_MS = 40;
 const MAX_BATCHED_TIMING_REPEATS = 64;
+const CI_BROWSER_LIMITS = {
+  w1OperationCount: 1200,
+  w4Cycles: 25,
+  b1InsertCount: 4096,
+  b1UpdateCount: 4096,
+  b1DeleteCount: 4096,
+  b2RequestCount: 768,
+  b3Cycles: 12,
+  b3LargeMultiplier: 8,
+  b4MaxSubscribers: 128,
+  b4Rounds: 12,
+  b5ReadRequests: 160,
+  b5UpdateAttempts: 120,
+  b6UpdateCount: 12000,
+} as const;
 
 const schema = (schemaJson as { tables: WasmSchema }).tables;
 const profile = profileJson as unknown as ProfileConfig;
@@ -618,7 +633,7 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 }
 
 async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<ScenarioResult> {
-  const operationCount = Math.min(w1.operation_count, 60);
+  const operationCount = Math.min(w1.operation_count, CI_BROWSER_LIMITS.w1OperationCount);
   progressLog(`W1 start operations=${operationCount}`);
   const rng = new Lcg(w1.seed ^ config.seed);
   const weights = w1.mix.map((x) => x.weight);
@@ -860,7 +875,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
   const dbName = uniqueDbName("w4");
   const appId = benchmarkAppId("w4");
-  const cycles = Math.min(w4.reopen_cycles, 3);
+  const cycles = Math.min(w4.reopen_cycles, CI_BROWSER_LIMITS.w4Cycles);
   progressLog(`W4 start cycles=${cycles}`);
   let db: Db | null = null;
   const latencies: number[] = [];
@@ -924,9 +939,12 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
   const appId = benchmarkAppId("b1");
   const dbName = uniqueDbName("b1");
   const rng = new Lcg(b1.seed ^ config.seed);
-  const insertCount = Math.min(b1.insert_count, 96);
-  const updateCount = Math.min(b1.update_count, 96);
-  const deleteCount = Math.min(b1.delete_count, insertCount);
+  const insertCount = Math.min(b1.insert_count, CI_BROWSER_LIMITS.b1InsertCount);
+  const updateCount = Math.min(b1.update_count, CI_BROWSER_LIMITS.b1UpdateCount);
+  const deleteCount = Math.min(
+    Math.min(b1.delete_count, CI_BROWSER_LIMITS.b1DeleteCount),
+    insertCount,
+  );
   const insertedCommentIds: string[] = [];
   const latencies: Record<string, number[]> = {};
   const opCounts: Record<string, number> = {};
@@ -1015,7 +1033,7 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
   const appId = benchmarkAppId("b2");
   const dbName = uniqueDbName("b2");
   const rng = new Lcg(b2.seed ^ config.seed);
-  const requestCount = Math.min(b2.request_count, 160);
+  const requestCount = Math.min(b2.request_count, CI_BROWSER_LIMITS.b2RequestCount);
   const weights = b2.mix.map((x) => x.weight);
   const latencies: Record<string, number[]> = {};
   const opCounts: Record<string, number> = {};
@@ -1115,8 +1133,11 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
 async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
   const appId = benchmarkAppId("b3");
   const dbName = uniqueDbName("b3");
-  const cycles = Math.min(b3.reopen_cycles, 4);
-  const largeConfig = scaledLargeProfile(config, b3.large_multiplier);
+  const cycles = Math.min(b3.reopen_cycles, CI_BROWSER_LIMITS.b3Cycles);
+  const largeConfig = scaledLargeProfile(
+    config,
+    Math.min(b3.large_multiplier, CI_BROWSER_LIMITS.b3LargeMultiplier),
+  );
   progressLog(
     `B3 start cycles=${cycles} tasks=${largeConfig.tasks} comments=${largeConfig.comments}`,
   );
@@ -1190,8 +1211,10 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B4 start");
   const appId = benchmarkAppId("b4");
   const dbName = uniqueDbName("b4");
-  const subscriberCounts = b4.subscriber_counts.map((x) => Math.max(1, Math.min(40, x)));
-  const rounds = Math.min(b4.rounds, 8);
+  const subscriberCounts = b4.subscriber_counts.map((x) =>
+    Math.max(1, Math.min(CI_BROWSER_LIMITS.b4MaxSubscribers, x)),
+  );
+  const rounds = Math.min(b4.rounds, CI_BROWSER_LIMITS.b4Rounds);
   const timeoutMs = Math.min(b4.timeout_seconds, 30) * 1000;
   const fanoutDeliveryLatencies: number[] = [];
   const operationSummaries: Record<string, OpSummary> = {};
@@ -1654,8 +1677,8 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   const dbPrefix = uniqueDbName("b5");
   const rng = new Lcg(b5.seed ^ config.seed);
   const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
-  const reads = Math.min(b5.read_request_count, 160);
-  const updates = Math.min(b5.update_attempt_count, 120);
+  const reads = Math.min(b5.read_request_count, CI_BROWSER_LIMITS.b5ReadRequests);
+  const updates = Math.min(b5.update_attempt_count, CI_BROWSER_LIMITS.b5UpdateAttempts);
   const latencies: Record<string, number[]> = {};
   const documentTable = tableProxy<PermissionDocumentRow, Omit<PermissionDocumentRow, "id">>(
     "documents",
@@ -2014,7 +2037,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   const appId = benchmarkAppId("b6");
   const dbName = uniqueDbName("b6");
   const rng = new Lcg(b6.seed ^ config.seed);
-  const updateCount = Math.min(b6.update_count, 300);
+  const updateCount = Math.min(b6.update_count, CI_BROWSER_LIMITS.b6UpdateCount);
   const latencies: number[] = [];
   let measuredUpdates = 0;
   let db: Db | null = null;
