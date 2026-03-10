@@ -1,4 +1,5 @@
 import {
+  ActiveQuerySubscriptionTrace,
   JazzClient,
   DurabilityTier,
   QueryExecutionOptions,
@@ -43,9 +44,13 @@ type PendingRequest = {
 };
 
 type DevToolsPortListener = () => void;
+type ActiveQuerySubscriptionsListener = (
+  subscriptions: readonly ActiveQuerySubscriptionTrace[],
+) => void;
 
 const devtoolsPortDisconnectListeners = new Set<DevToolsPortListener>();
 const devtoolsPortConnectListeners = new Set<DevToolsPortListener>();
+const activeQuerySubscriptionsListeners = new Set<ActiveQuerySubscriptionsListener>();
 
 let devtoolsPort: any | null = null;
 let announcedBootstrap: DevToolsBootstrap | null = null;
@@ -54,6 +59,16 @@ const pendingRequests = new Map<string, PendingRequest>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 const pendingSubscriptionBridgeIds = new Map<number, string>();
 let nextSubscriptionHandle = 1;
+let activeQuerySubscriptions: ActiveQuerySubscriptionTrace[] = [];
+
+function cloneActiveQuerySubscriptions(
+  subscriptions: readonly ActiveQuerySubscriptionTrace[],
+): ActiveQuerySubscriptionTrace[] {
+  return subscriptions.map((subscription) => ({
+    ...subscription,
+    branches: [...subscription.branches],
+  }));
+}
 
 function randomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -77,6 +92,13 @@ function notifyDevtoolsPortConnected(): void {
 function notifyDevtoolsPortDisconnected(): void {
   for (const listener of devtoolsPortDisconnectListeners) {
     listener();
+  }
+}
+
+function notifyActiveQuerySubscriptionsChanged(): void {
+  const snapshot = cloneActiveQuerySubscriptions(activeQuerySubscriptions);
+  for (const listener of activeQuerySubscriptionsListeners) {
+    listener(snapshot);
   }
 }
 
@@ -253,6 +275,22 @@ async function ensureDevtoolsPort(): Promise<any> {
       return;
     }
 
+    if (
+      eventEnvelope.channel === DEVTOOLS_BRIDGE_CHANNEL &&
+      eventEnvelope.kind === "event" &&
+      eventEnvelope.event === DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED
+    ) {
+      const payload = eventEnvelope.payload as
+        | DevtoolsEventPayloadByEvent[typeof DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED]
+        | undefined;
+      if (!payload || !Array.isArray(payload.subscriptions)) {
+        return;
+      }
+      activeQuerySubscriptions = cloneActiveQuerySubscriptions(payload.subscriptions);
+      notifyActiveQuerySubscriptionsChanged();
+      return;
+    }
+
     const responseEnvelope = message as Partial<DevtoolsResponseEnvelope>;
     if (
       responseEnvelope.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
@@ -291,9 +329,11 @@ async function ensureDevtoolsPort(): Promise<any> {
     pendingSubscriptionCallbacks.clear();
     pendingSubscriptionBridgeIds.clear();
     nextSubscriptionHandle = 1;
+    activeQuerySubscriptions = [];
     devtoolsPort = null;
     announcedBootstrap = null;
     announcePromise = null;
+    notifyActiveQuerySubscriptionsChanged();
     notifyDevtoolsPortDisconnected();
   };
 
@@ -365,6 +405,10 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
           wasmSchema: result.wasmSchema as WasmSchema,
           dbConfig: sanitizeDbConfigForBridge(result.dbConfig as DbConfig)!,
         };
+        activeQuerySubscriptions = cloneActiveQuerySubscriptions(
+          await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS, {}),
+        );
+        notifyActiveQuerySubscriptionsChanged();
         return announcedBootstrap;
       } catch {
         await wait(ANNOUNCE_POLL_INTERVAL_MS);
@@ -406,6 +450,20 @@ export function onDevToolsPortConnect(listener: DevToolsPortListener): () => voi
   devtoolsPortConnectListeners.add(listener);
   return () => {
     devtoolsPortConnectListeners.delete(listener);
+  };
+}
+
+export function getActiveQuerySubscriptions(): ActiveQuerySubscriptionTrace[] {
+  return cloneActiveQuerySubscriptions(activeQuerySubscriptions);
+}
+
+export function onActiveQuerySubscriptionsChange(
+  listener: ActiveQuerySubscriptionsListener,
+): () => void {
+  activeQuerySubscriptionsListeners.add(listener);
+  listener(getActiveQuerySubscriptions());
+  return () => {
+    activeQuerySubscriptionsListeners.delete(listener);
   };
 }
 

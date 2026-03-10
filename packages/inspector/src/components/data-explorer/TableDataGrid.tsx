@@ -73,7 +73,10 @@ export function TableDataGrid() {
       (delta) => {
         setRows(delta.all);
       },
-      { propagation: queryPropagation },
+      {
+        propagation: queryPropagation,
+        visibility: "hidden_from_live_query_list",
+      },
     );
 
     return () => {

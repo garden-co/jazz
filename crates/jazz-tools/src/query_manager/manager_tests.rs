@@ -7393,6 +7393,101 @@ fn server_pushes_new_matches() {
 }
 
 #[test]
+fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
+    use crate::sync_manager::{
+        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+    };
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let repeated_query = server_qm.query("users").build();
+    let repeated_query_json = serde_json::to_string(&repeated_query).unwrap();
+    let filtered_query = server_qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+
+    let client_a = ClientId::new();
+    let client_b = ClientId::new();
+    let client_c = ClientId::new();
+    for client_id in [client_a, client_b, client_c] {
+        server_qm.sync_manager_mut().add_client(client_id);
+    }
+
+    for (client_id, query_id, query, propagation) in [
+        (
+            client_a,
+            QueryId(1),
+            repeated_query.clone(),
+            QueryPropagation::Full,
+        ),
+        (
+            client_b,
+            QueryId(2),
+            repeated_query.clone(),
+            QueryPropagation::Full,
+        ),
+        (
+            client_c,
+            QueryId(3),
+            repeated_query.clone(),
+            QueryPropagation::LocalOnly,
+        ),
+        (
+            client_c,
+            QueryId(4),
+            filtered_query.clone(),
+            QueryPropagation::Full,
+        ),
+    ] {
+        server_qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id,
+                query: Box::new(query),
+                session: None,
+                propagation,
+            },
+        });
+    }
+
+    server_qm.process(&mut storage);
+
+    let telemetry = server_qm.server_subscription_telemetry();
+    assert_eq!(telemetry.len(), 3);
+    assert!(telemetry.iter().any(|group| {
+        group.count == 2 && group.propagation == QueryPropagation::Full && group.table == "users"
+    }));
+    assert!(
+        telemetry
+            .iter()
+            .any(|group| { group.count == 1 && group.propagation == QueryPropagation::LocalOnly })
+    );
+    assert!(
+        telemetry
+            .iter()
+            .any(|group| { group.count == 1 && group.query.contains("\"name\"") })
+    );
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_b),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(2),
+        },
+    });
+    server_qm.process(&mut storage);
+
+    let telemetry_after_unsubscribe = server_qm.server_subscription_telemetry();
+    assert!(telemetry_after_unsubscribe.iter().any(|group| {
+        group.count == 1
+            && group.propagation == QueryPropagation::Full
+            && group.query == repeated_query_json
+    }));
+}
+
+#[test]
 fn server_does_not_push_non_matching() {
     use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
     use uuid::Uuid;

@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
@@ -201,6 +204,17 @@ pub enum LocalUpdates {
     Deferred,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServerSubscriptionTelemetryGroup {
+    #[serde(rename = "groupKey")]
+    pub group_key: String,
+    pub count: usize,
+    pub table: String,
+    pub query: String,
+    pub branches: Vec<String>,
+    pub propagation: QueryPropagation,
+}
+
 /// Update for a query subscription.
 #[derive(Debug, Clone)]
 pub struct QueryUpdate {
@@ -321,6 +335,31 @@ pub struct QueryManager {
 }
 
 impl QueryManager {
+    pub fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
+        let mut groups: HashMap<String, ServerSubscriptionTelemetryGroup> = HashMap::new();
+
+        for subscription in self.server_subscriptions.values() {
+            let query = serde_json::to_string(&subscription.query)
+                .unwrap_or_else(|_| "{\"error\":\"query serialization failed\"}".to_string());
+            let propagation = propagation_label(subscription.propagation);
+            let group_key = subscription_group_key(&query, &subscription.branches, propagation);
+
+            groups
+                .entry(group_key.clone())
+                .and_modify(|group| group.count += 1)
+                .or_insert_with(|| ServerSubscriptionTelemetryGroup {
+                    group_key,
+                    count: 1,
+                    table: subscription.query.table.as_str().to_string(),
+                    query,
+                    branches: subscription.branches.clone(),
+                    propagation: subscription.propagation,
+                });
+        }
+
+        groups.into_values().collect()
+    }
+
     /// Create a new QueryManager with empty schema context.
     ///
     /// Call `set_current_schema()` to initialize the current schema before queries.
@@ -1318,4 +1357,24 @@ impl QueryManager {
         let total = indices + subscriptions + policy_checks;
         (indices, subscriptions, policy_checks, total)
     }
+}
+
+fn propagation_label(propagation: QueryPropagation) -> &'static str {
+    match propagation {
+        QueryPropagation::Full => "full",
+        QueryPropagation::LocalOnly => "local-only",
+    }
+}
+
+fn subscription_group_key(query: &str, branches: &[String], propagation: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(query.as_bytes());
+    hasher.update([0]);
+    hasher.update(propagation.as_bytes());
+    hasher.update([0]);
+    for branch in branches {
+        hasher.update(branch.as_bytes());
+        hasher.update([0]);
+    }
+    hex::encode(hasher.finalize())
 }

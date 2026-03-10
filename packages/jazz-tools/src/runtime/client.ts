@@ -93,10 +93,19 @@ export interface Runtime {
 export type DurabilityTier = "worker" | "edge" | "global";
 export type LocalUpdatesMode = "immediate" | "deferred";
 export type QueryPropagation = "full" | "local-only";
+export type QueryVisibility = "public" | "hidden_from_live_query_list";
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
+  visibility?: QueryVisibility;
+}
+
+export interface ResolvedQueryExecutionOptions {
+  tier: DurabilityTier;
+  localUpdates: LocalUpdatesMode;
+  propagation: QueryPropagation;
+  visibility: QueryVisibility;
 }
 
 export interface WriteDurabilityOptions {
@@ -135,6 +144,39 @@ export interface QueryInput {
   _build(): string;
   /** Optional schema metadata available on generated QueryBuilder objects. */
   _schema?: WasmSchema;
+}
+
+type QueryExecutionDefaultsContext = {
+  serverUrl?: string;
+  defaultDurabilityTier?: DurabilityTier;
+};
+
+export function resolveDefaultDurabilityTier(
+  context: QueryExecutionDefaultsContext,
+): DurabilityTier {
+  if (context.defaultDurabilityTier) {
+    return context.defaultDurabilityTier;
+  }
+
+  if (isBrowserRuntime()) {
+    return "worker";
+  }
+
+  // In non-browser environments, default to edge when connected to a server.
+  // For local/in-memory runtimes without a server, keep worker semantics.
+  return context.serverUrl ? "edge" : "worker";
+}
+
+export function resolveEffectiveQueryExecutionOptions(
+  context: QueryExecutionDefaultsContext,
+  options?: QueryExecutionOptions,
+): ResolvedQueryExecutionOptions {
+  return {
+    tier: options?.tier ?? resolveDefaultDurabilityTier(context),
+    localUpdates: options?.localUpdates ?? "immediate",
+    propagation: options?.propagation ?? "full",
+    visibility: options?.visibility ?? "public",
+  };
 }
 
 type RelationIrNode = Record<string, unknown>;
@@ -299,20 +341,6 @@ function getScheduler(): (task: () => void) => void {
   }
 
   return queueMicrotask;
-}
-
-function resolveDefaultDurabilityTier(context: AppContext): DurabilityTier {
-  if (context.defaultDurabilityTier) {
-    return context.defaultDurabilityTier;
-  }
-
-  if (isBrowserRuntime()) {
-    return "worker";
-  }
-
-  // In non-browser environments, default to edge when connected to a server.
-  // For local/in-memory runtimes without a server, keep worker semantics.
-  return context.serverUrl ? "edge" : "worker";
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
@@ -744,11 +772,10 @@ export class JazzClient {
   }
 
   private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
-    return {
-      tier: options?.tier ?? this.defaultDurabilityTier,
-      localUpdates: options?.localUpdates ?? "immediate",
-      propagation: options?.propagation ?? "full",
-    };
+    return resolveEffectiveQueryExecutionOptions(
+      { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
+      options,
+    );
   }
 
   private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
