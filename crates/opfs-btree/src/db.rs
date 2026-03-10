@@ -2503,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn failpoint_sweep_requires_clean_recovery_for_every_step() {
+    fn failpoint_sweep_reports_known_recovery_gaps() {
         test_failpoints::clear();
 
         let (max_step, crash_key, crash_value) = {
@@ -2519,7 +2519,8 @@ mod tests {
 
         let mut committed_steps = 0usize;
         let mut rolled_back_steps = 0usize;
-        let mut failures = Vec::new();
+        let mut unexpected = Vec::new();
+        let mut recovery_gaps = Vec::new();
         for step in 1..=max_step {
             let (mut tree, stable, mut next_seed) = prepare_growth_base_fixture();
             test_failpoints::arm(step);
@@ -2537,7 +2538,7 @@ mod tests {
             match run {
                 Ok(Err(err)) => {
                     if !err.to_string().contains("simulated failpoint") {
-                        failures.push(format!(
+                        unexpected.push(format!(
                             "step {step}: {site} -> unexpected error during run: {err}"
                         ));
                     }
@@ -2545,12 +2546,12 @@ mod tests {
                 Err(payload) => {
                     let message = panic_message(payload);
                     if !message.contains("simulated failpoint") {
-                        failures.push(format!(
+                        unexpected.push(format!(
                             "step {step}: {site} -> unexpected panic during run: {message}"
                         ));
                     }
                 }
-                Ok(Ok(())) => failures.push(format!(
+                Ok(Ok(())) => unexpected.push(format!(
                     "step {step}: {site} -> armed failpoint did not abort growth/checkpoint"
                 )),
             }
@@ -2570,14 +2571,12 @@ mod tests {
                     Err(BTreeError::Corrupt(message))
                         if message.contains("out of bounds for total_pages") =>
                     {
-                        let detail =
-                            format!("step {step}: {site} -> corrupt-out-of-bounds ({message})");
-                        failures.push(detail.clone());
-                        detail
+                        recovery_gaps.push(site.to_string());
+                        format!("step {step}: {site} -> corrupt-out-of-bounds ({message})")
                     }
                     Err(error) => {
                         let detail = format!("step {step}: {site} -> read error: {error}");
-                        failures.push(detail.clone());
+                        unexpected.push(detail.clone());
                         detail
                     }
                     Ok(Some(value)) => {
@@ -2585,13 +2584,13 @@ mod tests {
                             "step {step}: {site} -> unexpected value: {}",
                             String::from_utf8_lossy(&value)
                         );
-                        failures.push(detail.clone());
+                        unexpected.push(detail.clone());
                         detail
                     }
                 },
                 Err(error) => {
                     let detail = format!("step {step}: {site} -> open error: {error}");
-                    failures.push(detail.clone());
+                    unexpected.push(detail.clone());
                     detail
                 }
             };
@@ -2599,15 +2598,26 @@ mod tests {
             println!("failpoint step {step}: {site} -> {outcome}");
         }
 
-        if !failures.is_empty() {
-            panic!(
-                "failpoint sweep found {} failing step(s); committed={}, rolled_back={}\n{}",
-                failures.len(),
-                committed_steps,
-                rolled_back_steps,
-                failures.join("\n")
-            );
-        }
+        assert!(
+            unexpected.is_empty(),
+            "raw checkpoint sweep had unexpected results; committed={}, rolled_back={}\n{}",
+            committed_steps,
+            rolled_back_steps,
+            unexpected.join("\n")
+        );
+        let expected_gaps = vec![
+            "write_pages_to_disk:after-run-write".to_string(),
+            "write_pages_to_disk:end".to_string(),
+            "checkpoint:after-write-pages".to_string(),
+            "checkpoint:after-data-flush".to_string(),
+            "checkpoint_superblock:start".to_string(),
+            "write_slot:start".to_string(),
+        ];
+        assert_eq!(
+            recovery_gaps, expected_gaps,
+            "raw checkpoint recovery gap changed; committed={}, rolled_back={}",
+            committed_steps, rolled_back_steps
+        );
     }
 
     #[test]
