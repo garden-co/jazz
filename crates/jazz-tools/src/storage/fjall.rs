@@ -10,7 +10,7 @@ use std::path::Path;
 
 use fjall::{
     KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
-    SingleWriterWriteTx, Snapshot,
+    SingleWriterWriteTx,
 };
 
 use crate::commit::{Commit, CommitId};
@@ -31,9 +31,13 @@ use super::{
 
 const KEYSPACE_NAME: &str = "jazz";
 
-pub struct FjallStorage {
+struct FjallInner {
     db: SingleWriterTxDatabase,
     keyspace: SingleWriterTxKeyspace,
+}
+
+pub struct FjallStorage {
+    inner: RefCell<Option<FjallInner>>,
 }
 
 impl FjallStorage {
@@ -46,15 +50,20 @@ impl FjallStorage {
         let keyspace = db
             .keyspace(KEYSPACE_NAME, KeyspaceCreateOptions::default)
             .map_err(|e| StorageError::IoError(format!("fjall keyspace: {e}")))?;
-        Ok(Self { db, keyspace })
+        Ok(Self {
+            inner: RefCell::new(Some(FjallInner { db, keyspace })),
+        })
     }
 
-    fn read_tx(&self) -> Snapshot {
-        self.db.read_tx()
-    }
-
-    fn write_tx(&self) -> SingleWriterWriteTx<'_> {
-        self.db.write_tx()
+    fn with_inner<T>(
+        &self,
+        f: impl FnOnce(&FjallInner) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let inner = self.inner.borrow();
+        let inner = inner
+            .as_ref()
+            .ok_or_else(|| StorageError::IoError("fjall storage already closed".to_string()))?;
+        f(inner)
     }
 
     fn commit_tx(tx: SingleWriterWriteTx<'_>) -> Result<(), StorageError> {
@@ -178,19 +187,23 @@ impl Storage for FjallStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let mut tx = self.write_tx();
-        create_object_core(id, metadata, |key, value| {
-            Self::set_on_tx(&mut tx, &self.keyspace, key, value)
-        })?;
-        Self::commit_tx(tx)
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            create_object_core(id, metadata, |key, value| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, value)
+            })?;
+            Self::commit_tx(tx)
+        })
     }
 
     fn load_object_metadata(
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let tx = self.read_tx();
-        load_object_metadata_core(id, |key| Self::read_get(&tx, &self.keyspace, key))
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_object_metadata_core(id, |key| Self::read_get(&tx, &inner.keyspace, key))
+        })
     }
 
     fn load_branch(
@@ -198,13 +211,15 @@ impl Storage for FjallStorage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
-        let tx = self.read_tx();
-        load_branch_core(
-            object_id,
-            branch,
-            |key| Self::read_get(&tx, &self.keyspace, key),
-            |prefix| Self::scan_prefix(&tx, &self.keyspace, prefix),
-        )
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_branch_core(
+                object_id,
+                branch,
+                |key| Self::read_get(&tx, &inner.keyspace, key),
+                |prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix),
+            )
+        })
     }
 
     fn append_commit(
@@ -213,15 +228,17 @@ impl Storage for FjallStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        let tx = RefCell::new(self.write_tx());
-        append_commit_core(
-            object_id,
-            branch,
-            commit,
-            |key| Self::read_get_cell(&tx, &self.keyspace, key),
-            |key, value| Self::set_on_cell(&tx, &self.keyspace, key, value),
-        )?;
-        Self::commit_tx(tx.into_inner())
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            append_commit_core(
+                object_id,
+                branch,
+                commit,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
     }
 
     fn delete_commit(
@@ -230,16 +247,18 @@ impl Storage for FjallStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        let tx = RefCell::new(self.write_tx());
-        delete_commit_core(
-            object_id,
-            branch,
-            commit_id,
-            |key| Self::read_get_cell(&tx, &self.keyspace, key),
-            |key, value| Self::set_on_cell(&tx, &self.keyspace, key, value),
-            |key| Self::delete_on_cell(&tx, &self.keyspace, key),
-        )?;
-        Self::commit_tx(tx.into_inner())
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            delete_commit_core(
+                object_id,
+                branch,
+                commit_id,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
     }
 
     fn set_branch_tails(
@@ -248,15 +267,17 @@ impl Storage for FjallStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        let tx = RefCell::new(self.write_tx());
-        set_branch_tails_core(
-            object_id,
-            branch,
-            tails,
-            |key, value| Self::set_on_cell(&tx, &self.keyspace, key, value),
-            |key| Self::delete_on_cell(&tx, &self.keyspace, key),
-        )?;
-        Self::commit_tx(tx.into_inner())
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            set_branch_tails_core(
+                object_id,
+                branch,
+                tails,
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
     }
 
     fn store_ack_tier(
@@ -264,14 +285,16 @@ impl Storage for FjallStorage {
         commit_id: CommitId,
         tier: DurabilityTier,
     ) -> Result<(), StorageError> {
-        let tx = RefCell::new(self.write_tx());
-        store_ack_tier_core(
-            commit_id,
-            tier,
-            |key| Self::read_get_cell(&tx, &self.keyspace, key),
-            |key, value| Self::set_on_cell(&tx, &self.keyspace, key, value),
-        )?;
-        Self::commit_tx(tx.into_inner())
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            store_ack_tier_core(
+                commit_id,
+                tier,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
     }
 
     fn append_catalogue_manifest_op(
@@ -279,14 +302,16 @@ impl Storage for FjallStorage {
         app_id: ObjectId,
         op: CatalogueManifestOp,
     ) -> Result<(), StorageError> {
-        let tx = RefCell::new(self.write_tx());
-        append_catalogue_manifest_op_core(
-            app_id,
-            op,
-            |key| Self::read_get_cell(&tx, &self.keyspace, key),
-            |key, value| Self::set_on_cell(&tx, &self.keyspace, key, value),
-        )?;
-        Self::commit_tx(tx.into_inner())
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            append_catalogue_manifest_op_core(
+                app_id,
+                op,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
     }
 
     fn append_catalogue_manifest_ops(
@@ -294,23 +319,27 @@ impl Storage for FjallStorage {
         app_id: ObjectId,
         ops: &[CatalogueManifestOp],
     ) -> Result<(), StorageError> {
-        let tx = RefCell::new(self.write_tx());
-        append_catalogue_manifest_ops_core(
-            app_id,
-            ops,
-            |key| Self::read_get_cell(&tx, &self.keyspace, key),
-            |key, value| Self::set_on_cell(&tx, &self.keyspace, key, value),
-        )?;
-        Self::commit_tx(tx.into_inner())
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            append_catalogue_manifest_ops_core(
+                app_id,
+                ops,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
     }
 
     fn load_catalogue_manifest(
         &self,
         app_id: ObjectId,
     ) -> Result<Option<CatalogueManifest>, StorageError> {
-        let tx = self.read_tx();
-        load_catalogue_manifest_core(app_id, |prefix| {
-            Self::scan_prefix(&tx, &self.keyspace, prefix)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_catalogue_manifest_core(app_id, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
         })
     }
 
@@ -322,11 +351,13 @@ impl Storage for FjallStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        let mut tx = self.write_tx();
-        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-            Self::set_on_tx(&mut tx, &self.keyspace, key, bytes)
-        })?;
-        Self::commit_tx(tx)
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, bytes)
+            })?;
+            Self::commit_tx(tx)
+        })
     }
 
     fn index_remove(
@@ -337,11 +368,13 @@ impl Storage for FjallStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        let mut tx = self.write_tx();
-        index_remove_core(table, column, branch, value, row_id, |key| {
-            Self::delete_on_tx(&mut tx, &self.keyspace, key)
-        })?;
-        Self::commit_tx(tx)
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            index_remove_core(table, column, branch, value, row_id, |key| {
+                Self::delete_on_tx(&mut tx, &inner.keyspace, key)
+            })?;
+            Self::commit_tx(tx)
+        })
     }
 
     fn index_lookup(
@@ -351,10 +384,13 @@ impl Storage for FjallStorage {
         branch: &str,
         value: &Value,
     ) -> Vec<ObjectId> {
-        let tx = self.read_tx();
-        index_lookup_core(table, column, branch, value, |prefix| {
-            Self::scan_prefix_keys(&tx, &self.keyspace, prefix)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Ok(index_lookup_core(table, column, branch, value, |prefix| {
+                Self::scan_prefix_keys(&tx, &inner.keyspace, prefix)
+            }))
         })
+        .unwrap_or_default()
     }
 
     fn index_range(
@@ -365,21 +401,34 @@ impl Storage for FjallStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let tx = self.read_tx();
-        index_range_core(table, column, branch, start, end, |start_key, end_key| {
-            Self::scan_key_range(&tx, &self.keyspace, start_key, end_key)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Ok(index_range_core(
+                table,
+                column,
+                branch,
+                start,
+                end,
+                |start_key, end_key| Self::scan_key_range(&tx, &inner.keyspace, start_key, end_key),
+            ))
         })
+        .unwrap_or_default()
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let tx = self.read_tx();
-        index_scan_all_core(table, column, branch, |prefix| {
-            Self::scan_prefix_keys(&tx, &self.keyspace, prefix)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Ok(index_scan_all_core(table, column, branch, |prefix| {
+                Self::scan_prefix_keys(&tx, &inner.keyspace, prefix)
+            }))
         })
+        .unwrap_or_default()
     }
 
     fn flush(&self) {
-        let _ = self.db.persist(PersistMode::SyncData);
+        if let Some(inner) = self.inner.borrow().as_ref() {
+            let _ = inner.db.persist(PersistMode::SyncData);
+        }
     }
 
     fn flush_wal(&self) {
@@ -387,9 +436,16 @@ impl Storage for FjallStorage {
     }
 
     fn close(&self) -> Result<(), StorageError> {
-        self.db
+        let Some(inner) = self.inner.borrow_mut().take() else {
+            return Ok(());
+        };
+
+        inner
+            .db
             .persist(PersistMode::SyncData)
-            .map_err(|e| StorageError::IoError(format!("fjall persist on close: {e}")))
+            .map_err(|e| StorageError::IoError(format!("fjall persist on close: {e}")))?;
+        drop(inner);
+        Ok(())
     }
 }
 
@@ -415,6 +471,17 @@ mod tests {
         let db_path = temp_dir.path().join("test.fjall");
         let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
         (temp_dir, storage)
+    }
+
+    #[test]
+    fn close_releases_lock_for_reopen() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.fjall");
+        let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        storage.close().unwrap();
+
+        let reopened = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        reopened.close().unwrap();
     }
 
     #[test]
