@@ -12,12 +12,18 @@ import {
 import { useAll, useDb, useSession } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema/app";
 
-function toTestIdSegment(value: string): string {
-  return value
+function normalizeText(value: string | null | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
+function toTestIdSegment(value: string | null | undefined, fallback: string): string {
+  const normalized = normalizeText(value)
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+
+  return normalized || fallback;
 }
 
 export function TodoList() {
@@ -25,7 +31,7 @@ export function TodoList() {
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const [title, setTitle] = useState("");
 
-  const trimmedFilterTitle = filterTitle.trim();
+  const trimmedFilterTitle = normalizeText(filterTitle).trim();
   let todosQuery = app.todos;
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
@@ -40,14 +46,15 @@ export function TodoList() {
   const sessionUserId = session?.user_id ?? null;
 
   const addTodo = () => {
-    const trimmed = title.trim();
+    const trimmed = normalizeText(title).trim();
     if (!trimmed || !sessionUserId) return;
     db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
   const renderItem: ListRenderItem<Todo> = ({ item }) => {
-    const titleId = toTestIdSegment(item.title);
+    const displayTitle = normalizeText(item.title).trim() || "Untitled todo";
+    const titleId = toTestIdSegment(item.title, item.id);
 
     return (
       <View style={styles.todoRow}>
@@ -57,7 +64,7 @@ export function TodoList() {
           onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
         />
         <View style={styles.todoTextWrap}>
-          <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
+          <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{displayTitle}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
         <Pressable
@@ -76,7 +83,7 @@ export function TodoList() {
       <View style={styles.inputRow}>
         <TextInput
           testID="todo-input"
-          value={title}
+          value={normalizeText(title)}
           onChangeText={setTitle}
           placeholder="What needs to be done?"
           style={styles.input}
@@ -95,7 +102,7 @@ export function TodoList() {
 
       <View style={styles.filters}>
         <TextInput
-          value={filterTitle}
+          value={normalizeText(filterTitle)}
           onChangeText={setFilterTitle}
           placeholder="Filter by title (contains)"
           style={styles.filterInput}
