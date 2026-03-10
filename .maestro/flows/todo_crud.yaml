@@ -1,0 +1,50 @@
+appId: dev.jazz.todo.localfirstexpo
+---
+- launchApp
+
+- extendedWaitUntil:
+    visible: "Todos"
+    timeout: 4000
+
+- assertVisible: "Todos"
+
+- tapOn:
+    id: "todo-input"
+- inputText: "buy milk"
+- tapOn:
+    id: "todo-add"
+
+- tapOn:
+    id: "todo-input"
+- inputText: "pay rent"
+- tapOn:
+    id: "todo-add"
+
+- tapOn:
+    id: "todo-input"
+- inputText: "book trip"
+- tapOn:
+    id: "todo-add"
+
+- assertVisible: "buy milk"
+- assertVisible: "pay rent"
+- assertVisible: "book trip"
+
+- tapOn:
+    id: "todo-toggle-pay-rent"
+- tapOn:
+    id: "todo-filter-done-only"
+- assertVisible: "pay rent"
+- assertNotVisible: "buy milk"
+- assertNotVisible: "book trip"
+
+- tapOn:
+    id: "todo-filter-done-only"
+- tapOn:
+    id: "todo-delete-buy-milk"
+- tapOn:
+    id: "todo-delete-book-trip"
+
+- assertVisible: "pay rent"
+- assertNotVisible: "buy milk"
+- assertNotVisible: "book trip"
