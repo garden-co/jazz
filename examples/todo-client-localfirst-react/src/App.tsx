@@ -26,6 +26,7 @@ function defaultConfig(
     appId,
     env: "dev",
     userBranch: "main",
+    devMode: true,
     localAuthMode: active.localAuthMode,
     localAuthToken: active.localAuthToken,
     ...overrides,

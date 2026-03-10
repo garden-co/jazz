@@ -4,14 +4,21 @@ import { MemoryRouter } from "react-router";
 import { InspectorLayout } from "./index";
 
 const mockUseStandaloneContext = vi.fn();
+const mockUseDevtoolsContext = vi.fn();
 
 vi.mock("../../contexts/standalone-context.js", () => ({
   useStandaloneContext: () => mockUseStandaloneContext(),
 }));
 
+vi.mock("../../contexts/devtools-context.js", () => ({
+  useDevtoolsContext: () => mockUseDevtoolsContext(),
+}));
+
 describe("InspectorLayout", () => {
   beforeEach(() => {
     mockUseStandaloneContext.mockReset();
+    mockUseDevtoolsContext.mockReset();
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "extension" });
   });
 
   afterEach(() => {
@@ -40,6 +47,7 @@ describe("InspectorLayout", () => {
     expect(screen.getByRole("combobox")).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-a" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-b" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Live Query" })).not.toBeNull();
   });
 
   it("calls schema selection handler when dropdown value changes", () => {
@@ -109,5 +117,18 @@ describe("InspectorLayout", () => {
 
     expect(screen.queryByRole("button", { name: "Reset connection" })).toBeNull();
     expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("hides the live query tab in standalone mode", () => {
+    mockUseStandaloneContext.mockReturnValue(null);
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "standalone" });
+
+    render(
+      <MemoryRouter initialEntries={["/data-explorer"]}>
+        <InspectorLayout />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("link", { name: "Live Query" })).toBeNull();
   });
 });

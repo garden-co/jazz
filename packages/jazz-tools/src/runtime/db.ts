@@ -21,6 +21,8 @@ import {
   type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
+  type QueryVisibility,
+  resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
@@ -77,6 +79,8 @@ export interface DbConfig {
   dbName?: string;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
+  /** Enable runtime tracing for DevTools-only diagnostics. */
+  devMode?: boolean;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -100,6 +104,68 @@ export interface QueryBuilder<T> {
 
 export interface QueryOptions extends QueryExecutionOptions {
   propagation?: QueryPropagation;
+}
+
+export interface ActiveQuerySubscriptionTrace {
+  id: string;
+  query: string;
+  table: string;
+  branches: string[];
+  tier: DurabilityTier;
+  createdAt: string;
+  stack?: string;
+}
+
+type ActiveQuerySubscriptionTraceListener = (
+  traces: readonly ActiveQuerySubscriptionTrace[],
+) => void;
+
+type StoredActiveQuerySubscriptionTrace = ActiveQuerySubscriptionTrace & {
+  visibility: QueryVisibility;
+};
+
+type RuntimeQueryTracePayload = {
+  table: string;
+  branches: string[];
+};
+
+function trimSubscriptionTraceStack(stack: string | undefined): string | undefined {
+  if (!stack) {
+    return stack;
+  }
+
+  const lines = stack.split("\n");
+  if (lines.length <= 1) {
+    return stack;
+  }
+
+  const isInternalFrame = (line: string): boolean => {
+    return (
+      line.includes("Db.registerActiveQuerySubscriptionTrace") ||
+      line.includes("Db.subscribeAll") ||
+      line.includes("SubscriptionsOrchestrator.ensureEntryForKey") ||
+      line.includes("SubscriptionsOrchestrator.getCacheEntry") ||
+      line.includes("/node_modules/") ||
+      line.includes("react-dom") ||
+      line.includes("react_stack_bottom_frame")
+    );
+  };
+
+  const firstOriginIndex = lines.findIndex((line, index) => index > 0 && !isInternalFrame(line));
+  if (firstOriginIndex <= 0) {
+    return stack;
+  }
+
+  return [lines[0], ...lines.slice(firstOriginIndex)].join("\n");
+}
+
+function cloneActiveQuerySubscriptionTrace(
+  trace: ActiveQuerySubscriptionTrace,
+): ActiveQuerySubscriptionTrace {
+  return {
+    ...trace,
+    branches: [...trace.branches],
+  };
 }
 
 function resolveHopOutputTable(
@@ -283,6 +349,13 @@ export class Db {
   private workerReconfigure: Promise<void> = Promise.resolve();
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
+  private readonly activeQuerySubscriptionTraces = new Map<
+    string,
+    StoredActiveQuerySubscriptionTrace
+  >();
+  private readonly activeQuerySubscriptionTraceListeners =
+    new Set<ActiveQuerySubscriptionTraceListener>();
+  private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
   };
@@ -879,6 +952,20 @@ export class Db {
     return structuredClone(this.config);
   }
 
+  getActiveQuerySubscriptions(): ActiveQuerySubscriptionTrace[] {
+    return Array.from(this.activeQuerySubscriptionTraces.values())
+      .filter((trace) => trace.visibility === "public")
+      .map(({ visibility: _visibility, ...trace }) => cloneActiveQuerySubscriptionTrace(trace));
+  }
+
+  onActiveQuerySubscriptionsChange(listener: ActiveQuerySubscriptionTraceListener): () => void {
+    this.activeQuerySubscriptionTraceListeners.add(listener);
+    listener(this.getActiveQuerySubscriptions());
+    return () => {
+      this.activeQuerySubscriptionTraceListeners.delete(listener);
+    };
+  }
+
   /**
    * Insert a new row into a table without waiting for durability.
    *
@@ -1133,9 +1220,11 @@ export class Db {
       session,
       options,
     );
+    const traceId = this.registerActiveQuerySubscriptionTrace(wasmQuery, builtQuery.table, options);
 
     // Return unsubscribe function
     return () => {
+      this.unregisterActiveQuerySubscriptionTrace(traceId);
       client.unsubscribe(subId);
       manager.clear();
     };
@@ -1147,6 +1236,7 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.clearActiveQuerySubscriptionTraces();
     this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
     this.activeRemoteLeaderTabId = null;
@@ -1183,6 +1273,86 @@ export class Db {
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
+    }
+  }
+
+  private notifyActiveQuerySubscriptionTraceListeners(): void {
+    if (this.activeQuerySubscriptionTraceListeners.size === 0) {
+      return;
+    }
+
+    const snapshot = this.getActiveQuerySubscriptions();
+    for (const listener of this.activeQuerySubscriptionTraceListeners) {
+      listener(snapshot);
+    }
+  }
+
+  private registerActiveQuerySubscriptionTrace(
+    queryJson: string,
+    fallbackTable: string,
+    options?: QueryOptions,
+  ): string | null {
+    if (this.config.devMode === false) {
+      return null;
+    }
+
+    const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
+    const payload = this.parseRuntimeQueryTracePayload(queryJson, fallbackTable);
+    const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
+
+    this.activeQuerySubscriptionTraces.set(traceId, {
+      id: traceId,
+      query: queryJson,
+      table: payload.table,
+      branches: payload.branches,
+      tier: resolvedOptions.tier,
+      createdAt: new Date().toISOString(),
+      stack: trimSubscriptionTraceStack(new Error().stack),
+      visibility: resolvedOptions.visibility ?? "public",
+    });
+    this.notifyActiveQuerySubscriptionTraceListeners();
+
+    return traceId;
+  }
+
+  private unregisterActiveQuerySubscriptionTrace(traceId: string | null): void {
+    if (!traceId) {
+      return;
+    }
+    if (!this.activeQuerySubscriptionTraces.delete(traceId)) {
+      return;
+    }
+    this.notifyActiveQuerySubscriptionTraceListeners();
+  }
+
+  private clearActiveQuerySubscriptionTraces(): void {
+    if (this.activeQuerySubscriptionTraces.size === 0) {
+      return;
+    }
+    this.activeQuerySubscriptionTraces.clear();
+    this.notifyActiveQuerySubscriptionTraceListeners();
+  }
+
+  private parseRuntimeQueryTracePayload(
+    queryJson: string,
+    fallbackTable: string,
+  ): RuntimeQueryTracePayload {
+    try {
+      const parsed = JSON.parse(queryJson) as { table?: unknown; branches?: unknown };
+      const table = typeof parsed.table === "string" ? parsed.table : fallbackTable;
+      const branches = Array.isArray(parsed.branches)
+        ? parsed.branches.filter((branch): branch is string => typeof branch === "string")
+        : [];
+
+      return {
+        table,
+        branches: branches.length > 0 ? branches : [this.config.userBranch ?? "main"],
+      };
+    } catch {
+      return {
+        table: fallbackTable,
+        branches: [this.config.userBranch ?? "main"],
+      };
     }
   }
 }

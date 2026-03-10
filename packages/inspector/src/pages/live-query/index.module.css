@@ -1,15 +1,23 @@
 .container {
   height: 100%;
-  border: 1px solid #2a3341;
-  border-radius: 8px;
-  background: #151a24;
+  border: 1px solid #273344;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at top right, rgba(76, 99, 143, 0.2), transparent 28%),
+    linear-gradient(180deg, #141b25 0%, #0f141c 100%);
   padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow: hidden;
 }
 
 .header {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .title {
@@ -22,4 +30,123 @@
   margin: 0;
   color: #95a2b5;
   font-size: 14px;
+}
+
+.emptyState {
+  border: 1px dashed #36465d;
+  border-radius: 8px;
+  padding: 24px;
+  background: rgba(21, 27, 36, 0.8);
+}
+
+.emptyTitle {
+  margin: 0 0 8px;
+  color: #eef3fb;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.emptyText {
+  margin: 0;
+  color: #9ca8b9;
+  font-size: 14px;
+}
+
+.tableShell {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #2c394b;
+  border-radius: 8px;
+  background: rgba(17, 23, 31, 0.84);
+}
+
+.table {
+  width: 100%;
+  min-width: 960px;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid #253141;
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #18212d;
+  color: #9ca8b9;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sortableHeader {
+  cursor: pointer;
+}
+
+.sortableHeader:hover {
+  color: #dde6f3;
+}
+
+.table td {
+  color: #dbe1ea;
+  font-size: 13px;
+}
+
+.codeBlock {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b8d2ff;
+}
+
+.stackDetails {
+  min-width: 280px;
+}
+
+.stackSummary {
+  cursor: pointer;
+  color: #ffd48a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.stackSummary:hover {
+  color: #ffe2ad;
+}
+
+.stackDetails[open] .stackSummary {
+  margin-bottom: 8px;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #9ca8b9;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.filterSelect {
+  min-width: 160px;
+  border: 1px solid #36465d;
+  background: #202937;
+  color: #d6dde7;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
 }
