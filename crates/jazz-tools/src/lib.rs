@@ -1,3 +1,4 @@
+pub mod binding_support;
 pub mod commit;
 pub mod metadata;
 pub mod object;
