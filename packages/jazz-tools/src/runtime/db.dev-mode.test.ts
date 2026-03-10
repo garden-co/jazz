@@ -68,6 +68,7 @@ describe("Db devMode active query tracing", () => {
     expect(trace?.table).toBe("todos");
     expect(trace?.branches).toEqual(["feature-branch"]);
     expect(trace?.tier).toBe("worker");
+    expect(trace?.propagation).toBe("full");
     expect(trace?.query).toContain('"table":"todos"');
     expect(trace?.stack).toContain("Error");
     expect(observed.at(-1)).toHaveLength(1);
@@ -94,9 +95,13 @@ describe("Db devMode active query tracing", () => {
 
   it("records explicit tier overrides", async () => {
     const db = await makeDb(true);
-    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined, { tier: "edge" });
+    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined, {
+      tier: "edge",
+      propagation: "local-only",
+    });
 
     expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("edge");
+    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("local-only");
 
     unsubscribe();
   });

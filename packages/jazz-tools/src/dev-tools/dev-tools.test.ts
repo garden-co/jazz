@@ -104,6 +104,7 @@ describe("attachDevTools active query subscription bridge", () => {
         table: "todos",
         branches: ["main"],
         tier: "worker",
+        propagation: "full",
         createdAt: "2026-03-10T10:00:00.000Z",
         stack: "Error\n  at demo",
       },
