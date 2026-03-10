@@ -15,12 +15,7 @@ rust-version = "1.91.0"
 name = "fjall"
 version = "3.0.2"
 build = false
-include = [
-    "src/**/*",
-    "LICENSE-APACHE",
-    "LICENSE-MIT",
-    "README.md",
-]
+include = ["src/**/*", "LICENSE-APACHE", "LICENSE-MIT", "README.md"]
 autolib = false
 autobins = false
 autoexamples = false
@@ -29,18 +24,8 @@ autobenches = false
 description = "Log-structured, embeddable key-value storage engine"
 homepage = "https://github.com/fjall-rs/fjall"
 readme = "README.md"
-keywords = [
-    "database",
-    "key-value",
-    "lsm",
-    "rocksdb",
-    "leveldb",
-]
-categories = [
-    "data-structures",
-    "database-implementations",
-    "algorithms",
-]
+keywords = ["database", "key-value", "lsm", "rocksdb", "leveldb"]
+categories = ["data-structures", "database-implementations", "algorithms"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fjall-rs/fjall"
 
@@ -51,10 +36,7 @@ denylist = ["__internal_whitebox"]
 __internal_whitebox = []
 bytes_1 = ["lsm-tree/bytes_1"]
 default = ["lz4"]
-lz4 = [
-    "lsm-tree/lz4",
-    "dep:lz4_flex",
-]
+lz4 = ["lsm-tree/lz4", "dep:lz4_flex"]
 metrics = ["lsm-tree/metrics"]
 
 [lib]
