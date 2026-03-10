@@ -28,6 +28,7 @@ function parseArgs(argv) {
     prefix: "realistic_phase1/",
     out: "bench-out/native/criterion_realistic_phase1.json",
     summaryMd: "bench-out/native/criterion_realistic_phase1.md",
+    allowEmpty: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -51,6 +52,10 @@ function parseArgs(argv) {
     }
     if (arg === "--summary-md") {
       out.summaryMd = argv[++i] ?? "";
+      continue;
+    }
+    if (arg === "--allow-empty") {
+      out.allowEmpty = true;
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -153,6 +158,8 @@ function estimateMetrics(benchmarkJson, estimatesJson) {
   return {
     mean_ns: meanNs,
     mean_ms: meanNs / 1e6,
+    mean_ci_low_ms: Number.isFinite(ciLowerNs) ? ciLowerNs / 1e6 : null,
+    mean_ci_high_ms: Number.isFinite(ciUpperNs) ? ciUpperNs / 1e6 : null,
     iter_per_sec: iterPerSec,
     iter_per_sec_ci_low: iterPerSecCiLow,
     iter_per_sec_ci_high: iterPerSecCiHigh,
@@ -182,6 +189,11 @@ function buildSummaryMarkdown(exportJson) {
   lines.push(`SHA: ${exportJson.metadata.sha ?? "unknown"}`);
   lines.push(`Branch: ${exportJson.metadata.branch ?? "unknown"}`);
   lines.push("");
+  if (exportJson.benchmarks.length === 0) {
+    lines.push("_No Criterion benchmarks completed within the configured CI budget._");
+    lines.push("");
+    return `${lines.join("\n")}\n`;
+  }
   lines.push("| Benchmark | elems/s | mean ms | Scenario |");
   lines.push("|---|---:|---:|---|");
   for (const bench of exportJson.benchmarks) {
@@ -203,14 +215,16 @@ function main() {
   const outFile = path.resolve(args.out);
   const summaryFile = path.resolve(args.summaryMd);
 
-  if (!fs.existsSync(criterionRoot)) {
+  if (!fs.existsSync(criterionRoot) && !args.allowEmpty) {
     fail(`Criterion root does not exist: ${criterionRoot}`);
   }
 
   const scenarioMap = loadScenarios(scenariosDir);
-  const files = walkFiles(criterionRoot).filter((file) =>
-    file.endsWith(`${path.sep}new${path.sep}benchmark.json`),
-  );
+  const files = fs.existsSync(criterionRoot)
+    ? walkFiles(criterionRoot).filter((file) =>
+        file.endsWith(`${path.sep}new${path.sep}benchmark.json`),
+      )
+    : [];
 
   const benchmarks = [];
   for (const benchmarkFile of files) {
@@ -245,7 +259,7 @@ function main() {
   }
 
   benchmarks.sort((a, b) => a.full_id.localeCompare(b.full_id));
-  if (benchmarks.length === 0) {
+  if (benchmarks.length === 0 && !args.allowEmpty) {
     fail(`No Criterion benchmark data found under ${criterionRoot} with prefix '${args.prefix}'`);
   }
 

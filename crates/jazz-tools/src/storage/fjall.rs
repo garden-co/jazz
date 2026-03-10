@@ -1,30 +1,17 @@
-//! SurrealKV-backed Storage implementation.
+//! Fjall-backed Storage implementation.
 //!
-//! Uses a single SurrealKV tree with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, catalogue manifest ops, and indices.
-//!
-//! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
-//!
-//! ```text
-//! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
-//! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
-//! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
-//! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
-//! ```
+//! Uses one transactional Fjall database with a single keyspace and the same
+//! UTF-8 key encoding scheme as the other native backends.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::path::Path;
-use std::sync::OnceLock;
-use std::sync::mpsc;
 
-use surrealkv::{
-    Durability as SurrealDurability, LSMIterator, Mode as SurrealMode,
-    Transaction as SurrealTransaction, Tree as SurrealTree, TreeBuilder as SurrealTreeBuilder,
+use fjall::{
+    KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
+    SingleWriterWriteTx,
 };
-use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
@@ -33,7 +20,6 @@ use crate::sync_manager::DurabilityTier;
 
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
-    key_codec::increment_bytes,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
@@ -43,217 +29,170 @@ use super::{
     },
 };
 
-/// Minimum memtable size for SurrealKV.
-const MIN_MEMTABLE_SIZE: usize = 4 * 1024 * 1024;
+const KEYSPACE_NAME: &str = "jazz";
 
-/// A dedicated key used for `flush()` durability barriers.
-const FLUSH_MARKER_KEY: &str = "sys:flush_marker";
-
-pub struct SurrealKvStorage {
-    tree: SurrealTree,
-    runtime: &'static TokioRuntime,
+struct FjallInner {
+    db: SingleWriterTxDatabase,
+    keyspace: SingleWriterTxKeyspace,
 }
 
-trait EventualTxnAdapter {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError>;
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError>;
-    fn delete(&self, key: &str) -> Result<(), StorageError>;
+pub struct FjallStorage {
+    inner: RefCell<Option<FjallInner>>,
 }
 
-impl EventualTxnAdapter for std::cell::RefCell<SurrealTransaction> {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        let txn = self.borrow();
-        SurrealKvStorage::txn_get(&txn, key)
-    }
-
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-        let mut txn = self.borrow_mut();
-        SurrealKvStorage::txn_set(&mut txn, key, value)
-    }
-
-    fn delete(&self, key: &str) -> Result<(), StorageError> {
-        let mut txn = self.borrow_mut();
-        SurrealKvStorage::txn_delete(&mut txn, key)
-    }
-}
-
-impl SurrealKvStorage {
-    /// Open a file-backed SurrealKvStorage at the given path.
+impl FjallStorage {
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let runtime = shared_runtime();
-
-        let tree = {
-            let _guard = runtime.enter();
-            SurrealTreeBuilder::new()
-                .with_path(path.as_ref().to_path_buf())
-                .with_level_count(4)
-                .with_max_memtable_size(cache_size_bytes.max(MIN_MEMTABLE_SIZE))
-                .without_compression()
-                .build()
-                .map_err(|e| StorageError::IoError(format!("surrealkv open: {}", e)))?
-        };
-
-        Ok(Self { tree, runtime })
+        let db = SingleWriterTxDatabase::builder(path.as_ref())
+            .cache_size(cache_size_bytes as u64)
+            .manual_journal_persist(true)
+            .open()
+            .map_err(|e| StorageError::IoError(format!("fjall open: {e}")))?;
+        let keyspace = db
+            .keyspace(KEYSPACE_NAME, KeyspaceCreateOptions::default)
+            .map_err(|e| StorageError::IoError(format!("fjall keyspace: {e}")))?;
+        Ok(Self {
+            inner: RefCell::new(Some(FjallInner { db, keyspace })),
+        })
     }
 
-    fn begin_read_txn(&self) -> Result<SurrealTransaction, StorageError> {
-        let _guard = self.runtime.enter();
-        self.tree
-            .begin_with_mode(SurrealMode::ReadOnly)
-            .map_err(|e| StorageError::IoError(format!("surrealkv begin read txn: {}", e)))
-    }
-
-    fn begin_write_txn(
+    fn with_inner<T>(
         &self,
-        durability: SurrealDurability,
-    ) -> Result<SurrealTransaction, StorageError> {
-        let _guard = self.runtime.enter();
-        self.tree
-            .begin()
-            .map(|txn| txn.with_durability(durability))
-            .map_err(|e| StorageError::IoError(format!("surrealkv begin write txn: {}", e)))
+        f: impl FnOnce(&FjallInner) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let inner = self.inner.borrow();
+        let inner = inner
+            .as_ref()
+            .ok_or_else(|| StorageError::IoError("fjall storage already closed".to_string()))?;
+        f(inner)
     }
 
-    /// Close the underlying SurrealKV tree and release lock files.
-    pub fn close(&self) -> Result<(), StorageError> {
-        let tree = self.tree.clone();
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.runtime.spawn(async move {
-            let _ = tx.send(tree.close().await);
-        });
-        let close_result = rx
-            .recv()
-            .map_err(|e| StorageError::IoError(format!("surrealkv close recv: {}", e)))?;
-        close_result.map_err(|e| StorageError::IoError(format!("surrealkv close: {}", e)))
+    fn commit_tx(tx: SingleWriterWriteTx<'_>) -> Result<(), StorageError> {
+        tx.commit()
+            .map_err(|e| StorageError::IoError(format!("fjall commit: {e}")))
     }
 
-    fn commit_txn(&self, txn: &mut SurrealTransaction) -> Result<(), StorageError> {
-        futures::executor::block_on(async { txn.commit().await })
-            .map_err(|e| StorageError::IoError(format!("surrealkv commit: {}", e)))
-    }
-
-    fn txn_get(txn: &SurrealTransaction, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        txn.get(key.as_bytes())
-            .map_err(|e| StorageError::IoError(format!("surrealkv get: {}", e)))
-    }
-
-    fn txn_set(txn: &mut SurrealTransaction, key: &str, value: &[u8]) -> Result<(), StorageError> {
-        txn.set(key.as_bytes(), value)
-            .map_err(|e| StorageError::IoError(format!("surrealkv set: {}", e)))
-    }
-
-    fn txn_delete(txn: &mut SurrealTransaction, key: &str) -> Result<(), StorageError> {
-        txn.delete(key.as_bytes())
-            .map_err(|e| StorageError::IoError(format!("surrealkv delete: {}", e)))
-    }
-
-    fn with_eventual_write<R>(
-        &self,
-        op: impl FnOnce(&dyn EventualTxnAdapter) -> Result<R, StorageError>,
-    ) -> Result<R, StorageError> {
-        let txn = std::cell::RefCell::new(self.begin_write_txn(SurrealDurability::Eventual)?);
-        let output = op(&txn)?;
-        let mut txn = txn.into_inner();
-        self.commit_txn(&mut txn)?;
-        Ok(output)
+    fn read_get(
+        txn: &impl Readable,
+        keyspace: &SingleWriterTxKeyspace,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        txn.get(keyspace, key.as_bytes())
+            .map(|value| value.map(|value| value.to_vec()))
+            .map_err(|e| StorageError::IoError(format!("fjall get: {e}")))
     }
 
     fn scan_prefix(
-        txn: &SurrealTransaction,
+        txn: &impl Readable,
+        keyspace: &SingleWriterTxKeyspace,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        let mut end = prefix.as_bytes().to_vec();
-        increment_bytes(&mut end);
-        Self::scan_range(txn, prefix.as_bytes(), &end)
-    }
-
-    fn scan_range(
-        txn: &SurrealTransaction,
-        start: &[u8],
-        end: &[u8],
-    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        let mut iter = txn
-            .range(start, end)
-            .map_err(|e| StorageError::IoError(format!("surrealkv range: {}", e)))?;
-
         let mut out = Vec::new();
-        let mut has_more = iter
-            .seek_first()
-            .map_err(|e| StorageError::IoError(format!("surrealkv seek_first: {}", e)))?;
-
-        while has_more && iter.valid() {
-            let key = String::from_utf8(iter.key().user_key().to_vec())
-                .map_err(|e| StorageError::IoError(format!("surrealkv invalid key utf8: {}", e)))?;
-            let value = iter
-                .value()
-                .map_err(|e| StorageError::IoError(format!("surrealkv iter value: {}", e)))?;
-            out.push((key, value));
-            has_more = iter
-                .next()
-                .map_err(|e| StorageError::IoError(format!("surrealkv iter next: {}", e)))?;
+        for item in txn.prefix(keyspace, prefix.as_bytes()) {
+            let (key, value) = item
+                .into_inner()
+                .map_err(|e| StorageError::IoError(format!("fjall prefix item: {e}")))?;
+            let key = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("fjall invalid key utf8: {e}")))?;
+            out.push((key, value.to_vec()));
         }
-
         Ok(out)
     }
 
     fn scan_prefix_keys(
-        txn: &SurrealTransaction,
+        txn: &impl Readable,
+        keyspace: &SingleWriterTxKeyspace,
         prefix: &str,
     ) -> Result<Vec<String>, StorageError> {
-        Ok(Self::scan_prefix(txn, prefix)?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect())
+        let mut out = Vec::new();
+        for item in txn.prefix(keyspace, prefix.as_bytes()) {
+            let key = item
+                .key()
+                .map_err(|e| StorageError::IoError(format!("fjall prefix key: {e}")))?;
+            let key = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("fjall invalid key utf8: {e}")))?;
+            out.push(key);
+        }
+        Ok(out)
     }
 
     fn scan_key_range(
-        txn: &SurrealTransaction,
+        txn: &impl Readable,
+        keyspace: &SingleWriterTxKeyspace,
         start: &str,
         end: &str,
     ) -> Result<Vec<String>, StorageError> {
-        Ok(Self::scan_range(txn, start.as_bytes(), end.as_bytes())?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect())
-    }
-}
-
-impl Drop for SurrealKvStorage {
-    fn drop(&mut self) {
-        // If we're already inside a Tokio runtime, let SurrealKV's Tree::drop()
-        // schedule the async close itself.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return;
+        let mut out = Vec::new();
+        for item in txn.range(keyspace, start.as_bytes()..end.as_bytes()) {
+            let key = item
+                .key()
+                .map_err(|e| StorageError::IoError(format!("fjall range key: {e}")))?;
+            let key = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("fjall invalid key utf8: {e}")))?;
+            out.push(key);
         }
+        Ok(out)
+    }
 
-        // Best-effort close so lock files are released before drop.
-        let _ = self.close();
+    fn set_on_tx(
+        tx: &mut SingleWriterWriteTx<'_>,
+        keyspace: &SingleWriterTxKeyspace,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), StorageError> {
+        tx.insert(keyspace, key.as_bytes(), value);
+        Ok(())
+    }
+
+    fn delete_on_tx(
+        tx: &mut SingleWriterWriteTx<'_>,
+        keyspace: &SingleWriterTxKeyspace,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        tx.remove(keyspace, key.as_bytes());
+        Ok(())
+    }
+
+    fn read_get_cell(
+        tx: &RefCell<SingleWriterWriteTx<'_>>,
+        keyspace: &SingleWriterTxKeyspace,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let tx = tx.borrow();
+        Self::read_get(&*tx, keyspace, key)
+    }
+
+    fn set_on_cell(
+        tx: &RefCell<SingleWriterWriteTx<'_>>,
+        keyspace: &SingleWriterTxKeyspace,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut tx = tx.borrow_mut();
+        Self::set_on_tx(&mut tx, keyspace, key, value)
+    }
+
+    fn delete_on_cell(
+        tx: &RefCell<SingleWriterWriteTx<'_>>,
+        keyspace: &SingleWriterTxKeyspace,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        let mut tx = tx.borrow_mut();
+        Self::delete_on_tx(&mut tx, keyspace, key)
     }
 }
 
-fn shared_runtime() -> &'static TokioRuntime {
-    static RUNTIME: OnceLock<TokioRuntime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        TokioRuntimeBuilder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("build surrealkv shared runtime")
-    })
-}
-
-impl Storage for SurrealKvStorage {
-    // ================================================================
-    // Object storage
-    // ================================================================
-
+impl Storage for FjallStorage {
     fn create_object(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
-            create_object_core(id, metadata, |key, value| txn.set(key, value))
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            create_object_core(id, metadata, |key, value| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, value)
+            })?;
+            Self::commit_tx(tx)
         })
     }
 
@@ -261,8 +200,10 @@ impl Storage for SurrealKvStorage {
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        let txn = self.begin_read_txn()?;
-        load_object_metadata_core(id, |key| Self::txn_get(&txn, key))
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_object_metadata_core(id, |key| Self::read_get(&tx, &inner.keyspace, key))
+        })
     }
 
     fn load_branch(
@@ -270,13 +211,15 @@ impl Storage for SurrealKvStorage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
-        let txn = self.begin_read_txn()?;
-        load_branch_core(
-            object_id,
-            branch,
-            |key| Self::txn_get(&txn, key),
-            |prefix| Self::scan_prefix(&txn, prefix),
-        )
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_branch_core(
+                object_id,
+                branch,
+                |key| Self::read_get(&tx, &inner.keyspace, key),
+                |prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix),
+            )
+        })
     }
 
     fn append_commit(
@@ -285,14 +228,16 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
             append_commit_core(
                 object_id,
                 branch,
                 commit,
-                |key| txn.get(key),
-                |key, value| txn.set(key, value),
-            )
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
 
@@ -302,15 +247,17 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
             delete_commit_core(
                 object_id,
                 branch,
                 commit_id,
-                |key| txn.get(key),
-                |key, value| txn.set(key, value),
-                |key| txn.delete(key),
-            )
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
 
@@ -320,33 +267,33 @@ impl Storage for SurrealKvStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
             set_branch_tails_core(
                 object_id,
                 branch,
                 tails,
-                |key, value| txn.set(key, value),
-                |key| txn.delete(key),
-            )
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
-
-    // ================================================================
-    // Persistence ack storage
-    // ================================================================
 
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
         tier: DurabilityTier,
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
             store_ack_tier_core(
                 commit_id,
                 tier,
-                |key| txn.get(key),
-                |key, value| txn.set(key, value),
-            )
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
 
@@ -355,13 +302,15 @@ impl Storage for SurrealKvStorage {
         app_id: ObjectId,
         op: CatalogueManifestOp,
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
             append_catalogue_manifest_op_core(
                 app_id,
                 op,
-                |key| txn.get(key),
-                |key, value| txn.set(key, value),
-            )
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
 
@@ -370,13 +319,15 @@ impl Storage for SurrealKvStorage {
         app_id: ObjectId,
         ops: &[CatalogueManifestOp],
     ) -> Result<(), StorageError> {
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
             append_catalogue_manifest_ops_core(
                 app_id,
                 ops,
-                |key| txn.get(key),
-                |key, value| txn.set(key, value),
-            )
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
 
@@ -384,13 +335,13 @@ impl Storage for SurrealKvStorage {
         &self,
         app_id: ObjectId,
     ) -> Result<Option<CatalogueManifest>, StorageError> {
-        let txn = self.begin_read_txn()?;
-        load_catalogue_manifest_core(app_id, |prefix| Self::scan_prefix(&txn, prefix))
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_catalogue_manifest_core(app_id, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
     }
-
-    // ================================================================
-    // Index operations
-    // ================================================================
 
     fn index_insert(
         &mut self,
@@ -400,11 +351,12 @@ impl Storage for SurrealKvStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        self.with_eventual_write(|txn| {
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
             index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-                txn.set(key, bytes)
-            })
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, bytes)
+            })?;
+            Self::commit_tx(tx)
         })
     }
 
@@ -416,9 +368,12 @@ impl Storage for SurrealKvStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        self.with_eventual_write(|txn| {
-            index_remove_core(table, column, branch, value, row_id, |key| txn.delete(key))
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            index_remove_core(table, column, branch, value, row_id, |key| {
+                Self::delete_on_tx(&mut tx, &inner.keyspace, key)
+            })?;
+            Self::commit_tx(tx)
         })
     }
 
@@ -429,13 +384,13 @@ impl Storage for SurrealKvStorage {
         branch: &str,
         value: &Value,
     ) -> Vec<ObjectId> {
-        tracing::trace!(table, column, branch, "index_lookup");
-        let Ok(txn) = self.begin_read_txn() else {
-            return Vec::new();
-        };
-        index_lookup_core(table, column, branch, value, |prefix| {
-            Self::scan_prefix_keys(&txn, prefix)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Ok(index_lookup_core(table, column, branch, value, |prefix| {
+                Self::scan_prefix_keys(&tx, &inner.keyspace, prefix)
+            }))
         })
+        .unwrap_or_default()
     }
 
     fn index_range(
@@ -446,40 +401,51 @@ impl Storage for SurrealKvStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let Ok(txn) = self.begin_read_txn() else {
-            return Vec::new();
-        };
-        index_range_core(table, column, branch, start, end, |start_key, end_key| {
-            Self::scan_key_range(&txn, start_key, end_key)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Ok(index_range_core(
+                table,
+                column,
+                branch,
+                start,
+                end,
+                |start_key, end_key| Self::scan_key_range(&tx, &inner.keyspace, start_key, end_key),
+            ))
         })
+        .unwrap_or_default()
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let Ok(txn) = self.begin_read_txn() else {
-            return Vec::new();
-        };
-        index_scan_all_core(table, column, branch, |prefix| {
-            Self::scan_prefix_keys(&txn, prefix)
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Ok(index_scan_all_core(table, column, branch, |prefix| {
+                Self::scan_prefix_keys(&tx, &inner.keyspace, prefix)
+            }))
         })
+        .unwrap_or_default()
     }
 
     fn flush(&self) {
-        let _span = tracing::debug_span!("SurrealKvStorage::flush").entered();
-        let Ok(mut txn) = self.begin_write_txn(SurrealDurability::Immediate) else {
-            return;
-        };
-        if Self::txn_set(&mut txn, FLUSH_MARKER_KEY, b"1").is_ok() {
-            let _ = self.commit_txn(&mut txn);
+        if let Some(inner) = self.inner.borrow().as_ref() {
+            let _ = inner.db.persist(PersistMode::SyncData);
         }
     }
 
     fn flush_wal(&self) {
-        let _span = tracing::debug_span!("SurrealKvStorage::flush_wal").entered();
         self.flush();
     }
 
     fn close(&self) -> Result<(), StorageError> {
-        SurrealKvStorage::close(self)
+        let Some(inner) = self.inner.borrow_mut().take() else {
+            return Ok(());
+        };
+
+        inner
+            .db
+            .persist(PersistMode::SyncData)
+            .map_err(|e| StorageError::IoError(format!("fjall persist on close: {e}")))?;
+        drop(inner);
+        Ok(())
     }
 }
 
@@ -500,15 +466,26 @@ mod tests {
         }
     }
 
-    fn test_storage() -> (tempfile::TempDir, SurrealKvStorage) {
+    fn test_storage() -> (tempfile::TempDir, FjallStorage) {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.surrealkv");
-        let storage = SurrealKvStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        let db_path = temp_dir.path().join("test.fjall");
+        let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
         (temp_dir, storage)
     }
 
     #[test]
-    fn surrealkv_object_roundtrip() {
+    fn close_releases_lock_for_reopen() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.fjall");
+        let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        storage.close().unwrap();
+
+        let reopened = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        reopened.close().unwrap();
+    }
+
+    #[test]
+    fn fjall_object_roundtrip() {
         let (_temp_dir, mut storage) = test_storage();
 
         let id = ObjectId::new();
@@ -529,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn surrealkv_commit_roundtrip() {
+    fn fjall_commit_roundtrip() {
         let (_temp_dir, mut storage) = test_storage();
 
         let id = ObjectId::new();
@@ -564,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn surrealkv_index_ops() {
+    fn fjall_index_ops() {
         let (_temp_dir, mut storage) = test_storage();
 
         let row1 = ObjectId::new();
@@ -635,9 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn surrealkv_persistence() {
+    fn fjall_persistence() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("persist.surrealkv");
+        let db_path = temp_dir.path().join("persist.fjall");
 
         let id = ObjectId::new();
         let mut metadata = HashMap::new();
@@ -649,9 +626,8 @@ mod tests {
         let commit_content = b"persistent data";
         let branch = BranchName::new("main");
 
-        // Phase 1: Write data
         {
-            let mut storage = SurrealKvStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+            let mut storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
             storage.create_object(id, metadata.clone()).unwrap();
 
             let commit = make_commit(commit_content);
@@ -669,9 +645,8 @@ mod tests {
             storage.flush();
         }
 
-        // Phase 2: Reopen and verify
         {
-            let storage = SurrealKvStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+            let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
 
             let loaded_meta = storage.load_object_metadata(id).unwrap();
             assert_eq!(loaded_meta, Some(metadata));
@@ -688,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn surrealkv_catalogue_manifest_roundtrip() {
+    fn fjall_catalogue_manifest_roundtrip() {
         let (_temp_dir, mut storage) = test_storage();
         let app_id = ObjectId::new();
         let schema_object_id = ObjectId::new();

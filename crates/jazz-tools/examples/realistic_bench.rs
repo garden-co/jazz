@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::{
-    AppContext, AppId, ColumnType, JazzClient, ObjectId, PersistenceTier, QueryBuilder, Schema,
+    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema,
     SchemaBuilder, TableSchema, Value,
 };
 use serde::{Deserialize, Serialize};
@@ -55,13 +55,13 @@ struct DatasetProfile {
     hot_project_fraction: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskRecord {
     id: ObjectId,
     project_idx: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SeedState {
     users: Vec<ObjectId>,
     projects: Vec<ObjectId>,
@@ -100,6 +100,9 @@ struct Args {
     server_url: Option<String>,
     app_id: AppId,
     data_dir: Option<PathBuf>,
+    seed_state_path: Option<PathBuf>,
+    prepare_only: bool,
+    reuse_seed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +174,9 @@ fn parse_args() -> Result<Args, DynError> {
     let mut server_url: Option<String> = None;
     let mut app_id_raw: Option<String> = None;
     let mut data_dir: Option<PathBuf> = None;
+    let mut seed_state_path: Option<PathBuf> = None;
+    let mut prepare_only = false;
+    let mut reuse_seed = false;
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -194,6 +200,16 @@ fn parse_args() -> Result<Args, DynError> {
             "--data-dir" => {
                 let value = it.next().ok_or("--data-dir requires a value")?;
                 data_dir = Some(PathBuf::from(value));
+            }
+            "--seed-state" => {
+                let value = it.next().ok_or("--seed-state requires a value")?;
+                seed_state_path = Some(PathBuf::from(value));
+            }
+            "--prepare-only" => {
+                prepare_only = true;
+            }
+            "--reuse-seed" => {
+                reuse_seed = true;
             }
             "--help" | "-h" => {
                 print_help();
@@ -222,6 +238,9 @@ fn parse_args() -> Result<Args, DynError> {
         server_url,
         app_id,
         data_dir,
+        seed_state_path,
+        prepare_only,
+        reuse_seed,
     })
 }
 
@@ -239,6 +258,9 @@ Options:
   --server-url <url>   Optional server URL for sync scenarios (required for W3)
   --app-id <id|name>   App ID UUID or deterministic name (default: realistic-bench)
   --data-dir <path>    Persist benchmark files here instead of temp dir
+  --seed-state <path>  Persist or reuse serialized seeded dataset metadata
+  --prepare-only       Seed data and exit without running the scenario body
+  --reuse-seed         Reuse data-dir and --seed-state instead of reseeding
   -h, --help
 "
     );
@@ -247,6 +269,15 @@ Options:
 fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, DynError> {
     let raw = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), DynError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_vec_pretty(value)?;
+    fs::write(path, raw)?;
+    Ok(())
 }
 
 fn benchmark_schema() -> Schema {
@@ -350,7 +381,7 @@ async fn seed_dataset(
 
     for i in 0..profile.users {
         report_loop_progress("seed users", i, profile.users);
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "users",
                 vec![
@@ -364,7 +395,7 @@ async fn seed_dataset(
 
     for i in 0..profile.organizations {
         report_loop_progress("seed organizations", i, profile.organizations);
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "organizations",
                 vec![
@@ -380,7 +411,7 @@ async fn seed_dataset(
         report_loop_progress("seed memberships", i, profile.users);
         let org = organizations[i % organizations.len()];
         let user = users[i];
-        client
+        let _ = client
             .create(
                 "memberships",
                 vec![
@@ -395,7 +426,7 @@ async fn seed_dataset(
     for i in 0..profile.projects {
         report_loop_progress("seed projects", i, profile.projects);
         let org = organizations[i % organizations.len()];
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "projects",
                 vec![
@@ -414,7 +445,7 @@ async fn seed_dataset(
         report_loop_progress("seed tasks", i, profile.tasks);
         let project_idx = i % projects.len();
         let assignee_idx = i % users.len();
-        let id = client
+        let (id, _row_values) = client
             .create(
                 "tasks",
                 vec![
@@ -435,7 +466,7 @@ async fn seed_dataset(
         report_loop_progress("seed comments", i, profile.comments);
         let task_idx = i % tasks.len();
         let author = users[(i * 7) % users.len()];
-        client
+        let _ = client
             .create(
                 "task_comments",
                 vec![
@@ -453,7 +484,7 @@ async fn seed_dataset(
         report_loop_progress("seed task_watchers", task_idx, tasks.len());
         for w in 0..profile.watchers_per_task {
             let watcher = users[(task_idx + w) % users.len()];
-            client
+            let _ = client
                 .create(
                     "task_watchers",
                     vec![Value::Uuid(task.id), Value::Uuid(watcher)],
@@ -467,7 +498,7 @@ async fn seed_dataset(
         let task_idx = i % tasks.len();
         let task = &tasks[task_idx];
         let actor = users[(i * 11) % users.len()];
-        client
+        let _ = client
             .create(
                 "activity_events",
                 vec![
@@ -531,6 +562,23 @@ fn summarize_op(latencies_ms: &[f64]) -> OpSummary {
         p95_ms: at(0.95),
         p99_ms: at(0.99),
     }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), DynError> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+            fs::set_permissions(&dst_path, fs::metadata(&src_path)?.permissions())?;
+        }
+    }
+    Ok(())
 }
 
 fn choose_status(rng: &mut Lcg) -> &'static str {
@@ -726,7 +774,7 @@ async fn run_w3_offline_reconnect(
     let t_offline_start = Instant::now();
     for i in 0..offline_writes {
         let author = seed.users[rng.next_usize(seed.users.len())];
-        offline_client
+        let _ = offline_client
             .create(
                 "task_comments",
                 vec![
@@ -756,7 +804,7 @@ async fn run_w3_offline_reconnect(
             .filter_eq("task_id", Value::Uuid(target_task_id))
             .build();
         let rows = online_client
-            .query(query, Some(PersistenceTier::EdgeServer))
+            .query(query, Some(DurabilityTier::EdgeServer))
             .await?;
         observed_count = rows.len();
         polls += 1;
@@ -834,22 +882,21 @@ async fn run_w4_cold_start(
     data_dir: PathBuf,
     scenario: &ScenarioConfig,
     profile: &DatasetProfile,
+    seed: &SeedState,
 ) -> Result<BenchResult, DynError> {
     let cycles = scenario.reopen_cycles.unwrap_or(20);
-
-    let seeding_client = connect_client(app_id, data_dir.clone(), None).await?;
-    let seed = seed_dataset(&seeding_client, profile).await?;
     let hot_project = seed.projects[0];
-    seeding_client.shutdown().await?;
 
     let mut latencies = Vec::with_capacity(cycles);
-    let wall_start = Instant::now();
     progress(format!("W4 start cycles={}", cycles));
 
     for i in 0..cycles {
-        progress(format!("W4 cycle {}/{}", i + 1, cycles));
+        report_loop_progress("W4 cycles", i, cycles);
+        let cycle_temp = tempfile::tempdir()?;
+        let cycle_data_dir = cycle_temp.path().join("db");
+        copy_dir_recursive(&data_dir, &cycle_data_dir)?;
         let t0 = Instant::now();
-        let client = connect_client(app_id, data_dir.clone(), None).await?;
+        let client = connect_client(app_id, cycle_data_dir, None).await?;
         let query = QueryBuilder::new("tasks")
             .filter_eq("project_id", Value::Uuid(hot_project))
             .order_by_desc("updated_at")
@@ -859,9 +906,10 @@ async fn run_w4_cold_start(
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         latencies.push(elapsed_ms);
         client.shutdown().await?;
+        drop(cycle_temp);
     }
 
-    let wall_time_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
+    let wall_time_ms = latencies.iter().sum::<f64>();
     let mut operation_summaries = BTreeMap::new();
     operation_summaries.insert("cold_reopen".to_string(), summarize_op(&latencies));
 
@@ -880,6 +928,17 @@ async fn run_w4_cold_start(
             "hot_project_id": hot_project.to_string()
         }),
     })
+}
+
+fn load_seed_state(path: &Path) -> Result<SeedState, DynError> {
+    load_json(path)
+}
+
+fn maybe_write_seed_state(path: Option<&Path>, seed: &SeedState) -> Result<(), DynError> {
+    if let Some(path) = path {
+        write_json(path, seed)?;
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -913,7 +972,21 @@ async fn main() -> Result<(), DynError> {
             };
             let client =
                 connect_client(args.app_id, data_dir.clone(), args.server_url.as_deref()).await?;
-            let mut seed = seed_dataset(&client, &profile).await?;
+            let seed_state_path = args.seed_state_path.as_deref();
+            let mut seed = if args.reuse_seed {
+                let path = seed_state_path.ok_or("--reuse-seed requires --seed-state")?;
+                load_seed_state(path)?
+            } else {
+                let seed = seed_dataset(&client, &profile).await?;
+                maybe_write_seed_state(seed_state_path, &seed)?;
+                seed
+            };
+            if args.prepare_only {
+                client.shutdown().await?;
+                progress("prepare-only complete");
+                drop(owned_temp);
+                return Ok(());
+            }
             let result =
                 run_w1_interactive(&client, &scenario, &profile, &mut seed, topology).await?;
             client.shutdown().await?;
@@ -928,7 +1001,23 @@ async fn main() -> Result<(), DynError> {
                 .await?
         }
         ScenarioMode::ColdStart => {
-            run_w4_cold_start(args.app_id, data_dir.clone(), &scenario, &profile).await?
+            let seed_state_path = args.seed_state_path.as_deref();
+            let seed = if args.reuse_seed {
+                let path = seed_state_path.ok_or("--reuse-seed requires --seed-state")?;
+                load_seed_state(path)?
+            } else {
+                let seeding_client = connect_client(args.app_id, data_dir.clone(), None).await?;
+                let seed = seed_dataset(&seeding_client, &profile).await?;
+                maybe_write_seed_state(seed_state_path, &seed)?;
+                seeding_client.shutdown().await?;
+                seed
+            };
+            if args.prepare_only {
+                progress("prepare-only complete");
+                drop(owned_temp);
+                return Ok(());
+            }
+            run_w4_cold_start(args.app_id, data_dir.clone(), &scenario, &profile, &seed).await?
         }
     };
 

@@ -141,7 +141,7 @@ pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> Bench
     for i in 0..num_teams {
         let is_owned = i < owned_team_count;
         let owner = if is_owned { user_id } else { "other_user" };
-        let row_id = core
+        let (row_id, _row_values) = core
             .insert(
                 "teams",
                 vec![
@@ -170,7 +170,7 @@ pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> Bench
             other_teams[team_idx - owned_team_count]
         };
 
-        let row_id = core
+        let (row_id, _row_values) = core
             .insert(
                 "folders",
                 vec![
@@ -210,7 +210,7 @@ pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> Bench
             continue;
         };
 
-        let row_id = core
+        let (row_id, _row_values) = core
             .insert(
                 "documents",
                 vec![

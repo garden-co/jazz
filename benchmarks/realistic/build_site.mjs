@@ -52,91 +52,306 @@ function buildHtml() {
   <title>Jazz Realistic Benchmarks</title>
   <style>
     :root {
+      color-scheme: light;
       --bg: #f7f9fc;
-      --panel: #ffffff;
+      --panel: rgba(255, 255, 255, 0.94);
+      --panel-strong: #ffffff;
+      --chip: #f2f6fb;
       --ink: #142235;
       --muted: #53657d;
       --accent: #0f766e;
       --border: #d8e1eb;
+      --border-subtle: rgba(216, 225, 235, 0.7);
       --good: #0a7a3f;
+      --good-bg: #eaf8f0;
       --bad: #b42318;
+      --bad-bg: #fdecec;
+      --neutral-bg: #f3f5f8;
+      --card-width: 296px;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: radial-gradient(circle at top right, #d6ece8, var(--bg) 40%);
+      background:
+        radial-gradient(circle at top right, rgba(15, 118, 110, 0.18), transparent 30%),
+        linear-gradient(180deg, #f8fbff 0%, #f3f7fb 100%);
       color: var(--ink);
     }
-    .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 20px 40px; }
-    h1 { margin: 0 0 6px; font-size: 28px; }
-    h2 { margin: 4px 0 10px; font-size: 19px; }
-    .muted { color: var(--muted); }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
-      margin: 18px 0 20px;
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #0b1220;
+        --panel: rgba(15, 23, 42, 0.84);
+        --panel-strong: rgba(15, 23, 42, 0.96);
+        --chip: #111c31;
+        --ink: #e5edf7;
+        --muted: #9aacc4;
+        --accent: #2dd4bf;
+        --border: rgba(148, 163, 184, 0.24);
+        --border-subtle: rgba(148, 163, 184, 0.06);
+        --good: #4ade80;
+        --good-bg: rgba(34, 197, 94, 0.16);
+        --bad: #fb7185;
+        --bad-bg: rgba(244, 63, 94, 0.16);
+        --neutral-bg: rgba(148, 163, 184, 0.14);
+      }
+      body {
+        background:
+          radial-gradient(circle at top right, rgba(45, 212, 191, 0.14), transparent 28%),
+          linear-gradient(180deg, #0a1120 0%, #111827 100%);
+      }
+      .panel,
+      .scenario-card {
+        box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+      }
+      select {
+        background: rgba(15, 23, 42, 0.92);
+      }
     }
-    .card, .panel {
+    .wrap {
+      width: 100%;
+      padding: 16px 16px 32px;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 20px;
+      line-height: 1.15;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .panel,
+    .scenario-card {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      box-shadow: 0 6px 20px rgba(20,34,53,0.04);
+      border-radius: 16px;
+      box-shadow: 0 10px 28px rgba(20, 34, 53, 0.05);
+      backdrop-filter: blur(8px);
     }
-    .card { padding: 12px; }
-    .card .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-    .card .v { margin-top: 6px; font-size: 20px; font-weight: 700; }
-    .panel { padding: 14px; margin-top: 12px; }
-    .controls {
+    .panel {
+      padding: 16px;
+    }
+    .compare-controls {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 10px;
+      grid-template-columns:
+        minmax(160px, 0.9fr)
+        minmax(240px, 1.2fr)
+        28px
+        minmax(160px, 0.9fr)
+        minmax(240px, 1.2fr)
+        minmax(100px, 0.6fr)
+        minmax(160px, 0.8fr);
+      gap: 12px;
+      align-items: end;
     }
-    label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .control-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding-bottom: 10px;
+      color: var(--muted);
+      font-size: 22px;
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
     select {
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 8px;
-      background: #fff;
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: var(--panel-strong);
       color: var(--ink);
       font-size: 14px;
     }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; }
-    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
-    td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    .trend-better { color: var(--good); font-weight: 600; }
-    .trend-worse { color: var(--bad); font-weight: 600; }
-    .subtle { color: var(--muted); }
-    .pill {
-      display: inline-block;
-      padding: 2px 7px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      font-size: 11px;
+    .compare-meta {
+      margin-top: 10px;
       color: var(--muted);
+      font-size: 14px;
+    }
+    .compare-meta:empty {
+      display: none;
+    }
+    .scenario-grid {
+      display: flex;
+      flex-flow: column wrap;
+      align-content: flex-start;
+      align-items: flex-start;
+      gap: 10px 12px;
+      margin-top: 14px;
+    }
+    .scenario-card {
+      width: min(100%, var(--card-width));
+      margin: 0;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .scenario-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 6px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .scenario-prefix {
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.01em;
+      text-transform: lowercase;
+    }
+    .scenario-title {
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.15;
+      display: inline;
+    }
+    .scenario-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.2;
+      display: inline;
+    }
+    .metric-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      align-items: baseline;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .metric-row:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+    .metric-name {
+      min-width: 0;
+      font-size: 10px;
+      font-weight: 400;
+      line-height: 1.2;
+      word-break: break-word;
+      color: var(--muted);
+    }
+    .metric-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 1px;
+      min-width: 0;
+      font-size: 10px;
+      line-height: 1.2;
+      font-variant-numeric: tabular-nums;
+      justify-content: flex-end;
+      text-align: right;
+    }
+    .metric-arrow {
+      color: var(--muted);
+    }
+    .metric-value {
+      font-size: 12px;
+      font-weight: 400;
+      overflow-wrap: anywhere;
+      text-align: right;
+    }
+    .metric-delta {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+      transition: background-color 140ms ease, color 140ms ease;
+    }
+    .delta-good {
+      color: var(--good);
+    }
+    .delta-bad {
+      color: var(--bad);
+    }
+    .delta-neutral {
+      color: var(--muted);
+      background: var(--neutral-bg);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th,
+    td {
+      border-bottom: 1px solid var(--border);
+      padding: 9px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    td.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .empty {
+      padding: 16px 6px 4px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 840px) {
+      .wrap {
+        padding: 20px 14px 32px;
+      }
+      .compare-controls {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+      .control-arrow {
+        display: none;
+      }
+      .scenario-grid {
+        display: block;
+        height: auto !important;
+      }
+      .scenario-card {
+        width: 100%;
+      }
+      .metric-row {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Jazz Realistic Benchmark Dashboard</h1>
-    <div class="muted">Static page generated in CI from benchmark artifacts.</div>
-
-    <div class="grid" id="summaryCards"></div>
-
     <section class="panel">
-      <h2>Comparison</h2>
-      <div class="controls">
-        <label>Head Branch
-          <select id="headBranch"></select>
-        </label>
+      <div class="compare-controls">
         <label>Base Branch
           <select id="baseBranch"></select>
         </label>
-        <label>Suite
-          <select id="suite"></select>
+        <label>Base Snapshot
+          <select id="baseSnapshot"></select>
+        </label>
+        <div class="control-arrow" aria-hidden="true">→</div>
+        <label>Head Branch
+          <select id="headBranch"></select>
+        </label>
+        <label>Head Snapshot
+          <select id="headSnapshot"></select>
         </label>
         <label>Profile
           <select id="profile"></select>
@@ -144,41 +359,23 @@ function buildHtml() {
         <label>Scenario
           <select id="scenario"></select>
         </label>
-        <label>Metric
-          <select id="metric"></select>
-        </label>
       </div>
-      <div id="compareMeta" class="muted" style="margin-top:8px;"></div>
-      <div style="overflow:auto; margin-top:8px;">
-        <table id="compareTable">
-          <thead>
-            <tr>
-              <th>Scenario</th>
-              <th>Metric</th>
-              <th class="num">Base</th>
-              <th class="num">Head</th>
-              <th class="num">Delta</th>
-              <th class="num">Delta %</th>
-              <th>Trend</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <div id="compareMeta" class="compare-meta muted"></div>
+      <div id="compareGrid" class="scenario-grid"></div>
     </section>
 
     <section class="panel">
       <h2>Regression Watchlist</h2>
-      <div class="muted">Worst per-branch regression versus selected base branch/suite/profile.</div>
-      <div style="overflow:auto; margin-top:8px;">
+      <div class="muted">Worst per-branch regression versus the selected base snapshot.</div>
+      <div style="overflow:auto; margin-top:10px;">
         <table id="regressionsTable">
           <thead>
             <tr>
               <th>Branch</th>
+              <th>Suite</th>
               <th>Scenario</th>
               <th>Metric</th>
               <th class="num">Delta %</th>
-              <th>Trend</th>
               <th>Compared SHA</th>
               <th>Compared At</th>
             </tr>
@@ -189,18 +386,18 @@ function buildHtml() {
     </section>
 
     <section class="panel">
-      <h2>Recent Runs</h2>
+      <h2>Recent Snapshots</h2>
       <div style="overflow:auto;">
-        <table id="runsTable">
+        <table id="snapshotsTable">
           <thead>
             <tr>
               <th>Time</th>
-              <th>Suite</th>
               <th>Branch</th>
               <th>Profile</th>
               <th>SHA</th>
               <th>Run</th>
-              <th>Scenarios</th>
+              <th>Suites</th>
+              <th>Cards</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -210,61 +407,237 @@ function buildHtml() {
   </div>
 
   <script>
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    const SUITE_ORDER = ["native", "native-criterion", "browser"];
+    const SUITE_LABELS = {
+      native: "Native",
+      browser: "Browser",
+      "native-criterion": "Native CR",
+    };
+    const CORE_METRICS = ["wall_time_ms", "throughput_ops_per_sec"];
+    const OP_METRIC_ORDER = ["avg_ms", "p95_ms"];
+    const SCENARIO_CARD_WIDTH = 296;
+    const SCENARIO_COLUMN_GAP = 12;
+    const SCENARIO_ROW_GAP = 10;
+
     function byGenerated(a, b) {
       return Date.parse(b.generated_at || 0) - Date.parse(a.generated_at || 0);
     }
-    function fmt(n) {
-      if (!Number.isFinite(n)) return "n/a";
-      const abs = Math.abs(n);
-      if (abs >= 1000) return n.toFixed(1);
-      if (abs >= 10) return n.toFixed(2);
-      return n.toFixed(3);
+
+    function compareText(a, b) {
+      return collator.compare(String(a || ""), String(b || ""));
     }
-    function toPct(delta, base) {
-      if (!Number.isFinite(delta) || !Number.isFinite(base) || base === 0) return NaN;
-      return (delta / base) * 100;
+
+    function unique(list) {
+      return [...new Set(list)];
     }
-    function trend(metric, delta) {
-      if (!Number.isFinite(delta) || delta === 0) return { label: "flat", cls: "subtle" };
-      const higherIsBetter = metric.includes("throughput_ops_per_sec");
-      if (higherIsBetter) {
-        return delta > 0 ? { label: "better", cls: "trend-better" } : { label: "worse", cls: "trend-worse" };
-      }
-      const lowerIsBetter = metric.includes("_ms");
-      if (lowerIsBetter) {
-        return delta < 0 ? { label: "better", cls: "trend-better" } : { label: "worse", cls: "trend-worse" };
-      }
-      return delta > 0 ? { label: "up", cls: "subtle" } : { label: "down", cls: "subtle" };
+
+    function suiteRank(suite) {
+      const idx = SUITE_ORDER.indexOf(suite);
+      return idx === -1 ? SUITE_ORDER.length + 1 : idx;
     }
-    function regressionPct(metric, deltaPct) {
-      if (!Number.isFinite(deltaPct)) return NaN;
-      if (metric.includes("throughput_ops_per_sec")) return -deltaPct;
-      if (metric.includes("_ms")) return deltaPct;
-      return deltaPct;
+
+    function suiteLabel(suite) {
+      return SUITE_LABELS[suite] || suite || "Unknown";
     }
-    function scenarioMap(run) {
-      const map = new Map();
-      for (const s of run && Array.isArray(run.scenarios) ? run.scenarios : []) {
-        if (s && typeof s.scenario_id === "string") map.set(s.scenario_id, s);
-      }
-      return map;
-    }
+
     function runId(run) {
       return [run.run_id || "?", run.run_attempt || "?"].join("/");
     }
+
+    function snapshotKey(run) {
+      return [
+        run.repository || "",
+        run.branch || "",
+        run.profile || "",
+        run.sha || "",
+        run.run_id || "",
+        run.run_attempt || "",
+      ].join(":");
+    }
+
+    function prettyToken(text) {
+      return String(text || "")
+        .replaceAll("_", " ")
+        .replaceAll("/", " / ")
+        .trim();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function scenarioVariant(scenario) {
+      const extra = scenario && scenario.extra && typeof scenario.extra === "object" ? scenario.extra : {};
+      return String(
+        extra.benchmark_id ||
+          scenario.topology ||
+          scenario.scenario_name ||
+          scenario.scenario_id ||
+          ""
+      ).trim();
+    }
+
+    function buildSnapshots(runs) {
+      const map = new Map();
+      for (const run of [...runs].sort(byGenerated)) {
+        const key = snapshotKey(run);
+        let snapshot = map.get(key);
+        if (!snapshot) {
+          snapshot = {
+            id: key,
+            repository: run.repository || "",
+            branch: run.branch || "",
+            profile: run.profile || "",
+            sha: run.sha || "",
+            run_id: run.run_id || "",
+            run_attempt: run.run_attempt || "",
+            ref: run.ref || "",
+            generated_at: run.generated_at || "",
+            runs: [],
+            runs_by_suite: {},
+          };
+          map.set(key, snapshot);
+        }
+        snapshot.generated_at =
+          Date.parse(run.generated_at || 0) > Date.parse(snapshot.generated_at || 0)
+            ? run.generated_at || snapshot.generated_at
+            : snapshot.generated_at;
+        snapshot.runs.push(run);
+        snapshot.runs_by_suite[run.suite] = run;
+      }
+
+      return [...map.values()]
+        .map((snapshot) => {
+          snapshot.runs.sort((a, b) => suiteRank(a.suite) - suiteRank(b.suite) || compareText(a.suite, b.suite));
+          return snapshot;
+        })
+        .sort(byGenerated);
+    }
+
+    function snapshotLabel(snapshot) {
+      return [
+        snapshot.generated_at || "n/a",
+        String(snapshot.sha || "n/a").slice(0, 12),
+        runId(snapshot),
+        snapshot.runs.length + " suites",
+      ].join(" • ");
+    }
+
+    function normalizeScenarioEntry(run, scenario) {
+      const variantKey = scenarioVariant(scenario);
+      return {
+        key: [run.suite || "", scenario.scenario_id || "", variantKey].join("::"),
+        suite: run.suite || "",
+        scenarioId: scenario.scenario_id || "unknown",
+        scenarioName: scenario.scenario_name || scenario.scenario_id || "unknown",
+        topology: scenario.topology || "",
+        variantLabel:
+          scenario && scenario.extra && typeof scenario.extra === "object" && scenario.extra.benchmark_id
+            ? String(scenario.extra.benchmark_id)
+            : "",
+        variantKey,
+        scenario,
+      };
+    }
+
+    function compareScenarioEntries(a, b) {
+      const suiteCmp = suiteRank(a.suite) - suiteRank(b.suite);
+      if (suiteCmp !== 0) return suiteCmp;
+      const scenarioCmp = compareText(a.scenarioId, b.scenarioId);
+      if (scenarioCmp !== 0) return scenarioCmp;
+      const variantCmp = compareText(a.variantKey, b.variantKey);
+      if (variantCmp !== 0) return variantCmp;
+      return compareText(a.topology, b.topology);
+    }
+
+    function scenarioEntries(snapshot) {
+      const entries = [];
+      for (const run of snapshot && Array.isArray(snapshot.runs) ? snapshot.runs : []) {
+        for (const scenario of Array.isArray(run.scenarios) ? run.scenarios : []) {
+          if (!scenario || typeof scenario !== "object") continue;
+          entries.push(normalizeScenarioEntry(run, scenario));
+        }
+      }
+      return entries.sort(compareScenarioEntries);
+    }
+
+    function scenarioMap(snapshot) {
+      const map = new Map();
+      for (const entry of scenarioEntries(snapshot)) {
+        map.set(entry.key, entry);
+      }
+      return map;
+    }
+
+    function metricDescriptor(metric) {
+      if (metric === "wall_time_ms") {
+        return { label: "Wall time", detail: "ms", unit: "ms", direction: "lower", rank: 0, subrank: 0 };
+      }
+      if (metric === "throughput_ops_per_sec") {
+        return {
+          label: "Throughput",
+          detail: "ops / sec",
+          unit: "ops/s",
+          direction: "higher",
+          rank: 1,
+          subrank: 0,
+        };
+      }
+      if (!metric.startsWith("op:")) {
+        return { label: metric, detail: "", unit: "", direction: "neutral", rank: 99, subrank: 99 };
+      }
+
+      const slash = metric.lastIndexOf("/");
+      if (slash <= 3) {
+        return { label: metric, detail: "", unit: "", direction: "neutral", rank: 99, subrank: 99 };
+      }
+
+      const opName = metric.slice(3, slash);
+      const field = metric.slice(slash + 1);
+      const fieldIndex = OP_METRIC_ORDER.indexOf(field);
+      return {
+        label: prettyToken(opName),
+        detail: field === "avg_ms" ? "avg • ms" : field === "p95_ms" ? "p95 • ms" : prettyToken(field),
+        unit: "ms",
+        direction: "lower",
+        rank: 2,
+        opName,
+        subrank: fieldIndex === -1 ? 99 : fieldIndex,
+      };
+    }
+
+    function compareMetrics(a, b) {
+      const aDesc = metricDescriptor(a);
+      const bDesc = metricDescriptor(b);
+      if (aDesc.rank !== bDesc.rank) return aDesc.rank - bDesc.rank;
+      const opCmp = compareText(aDesc.opName || "", bDesc.opName || "");
+      if (opCmp !== 0) return opCmp;
+      if (aDesc.subrank !== bDesc.subrank) return aDesc.subrank - bDesc.subrank;
+      return compareText(a, b);
+    }
+
     function metricKeysForScenario(scenario) {
-      const keys = ["wall_time_ms", "throughput_ops_per_sec"];
-      const ops = scenario && scenario.operation_summaries && typeof scenario.operation_summaries === "object"
-        ? scenario.operation_summaries
-        : {};
-      for (const opName of Object.keys(ops).sort()) {
+      const keys = [];
+      if (Number.isFinite(Number(scenario && scenario.wall_time_ms))) keys.push("wall_time_ms");
+      if (Number.isFinite(Number(scenario && scenario.throughput_ops_per_sec))) keys.push("throughput_ops_per_sec");
+      const ops =
+        scenario && scenario.operation_summaries && typeof scenario.operation_summaries === "object"
+          ? scenario.operation_summaries
+          : {};
+      for (const opName of Object.keys(ops).sort(compareText)) {
         const summary = ops[opName];
         if (!summary || typeof summary !== "object") continue;
         if (Number.isFinite(Number(summary.avg_ms))) keys.push("op:" + opName + "/avg_ms");
         if (Number.isFinite(Number(summary.p95_ms))) keys.push("op:" + opName + "/p95_ms");
       }
-      return keys;
+      return keys.sort(compareMetrics);
     }
+
     function metricValue(scenario, metric) {
       if (!scenario || typeof scenario !== "object") return NaN;
       if (metric === "wall_time_ms") return Number(scenario.wall_time_ms);
@@ -281,267 +654,558 @@ function buildHtml() {
       if (!summary || typeof summary !== "object") return NaN;
       return Number(summary[field]);
     }
-    function unique(list) {
-      return [...new Set(list)];
+
+    function metricNoiseDescriptor(scenario, metric) {
+      const noise = scenario?.extra?.noise;
+      if (!noise || typeof noise !== "object") return null;
+      if (metric === "wall_time_ms" || metric === "throughput_ops_per_sec") {
+        return noise.metrics?.[metric] ?? null;
+      }
+      if (!metric.startsWith("op:")) return null;
+      const slash = metric.lastIndexOf("/");
+      if (slash <= 3) return null;
+      const opName = metric.slice(3, slash);
+      const field = metric.slice(slash + 1);
+      return noise.operations?.[opName]?.[field] ?? null;
+    }
+
+    function metricNoisePct(scenario, metric) {
+      const descriptor = metricNoiseDescriptor(scenario, metric);
+      if (!descriptor || typeof descriptor !== "object") return NaN;
+      if (Number.isFinite(Number(descriptor.relative_half_width_pct))) {
+        return Number(descriptor.relative_half_width_pct);
+      }
+      const candidates = [descriptor.cv_pct, descriptor.rel_mad_pct]
+        .map((value) => Number(value))
+        .filter(Number.isFinite);
+      if (candidates.length === 0) return NaN;
+      return Math.max(...candidates);
+    }
+
+    function combinedNoisePct(metric, baseScenario, headScenario) {
+      const parts = [metricNoisePct(baseScenario, metric), metricNoisePct(headScenario, metric)].filter(
+        Number.isFinite,
+      );
+      if (parts.length === 0) return NaN;
+      return Math.sqrt(parts.reduce((sum, value) => sum + value * value, 0));
+    }
+
+    function toPct(delta, base) {
+      if (!Number.isFinite(delta) || !Number.isFinite(base) || base === 0) return NaN;
+      return (delta / base) * 100;
+    }
+
+    function regressionPct(metric, deltaPct) {
+      const desc = metricDescriptor(metric);
+      if (!Number.isFinite(deltaPct)) return NaN;
+      if (desc.direction === "higher") return -deltaPct;
+      if (desc.direction === "lower") return deltaPct;
+      return Math.abs(deltaPct);
+    }
+
+    function deltaClass(metric, deltaPct) {
+      if (!Number.isFinite(deltaPct) || deltaPct === 0) return "delta-neutral";
+      const desc = metricDescriptor(metric);
+      if (desc.direction === "higher") return deltaPct > 0 ? "delta-good" : "delta-bad";
+      if (desc.direction === "lower") return deltaPct < 0 ? "delta-good" : "delta-bad";
+      return "delta-neutral";
+    }
+
+    function fractionDigits(metric, value) {
+      const abs = Math.abs(Number(value) || 0);
+      if (metric === "throughput_ops_per_sec") {
+        if (abs >= 1000) return 1;
+        if (abs >= 100) return 1;
+        if (abs >= 10) return 2;
+        return 2;
+      }
+      if (abs >= 1000) return 1;
+      if (abs >= 100) return 1;
+      if (abs >= 10) return 2;
+      return 3;
+    }
+
+    function formatNumber(value, digits) {
+      if (!Number.isFinite(value)) return "n/a";
+      return new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: digits,
+        useGrouping: true,
+      }).format(value);
+    }
+
+    function formatMetricValue(metric, value) {
+      return formatNumber(value, fractionDigits(metric, value));
+    }
+
+    function metricUnitSuffix(descriptor) {
+      if (!descriptor || !descriptor.unit) return "";
+      if (descriptor.unit === "ms") return "ms";
+      if (descriptor.unit === "ops/s") return " ops/s";
+      return " " + descriptor.unit;
+    }
+
+    function metricLabelText(descriptor) {
+      if (!descriptor) return "";
+      if (descriptor.rank >= 2 && descriptor.detail) {
+        return descriptor.label + " " + descriptor.detail.replace(" • ", " ").replace(/\\s+ms$/i, "");
+      }
+      return descriptor.label;
+    }
+
+    function scenarioPrefixText(suite, scenarioId) {
+      return suiteLabel(suite).toLowerCase() + "/" + String(scenarioId || "");
+    }
+
+    function formatPct(value) {
+      if (!Number.isFinite(value)) return "n/a";
+      const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+      const raw = Math.abs(value);
+      return sign + formatNumber(raw, 1) + "%";
+    }
+
+    function formatNoisePct(value) {
+      if (!Number.isFinite(value)) return null;
+      return "±" + formatNumber(Math.abs(value), 1) + "%";
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), max);
+    }
+
+    function deltaStyle(metric, deltaPct) {
+      const cls = deltaClass(metric, deltaPct);
+      if (cls === "delta-neutral") return "";
+      const strength = clamp(Math.abs(deltaPct) / 20, 0, 1);
+      const alpha = 0.08 + strength * 0.2;
+      if (cls === "delta-good") {
+        return "background-color: rgba(10, 122, 63, " + alpha.toFixed(3) + "); color: rgb(10, 122, 63);";
+      }
+      if (cls === "delta-bad") {
+        return "background-color: rgba(180, 35, 24, " + alpha.toFixed(3) + "); color: rgb(180, 35, 24);";
+      }
+      return "";
+    }
+
+    function inlineStyleAttr(styleValue) {
+      return styleValue ? ' style="' + escapeHtml(styleValue) + '"' : "";
+    }
+
+    function inlineTitleAttr(titleValue) {
+      return titleValue ? ' title="' + escapeHtml(titleValue) + '"' : "";
+    }
+
+    function deltaTooltip(row) {
+      if (!Number.isFinite(row?.noisePct)) return "";
+      const parts = ["Noise floor: " + formatNoisePct(row.noisePct)];
+      if (Number.isFinite(row?.signalMarginPct)) {
+        parts.push("Signal margin: " + formatPct(row.signalMarginPct));
+      }
+      parts.push(row?.significant ? "Above noise floor" : "Within noise floor");
+      return parts.join(" • ");
+    }
+
+    function scenarioColumnCount(container) {
+      if (!container) return 1;
+      const width = container.clientWidth || window.innerWidth || 0;
+      if (width <= 840) return 1;
+      return Math.max(1, Math.floor((width + SCENARIO_COLUMN_GAP) / (SCENARIO_CARD_WIDTH + SCENARIO_COLUMN_GAP)));
+    }
+
+    function wrappedColumnHeight(itemHeights, columnCount) {
+      if (columnCount <= 1 || itemHeights.length === 0) return 0;
+
+      const lower = Math.max(...itemHeights);
+      const upper = itemHeights.reduce((sum, height) => sum + height, 0) + SCENARIO_ROW_GAP * Math.max(itemHeights.length - 1, 0);
+
+      function requiredColumns(heightLimit) {
+        let columns = 1;
+        let currentHeight = 0;
+
+        for (const height of itemHeights) {
+          if (currentHeight === 0) {
+            currentHeight = height;
+            continue;
+          }
+          if (currentHeight + SCENARIO_ROW_GAP + height <= heightLimit + 0.5) {
+            currentHeight += SCENARIO_ROW_GAP + height;
+            continue;
+          }
+          columns += 1;
+          currentHeight = height;
+        }
+
+        return columns;
+      }
+
+      let min = lower;
+      let max = upper;
+      for (let i = 0; i < 24; i += 1) {
+        const mid = (min + max) / 2;
+        if (requiredColumns(mid) <= columnCount) {
+          max = mid;
+        } else {
+          min = mid;
+        }
+      }
+
+      return Math.ceil(max);
+    }
+
+    function comparableMetricRows(baseScenario, headScenario) {
+      const baseKeys = metricKeysForScenario(baseScenario);
+      const headKeys = metricKeysForScenario(headScenario);
+      const keys = baseKeys.filter((metric) => headKeys.includes(metric)).sort(compareMetrics);
+      const rows = [];
+      for (const metric of keys) {
+        const baseValue = metricValue(baseScenario, metric);
+        const headValue = metricValue(headScenario, metric);
+        if (!Number.isFinite(baseValue) || !Number.isFinite(headValue)) continue;
+        const deltaPct = toPct(headValue - baseValue, baseValue);
+        const noisePct = combinedNoisePct(metric, baseScenario, headScenario);
+        const signalMarginPct =
+          Number.isFinite(noisePct) && Number.isFinite(deltaPct)
+            ? Math.abs(deltaPct) - noisePct
+            : NaN;
+        const significant = Number.isFinite(signalMarginPct) ? signalMarginPct > 0 : true;
+        rows.push({
+          metric,
+          descriptor: metricDescriptor(metric),
+          baseValue,
+          headValue,
+          deltaPct,
+          noisePct,
+          signalMarginPct,
+          significant,
+          deltaClass: significant ? deltaClass(metric, deltaPct) : "delta-neutral",
+          deltaStyle: significant ? deltaStyle(metric, deltaPct) : "",
+        });
+      }
+      return rows;
+    }
+
+    function comparableCards(baseSnapshot, headSnapshot, selectedScenario) {
+      const cards = [];
+      if (!baseSnapshot || !headSnapshot) return cards;
+
+      const baseEntries = scenarioMap(baseSnapshot);
+      const headEntries = scenarioMap(headSnapshot);
+      const keys = [...baseEntries.keys()]
+        .filter((key) => headEntries.has(key))
+        .sort((a, b) => compareScenarioEntries(baseEntries.get(a), baseEntries.get(b)));
+
+      for (const key of keys) {
+        const baseEntry = baseEntries.get(key);
+        const headEntry = headEntries.get(key);
+        if (!baseEntry || !headEntry) continue;
+        if (selectedScenario !== "__all__" && baseEntry.scenarioId !== selectedScenario) continue;
+        const metricRows = comparableMetricRows(baseEntry.scenario, headEntry.scenario);
+        if (metricRows.length === 0) continue;
+        cards.push({
+          key,
+          suite: baseEntry.suite,
+          scenarioId: baseEntry.scenarioId,
+          scenarioName: baseEntry.scenarioName,
+          subtitle: baseEntry.variantLabel || baseEntry.topology || "",
+          metricRows,
+        });
+      }
+
+      return cards;
+    }
+
+    function comparableDiffRows(baseSnapshot, headSnapshot, selectedScenario) {
+      const rows = [];
+      for (const card of comparableCards(baseSnapshot, headSnapshot, selectedScenario)) {
+        for (const metricRow of card.metricRows) {
+          rows.push({
+            suite: card.suite,
+            scenarioId: card.scenarioId,
+            scenarioName: card.scenarioName,
+            subtitle: card.subtitle,
+            metric: metricRow.metric,
+            descriptor: metricRow.descriptor,
+            deltaPct: metricRow.deltaPct,
+            noisePct: metricRow.noisePct,
+            signalMarginPct: metricRow.signalMarginPct,
+            significant: metricRow.significant,
+            deltaClass: metricRow.deltaClass,
+            deltaStyle: metricRow.deltaStyle,
+          });
+        }
+      }
+      return rows;
+    }
+
+    function fillSelect(select, values, preferred) {
+      select.innerHTML = "";
+      if (!Array.isArray(values) || values.length === 0) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "n/a";
+        select.appendChild(opt);
+        return;
+      }
+      for (const value of values) {
+        const option = document.createElement("option");
+        if (typeof value === "string") {
+          option.value = value;
+          option.textContent = value;
+        } else {
+          option.value = value.value;
+          option.textContent = value.label;
+        }
+        select.appendChild(option);
+      }
+      if (preferred && values.some((value) => (typeof value === "string" ? value : value.value) === preferred)) {
+        select.value = preferred;
+      }
+    }
+
+    function renderEmptyState(message) {
+      const compareMeta = document.getElementById("compareMeta");
+      const compareGrid = document.getElementById("compareGrid");
+      compareMeta.textContent = message;
+      compareGrid.innerHTML = '<div class="empty">' + escapeHtml(message) + "</div>";
+
+      const regressions = document.querySelector("#regressionsTable tbody");
+      regressions.innerHTML = '<tr><td colspan="7" class="empty">' + escapeHtml(message) + "</td></tr>";
     }
 
     async function load() {
-      const res = await fetch("./history.json", { cache: "no-store" });
-      const history = await res.json();
+      const response = await fetch("./history.json", { cache: "no-store" });
+      const history = await response.json();
       const runs = Array.isArray(history.runs) ? [...history.runs].sort(byGenerated) : [];
+      const snapshots = buildSnapshots(runs);
 
-      const suites = unique(runs.map((r) => r.suite).filter(Boolean)).sort();
-      const branches = unique(runs.map((r) => r.branch).filter(Boolean)).sort();
-      const profiles = unique(runs.map((r) => r.profile).filter(Boolean)).sort();
-
-      const cards = document.getElementById("summaryCards");
-      cards.innerHTML = "";
-      const cardItems = [
-        ["Total Runs", String(runs.length)],
-        ["Suites", String(suites.length)],
-        ["Branches", String(branches.length)],
-        ["Profiles", String(profiles.length)],
-        ["Last Updated", history.updated_at || "n/a"],
-      ];
-      for (const [k, v] of cardItems) {
-        const div = document.createElement("div");
-        div.className = "card";
-        div.innerHTML = '<div class="k">' + k + '</div><div class="v">' + v + "</div>";
-        cards.appendChild(div);
-      }
+      const suites = unique(runs.map((run) => run.suite).filter(Boolean)).sort(
+        (a, b) => suiteRank(a) - suiteRank(b) || compareText(a, b),
+      );
+      const branches = unique(snapshots.map((snapshot) => snapshot.branch).filter(Boolean)).sort(compareText);
+      const profiles = unique(snapshots.map((snapshot) => snapshot.profile).filter(Boolean)).sort(compareText);
 
       const headBranchSel = document.getElementById("headBranch");
+      const headSnapshotSel = document.getElementById("headSnapshot");
       const baseBranchSel = document.getElementById("baseBranch");
-      const suiteSel = document.getElementById("suite");
+      const baseSnapshotSel = document.getElementById("baseSnapshot");
       const profileSel = document.getElementById("profile");
       const scenarioSel = document.getElementById("scenario");
-      const metricSel = document.getElementById("metric");
 
-      function fillSelect(sel, values, preferred) {
-        sel.innerHTML = "";
-        if (!Array.isArray(values) || values.length === 0) {
-          const opt = document.createElement("option");
-          opt.value = "";
-          opt.textContent = "n/a";
-          sel.appendChild(opt);
-          return;
-        }
-        for (const value of values) {
-          const opt = document.createElement("option");
-          if (typeof value === "string") {
-            opt.value = value;
-            opt.textContent = value;
-          } else {
-            opt.value = value.value;
-            opt.textContent = value.label;
-          }
-          sel.appendChild(opt);
-        }
-        if (preferred) {
-          const found = values.find((v) => (typeof v === "string" ? v : v.value) === preferred);
-          if (found) sel.value = preferred;
-        }
-      }
-
-      if (runs.length === 0) {
+      if (snapshots.length === 0) {
         fillSelect(headBranchSel, []);
+        fillSelect(headSnapshotSel, []);
         fillSelect(baseBranchSel, []);
-        fillSelect(suiteSel, []);
+        fillSelect(baseSnapshotSel, []);
         fillSelect(profileSel, []);
         fillSelect(scenarioSel, []);
-        fillSelect(metricSel, []);
-        document.getElementById("compareMeta").textContent = "No benchmark history yet.";
+        renderEmptyState("No benchmark history yet.");
         return;
       }
 
-      const latestBranch = runs[0] && runs[0].branch ? runs[0].branch : "main";
-      const preferredHead =
+      const latestBranch = snapshots[0] && snapshots[0].branch ? snapshots[0].branch : "main";
+      const preferredHeadBranch =
         latestBranch === "main" && branches.includes("main") && branches.length > 1
-          ? branches.find((b) => b !== "main")
+          ? branches.find((branch) => branch !== "main")
           : latestBranch;
-      fillSelect(headBranchSel, branches, preferredHead || latestBranch);
+
+      fillSelect(headBranchSel, branches, preferredHeadBranch || latestBranch);
       fillSelect(baseBranchSel, branches, branches.includes("main") ? "main" : branches[0]);
-      fillSelect(suiteSel, suites, suites.includes("native") ? "native" : suites[0]);
       fillSelect(profileSel, profiles, profiles.includes("s") ? "s" : profiles[0]);
 
-      function runsFor(suite, profile) {
-        return runs.filter((r) => r.suite === suite && r.profile === profile);
+      function snapshotsFor(profile) {
+        return snapshots.filter((snapshot) => snapshot.profile === profile);
       }
 
-      function latestRun(branch, suite, profile) {
-        return runs.find((r) => r.branch === branch && r.suite === suite && r.profile === profile) || null;
+      function snapshotsForBranch(branch, profile) {
+        return snapshots.filter((snapshot) => snapshot.branch === branch && snapshot.profile === profile);
       }
 
-      function collectScenarioIds(filteredRuns) {
+      function latestSnapshot(branch, profile) {
+        return snapshotsForBranch(branch, profile)[0] || null;
+      }
+
+      function findSnapshotById(snapshotIdValue) {
+        return snapshots.find((snapshot) => snapshot.id === snapshotIdValue) || null;
+      }
+
+      function pickSnapshotId(candidates, currentValue, preferredValue) {
+        if (currentValue && candidates.some((snapshot) => snapshot.id === currentValue)) {
+          return currentValue;
+        }
+        if (preferredValue && candidates.some((snapshot) => snapshot.id === preferredValue)) {
+          return preferredValue;
+        }
+        return candidates[0] ? candidates[0].id : "";
+      }
+
+      function firstDifferentSnapshotId(candidates, excludedId) {
+        const found = candidates.find((snapshot) => snapshot.id !== excludedId);
+        return found ? found.id : "";
+      }
+
+      function collectScenarioIds(filteredSnapshots) {
         const ids = [];
-        for (const run of filteredRuns) {
-          for (const scenario of run.scenarios || []) {
-            if (scenario && typeof scenario.scenario_id === "string") ids.push(scenario.scenario_id);
+        for (const snapshot of filteredSnapshots) {
+          for (const entry of scenarioEntries(snapshot)) {
+            ids.push(entry.scenarioId);
           }
         }
-        return unique(ids).sort();
+        return unique(ids).sort(compareText);
       }
 
-      function collectMetricKeys(filteredRuns, selectedScenarioId) {
-        const keys = [];
-        for (const run of filteredRuns) {
-          for (const scenario of run.scenarios || []) {
-            if (!scenario || typeof scenario !== "object") continue;
-            if (selectedScenarioId && selectedScenarioId !== "__all__" && scenario.scenario_id !== selectedScenarioId) {
-              continue;
-            }
-            keys.push(...metricKeysForScenario(scenario));
-          }
-        }
-        return unique(keys).sort();
-      }
-
-      function refreshScenarioAndMetricOptions() {
-        const suite = suiteSel.value;
+      function refreshSnapshotOptions() {
         const profile = profileSel.value;
-        const filtered = runsFor(suite, profile);
+        const headCandidates = snapshotsForBranch(headBranchSel.value, profile);
+        const baseCandidates = snapshotsForBranch(baseBranchSel.value, profile);
 
-        const currentScenario = scenarioSel.value;
-        const scenarioOptions = [{ value: "__all__", label: "All Scenarios" }].concat(
-          collectScenarioIds(filtered).map((id) => ({ value: id, label: id })),
+        const nextHeadId = pickSnapshotId(headCandidates, headSnapshotSel.value, headCandidates[0] && headCandidates[0].id);
+        fillSelect(
+          headSnapshotSel,
+          headCandidates.map((snapshot) => ({ value: snapshot.id, label: snapshotLabel(snapshot) })),
+          nextHeadId,
         );
-        fillSelect(scenarioSel, scenarioOptions, currentScenario || "__all__");
 
-        const currentMetric = metricSel.value;
-        const metricOptions = [{ value: "__all__", label: "All Metrics" }].concat(
-          collectMetricKeys(filtered, scenarioSel.value).map((metric) => ({ value: metric, label: metric })),
-        );
-        fillSelect(metricSel, metricOptions, currentMetric || "__all__");
-      }
-
-      function comparableRows(baseRun, headRun, selectedScenario, selectedMetric) {
-        const rows = [];
-        if (!baseRun || !headRun) return rows;
-
-        const baseScenarios = scenarioMap(baseRun);
-        const headScenarios = scenarioMap(headRun);
-        const ids = [...baseScenarios.keys()].filter((id) => headScenarios.has(id)).sort();
-
-        for (const scenarioId of ids) {
-          if (selectedScenario !== "__all__" && scenarioId !== selectedScenario) continue;
-          const baseScenario = baseScenarios.get(scenarioId);
-          const headScenario = headScenarios.get(scenarioId);
-
-          const baseMetricKeys = metricKeysForScenario(baseScenario);
-          const headMetricKeys = metricKeysForScenario(headScenario);
-          const keys = baseMetricKeys.filter((k) => headMetricKeys.includes(k)).sort();
-
-          for (const metric of keys) {
-            if (selectedMetric !== "__all__" && metric !== selectedMetric) continue;
-            const baseValue = metricValue(baseScenario, metric);
-            const headValue = metricValue(headScenario, metric);
-            if (!Number.isFinite(baseValue) || !Number.isFinite(headValue)) continue;
-            const delta = headValue - baseValue;
-            const deltaPct = toPct(delta, baseValue);
-            rows.push({
-              scenarioId,
-              metric,
-              baseValue,
-              headValue,
-              delta,
-              deltaPct,
-              trend: trend(metric, delta),
-            });
-          }
+        let preferredBaseId = baseCandidates[0] && baseCandidates[0].id ? baseCandidates[0].id : "";
+        if (baseBranchSel.value === headBranchSel.value) {
+          preferredBaseId = firstDifferentSnapshotId(baseCandidates, headSnapshotSel.value || nextHeadId) || preferredBaseId;
         }
 
-        rows.sort((a, b) => Math.abs(b.deltaPct || 0) - Math.abs(a.deltaPct || 0));
-        return rows;
+        const nextBaseId = pickSnapshotId(baseCandidates, baseSnapshotSel.value, preferredBaseId);
+        fillSelect(
+          baseSnapshotSel,
+          baseCandidates.map((snapshot) => ({ value: snapshot.id, label: snapshotLabel(snapshot) })),
+          nextBaseId,
+        );
+
+        if (
+          baseBranchSel.value === headBranchSel.value &&
+          headSnapshotSel.value &&
+          baseSnapshotSel.value === headSnapshotSel.value &&
+          baseCandidates.length > 1
+        ) {
+          baseSnapshotSel.value = firstDifferentSnapshotId(baseCandidates, headSnapshotSel.value) || baseSnapshotSel.value;
+        }
       }
 
-      function renderRunsTable() {
-        const tbody = document.querySelector("#runsTable tbody");
+      function refreshScenarioOptions() {
+        const filtered = snapshotsFor(profileSel.value);
+        const current = scenarioSel.value;
+        const options = [{ value: "__all__", label: "All Scenarios" }].concat(
+          collectScenarioIds(filtered).map((scenarioId) => ({ value: scenarioId, label: scenarioId })),
+        );
+        fillSelect(scenarioSel, options, current || "__all__");
+      }
+
+      function renderSnapshotsTable() {
+        const tbody = document.querySelector("#snapshotsTable tbody");
         tbody.innerHTML = "";
 
-        for (const run of runs.slice(0, 60)) {
+        for (const snapshot of snapshots.slice(0, 60)) {
           const tr = document.createElement("tr");
+          const suitesText = snapshot.runs.map((run) => suiteLabel(run.suite)).join(", ");
+          const cardCount = scenarioEntries(snapshot).length;
           tr.innerHTML = [
-            "<td>" + (run.generated_at || "n/a") + "</td>",
-            '<td><span class="pill">' + run.suite + "</span></td>",
-            "<td>" + (run.branch || "n/a") + "</td>",
-            "<td>" + (run.profile || "n/a") + "</td>",
-            '<td class="subtle">' + String(run.sha || "n/a").slice(0, 12) + "</td>",
-            "<td>" + runId(run) + "</td>",
-            '<td class="subtle">' + (run.scenarios || []).map((s) => s.scenario_id).join(", ") + "</td>",
+            "<td>" + escapeHtml(snapshot.generated_at || "n/a") + "</td>",
+            "<td>" + escapeHtml(snapshot.branch || "n/a") + "</td>",
+            "<td>" + escapeHtml(snapshot.profile || "n/a") + "</td>",
+            '<td class="muted">' + escapeHtml(String(snapshot.sha || "n/a").slice(0, 12)) + "</td>",
+            "<td>" + escapeHtml(runId(snapshot)) + "</td>",
+            '<td class="muted">' + escapeHtml(suitesText || "n/a") + "</td>",
+            '<td class="num">' + escapeHtml(String(cardCount)) + "</td>",
           ].join("");
           tbody.appendChild(tr);
         }
       }
 
       function renderComparison() {
-        const headBranch = headBranchSel.value;
-        const baseBranch = baseBranchSel.value;
-        const suite = suiteSel.value;
-        const profile = profileSel.value;
         const selectedScenario = scenarioSel.value || "__all__";
-        const selectedMetric = metricSel.value || "__all__";
+        const headSnapshot = findSnapshotById(headSnapshotSel.value);
+        const baseSnapshot = findSnapshotById(baseSnapshotSel.value);
+        const compareMeta = document.getElementById("compareMeta");
+        const compareGrid = document.getElementById("compareGrid");
+        compareGrid.innerHTML = "";
 
-        const headRun = latestRun(headBranch, suite, profile);
-        const baseRun = latestRun(baseBranch, suite, profile);
-
-        const meta = document.getElementById("compareMeta");
-        const tbody = document.querySelector("#compareTable tbody");
-        tbody.innerHTML = "";
-
-        if (!headRun || !baseRun) {
-          meta.textContent = "No matching runs for selected branches/suite/profile.";
+        if (!headSnapshot || !baseSnapshot) {
+          compareMeta.textContent = "No matching snapshots for selected filters.";
+          compareGrid.innerHTML = '<div class="empty">No matching snapshots for selected filters.</div>';
           return;
         }
 
-        meta.textContent =
-          "Base " +
-          (baseRun.generated_at || "n/a") +
-          " (" +
-          String(baseRun.sha || "").slice(0, 12) +
-          ") vs Head " +
-          (headRun.generated_at || "n/a") +
-          " (" +
-          String(headRun.sha || "").slice(0, 12) +
-          ")";
-
-        const rows = comparableRows(baseRun, headRun, selectedScenario, selectedMetric);
-        if (rows.length === 0) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = '<td colspan="7" class="subtle">No overlapping metrics for this filter.</td>';
-          tbody.appendChild(tr);
+        if (headSnapshot.id === baseSnapshot.id) {
+          compareMeta.textContent = "Choose two different snapshots to compare.";
+          compareGrid.innerHTML = '<div class="empty">Choose two different snapshots to compare.</div>';
           return;
         }
 
-        for (const row of rows) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = [
-            "<td>" + row.scenarioId + "</td>",
-            "<td>" + row.metric + "</td>",
-            '<td class="num">' + fmt(row.baseValue) + "</td>",
-            '<td class="num">' + fmt(row.headValue) + "</td>",
-            '<td class="num">' + fmt(row.delta) + "</td>",
-            '<td class="num">' + fmt(row.deltaPct) + "%</td>",
-            '<td class="' + row.trend.cls + '">' + row.trend.label + "</td>",
+        const cards = comparableCards(baseSnapshot, headSnapshot, selectedScenario);
+
+        compareMeta.textContent = "";
+        compareGrid.style.height = "";
+
+        if (cards.length === 0) {
+          compareGrid.innerHTML = '<div class="empty">No overlapping metrics for this filter.</div>';
+          return;
+        }
+
+	        cards.forEach((card) => {
+	          const article = document.createElement("article");
+	          article.className = "scenario-card";
+	          const metricRowsHtml = card.metricRows
+	            .map((row) => {
+	              const descriptor = row.descriptor;
+	              const headValueWithUnit = formatMetricValue(row.metric, row.headValue) + metricUnitSuffix(descriptor);
+	              const deltaLabel = formatPct(row.deltaPct);
+	              return [
+	                '<div class="metric-row">',
+	                '  <div class="metric-name">' + escapeHtml(metricLabelText(descriptor)) + ":</div>",
+	                '  <div class="metric-line">',
+	                '    <span class="metric-value">' + escapeHtml(formatMetricValue(row.metric, row.baseValue)) + "</span>",
+	                '    <span class="metric-arrow">→</span>',
+	                '    <span class="metric-value">' + escapeHtml(headValueWithUnit) + "</span>",
+	                '    <span class="metric-delta ' + row.deltaClass + '"' + inlineStyleAttr(row.deltaStyle) + inlineTitleAttr(deltaTooltip(row)) + '>(' + escapeHtml(deltaLabel) + ")</span>",
+	                "  </div>",
+	                "</div>",
+	              ].join("");
+	            })
+            .join("");
+
+          const subtitleParts = [];
+          if (card.subtitle) subtitleParts.push(card.subtitle);
+          article.innerHTML = [
+            '<div class="scenario-head">',
+            '  <span class="scenario-prefix">' + escapeHtml(scenarioPrefixText(card.suite, card.scenarioId)) + ":</span>",
+            '  <span class="scenario-title">' + escapeHtml(prettyToken(card.scenarioName)) + "</span>",
+            subtitleParts.length
+              ? '  <span class="scenario-subtitle">' + escapeHtml(prettyToken(subtitleParts.join(" • "))) + "</span>"
+              : "",
+            "</div>",
+            '<div class="metric-list">' + metricRowsHtml + "</div>",
           ].join("");
-          tbody.appendChild(tr);
+          compareGrid.appendChild(article);
+        });
+
+        const columnCount = scenarioColumnCount(compareGrid);
+        if (columnCount <= 1) return;
+
+        const itemHeights = [...compareGrid.querySelectorAll(".scenario-card")].map((card) =>
+          Math.ceil(card.getBoundingClientRect().height),
+        );
+        const height = wrappedColumnHeight(itemHeights, columnCount);
+        if (height > 0) {
+          compareGrid.style.height = height + "px";
         }
       }
 
       function renderRegressionWatchlist() {
         const baseBranch = baseBranchSel.value;
-        const suite = suiteSel.value;
         const profile = profileSel.value;
         const selectedScenario = scenarioSel.value || "__all__";
-        const selectedMetric = metricSel.value || "__all__";
-
-        const baseRun = latestRun(baseBranch, suite, profile);
+        const baseSnapshot = findSnapshotById(baseSnapshotSel.value);
         const tbody = document.querySelector("#regressionsTable tbody");
         tbody.innerHTML = "";
 
-        if (!baseRun) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = '<td colspan="7" class="subtle">Base run not found for selected filters.</td>';
-          tbody.appendChild(tr);
+        if (!baseSnapshot) {
+          tbody.innerHTML = '<tr><td colspan="7" class="empty">Base snapshot not found for selected filters.</td></tr>';
           return;
         }
 
@@ -549,28 +1213,28 @@ function buildHtml() {
         const rows = [];
 
         for (const branch of candidateBranches) {
-          const run = latestRun(branch, suite, profile);
-          if (!run) continue;
+          const snapshot = latestSnapshot(branch, profile);
+          if (!snapshot) continue;
 
-          const diffs = comparableRows(baseRun, run, selectedScenario, selectedMetric);
+          const diffs = comparableDiffRows(baseSnapshot, snapshot, selectedScenario);
           let worst = null;
           for (const diff of diffs) {
             const regression = regressionPct(diff.metric, diff.deltaPct);
-            if (!Number.isFinite(regression)) continue;
-            if (!worst || regression > worst.regression) {
-              worst = { regression, diff };
+            const regressionSignal = Number.isFinite(diff.noisePct) ? regression - diff.noisePct : regression;
+            if (!Number.isFinite(regression) || !Number.isFinite(regressionSignal) || regressionSignal <= 0) continue;
+            if (!worst || regressionSignal > worst.regression) {
+              worst = { regression: regressionSignal, diff };
             }
           }
 
           if (!worst) continue;
-          rows.push({ branch, run, worst });
+          rows.push({ branch, snapshot, worst });
         }
 
         rows.sort((a, b) => b.worst.regression - a.worst.regression);
         if (rows.length === 0) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = '<td colspan="7" class="subtle">No comparable branch runs yet.</td>';
-          tbody.appendChild(tr);
+          tbody.innerHTML =
+            '<tr><td colspan="7" class="empty">No comparable branch snapshots above the current noise floor yet.</td></tr>';
           return;
         }
 
@@ -578,13 +1242,13 @@ function buildHtml() {
           const diff = entry.worst.diff;
           const tr = document.createElement("tr");
           tr.innerHTML = [
-            "<td>" + entry.branch + "</td>",
-            "<td>" + diff.scenarioId + "</td>",
-            "<td>" + diff.metric + "</td>",
-            '<td class="num">' + fmt(diff.deltaPct) + "%</td>",
-            '<td class="' + diff.trend.cls + '">' + diff.trend.label + "</td>",
-            '<td class="subtle">' + String(entry.run.sha || "").slice(0, 12) + "</td>",
-            '<td class="subtle">' + (entry.run.generated_at || "n/a") + "</td>",
+            "<td>" + escapeHtml(entry.branch) + "</td>",
+            "<td>" + escapeHtml(suiteLabel(diff.suite)) + "</td>",
+            "<td>" + escapeHtml(diff.scenarioId) + "</td>",
+            "<td>" + escapeHtml(diff.descriptor.label) + "</td>",
+            '<td class="num ' + diff.deltaClass + '"' + inlineStyleAttr(diff.deltaStyle) + inlineTitleAttr(deltaTooltip(diff)) + ">" + escapeHtml(formatPct(diff.deltaPct)) + "</td>",
+            '<td class="muted">' + escapeHtml(String(entry.snapshot.sha || "").slice(0, 12)) + "</td>",
+            '<td class="muted">' + escapeHtml(entry.snapshot.generated_at || "n/a") + "</td>",
           ].join("");
           tbody.appendChild(tr);
         }
@@ -595,27 +1259,51 @@ function buildHtml() {
         renderRegressionWatchlist();
       }
 
-      refreshScenarioAndMetricOptions();
-      renderRunsTable();
+      refreshScenarioOptions();
+      refreshSnapshotOptions();
+      renderSnapshotsTable();
       renderAll();
 
-      [headBranchSel, baseBranchSel].forEach((el) => el.addEventListener("change", renderAll));
-      [suiteSel, profileSel].forEach((el) =>
-        el.addEventListener("change", () => {
-          refreshScenarioAndMetricOptions();
+      [headBranchSel, baseBranchSel].forEach((select) =>
+        select.addEventListener("change", () => {
+          refreshSnapshotOptions();
           renderAll();
         }),
       );
-      scenarioSel.addEventListener("change", () => {
-        refreshScenarioAndMetricOptions();
+
+      profileSel.addEventListener("change", () => {
+        refreshScenarioOptions();
+        refreshSnapshotOptions();
         renderAll();
       });
-      metricSel.addEventListener("change", renderAll);
+
+      scenarioSel.addEventListener("change", renderAll);
+
+      headSnapshotSel.addEventListener("change", () => {
+        if (
+          baseBranchSel.value === headBranchSel.value &&
+          baseSnapshotSel.value === headSnapshotSel.value &&
+          baseSnapshotSel.options.length > 1
+        ) {
+          const sameBranchSnapshots = snapshotsForBranch(baseBranchSel.value, profileSel.value);
+          baseSnapshotSel.value = firstDifferentSnapshotId(sameBranchSnapshots, headSnapshotSel.value) || baseSnapshotSel.value;
+        }
+        renderAll();
+      });
+
+      baseSnapshotSel.addEventListener("change", renderAll);
+      let resizeTimer = 0;
+      window.addEventListener("resize", () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          renderComparison();
+        }, 80);
+      });
     }
 
-    load().catch((err) => {
+    load().catch((error) => {
       document.body.innerHTML =
-        '<pre style="padding:20px;">Failed to load history.json\\n' + String(err) + "</pre>";
+        '<pre style="padding:20px;">Failed to load history.json\\n' + String(error) + "</pre>";
     });
   </script>
 </body>

@@ -17,15 +17,15 @@ required-features = ["cli"]
 
 [features]
 default = []
-surrealkv = ["dep:surrealkv", "dep:tokio"]
+fjall = ["dep:fjall"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "surrealkv", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "fjall", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",
-  "surrealkv",
+  "fjall",
   "dep:tokio",
   "dep:axum",
   "dep:clap",
@@ -69,7 +69,7 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-surrealkv = { version = "0.19", optional = true }
+fjall = { version = "3.0.2", optional = true }
 
 axum = { version = "0.7", optional = true }
 bytes = { version = "1", optional = true }

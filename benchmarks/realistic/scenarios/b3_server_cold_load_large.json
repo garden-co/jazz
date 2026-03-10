@@ -2,6 +2,6 @@
   "id": "B3",
   "name": "server_cold_load_large",
   "seed": 20260224,
-  "reopen_cycles": 3,
-  "large_multiplier": 4
+  "reopen_cycles": 12,
+  "large_multiplier": 8
 }

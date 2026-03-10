@@ -1,0 +1,13 @@
+{
+  "id": "W1",
+  "name": "interactive_board_session",
+  "seed": 9001,
+  "mode": "interactive",
+  "operation_count": 100000,
+  "mix": [
+    { "operation": "query_board", "weight": 30 },
+    { "operation": "query_my_work", "weight": 20 },
+    { "operation": "query_task_detail", "weight": 20 },
+    { "operation": "insert_comment", "weight": 30 }
+  ]
+}
