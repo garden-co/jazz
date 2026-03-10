@@ -183,7 +183,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     await expect(deferred).rejects.toBe(reason);
   });
 
-  it("SO-U07 makeQueryKey includes appId, tier, and query payload", async () => {
+  it("SO-U07 makeQueryKey includes appId, normalized options, and query payload", async () => {
     const harness = createUnitHarness("app-so-u07");
     const query = makeQuery({
       table: "todos",
@@ -191,8 +191,54 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     });
 
     try {
-      const key = harness.manager.makeQueryKey(query, "edge");
-      expect(key).toBe(`app-so-u07:edge:${query._build()}`);
+      const key = harness.manager.makeQueryKey(query, {
+        tier: "edge",
+        localUpdates: "deferred",
+        propagation: "local-only",
+      });
+      expect(key).toBe(
+        `app-so-u07:${JSON.stringify({
+          tier: "edge",
+          localUpdates: "deferred",
+          propagation: "local-only",
+        })}:${query._build()}`,
+      );
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U07b makeQueryKey reuses the default key for empty/default-equivalent options", async () => {
+    const harness = createUnitHarness("app-so-u07b");
+    const query = makeQuery();
+
+    try {
+      const defaultKey = harness.manager.makeQueryKey(query);
+      const emptyKey = harness.manager.makeQueryKey(query, {});
+      const normalizedKey = harness.manager.makeQueryKey(query, {
+        localUpdates: "immediate",
+        propagation: "full",
+      });
+
+      expect(emptyKey).toBe(defaultKey);
+      expect(normalizedKey).toBe(defaultKey);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U07c makeQueryKey changes when localUpdates or propagation changes", async () => {
+    const harness = createUnitHarness("app-so-u07c");
+    const query = makeQuery();
+
+    try {
+      const defaultKey = harness.manager.makeQueryKey(query);
+      const deferredKey = harness.manager.makeQueryKey(query, { localUpdates: "deferred" });
+      const localOnlyKey = harness.manager.makeQueryKey(query, { propagation: "local-only" });
+
+      expect(deferredKey).not.toBe(defaultKey);
+      expect(localOnlyKey).not.toBe(defaultKey);
+      expect(localOnlyKey).not.toBe(deferredKey);
     } finally {
       await harness.manager.shutdown();
     }
@@ -202,7 +248,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const harness = createUnitHarness();
     try {
       expect(() => harness.manager.getCacheEntry<Todo>("missing-key")).toThrow(
-        'Unknown query key "missing-key". Call makeQueryKey(query, tier) first.',
+        'Unknown query key "missing-key". Call makeQueryKey(query, options) first.',
       );
     } finally {
       await harness.manager.shutdown();
@@ -212,12 +258,34 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
   it("SO-U09 getCacheEntry returns stable identity for same key", async () => {
     const harness = createUnitHarness();
     try {
-      const key = harness.manager.makeQueryKey(makeQuery());
+      const options = { localUpdates: "immediate" } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
       const first = harness.manager.getCacheEntry<Todo>(key);
-      const second = harness.manager.getCacheEntry<Todo>(key);
+      const second = harness.manager.getCacheEntry<Todo>(
+        harness.manager.makeQueryKey(makeQuery(), {}),
+      );
 
       expect(second).toBe(first);
       expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U09b getCacheEntry forwards full QueryOptions to subscribeAll", async () => {
+    const harness = createUnitHarness();
+    try {
+      const options = {
+        tier: "global",
+        localUpdates: "deferred",
+        propagation: "local-only",
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      harness.manager.getCacheEntry<Todo>(key);
+
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.options).toEqual(options);
     } finally {
       await harness.manager.shutdown();
     }

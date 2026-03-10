@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { userEvent } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/db.js";
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
 import { JazzProvider } from "../../src/react-core/provider.js";
 import { useAllSuspense } from "../../src/react-core/use-all.js";
@@ -187,12 +187,14 @@ async function waitForCondition(
 
 function UseAllProbe<T extends { id: string }>({
   query,
+  options,
   pick,
 }: {
   query?: QueryBuilder<T>;
+  options?: QueryOptions;
   pick: (row: T) => string;
 }) {
-  const rows = useAllSuspense(query);
+  const rows = useAllSuspense(query, options);
   const text = rows.map(pick).join("|");
   return <div data-testid="rows">{text}</div>;
 }
@@ -416,6 +418,39 @@ describe("useAllSuspense browser integration", () => {
       () => getText("rows") === "p2",
       5000,
       "expected p2 in paginated useAllSuspense",
+    );
+  });
+
+  it("accepts QueryOptions for suspense subscriptions", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("options"),
+        driver: { type: "persistent", dbName: uniqueId("options") },
+      }),
+    );
+
+    renderSuspense(
+      <JazzProvider client={client}>
+        <UseAllProbe
+          query={makeQuery<Todo>("todos", {})}
+          options={{ localUpdates: "deferred", propagation: "local-only" }}
+          pick={(row) => row.title}
+        />
+      </JazzProvider>,
+    );
+
+    await client.db.insert(todos, {
+      title: "optioned-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await waitForCondition(
+      () => getText("rows").includes("optioned-task"),
+      5000,
+      "expected useAllSuspense with QueryOptions to receive rows",
     );
   });
 

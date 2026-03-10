@@ -72,7 +72,7 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
 
 <QuickstartWhereOperatorsSummary />
 
-By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
+By default `useAll` returns results immediately from the local replica. Use query options when you need explicit confirmation boundaries.
 
 Deep dive: [Reading Data](/docs/reading-data).
 
@@ -100,10 +100,10 @@ Mutation API details: [Writing Data](/docs/writing-data).
 
 ### Reading with a durability tier
 
-Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-gated delivery.
+Inside components, use `useAll(query, options)` with the same `QueryOptions` as `db.subscribeAll`. Outside components, use `db.subscribeAll` (or `db.all`) directly when you need tier-gated delivery or deltas.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#reading-tier-react
+<include cwd lang="tsx" title="src/TodoList.tsx">
+  ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-query-options-react
 </include>
 
 ### Writing with a durability tier
