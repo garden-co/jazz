@@ -35,7 +35,7 @@ The branch implementation mostly realizes this through `IndexedQueryNode`, with 
 
 ## Rewrite Goal
 
-Implement a dedicated "ordered index top-k" path that:
+Implement a single "ordered index top-k" path that:
 
 1. Avoids full-result sorting for eligible queries.
 2. Uses ordered storage scans as the driver.
@@ -91,6 +91,8 @@ The planner should lower eligible queries into one source node that owns:
 - exact-match index probes
 - optional per-row policy checks
 - residual tuple filtering
+
+Single-table ordered pagination is the zero-join specialization of this same node. The rewrite should not introduce a second planner node just for the single-table case.
 
 The planner must still preserve the downstream row-shaping stages that are semantically separate, such as:
 
@@ -234,22 +236,23 @@ This is required so sync propagation can answer "which rows must the downstream 
 
 The new implementation should keep the ideas but simplify the shape:
 
-1. Have exactly one top-k source path for eligible ordered queries.
+1. Have exactly one top-k source path for eligible ordered queries, including the single-table ordered-pagination case.
 2. Make planner eligibility explicit and easy to inspect.
 3. Keep storage ordering/resume logic isolated behind a small API.
 4. Keep tuple provenance handling centralized.
 5. Separate "driver scan orchestration" from "row shaping" so joins, projection, and sync scope stay understandable.
 
-## Known Issue In The Current Branch
+## Known Issue In The POC Branch
 
 The branch adds both `OrderedPaginationNode` and `IndexedQueryNode`, but the planner dispatch currently calls `compile_indexed_query_plan()` before `ordered_pagination_plan_for_execution_plan()`.
 
 Because `compile_indexed_query_plan()` accepts any single-table query with `LIMIT` or `OFFSET`, the dedicated ordered-pagination path is effectively unreachable for the exact query family it was introduced for.
 
-For the rewrite, do one of these:
+For the rewrite, take the simpler route:
 
-- delete the separate ordered-pagination node and fold the behavior into the single top-k path, or
-- make the planner choose the dedicated ordered-pagination node first for eligible single-table shapes
+- delete the separate ordered-pagination node
+- fold single-table ordered pagination into the single top-k path as the no-join case
+- keep one planner entry for eligible ordered queries and configure it for single-table or join-assisted execution based on query shape
 
 Do not keep two overlapping planner entries where one shadows the other.
 
