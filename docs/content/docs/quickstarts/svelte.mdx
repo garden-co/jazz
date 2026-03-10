@@ -98,9 +98,9 @@ Mutation API details: [Writing Data](/docs/writing-data).
   acknowledgement.
 </Callout>
 
-### Reading with a tier
+### Reading with query options
 
-Pass a tier as the second argument to `QuerySubscription` to gate initial delivery.
+Pass `QueryOptions` as the second argument to `QuerySubscription` to control subscription delivery. Use `tier` when you need to gate initial delivery.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-tier-svelte
