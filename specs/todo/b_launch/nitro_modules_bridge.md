@@ -471,7 +471,7 @@ GitHub tarballs (used by pnpm for git deps) don't include build output. Both `pa
 | Status | Path                                        | Purpose                                     |
 | ------ | ------------------------------------------- | ------------------------------------------- |
 | DONE   | `crates/jazz-nitro/`                        | Nitro binding crate (spike scope)           |
-| DONE   | `crates/jazz-nitro/src/lib.rs`              | `StorageSpikeImpl` (Fjall only)         |
+| DONE   | `crates/jazz-nitro/src/lib.rs`              | `StorageSpikeImpl` (Fjall only)             |
 | DONE   | `crates/jazz-nitro/Cargo.toml`              | Crate config                                |
 | DONE   | `crates/jazz-nitro/jazz-nitro.nitro.ts`     | Nitro TypeScript spec (`StorageSpike`)      |
 | DONE   | `crates/jazz-nitro/nitro.json`              | Nitrogen config                             |

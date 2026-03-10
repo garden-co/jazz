@@ -38,7 +38,7 @@ Queries compile into a pipeline of nodes (`IndexScan → Materialize → Filter 
 | Binary throughout      | `Value` only at API boundary; internally `&[u8]` with `RowDescriptor`         | Avoids allocation and type dispatch in the hot path                                   |
 | Index-first            | No table scans; every query starts with an index (`_id` for unfiltered)       | Predictable performance; the `_id` index doubles as the row manifest                  |
 | Auto-index all columns | Every column gets a single-column index (zero-config)                         | Local-first databases are small enough that index overhead is negligible              |
-| All indices persisted  | Via `Storage` trait (MemoryStorage, FjallStorage, OpfsBTreeStorage)       | Cold start loads indices, not all row data — fast startup                             |
+| All indices persisted  | Via `Storage` trait (MemoryStorage, FjallStorage, OpfsBTreeStorage)           | Cold start loads indices, not all row data — fast startup                             |
 | No index rebuild       | Incremental maintenance only; missing index = error                           | Indices are always consistent with data; no expensive rebuild path                    |
 | TupleDelta throughout  | Unified delta type for progressive materialization                            | Each node transforms deltas without knowing what's upstream or downstream             |
 | Branch-aware           | Indices keyed by `(table, column, branch)`; queries specify target branch(es) | Schema versions use different branches — queries must address the right one           |
