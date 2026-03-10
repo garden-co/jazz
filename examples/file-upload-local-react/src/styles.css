@@ -1,0 +1,230 @@
+:root {
+  color: #111111;
+  background: #ededed;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.page-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 78px 20px 80px;
+}
+
+.error-banner {
+  margin: 18px auto 0;
+  max-width: 52rem;
+  color: #9d2d21;
+}
+
+.brand-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 52px;
+}
+
+.brand-mark {
+  color: #2563eb;
+  font-size: 4.75rem;
+  line-height: 1;
+}
+
+.brand-name {
+  font-size: 4.25rem;
+  font-weight: 500;
+}
+
+.uploader-layout {
+  display: grid;
+  gap: 26px;
+  justify-items: center;
+}
+
+.drop-zone {
+  display: grid;
+  place-items: center;
+  width: min(100%, 840px);
+  min-height: 228px;
+  border: 2px dashed #aba39b;
+  background: rgba(255, 255, 255, 0.14);
+  color: #111111;
+  font-size: 1.05rem;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.drop-zone.is-dragging {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.upload-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: min(100%, 826px);
+}
+
+.file-input,
+.action-button,
+.secondary-button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  font-size: 0.98rem;
+}
+
+.file-input {
+  width: 100%;
+  padding: 7px 10px;
+  background: #e4e4e4;
+}
+
+.action-button,
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  background: #e1e1e1;
+  color: #111111;
+  cursor: pointer;
+}
+
+.action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.details-layout {
+  display: grid;
+  justify-items: center;
+  gap: 28px;
+}
+
+.details-row {
+  display: grid;
+  grid-template-columns: 220px minmax(340px, 1fr);
+  gap: 40px;
+  width: min(100%, 860px);
+  align-items: start;
+}
+
+.details-labels p,
+.details-values p {
+  margin: 0 0 14px;
+  font-size: 1rem;
+}
+
+.details-labels {
+  font-weight: 700;
+}
+
+.details-values {
+  text-align: right;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  width: min(100%, 860px);
+}
+
+.hash-value {
+  word-break: break-all;
+}
+
+.preview-wrap {
+  display: grid;
+  place-items: center;
+  width: 100%;
+}
+
+.preview-media,
+.preview-frame {
+  width: min(100%, 380px);
+  border: 0;
+  background: transparent;
+}
+
+.preview-media {
+  max-height: 380px;
+  object-fit: contain;
+}
+
+.preview-frame {
+  height: 460px;
+}
+
+.fallback-preview {
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .page-shell {
+    padding-top: 40px;
+  }
+
+  .brand-mark {
+    font-size: 3.6rem;
+  }
+
+  .brand-name {
+    font-size: 3.2rem;
+  }
+
+  .upload-controls,
+  .details-row,
+  .detail-actions {
+    width: 100%;
+  }
+
+  .upload-controls,
+  .details-row {
+    grid-template-columns: 1fr;
+  }
+
+  .details-values,
+  .detail-actions {
+    text-align: left;
+    justify-content: flex-start;
+  }
+}
