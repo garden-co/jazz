@@ -1297,7 +1297,7 @@ export class Db {
     fallbackTable: string,
     options?: QueryOptions,
   ): string | null {
-    if (this.config.devMode === false) {
+    if (!this.config.devMode) {
       return null;
     }
 
