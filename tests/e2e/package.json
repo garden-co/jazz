@@ -1,5 +1,5 @@
 {
-  "name": "@jazz/e2e",
+  "name": "jazz/e2e",
   "private": true,
   "type": "module",
   "scripts": {

@@ -76,5 +76,6 @@ jobs:
       - run: pnpm exec playwright install chromium
       - run: pnpm test
       - run: pnpm --filter jazz-tools test:browser
+      - run: pnpm --filter jazz/e2e test:browser
       - name: Show sccache stats (after tests)
         run: sccache --show-stats || true
