@@ -9,6 +9,7 @@ This deployment is intentionally simple:
 - ALB + HTTPS
 - persistent EBS volume mounted at `/mnt/data`
 - Route53 record `cloud2.aws.cloud.jazz.tools`
+- ECS runtime in the staging account, with images pulled from the shared ECR repo
 
 ## Prerequisites
 
@@ -17,7 +18,7 @@ This deployment is intentionally simple:
 - [AWS CLI](https://aws.amazon.com/cli/) v2
 - [Pulumi CLI](https://www.pulumi.com/docs/get-started/install/)
 - [Docker](https://docs.docker.com/get-docker/) with Buildx support
-- AWS account with permissions for ECR + ECS + EC2 + ALB + ACM + Route53 + IAM + Secrets Manager
+- AWS access to the staging/runtime account, plus shared-account access if you push images locally
 
 ## Project structure
 
@@ -81,15 +82,16 @@ npm install
 
 ### Step 2: configure AWS SSO
 
-Configure local AWS credentials for the staging account. If DNS writes require a
-second account, prefer a delegation role so local config stays compatible with
-Pulumi Cloud.
+Configure local AWS credentials for the staging account. If you use the local image
+push flow, also configure the shared image account. If DNS writes require a second
+account, prefer a delegation role so local config stays compatible with Pulumi Cloud.
 
 ```bash
 aws configure sso --profile jazz2:staging
+aws configure sso --profile jazz2:shared
 ```
 
-Use these values:
+Use these values for both profiles:
 
 - SSO start URL: `https://d-9a675128f3.awsapps.com/start/`
 - SSO region: `us-east-2`
@@ -100,8 +102,10 @@ Then log in:
 
 ```bash
 aws sso login --profile jazz2:staging
+aws sso login --profile jazz2:shared
 
 aws sts get-caller-identity --profile jazz2:staging
+aws sts get-caller-identity --profile jazz2:shared
 ```
 
 ### Step 3: bootstrap Pulumi stack
@@ -121,14 +125,19 @@ Set baseline non-secret config:
 
 ```bash
 STAGING_PROFILE="jazz2:staging"
+SHARED_IMAGE_PROFILE="jazz2:shared"
 STAGING_ACCOUNT_ID="$(aws sts get-caller-identity --profile "${STAGING_PROFILE}" --query Account --output text)"
+SHARED_IMAGE_ACCOUNT_ID="$(aws sts get-caller-identity --profile "${SHARED_IMAGE_PROFILE}" --query Account --output text)"
 
 pulumi config set region us-east-2
 pulumi config set allowedAccountId "${STAGING_ACCOUNT_ID}"
 pulumi config set domainName cloud2.aws.cloud.jazz.tools
-pulumi config set containerImageRepository "${STAGING_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server"
+pulumi config set containerImageRepository "${SHARED_IMAGE_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz2-cloud-server"
 pulumi config set containerImageTag latest
 ```
+
+The ECS cluster still runs in the staging account. Only the image registry lives in
+the shared account.
 
 For local `pulumi preview` / `pulumi up`, export your compute credentials before
 running Pulumi:
@@ -172,7 +181,7 @@ Notes:
 Use the local push flow that mirrors `infra-composer`:
 
 ```bash
-pnpm push:image:local -- --aws-profile jazz2:staging --stack dev
+pnpm push:image:local -- --aws-profile jazz2:shared --stack dev
 ```
 
 This script:
@@ -183,6 +192,7 @@ This script:
   - `containerImageRepository`
   - `containerImageTag`
 - removes `containerImage` key if present (so repo+tag is authoritative)
+- defaults to the shared repo name `jazz2-cloud-server`
 
 ### Step 5: deploy infra
 
@@ -204,6 +214,10 @@ If you want build+push+config+deploy in one command:
 ```bash
 ./deploy-local.sh --aws-profile jazz2:staging --stack dev --yes
 ```
+
+That helper assumes the same AWS credentials are used for both image push and Pulumi.
+With the shared-image-account layout, prefer `pnpm push:image:local` against
+`jazz2:shared`, then run `pulumi up` with staging credentials.
 
 ## Stack config reference
 
@@ -253,8 +267,9 @@ This is the intended day-to-day path:
 
 Required GitHub configuration:
 
-- repo variable `AWS_ACCOUNT_ID`
-- repo secret `AWS_GITHUB_ACTIONS_ROLE_ARN`
+- repo variable `AWS_ACCOUNT_ID` set to the shared image account (`851454408348`)
+- repo variable `JAZZ_CLOUD_SERVER_ECR_REPOSITORY` set to `jazz2-cloud-server`
+- repo secret `AWS_GITHUB_ACTIONS_ROLE_ARN` with permission to push to that shared repo
 
 Required Pulumi Cloud configuration:
 
@@ -269,11 +284,15 @@ Secrets can be supplied either way:
 - deployment environment variables `JAZZ_CLOUD2_INTERNAL_API_SECRET` and
   `JAZZ_CLOUD2_SECRET_HASH_KEY`
 
+The Pulumi stack itself should keep `containerImageRepository` pointed at the shared
+repo `851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz2-cloud-server`; deployment PRs
+only need to update `containerImageTag`.
+
 ### Local release
 
 ```bash
-pnpm push:image:local -- --aws-profile jazz2:staging --stack dev
-pulumi up
+pnpm push:image:local -- --aws-profile jazz2:shared --stack dev
+AWS_PROFILE=jazz2:staging pulumi up
 ```
 
 ## Cleaning up
@@ -290,6 +309,7 @@ pulumi destroy
 
 ```bash
 aws sso login --profile jazz2:staging
+aws sso login --profile jazz2:shared
 ```
 
 ### Buildx not available
