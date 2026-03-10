@@ -15,13 +15,6 @@ export function TodoList() {
   );
   // #endregion reading-filtering-react
 
-  // #region reading-query-options-react
-  const _confirmedTodos = useAll(app.todos.where({ done: false }), {
-    tier: "edge",
-    localUpdates: "deferred",
-  });
-  // #endregion reading-query-options-react
-
   // #region writing-use-db-react
   function addTodo(todoTitle: string) {
     db.insert(app.todos, { title: todoTitle, done: false });

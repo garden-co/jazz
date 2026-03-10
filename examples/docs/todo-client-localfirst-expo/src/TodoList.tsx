@@ -36,13 +36,6 @@ export function TodoList() {
   const sessionUserId = session?.user_id ?? null;
   // #endregion reading-reactive-hooks-expo
 
-  // #region reading-query-options-expo
-  const _confirmedTodos = useAll(app.todos.where({ done: false }), {
-    tier: "edge",
-    localUpdates: "deferred",
-  });
-  // #endregion reading-query-options-expo
-
   // #region writing-use-db-expo
   const addTodo = () => {
     const trimmed = title.trim();
