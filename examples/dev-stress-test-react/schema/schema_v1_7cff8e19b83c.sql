@@ -1,0 +1,21 @@
+CREATE TABLE projects (
+    name TEXT NOT NULL,
+    owner_id TEXT NOT NULL
+);
+CREATE POLICY projects_select_policy ON projects FOR SELECT USING (owner_id = @session.user_id);
+CREATE POLICY projects_insert_policy ON projects FOR INSERT WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY projects_update_policy ON projects FOR UPDATE USING (owner_id = @session.user_id) WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY projects_delete_policy ON projects FOR DELETE USING (owner_id = @session.user_id);
+
+CREATE TABLE todos (
+    title TEXT NOT NULL,
+    done BOOLEAN NOT NULL,
+    description TEXT,
+    owner_id TEXT NOT NULL,
+    parent UUID REFERENCES todos,
+    project UUID REFERENCES projects
+);
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
+CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session.user_id) WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
