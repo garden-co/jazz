@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { userEvent } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/db.js";
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
 import { JazzProvider } from "../../src/react-core/provider.js";
 import { useAll } from "../../src/react-core/use-all.js";
@@ -174,12 +174,14 @@ async function waitForCondition(
 
 function UseAllProbe<T extends { id: string }>({
   query,
+  options,
   pick,
 }: {
   query?: QueryBuilder<T>;
+  options?: QueryOptions;
   pick: (row: T) => string;
 }) {
-  const rows = useAll(query);
+  const rows = useAll(query, options);
   const text = rows ? rows.map(pick).join("|") : "pending";
   return <div data-testid="rows">{text}</div>;
 }
@@ -380,6 +382,39 @@ describe("useAll browser integration", () => {
     });
 
     await waitForCondition(() => getText("rows") === "p2", 5000, "expected p2 in paginated useAll");
+  });
+
+  it("accepts QueryOptions for component subscriptions", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("options"),
+        driver: { type: "persistent", dbName: uniqueId("options") },
+      }),
+    );
+
+    render(
+      <JazzProvider client={client}>
+        <UseAllProbe
+          query={makeQuery<Todo>("todos", {})}
+          options={{ localUpdates: "deferred", propagation: "local-only" }}
+          pick={(row) => row.title}
+        />
+      </JazzProvider>,
+    );
+
+    await client.db.insert(todos, {
+      title: "optioned-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await waitForCondition(
+      () => getText("rows").includes("optioned-task"),
+      5000,
+      "expected useAll with QueryOptions to receive rows",
+    );
   });
 
   it("does not include rows for non-matching text contains", async () => {

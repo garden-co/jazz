@@ -50,6 +50,22 @@ describe("QuerySubscription subscription wiring", () => {
     expect(typeof unsub).toBe("function");
   });
 
+  it("subscribeAll is called with full QueryOptions", () => {
+    const query = { _build: () => '{"table":"todos"}', _table: "todos" } as any;
+
+    const unsub = mockDb.subscribeAll(query, () => {}, {
+      tier: "worker",
+      localUpdates: "deferred",
+      propagation: "local-only",
+    });
+    expect(mockDb.subscribeAll).toHaveBeenCalledWith(query, expect.any(Function), {
+      tier: "worker",
+      localUpdates: "deferred",
+      propagation: "local-only",
+    });
+    expect(typeof unsub).toBe("function");
+  });
+
   it("subscription callback receives delta.all", () => {
     const query = { _build: () => '{"table":"todos"}' } as any;
     let items: any[] | undefined = [];
@@ -93,6 +109,24 @@ describe("QuerySubscription subscription wiring", () => {
     );
     subscribeCallback!({ all: [] });
     expect(items).toEqual([]);
+  });
+
+  it("without tier, non-tier options keep the initial value as empty array", () => {
+    const options = { localUpdates: "deferred", propagation: "local-only" };
+    let items: any[] | undefined = options && "tier" in options && options.tier ? undefined : [];
+
+    expect(items).toEqual([]);
+
+    const query = { _build: () => '{"table":"todos"}' } as any;
+    mockDb.subscribeAll(
+      query,
+      (delta: any) => {
+        items = delta.all;
+      },
+      options,
+    );
+    subscribeCallback!({ all: [{ id: "1", title: "First" }] });
+    expect(items).toEqual([{ id: "1", title: "First" }]);
   });
 
   it("without tier, initial value should be empty array (loaded but empty)", () => {
