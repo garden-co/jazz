@@ -71,7 +71,10 @@ export interface TodoRelations {
   project: Project;
 }
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}> = Project & {
+export type ProjectWithIncludes<I extends ProjectInclude = {}> = Omit<
+  Project,
+  keyof ProjectInclude
+> & {
   todosViaProject?: NonNullable<I["todosViaProject"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Todo[]
@@ -86,7 +89,7 @@ export type ProjectWithIncludes<I extends ProjectInclude = {}> = Project & {
     : never;
 };
 
-export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
+export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, keyof TodoInclude> & {
   parent?: NonNullable<I["parent"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Todo
@@ -132,7 +135,8 @@ export type ProjectSelected<S extends keyof Project | "*" = keyof Project> = "*"
 export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
   S extends keyof Project | "*" = keyof Project,
-> = ProjectSelected<S> & Omit<ProjectWithIncludes<I>, keyof Project>;
+> = Omit<ProjectSelected<S>, keyof ProjectInclude> &
+  Omit<ProjectWithIncludes<I>, keyof Omit<Project, keyof ProjectInclude>>;
 
 export type TodoSelected<S extends keyof Todo | "*" = keyof Todo> = "*" extends S
   ? Todo
@@ -141,7 +145,8 @@ export type TodoSelected<S extends keyof Todo | "*" = keyof Todo> = "*" extends 
 export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
   S extends keyof Todo | "*" = keyof Todo,
-> = TodoSelected<S> & Omit<TodoWithIncludes<I>, keyof Todo>;
+> = Omit<TodoSelected<S>, keyof TodoInclude> &
+  Omit<TodoWithIncludes<I>, keyof Omit<Todo, keyof TodoInclude>>;
 
 export const wasmSchema: WasmSchema = {
   projects: {

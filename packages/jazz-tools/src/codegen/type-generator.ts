@@ -204,7 +204,7 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
  * Generate WithIncludes types for type-safe include results.
  *
  * Example output:
- *   export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
+ *   export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, keyof TodoInclude> & {
  *     project?: NonNullable<I["project"]> extends infer RelationInclude
  *       ? RelationInclude extends true
  *         ? Project
@@ -226,7 +226,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     const includeInterface = baseInterface + "Include";
 
     lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = ${baseInterface} & {`,
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = Omit<${baseInterface}, keyof ${includeInterface}> & {`,
     );
     for (const rel of rels) {
       const targetInterface = tableNameToInterface(rel.toTable);
@@ -277,7 +277,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = ${baseInterface}Selected<S> & Omit<${withIncludesType}<I>, keyof ${baseInterface}>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, keyof ${includeInterface}> & Omit<${withIncludesType}<I>, keyof Omit<${baseInterface}, keyof ${includeInterface}>>;`,
       );
       lines.push("");
     }

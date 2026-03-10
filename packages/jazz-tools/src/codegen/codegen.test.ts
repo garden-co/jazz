@@ -804,8 +804,12 @@ describe("generateTypes with relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export type TodoWithIncludes<I extends TodoInclude = {}>");
-    expect(output).toContain("export type UserWithIncludes<I extends UserInclude = {}>");
+    expect(output).toContain(
+      "export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, keyof TodoInclude> & {",
+    );
+    expect(output).toContain(
+      "export type UserWithIncludes<I extends UserInclude = {}> = Omit<User, keyof UserInclude> & {",
+    );
     expect(output).toContain('owner?: NonNullable<I["owner"]> extends infer RelationInclude');
     expect(output).toContain("? RelationInclude extends true");
     expect(output).toContain("? User");
@@ -841,7 +845,9 @@ describe("generateTypes with relations", () => {
     expect(output).toContain(
       'export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends keyof Todo | "*" = keyof Todo>',
     );
-    expect(output).toContain("TodoSelected<S> & Omit<TodoWithIncludes<I>, keyof Todo>");
+    expect(output).toContain(
+      "Omit<TodoSelected<S>, keyof TodoInclude> & Omit<TodoWithIncludes<I>, keyof Omit<Todo, keyof TodoInclude>>",
+    );
   });
 
   it("avoids collapsing nested array includes to never when selectors are optional", () => {

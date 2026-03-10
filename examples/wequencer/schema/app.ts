@@ -154,7 +154,10 @@ export interface ParticipantRelations {
   jam: Jam;
 }
 
-export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Instrument & {
+export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Omit<
+  Instrument,
+  keyof InstrumentInclude
+> & {
   beatsViaInstrument?: NonNullable<I["beatsViaInstrument"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Beat[]
@@ -169,7 +172,7 @@ export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Instrumen
     : never;
 };
 
-export type JamWithIncludes<I extends JamInclude = {}> = Jam & {
+export type JamWithIncludes<I extends JamInclude = {}> = Omit<Jam, keyof JamInclude> & {
   beatsViaJam?: NonNullable<I["beatsViaJam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Beat[]
@@ -196,7 +199,7 @@ export type JamWithIncludes<I extends JamInclude = {}> = Jam & {
     : never;
 };
 
-export type BeatWithIncludes<I extends BeatInclude = {}> = Beat & {
+export type BeatWithIncludes<I extends BeatInclude = {}> = Omit<Beat, keyof BeatInclude> & {
   jam?: NonNullable<I["jam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Jam
@@ -223,7 +226,10 @@ export type BeatWithIncludes<I extends BeatInclude = {}> = Beat & {
     : never;
 };
 
-export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Participant & {
+export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Omit<
+  Participant,
+  keyof ParticipantInclude
+> & {
   jam?: NonNullable<I["jam"]> extends infer RelationInclude
     ? RelationInclude extends true
       ? Jam
@@ -245,7 +251,8 @@ export type InstrumentSelected<S extends keyof Instrument | "*" = keyof Instrume
 export type InstrumentSelectedWithIncludes<
   I extends InstrumentInclude = {},
   S extends keyof Instrument | "*" = keyof Instrument,
-> = InstrumentSelected<S> & Omit<InstrumentWithIncludes<I>, keyof Instrument>;
+> = Omit<InstrumentSelected<S>, keyof InstrumentInclude> &
+  Omit<InstrumentWithIncludes<I>, keyof Omit<Instrument, keyof InstrumentInclude>>;
 
 export type JamSelected<S extends keyof Jam | "*" = keyof Jam> = "*" extends S
   ? Jam
@@ -254,7 +261,8 @@ export type JamSelected<S extends keyof Jam | "*" = keyof Jam> = "*" extends S
 export type JamSelectedWithIncludes<
   I extends JamInclude = {},
   S extends keyof Jam | "*" = keyof Jam,
-> = JamSelected<S> & Omit<JamWithIncludes<I>, keyof Jam>;
+> = Omit<JamSelected<S>, keyof JamInclude> &
+  Omit<JamWithIncludes<I>, keyof Omit<Jam, keyof JamInclude>>;
 
 export type BeatSelected<S extends keyof Beat | "*" = keyof Beat> = "*" extends S
   ? Beat
@@ -263,7 +271,8 @@ export type BeatSelected<S extends keyof Beat | "*" = keyof Beat> = "*" extends 
 export type BeatSelectedWithIncludes<
   I extends BeatInclude = {},
   S extends keyof Beat | "*" = keyof Beat,
-> = BeatSelected<S> & Omit<BeatWithIncludes<I>, keyof Beat>;
+> = Omit<BeatSelected<S>, keyof BeatInclude> &
+  Omit<BeatWithIncludes<I>, keyof Omit<Beat, keyof BeatInclude>>;
 
 export type ParticipantSelected<S extends keyof Participant | "*" = keyof Participant> =
   "*" extends S ? Participant : Pick<Participant, Extract<S | "id", keyof Participant>>;
@@ -271,7 +280,8 @@ export type ParticipantSelected<S extends keyof Participant | "*" = keyof Partic
 export type ParticipantSelectedWithIncludes<
   I extends ParticipantInclude = {},
   S extends keyof Participant | "*" = keyof Participant,
-> = ParticipantSelected<S> & Omit<ParticipantWithIncludes<I>, keyof Participant>;
+> = Omit<ParticipantSelected<S>, keyof ParticipantInclude> &
+  Omit<ParticipantWithIncludes<I>, keyof Omit<Participant, keyof ParticipantInclude>>;
 
 export const wasmSchema: WasmSchema = {
   instruments: {
