@@ -67,7 +67,7 @@ pub struct AppContext {
     pub schema: Schema,
     /// Server URL for sync (e.g., "http://localhost:1625").
     pub server_url: String,
-    /// Local data directory for SurrealKV storage.
+    /// Local data directory for Fjall storage.
     pub data_dir: PathBuf,
 
     // Authentication fields

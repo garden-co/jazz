@@ -2,11 +2,11 @@
 
 ## Spike Status (2026-02-18)
 
-The `spike/rn-surrealkv` branch validated the full Nitro-Rust-SurrealKV stack on iOS. This was a narrowly-scoped storage spike — not the full GrooveRuntime, just enough to prove the toolchain end-to-end.
+The `spike/rn-fjall` branch validated the full Nitro-Rust-Fjall stack on iOS. This was a narrowly-scoped storage spike — not the full GrooveRuntime, just enough to prove the toolchain end-to-end.
 
 ### What was built
 
-- **`crates/jazz-nitro`** — Rust crate with `StorageSpikeImpl`: open/write/read/flush/close against SurrealKV
+- **`crates/jazz-nitro`** — Rust crate with `StorageSpikeImpl`: open/write/read/flush/close against Fjall
 - **`.nitro.ts` spec** — `StorageSpike` HybridObject with 5 sync methods (no Promises, callbacks, or ArrayBuffer yet)
 - **Nitrogen codegen** — ran from the `boorad/nitro#feat/rust` fork, producing:
   - Generated trait (`HybridStorageSpikeSpec`) + FFI shims + C++ bridge headers
@@ -19,9 +19,9 @@ The `spike/rn-surrealkv` branch validated the full Nitro-Rust-SurrealKV stack on
 
 1. **Xcode CC env must be unset for Rust builds.** Xcode sets `CC`/`CXX`/`LD` to iOS SDK clang, which breaks host-targeted build scripts (proc-macros, libc crate). The podspec unsets them and instead sets `CARGO_TARGET_*_LINKER` for cross-compilation.
 
-2. **Commit via `runtime.spawn` + `mpsc::sync_channel`, not `block_on`.** SurrealKV's `txn.commit()` is async. `runtime.block_on()` panics if the calling thread is already a tokio worker. The spawn+channel pattern (same as `tree.close()`) avoids this.
+2. **Commit via `runtime.spawn` + `mpsc::sync_channel`, not `block_on`.** Fjall's `txn.commit()` is async. `runtime.block_on()` panics if the calling thread is already a tokio worker. The spawn+channel pattern (same as `tree.close()`) avoids this.
 
-3. **Nitrogen wrapper pattern.** The generated `factory.rs` wraps the impl struct rather than having the impl struct directly implement the generated trait. This keeps `jazz-nitro/src/lib.rs` free of codegen dependencies — the impl crate only needs SurrealKV, not the generated trait.
+3. **Nitrogen wrapper pattern.** The generated `factory.rs` wraps the impl struct rather than having the impl struct directly implement the generated trait. This keeps `jazz-nitro/src/lib.rs` free of codegen dependencies — the impl crate only needs Fjall, not the generated trait.
 
 4. **Podspec lives in the crate, not in `ios/`.** `JazzNitro.podspec` is at `crates/jazz-nitro/`, and the RN app's Podfile references it via a relative path. The generated Rust crate (`nitrogen/generated/shared/rust/`) is compiled by the podspec's script phase.
 
@@ -81,7 +81,7 @@ Nitro does **not** replace jazz-wasm (browser) or jazz-napi (Node.js server). It
     ┌──────────────┐  ┌────────────┐  ┌──────────────┐
     │  jazz-wasm   │  │ jazz-napi  │  │  jazz-nitro  │  ← NEW
     │ wasm-bindgen │  │ napi-rs    │  │ Nitro Rust   │
-    │ browser/OPFS │  │ Node/Surreal│  │ RN/SurrealKV │
+    │ browser/OPFS │  │ Node/Surreal│  │ RN/Fjall │
     └──────┬───────┘  └─────┬──────┘  └──────┬───────┘
            │                │                 │
            ▼                ▼                 ▼
@@ -91,11 +91,11 @@ Nitro does **not** replace jazz-wasm (browser) or jazz-napi (Node.js server). It
 
 ### What jazz-nitro wraps today vs. the target
 
-**Today (spike):** `StorageSpikeImpl` — a standalone SurrealKV key-value store. No RuntimeCore, no scheduler, no sync. Just open/write/read/flush/close.
+**Today (spike):** `StorageSpikeImpl` — a standalone Fjall key-value store. No RuntimeCore, no scheduler, no sync. Just open/write/read/flush/close.
 
-**Target:** `RuntimeCore<SurrealKvStorage, NitroScheduler, NitroSyncSender>`
+**Target:** `RuntimeCore<FjallStorage, NitroScheduler, NitroSyncSender>`
 
-- **SurrealKvStorage** — same persistent storage as jazz-napi (Documents dir on iOS, internal storage on Android)
+- **FjallStorage** — same persistent storage as jazz-napi (Documents dir on iOS, internal storage on Android)
 - **NitroScheduler** — schedules `batched_tick()` on the RN JS thread via Nitro callback
 - **NitroSyncSender** — sends sync messages back to JS via Nitro callback
 
@@ -132,7 +132,7 @@ interface SubscriptionDelta {
 
 /**
  * Core Jazz runtime for React Native.
- * Wraps Rust RuntimeCore with SurrealKV storage.
+ * Wraps Rust RuntimeCore with Fjall storage.
  */
 export interface GrooveRuntime extends HybridObject<{ ios: "rust"; android: "rust" }> {
   // --- CRUD (small payloads — JSON strings are fine) ---
@@ -203,7 +203,7 @@ crates/jazz-nitro/
 ├── package.json                # workspace package for Nitrogen resolution
 ├── tsconfig.json
 ├── src/
-│   └── lib.rs                  # StorageSpikeImpl (SurrealKV ops only)
+│   └── lib.rs                  # StorageSpikeImpl (Fjall ops only)
 └── nitrogen/generated/         # All Nitrogen codegen output
     ├── shared/c++/             # C++ bridge headers
     ├── shared/rust/            # Generated trait, FFI shims, factory.rs
@@ -225,7 +225,7 @@ The structure will mirror jazz-napi. Key differences:
 
 - jazz-napi uses `napi::ThreadsafeFunction` for callbacks → jazz-nitro will use Nitro's `Func_*` callback mechanism (`fn_ptr` + `userdata` + `destroy_fn`)
 - jazz-napi uses `#[napi]` macros → jazz-nitro implements a trait generated by Nitrogen from the `.nitro.ts` spec
-- Both use `Arc<Mutex<RuntimeCore<SurrealKvStorage, ...>>>` since they're multi-threaded native
+- Both use `Arc<Mutex<RuntimeCore<FjallStorage, ...>>>` since they're multi-threaded native
 
 ### NitroScheduler
 
@@ -306,7 +306,7 @@ The biggest wins: **performance** (NativeState vs HostObject) and **TS-first spe
 This Nitro approach answers the open questions in:
 
 - **`react_native_packaging.md`**: "NAPI via Hermes vs JSI vs Turbo Modules?" → **Nitro** (JSI-based, faster than all three options listed)
-- **`react_native_storage_investigation.md`**: The spike work (SurrealKV on iOS/Android) is **validated on iOS**. jazz-nitro uses the same SurrealKV patterns as jazz-napi.
+- **`react_native_storage_investigation.md`**: The spike work (Fjall on iOS/Android) is **validated on iOS**. jazz-nitro uses the same Fjall patterns as jazz-napi.
 - **`swift_bindings.md`** / **`kotlin_bindings.md`**: Nitro is specifically for React Native. Pure Swift/Kotlin native apps would still use their own FFI approach (UniFFI, C bridge, JNI). But if the primary mobile target is RN, Nitro covers it.
 
 ---
@@ -314,7 +314,7 @@ This Nitro approach answers the open questions in:
 ## What Needs to Happen (Sequencing)
 
 1. ~~**Complete Nitro Rust support** (`boorad/nitro feat/rust`)~~ — DONE. Sync methods, factory, FFI shims, iOS/Android build system all work.
-2. ~~**Complete RN storage spike**~~ — DONE (iOS Simulator). SurrealKV opens, writes, reads, flushes, closes via Nitro Rust bridge. See `examples/rn-storage-spike/RESULTS.md`.
+2. ~~**Complete RN storage spike**~~ — DONE (iOS Simulator). Fjall opens, writes, reads, flushes, closes via Nitro Rust bridge. See `examples/rn-storage-spike/RESULTS.md`.
 3. **Validate on Android** — run the storage spike on Android emulator via cargo-ndk + CMake
 4. **Validate advanced Nitro features** — Promises (for `query()`), callbacks (for subscriptions/sync), ArrayBuffer/NitroBuffer (for zero-copy binary transfer). These are implemented in the fork but untested in Jazz.
 5. **Evolve `jazz-nitro` to wrap RuntimeCore** — expand from storage-only spike to the full `GrooveRuntime` HybridObject spec (see Nitro HybridObject Spec below), following jazz-napi's patterns
@@ -471,7 +471,7 @@ GitHub tarballs (used by pnpm for git deps) don't include build output. Both `pa
 | Status | Path                                        | Purpose                                     |
 | ------ | ------------------------------------------- | ------------------------------------------- |
 | DONE   | `crates/jazz-nitro/`                        | Nitro binding crate (spike scope)           |
-| DONE   | `crates/jazz-nitro/src/lib.rs`              | `StorageSpikeImpl` (SurrealKV only)         |
+| DONE   | `crates/jazz-nitro/src/lib.rs`              | `StorageSpikeImpl` (Fjall only)         |
 | DONE   | `crates/jazz-nitro/Cargo.toml`              | Crate config                                |
 | DONE   | `crates/jazz-nitro/jazz-nitro.nitro.ts`     | Nitro TypeScript spec (`StorageSpike`)      |
 | DONE   | `crates/jazz-nitro/nitro.json`              | Nitrogen config                             |

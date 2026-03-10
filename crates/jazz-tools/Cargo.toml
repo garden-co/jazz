@@ -18,15 +18,14 @@ required-features = ["cli"]
 [features]
 default = []
 fjall = ["dep:fjall"]
-surrealkv = ["dep:surrealkv", "dep:tokio"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "surrealkv", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "fjall", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",
-  "surrealkv",
+  "fjall",
   "dep:tokio",
   "dep:axum",
   "dep:clap",
@@ -71,7 +70,6 @@ sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
 fjall = { version = "3.0.2", optional = true }
-surrealkv = { version = "0.19", optional = true }
 
 axum = { version = "0.7", optional = true }
 bytes = { version = "1", optional = true }
@@ -113,10 +111,6 @@ tokio = { version = "1", features = ["test-util", "full"] }
 [[bench]]
 name = "realistic_phase1"
 harness = false
-
-[[example]]
-name = "storage_backend_probe"
-required-features = ["fjall", "surrealkv"]
 
 [[example]]
 name = "realistic_bench"

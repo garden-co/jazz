@@ -17,10 +17,6 @@ pub use opfs_btree::OpfsBTreeStorage;
 mod fjall;
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 pub use fjall::FjallStorage;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-mod surrealkv;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-pub use surrealkv::SurrealKvStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;

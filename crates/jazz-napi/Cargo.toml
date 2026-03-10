@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
-  "surrealkv",
+  "fjall",
 ] }
 napi = { version = "3", features = ["napi5", "serde-json", "async"] }
 napi-derive = "3"
