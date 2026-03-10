@@ -1,6 +1,6 @@
 config:
   jazz-cloud2:allowedAccountId: "327252143262"
-  jazz-cloud2:containerImageRepository: 327252143262.dkr.ecr.us-east-2.amazonaws.com/jazz-cloud-server
+  jazz-cloud2:containerImageRepository: 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz2-cloud-server
   jazz-cloud2:containerImageTag: "sha-df19528"
   jazz-cloud2:dataVolumeSizeGiB: "100"
   jazz-cloud2:domainName: cloud2.aws.cloud.jazz.tools
