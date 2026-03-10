@@ -4,11 +4,8 @@ import { TableDataGrid } from "./components/data-explorer/TableDataGrid";
 import { TableSchemaSql } from "./components/data-explorer/TableSchemaSql";
 import { InspectorLayout } from "./components/inspector-layout";
 import { LiveQuery } from "./pages/live-query";
-import { useDevtoolsContext } from "./contexts/devtools-context";
 
 export function InspectorRoutes() {
-  const { runtime } = useDevtoolsContext();
-
   return (
     <Routes>
       <Route path="/" element={<InspectorLayout />}>
@@ -17,7 +14,7 @@ export function InspectorRoutes() {
           <Route path=":table/data" element={<TableDataGrid />} />
           <Route path=":table/schema" element={<TableSchemaSql />} />
         </Route>
-        {runtime === "extension" ? <Route path="live-query" element={<LiveQuery />} /> : null}
+        <Route path="live-query" element={<LiveQuery />} />
       </Route>
     </Routes>
   );

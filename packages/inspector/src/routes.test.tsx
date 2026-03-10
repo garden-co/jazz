@@ -54,18 +54,4 @@ describe("InspectorRoutes", () => {
 
     expect(screen.getByText("live query page")).not.toBeNull();
   });
-
-  it("does not resolve the live query route in standalone mode", () => {
-    mockUseDevtoolsContext.mockReturnValue({ runtime: "standalone" });
-    const errorSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
-    render(
-      <MemoryRouter initialEntries={["/live-query"]}>
-        <InspectorRoutes />
-      </MemoryRouter>,
-    );
-
-    expect(screen.queryByText("live query page")).toBeNull();
-    errorSpy.mockRestore();
-  });
 });

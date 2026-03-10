@@ -183,7 +183,7 @@ export default function App() {
     );
   }
 
-  if (!client || !wasmSchema) {
+  if (!client || !wasmSchema || !storedConfig) {
     return (
       <main className={styles.statePage}>
         <section className={styles.stateCard}>
@@ -202,6 +202,12 @@ export default function App() {
           selectedSchemaHash={storedConfig?.schemaHash ?? null}
           onSelectSchema={handleHeaderSchemaSelect}
           isSwitchingSchema={isSwitchingSchema}
+          connection={{
+            serverUrl: storedConfig.serverUrl,
+            appId: storedConfig.appId,
+            adminSecret: storedConfig.adminSecret,
+            serverPathPrefix: storedConfig.serverPathPrefix,
+          }}
         >
           <BrowserRouter>
             <InspectorRoutes />

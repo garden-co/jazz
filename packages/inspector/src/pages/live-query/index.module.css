@@ -32,6 +32,12 @@
   font-size: 14px;
 }
 
+.statusText {
+  margin: 6px 0 0;
+  color: #7f91a8;
+  font-size: 12px;
+}
+
 .emptyState {
   border: 1px dashed #36465d;
   border-radius: 8px;
