@@ -118,17 +118,4 @@ describe("InspectorLayout", () => {
     expect(screen.queryByRole("button", { name: "Reset connection" })).toBeNull();
     expect(screen.queryByRole("combobox")).toBeNull();
   });
-
-  it("hides the live query tab in standalone mode", () => {
-    mockUseStandaloneContext.mockReturnValue(null);
-    mockUseDevtoolsContext.mockReturnValue({ runtime: "standalone" });
-
-    render(
-      <MemoryRouter initialEntries={["/data-explorer"]}>
-        <InspectorLayout />
-      </MemoryRouter>,
-    );
-
-    expect(screen.queryByRole("link", { name: "Live Query" })).toBeNull();
-  });
 });

@@ -35,6 +35,12 @@ export {
   fetchStoredWasmSchema,
   type FetchStoredWasmSchemaOptions,
 } from "./schema-fetch.js";
+export {
+  fetchServerSubscriptions,
+  type FetchServerSubscriptionsOptions,
+  type IntrospectionSubscriptionGroup,
+  type IntrospectionSubscriptionResponse,
+} from "./introspection-fetch.js";
 export { resolveLocalAuthDefaults } from "./local-auth.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";

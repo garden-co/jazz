@@ -1,12 +1,15 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LiveQuery } from "./index";
 
+const mockFetchServerSubscriptions = vi.fn();
 const mockGetActiveQuerySubscriptions = vi.fn();
 const mockOnActiveQuerySubscriptionsChange = vi.fn();
 const mockUseDevtoolsContext = vi.fn();
+const mockUseStandaloneContext = vi.fn();
 
 vi.mock("jazz-tools", () => ({
+  fetchServerSubscriptions: (...args: unknown[]) => mockFetchServerSubscriptions(...args),
   getActiveQuerySubscriptions: () => mockGetActiveQuerySubscriptions(),
   onActiveQuerySubscriptionsChange: (listener: (subscriptions: unknown[]) => void) =>
     mockOnActiveQuerySubscriptionsChange(listener),
@@ -16,15 +19,21 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
 
+vi.mock("../../contexts/standalone-context.js", () => ({
+  useStandaloneContext: () => mockUseStandaloneContext(),
+}));
+
 describe("LiveQuery", () => {
   afterEach(() => {
     cleanup();
   });
 
   beforeEach(() => {
+    mockFetchServerSubscriptions.mockReset();
     mockGetActiveQuerySubscriptions.mockReset();
     mockOnActiveQuerySubscriptionsChange.mockReset();
     mockUseDevtoolsContext.mockReset();
+    mockUseStandaloneContext.mockReset();
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "extension",
       wasmSchema: {
@@ -32,11 +41,23 @@ describe("LiveQuery", () => {
         todos: { columns: [] },
       },
     });
+    mockUseStandaloneContext.mockReturnValue({
+      connection: {
+        serverUrl: "http://localhost:1625",
+        appId: "test-app",
+        adminSecret: "admin-secret",
+      },
+    });
     mockGetActiveQuerySubscriptions.mockReturnValue([]);
     mockOnActiveQuerySubscriptionsChange.mockImplementation(() => vi.fn());
+    mockFetchServerSubscriptions.mockResolvedValue({
+      appId: "test-app",
+      generatedAt: 1741600800000,
+      queries: [],
+    });
   });
 
-  it("renders an empty state when there are no active subscriptions", () => {
+  it("renders an empty state when there are no active extension subscriptions", () => {
     render(<LiveQuery />);
 
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
@@ -70,7 +91,7 @@ describe("LiveQuery", () => {
     expect(screen.getByText(/at useAll/)).not.toBeNull();
   });
 
-  it("filters rows by table and tier", () => {
+  it("filters extension rows by table and tier", () => {
     mockGetActiveQuerySubscriptions.mockReturnValue([
       {
         id: "sub-1",
@@ -110,7 +131,7 @@ describe("LiveQuery", () => {
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
 
-  it("sorts by started date and tier, and allows toggling started order", () => {
+  it("sorts extension rows by started date and tier, and allows toggling started order", () => {
     mockGetActiveQuerySubscriptions.mockReturnValue([
       {
         id: "sub-1",
@@ -163,5 +184,40 @@ describe("LiveQuery", () => {
 
     const reSortedRows = screen.getAllByRole("row");
     expect(reSortedRows[1]?.textContent).toContain("todos");
+  });
+
+  it("fetches and renders grouped standalone server telemetry", async () => {
+    mockUseDevtoolsContext.mockReturnValue({
+      runtime: "standalone",
+      wasmSchema: {},
+    });
+    mockFetchServerSubscriptions.mockResolvedValue({
+      appId: "test-app",
+      generatedAt: 1741600800000,
+      queries: [
+        {
+          groupKey: "group-1",
+          count: 2,
+          table: "todos",
+          propagation: "full",
+          branches: ["main"],
+          query: '{"table":"todos"}',
+        },
+      ],
+    });
+
+    render(<LiveQuery />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("cell", { name: "todos" })).not.toBeNull();
+    });
+
+    expect(mockFetchServerSubscriptions).toHaveBeenCalledWith("http://localhost:1625", {
+      adminSecret: "admin-secret",
+      appId: "test-app",
+      pathPrefix: undefined,
+    });
+    expect(screen.getByRole("cell", { name: "2" })).not.toBeNull();
+    expect(screen.queryByLabelText("Filter by tier")).toBeNull();
   });
 });
