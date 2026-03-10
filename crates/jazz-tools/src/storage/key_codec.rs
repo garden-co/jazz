@@ -4,7 +4,7 @@ use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 
-use super::encode_value;
+use super::{OrderedIndexCursor, decode_index_value, encode_value};
 
 /// Format an ObjectId as compact hex (no dashes).
 pub(super) fn format_uuid(id: ObjectId) -> String {
@@ -151,6 +151,18 @@ pub(super) fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
     }
     let uuid = uuid::Uuid::from_bytes(bytes.try_into().ok()?);
     Some(ObjectId(internment::Intern::new(uuid)))
+}
+
+pub(super) fn parse_ordered_cursor_from_index_key(key: &str) -> Option<OrderedIndexCursor> {
+    let mut parts = key.rsplitn(3, ':');
+    let row_id = parse_uuid_from_index_key(key)?;
+    let value_hex = parts.nth(1)?;
+    let value_bytes = hex::decode(value_hex).ok()?;
+
+    Some(OrderedIndexCursor {
+        value: decode_index_value(&value_bytes)?,
+        row_id,
+    })
 }
 
 /// Increment the last byte for exclusive upper bounds.

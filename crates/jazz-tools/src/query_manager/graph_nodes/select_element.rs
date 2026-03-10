@@ -48,6 +48,10 @@ impl SelectElementNode {
         Some(Tuple::new(vec![element]).with_provenance(tuple.provenance().clone()))
     }
 
+    pub fn select_tuple_for_output(&self, tuple: &Tuple) -> Option<Tuple> {
+        self.select_tuple(tuple)
+    }
+
     fn tuple_content_changed(old_tuple: &Tuple, new_tuple: &Tuple) -> bool {
         match (old_tuple.to_single_row(), new_tuple.to_single_row()) {
             (Some(old_row), Some(new_row)) => {

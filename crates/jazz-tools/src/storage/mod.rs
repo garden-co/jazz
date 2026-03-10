@@ -46,6 +46,13 @@ pub enum IndexScanDirection {
     Descending,
 }
 
+/// Resume point for an ordered index scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderedIndexCursor {
+    pub value: Value,
+    pub row_id: ObjectId,
+}
+
 /// Parameters for an ordered index scan.
 #[derive(Debug, Clone, Copy)]
 pub struct OrderedIndexScan<'a> {
@@ -56,6 +63,7 @@ pub struct OrderedIndexScan<'a> {
     pub end: Bound<&'a Value>,
     pub direction: IndexScanDirection,
     pub take: Option<usize>,
+    pub resume_after: Option<&'a OrderedIndexCursor>,
 }
 
 // ============================================================================
@@ -280,7 +288,10 @@ pub trait Storage {
     ) -> Vec<ObjectId>;
 
     /// Ordered scan with optional bounds and count limit.
-    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId>;
+    ///
+    /// Returns resume cursors for the visited entries so callers can continue
+    /// scanning even when a row is later filtered out after lookup/materialization.
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<OrderedIndexCursor>;
 
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
@@ -423,7 +434,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).index_range(table, column, branch, start, end)
     }
 
-    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId> {
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<OrderedIndexCursor> {
         (**self).index_scan_ordered(scan)
     }
 
@@ -599,6 +610,42 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             bytes.extend_from_slice(json.as_bytes());
             bytes
         }
+    }
+}
+
+pub(crate) fn decode_index_value(bytes: &[u8]) -> Option<Value> {
+    let (&tag, rest) = bytes.split_first()?;
+
+    match tag {
+        0x00 if rest.is_empty() => Some(Value::Null),
+        0x01 => match rest {
+            [0x01] => Some(Value::Boolean(false)),
+            [0x02] => Some(Value::Boolean(true)),
+            _ => None,
+        },
+        0x02 => {
+            let raw = i64::from_be_bytes(rest.try_into().ok()?) ^ i64::MIN;
+            Some(Value::Integer(i32::try_from(raw).ok()?))
+        }
+        0x03 => Some(Value::BigInt(
+            i64::from_be_bytes(rest.try_into().ok()?) ^ i64::MIN,
+        )),
+        0x04 => Some(Value::Timestamp(u64::from_be_bytes(rest.try_into().ok()?))),
+        0x05 => Some(Value::Text(String::from_utf8(rest.to_vec()).ok()?)),
+        0x06 => Some(Value::Uuid(ObjectId::from_uuid(uuid::Uuid::from_bytes(
+            rest.try_into().ok()?,
+        )))),
+        0x07 | 0x08 => serde_json::from_slice(rest).ok(),
+        0x09 => {
+            let ordered = u64::from_be_bytes(rest.try_into().ok()?);
+            let bits = if ordered & (1u64 << 63) != 0 {
+                ordered ^ (1u64 << 63)
+            } else {
+                !ordered
+            };
+            Some(Value::Double(f64::from_bits(bits)))
+        }
+        _ => None,
     }
 }
 
@@ -890,7 +937,7 @@ impl Storage for MemoryStorage {
             .collect()
     }
 
-    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId> {
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<OrderedIndexCursor> {
         let key = (
             scan.table.to_string(),
             scan.column.to_string(),
@@ -922,11 +969,40 @@ impl Storage for MemoryStorage {
             Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
             Bound::Unbounded => Bound::Unbounded,
         };
+        let resume_after = scan.resume_after.map(|cursor| {
+            let value = match &cursor.value {
+                Value::Double(v) if *v == 0.0 => encode_value(&Value::Double(-0.0)),
+                value => encode_value(value),
+            };
+            (value, cursor.row_id)
+        });
 
         let mut results = Vec::new();
-        let mut push_ids = |ids: &HashSet<ObjectId>| {
+        let mut push_ids = |value: &[u8], ids: &HashSet<ObjectId>| {
+            let Some(decoded_value) = decode_index_value(value) else {
+                return false;
+            };
             for id in sort_object_ids(ids) {
-                results.push(id);
+                if let Some((resume_value, resume_id)) = &resume_after {
+                    let is_after_cursor = match scan.direction {
+                        IndexScanDirection::Ascending => {
+                            value > resume_value.as_slice()
+                                || (value == resume_value.as_slice() && id > *resume_id)
+                        }
+                        IndexScanDirection::Descending => {
+                            value < resume_value.as_slice()
+                                || (value == resume_value.as_slice() && id > *resume_id)
+                        }
+                    };
+                    if !is_after_cursor {
+                        continue;
+                    }
+                }
+
+                results.push(OrderedIndexCursor {
+                    value: decoded_value.clone(),
+                    row_id: id,
+                });
                 if scan.take.is_some_and(|limit| results.len() >= limit) {
                     return true;
                 }
@@ -936,15 +1012,15 @@ impl Storage for MemoryStorage {
 
         match scan.direction {
             IndexScanDirection::Ascending => {
-                for (_, ids) in index.range((start_bound, end_bound)) {
-                    if push_ids(ids) {
+                for (value, ids) in index.range((start_bound, end_bound)) {
+                    if push_ids(value, ids) {
                         break;
                     }
                 }
             }
             IndexScanDirection::Descending => {
-                for (_, ids) in index.range((start_bound, end_bound)).rev() {
-                    if push_ids(ids) {
+                for (value, ids) in index.range((start_bound, end_bound)).rev() {
+                    if push_ids(value, ids) {
                         break;
                     }
                 }
@@ -1173,8 +1249,16 @@ mod tests {
             end: Bound::Unbounded,
             direction: IndexScanDirection::Ascending,
             take: Some(3),
+            resume_after: None,
         });
-        assert_eq!(asc, vec![row25a, row25b, row30]);
+        assert_eq!(
+            asc.iter().map(|cursor| cursor.row_id).collect::<Vec<_>>(),
+            vec![row25a, row25b, row30]
+        );
+        assert!(
+            asc.iter()
+                .all(|cursor| matches!(cursor.value, Value::Integer(25) | Value::Integer(30)))
+        );
 
         let desc = storage.index_scan_ordered(OrderedIndexScan {
             table: "users",
@@ -1184,8 +1268,12 @@ mod tests {
             end: Bound::Included(&Value::Integer(25)),
             direction: IndexScanDirection::Descending,
             take: Some(3),
+            resume_after: None,
         });
-        assert_eq!(desc, vec![row25a, row25b, row20]);
+        assert_eq!(
+            desc.iter().map(|cursor| cursor.row_id).collect::<Vec<_>>(),
+            vec![row25a, row25b, row20]
+        );
     }
 
     #[test]

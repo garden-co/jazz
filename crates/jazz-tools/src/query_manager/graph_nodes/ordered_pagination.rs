@@ -164,7 +164,7 @@ impl OrderedPaginationNode {
 
     fn scan_without_policy(&mut self, ctx: &SourceContext) -> TupleDelta {
         let branch = BranchName::new(&self.branch);
-        let ordered_ids = ctx.storage.index_scan_ordered(OrderedIndexScan {
+        let ordered = ctx.storage.index_scan_ordered(OrderedIndexScan {
             table: self.table.as_str(),
             column: self.column.as_str(),
             branch: &self.branch,
@@ -172,12 +172,13 @@ impl OrderedPaginationNode {
             end: self.end.as_ref(),
             direction: self.direction,
             take: self.take_count(),
+            resume_after: None,
         });
 
         self.rebuild_window(
-            ordered_ids
+            ordered
                 .into_iter()
-                .map(|id| Tuple::from_scoped_id(id, branch))
+                .map(|cursor| Tuple::from_scoped_id(cursor.row_id, branch))
                 .collect(),
         )
     }
@@ -194,7 +195,7 @@ impl OrderedPaginationNode {
         let mut take = desired_visible;
 
         loop {
-            let ordered_ids = ctx.storage.index_scan_ordered(OrderedIndexScan {
+            let ordered = ctx.storage.index_scan_ordered(OrderedIndexScan {
                 table: self.table.as_str(),
                 column: self.column.as_str(),
                 branch: &self.branch,
@@ -202,6 +203,7 @@ impl OrderedPaginationNode {
                 end: self.end.as_ref(),
                 direction: self.direction,
                 take,
+                resume_after: None,
             });
 
             let mut policy_filter = PolicyFilterNode::new_with_branch(
@@ -214,13 +216,13 @@ impl OrderedPaginationNode {
             );
             let mut visible_prefix = Vec::new();
 
-            for row_id in &ordered_ids {
-                let Some(loaded) = row_loader(*row_id) else {
+            for cursor in &ordered {
+                let Some(loaded) = row_loader(cursor.row_id) else {
                     continue;
                 };
                 let tuple = Tuple::new_with_provenance(
                     vec![TupleElement::Row {
-                        id: *row_id,
+                        id: cursor.row_id,
                         content: loaded.data,
                         commit_id: loaded.commit_id,
                     }],
@@ -241,7 +243,7 @@ impl OrderedPaginationNode {
                 }
             }
 
-            let reached_end = take.is_none() || take.is_some_and(|limit| ordered_ids.len() < limit);
+            let reached_end = take.is_none() || take.is_some_and(|limit| ordered.len() < limit);
             let enough_visible =
                 desired_visible.is_some_and(|needed| visible_prefix.len() >= needed);
             if (desired_visible.is_some() && (enough_visible || reached_end))

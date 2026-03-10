@@ -32,6 +32,42 @@ pub enum SortTarget {
     RowId,
 }
 
+pub fn compare_tuples_with_keys(
+    descriptor: &RowDescriptor,
+    sort_keys: &[SortKey],
+    a: &Tuple,
+    b: &Tuple,
+) -> Ordering {
+    let a_content = a.get(0).and_then(|e| e.content());
+    let b_content = b.get(0).and_then(|e| e.content());
+
+    for key in sort_keys {
+        let ord = match key.target {
+            SortTarget::Column(col_index) => match (a_content, b_content) {
+                (Some(a_data), Some(b_data)) => {
+                    compare_column(descriptor, a_data, col_index, b_data, col_index)
+                        .unwrap_or(Ordering::Equal)
+                }
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            SortTarget::RowId => a.ids().cmp(&b.ids()),
+        };
+
+        let ord = match key.direction {
+            SortDirection::Ascending => ord,
+            SortDirection::Descending => ord.reverse(),
+        };
+
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    a.ids().cmp(&b.ids())
+}
+
 /// Sort node for ordering rows.
 #[derive(Debug)]
 pub struct SortNode {
@@ -70,37 +106,7 @@ impl SortNode {
 
     /// Compare two tuples by sort keys (assumes single-element tuples).
     fn compare_tuples(&self, a: &Tuple, b: &Tuple) -> Ordering {
-        // For single-table queries, compare first element's content
-        let a_content = a.get(0).and_then(|e| e.content());
-        let b_content = b.get(0).and_then(|e| e.content());
-
-        for key in &self.sort_keys {
-            let ord = match key.target {
-                SortTarget::Column(col_index) => match (a_content, b_content) {
-                    (Some(a_data), Some(b_data)) => {
-                        compare_column(&self.descriptor, a_data, col_index, b_data, col_index)
-                            .unwrap_or(Ordering::Equal)
-                    }
-                    // Unmaterialized tuples sort to the end
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                },
-                SortTarget::RowId => a.ids().cmp(&b.ids()),
-            };
-
-            let ord = match key.direction {
-                SortDirection::Ascending => ord,
-                SortDirection::Descending => ord.reverse(),
-            };
-
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-
-        // Stable tie-breaker for deterministic ordering.
-        a.ids().cmp(&b.ids())
+        compare_tuples_with_keys(&self.descriptor, &self.sort_keys, a, b)
     }
 
     /// Find the insertion position for a tuple (binary search).

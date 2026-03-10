@@ -12,11 +12,11 @@ use crate::query_manager::types::Value;
 use super::key_codec::{
     ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
     commit_prefix, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
-    obj_meta_key, parse_uuid_from_index_key,
+    obj_meta_key, parse_ordered_cursor_from_index_key, parse_uuid_from_index_key,
 };
 use super::{
-    CatalogueManifest, CatalogueManifestOp, IndexScanDirection, LoadedBranch, OrderedIndexScan,
-    StorageError,
+    CatalogueManifest, CatalogueManifestOp, IndexScanDirection, LoadedBranch, OrderedIndexCursor,
+    OrderedIndexScan, StorageError,
 };
 
 fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
@@ -337,9 +337,16 @@ pub(super) fn ordered_index_scan_bounds(scan: OrderedIndexScan<'_>) -> Option<(S
 pub(super) struct OrderedScanCollector {
     direction: IndexScanDirection,
     limit: Option<usize>,
-    ids: Vec<ObjectId>,
+    entries: Vec<OrderedIndexCursor>,
     current_group_prefix: Option<String>,
-    current_group_ids: Vec<ObjectId>,
+    current_group_entries: Vec<OrderedIndexCursor>,
+    resume_after: Option<OrderedScanResume>,
+}
+
+#[derive(Debug)]
+struct OrderedScanResume {
+    value_prefix: String,
+    row_id: ObjectId,
 }
 
 impl OrderedScanCollector {
@@ -347,9 +354,60 @@ impl OrderedScanCollector {
         Self {
             direction,
             limit: take,
-            ids: Vec::with_capacity(take.unwrap_or_default()),
+            entries: Vec::with_capacity(take.unwrap_or_default()),
             current_group_prefix: None,
-            current_group_ids: Vec::new(),
+            current_group_entries: Vec::new(),
+            resume_after: None,
+        }
+    }
+
+    pub(super) fn with_cursor(
+        direction: IndexScanDirection,
+        take: Option<usize>,
+        table: &str,
+        column: &str,
+        branch: &str,
+        resume_after: Option<&OrderedIndexCursor>,
+    ) -> Self {
+        let mut collector = Self::new(direction, take);
+        collector.resume_after = resume_after.map(|cursor| OrderedScanResume {
+            value_prefix: index_value_prefix(table, column, branch, &cursor.value),
+            row_id: cursor.row_id,
+        });
+        collector
+    }
+
+    fn is_after_cursor(&self, key: &str) -> bool {
+        let Some(resume_after) = &self.resume_after else {
+            return true;
+        };
+
+        let key_prefix = index_value_key_prefix(key);
+        match self.direction {
+            IndexScanDirection::Ascending => {
+                if key_prefix < resume_after.value_prefix.as_str() {
+                    return false;
+                }
+                if key_prefix > resume_after.value_prefix.as_str() {
+                    return true;
+                }
+            }
+            IndexScanDirection::Descending => {
+                if key_prefix > resume_after.value_prefix.as_str() {
+                    return false;
+                }
+                if key_prefix < resume_after.value_prefix.as_str() {
+                    return true;
+                }
+            }
+        }
+
+        parse_uuid_from_index_key(key).is_some_and(|row_id| row_id > resume_after.row_id)
+    }
+
+    fn maybe_clear_cursor(&mut self, key: &str) {
+        if self.is_after_cursor(key) {
+            self.resume_after = None;
         }
     }
 
@@ -362,10 +420,15 @@ impl OrderedScanCollector {
             return false;
         }
 
+        if !self.is_after_cursor(key) {
+            return true;
+        }
+        self.maybe_clear_cursor(key);
+
         match self.direction {
             IndexScanDirection::Ascending => {
-                if let Some(id) = parse_uuid_from_index_key(key) {
-                    self.ids.push(id);
+                if let Some(cursor) = parse_ordered_cursor_from_index_key(key) {
+                    self.entries.push(cursor);
                 }
                 self.should_continue()
             }
@@ -378,8 +441,8 @@ impl OrderedScanCollector {
                     self.current_group_prefix = Some(group_prefix.to_owned());
                 }
 
-                if let Some(id) = parse_uuid_from_index_key(key) {
-                    self.current_group_ids.push(id);
+                if let Some(cursor) = parse_ordered_cursor_from_index_key(key) {
+                    self.current_group_entries.push(cursor);
                 }
 
                 true
@@ -387,30 +450,31 @@ impl OrderedScanCollector {
         }
     }
 
-    pub(super) fn finish(mut self) -> Vec<ObjectId> {
+    pub(super) fn finish(mut self) -> Vec<OrderedIndexCursor> {
         if self.direction == IndexScanDirection::Descending {
             let _ = self.flush_descending_group();
         }
-        self.ids
+        self.entries
     }
 
     fn remaining_slots(&self) -> Option<usize> {
-        self.limit.map(|limit| limit.saturating_sub(self.ids.len()))
+        self.limit
+            .map(|limit| limit.saturating_sub(self.entries.len()))
     }
 
     fn flush_descending_group(&mut self) -> bool {
-        if self.current_group_ids.is_empty() {
+        if self.current_group_entries.is_empty() {
             self.current_group_prefix = None;
             return self.should_continue();
         }
 
         let take = self
             .remaining_slots()
-            .unwrap_or(self.current_group_ids.len())
-            .min(self.current_group_ids.len());
-        self.ids
-            .extend(self.current_group_ids.iter().rev().take(take).copied());
-        self.current_group_ids.clear();
+            .unwrap_or(self.current_group_entries.len())
+            .min(self.current_group_entries.len());
+        self.entries
+            .extend(self.current_group_entries.iter().rev().take(take).cloned());
+        self.current_group_entries.clear();
         self.current_group_prefix = None;
         self.should_continue()
     }
@@ -420,7 +484,7 @@ impl OrderedScanCollector {
 pub(super) fn index_scan_ordered_core(
     scan: OrderedIndexScan<'_>,
     mut scan_key_range: impl FnMut(&str, &str) -> Result<Vec<String>, StorageError>,
-) -> Vec<ObjectId> {
+) -> Vec<OrderedIndexCursor> {
     let Some((start_key, end_key)) = ordered_index_scan_bounds(scan) else {
         return Vec::new();
     };
@@ -482,6 +546,7 @@ mod tests {
                 end: Bound::Included(&Value::Integer(25)),
                 direction: IndexScanDirection::Descending,
                 take: Some(3),
+                resume_after: None,
             },
             |start, end| {
                 Ok(keys
@@ -492,7 +557,13 @@ mod tests {
             },
         );
 
-        assert_eq!(results, vec![row25a, row25b, row20]);
+        assert_eq!(
+            results
+                .into_iter()
+                .map(|cursor| cursor.row_id)
+                .collect::<Vec<_>>(),
+            vec![row25a, row25b, row20]
+        );
     }
 
     #[test]
@@ -517,7 +588,14 @@ mod tests {
         }
 
         assert_eq!(visited, 2);
-        assert_eq!(collector.finish(), vec![row20, row25]);
+        assert_eq!(
+            collector
+                .finish()
+                .into_iter()
+                .map(|cursor| cursor.row_id)
+                .collect::<Vec<_>>(),
+            vec![row20, row25]
+        );
     }
 
     #[test]
@@ -550,6 +628,13 @@ mod tests {
         }
 
         assert_eq!(visited, 6);
-        assert_eq!(collector.finish(), vec![row40, row30, row20a]);
+        assert_eq!(
+            collector
+                .finish()
+                .into_iter()
+                .map(|cursor| cursor.row_id)
+                .collect::<Vec<_>>(),
+            vec![row40, row30, row20a]
+        );
     }
 }

@@ -637,6 +637,78 @@ fn query_with_same_column_filter_sort_and_limit() {
 }
 
 #[test]
+fn query_with_different_filter_sort_and_limit() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    for (name, score) in [
+        ("Alice", 10),
+        ("Bob", 60),
+        ("Alice", 50),
+        ("Alice", 40),
+        ("Cara", 70),
+    ] {
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text(name.into()), Value::Integer(score)],
+        )
+        .unwrap();
+    }
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .order_by_desc("score")
+        .limit(2)
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
+    assert_eq!(results[0].1[1], Value::Integer(50));
+    assert_eq!(results[1].1[1], Value::Integer(40));
+}
+
+#[test]
+fn query_with_different_filter_sort_and_limit_skips_full_driver_batch() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    for idx in 0..70 {
+        qm.insert(
+            &mut storage,
+            "users",
+            &[
+                Value::Text(format!("Bob {}", idx)),
+                Value::Integer(1000 - idx),
+            ],
+        )
+        .unwrap();
+    }
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(1)],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .order_by_desc("score")
+        .limit(1)
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
+    assert_eq!(results[0].1[1], Value::Integer(1));
+}
+
+#[test]
 fn query_order_by_id_is_deterministic() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -3769,6 +3841,71 @@ fn join_produces_combined_tuples() {
             .any(|w| w == "Hello World".as_bytes()),
         true,
         "Joined row payload should contain joined-table text value"
+    );
+}
+
+#[test]
+fn join_top_k_can_order_by_joined_scope() {
+    let sync_manager = SyncManager::new();
+    let schema = join_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("First".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(200),
+            Value::Text("Second".into()),
+            Value::Integer(2),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.id", "posts.author_id")
+        .order_by_desc("posts.id")
+        .limit(1)
+        .build();
+
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]
+            .1
+            .iter()
+            .any(|value| *value == Value::Text("Bob".into())),
+        "The joined row ordered by posts.id desc should keep Bob's row"
+    );
+    assert!(
+        results[0]
+            .1
+            .iter()
+            .any(|value| *value == Value::Integer(200)),
+        "The visible joined row should include the highest joined post id"
     );
 }
 
@@ -7081,6 +7218,76 @@ fn contributing_ids_for_array_subquery_include_inner_rows() {
     assert!(contributing.contains(&(user.row_id, branch.clone())));
     assert!(contributing.contains(&(post1.row_id, branch.clone())));
     assert!(contributing.contains(&(post2.row_id, branch)));
+}
+
+#[test]
+fn contributing_ids_for_paginated_array_subquery_include_visible_inner_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let user1 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .unwrap();
+    let user2 = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(2), Value::Text("Bob".into())],
+        )
+        .unwrap();
+    let post1 = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post 1".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+    let post2 = qm
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Post 2".into()),
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+
+    let query = qm
+        .query("users")
+        .order_by("id")
+        .limit(1)
+        .with_array("posts", |sub| {
+            sub.from("posts").correlate("author_id", "users.id")
+        })
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.process(&mut storage);
+
+    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+
+    assert!(contributing.contains(&(user1.row_id, branch.clone())));
+    assert!(contributing.contains(&(post1.row_id, branch.clone())));
+    assert!(
+        !contributing.contains(&(user2.row_id, branch.clone())),
+        "Only the visible outer row should contribute to the paginated array output"
+    );
+    assert!(
+        !contributing.contains(&(post2.row_id, branch)),
+        "Only inner rows for the visible outer row should be synced"
+    );
 }
 
 #[test]

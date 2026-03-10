@@ -32,8 +32,8 @@ use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, IndexScanDirection, LoadedBranch, OrderedIndexScan,
-    Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, IndexScanDirection, LoadedBranch, OrderedIndexCursor,
+    OrderedIndexScan, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
         OrderedScanCollector, append_catalogue_manifest_op_core,
@@ -222,12 +222,19 @@ impl SurrealKvStorage {
     fn scan_ordered(
         txn: &SurrealTransaction,
         scan: OrderedIndexScan<'_>,
-    ) -> Result<Vec<ObjectId>, StorageError> {
+    ) -> Result<Vec<OrderedIndexCursor>, StorageError> {
         let Some((start_key, end_key)) = ordered_index_scan_bounds(scan) else {
             return Ok(Vec::new());
         };
 
-        let mut collector = OrderedScanCollector::new(scan.direction, scan.take);
+        let mut collector = OrderedScanCollector::with_cursor(
+            scan.direction,
+            scan.take,
+            scan.table,
+            scan.column,
+            scan.branch,
+            scan.resume_after,
+        );
         if !collector.should_continue() {
             return Ok(collector.finish());
         }
@@ -502,7 +509,7 @@ impl Storage for SurrealKvStorage {
         })
     }
 
-    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<ObjectId> {
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<OrderedIndexCursor> {
         let Ok(txn) = self.begin_read_txn() else {
             return Vec::new();
         };
@@ -723,8 +730,12 @@ mod tests {
             end: Bound::Excluded(&Value::Integer(35)),
             direction: IndexScanDirection::Ascending,
             take: Some(3),
+            resume_after: None,
         });
-        assert_eq!(asc, vec![row25a, row25b, row30]);
+        assert_eq!(
+            asc.iter().map(|cursor| cursor.row_id).collect::<Vec<_>>(),
+            vec![row25a, row25b, row30]
+        );
 
         let desc = storage.index_scan_ordered(OrderedIndexScan {
             table: "users",
@@ -734,8 +745,12 @@ mod tests {
             end: Bound::Included(&Value::Integer(25)),
             direction: IndexScanDirection::Descending,
             take: Some(3),
+            resume_after: None,
         });
-        assert_eq!(desc, vec![row25a, row25b, row20]);
+        assert_eq!(
+            desc.iter().map(|cursor| cursor.row_id).collect::<Vec<_>>(),
+            vec![row25a, row25b, row20]
+        );
     }
 
     #[test]

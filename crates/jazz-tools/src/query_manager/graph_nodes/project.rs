@@ -209,6 +209,10 @@ impl ProjectNode {
             .with_provenance(tuple.provenance().clone()),
         )
     }
+
+    pub fn project_tuple_for_output(&self, tuple: &Tuple) -> Option<Tuple> {
+        self.project_tuple(tuple)
+    }
 }
 
 fn resolve_row_id_element(
