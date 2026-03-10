@@ -23,7 +23,6 @@ use super::graph_nodes::indexed_query::{
 use super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::graph_nodes::materialize::MaterializeNode;
-use super::graph_nodes::ordered_pagination::{OrderedPaginationNode, OrderedPaginationNodeConfig};
 use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::graph_nodes::project::ProjectNode;
@@ -43,7 +42,7 @@ use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execut
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
+    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +73,6 @@ pub enum GraphNode {
     Join(JoinNode),
     Materialize(MaterializeNode),
     IndexedQuery(IndexedQueryNode),
-    OrderedPagination(OrderedPaginationNode),
     Project(ProjectNode),
     SelectElement(SelectElementNode),
     RecursiveRelation(RecursiveRelationNode),
@@ -113,7 +111,7 @@ pub struct QueryGraph {
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
     pub index_scan_nodes: Vec<(NodeId, TableName, ColumnName)>, // (node_id, table, column)
-    /// Ordered pagination source nodes for this query.
+    /// Ordered-scan source nodes for this query.
     pub ordered_scan_nodes: Vec<(NodeId, TableName, ColumnName)>,
     /// Array subquery nodes and their inner tables (for marking dirty on inner table updates).
     pub array_subquery_tables: Vec<(NodeId, TableName)>, // (node_id, inner_table)
@@ -235,24 +233,6 @@ fn resolve_sort_key(
     Some((scope_index, key, ResolvedSortKey { target, direction }))
 }
 
-#[derive(Debug, Clone)]
-struct OrderedPaginationPlan {
-    column: String,
-    start: Bound<Value>,
-    end: Bound<Value>,
-    direction: IndexScanDirection,
-}
-
-struct OrderedPaginationCompileContext<'a> {
-    plan: &'a ExecutionQueryPlan,
-    branches: &'a [String],
-    branch_schema_map: &'a HashMap<String, SchemaHash>,
-    schema_context: &'a SchemaContext,
-    schema: &'a Schema,
-    session: Option<Session>,
-    select_policy: Option<PolicyExpr>,
-}
-
 impl QueryGraph {
     pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
@@ -269,83 +249,6 @@ impl QueryGraph {
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
         }
-    }
-
-    fn compile_ordered_pagination_plan(
-        ctx: OrderedPaginationCompileContext<'_>,
-        descriptor: RowDescriptor,
-        ordered_plan: OrderedPaginationPlan,
-    ) -> Option<Self> {
-        let OrderedPaginationCompileContext {
-            plan,
-            branches,
-            branch_schema_map,
-            schema_context,
-            schema,
-            session,
-            select_policy,
-        } = ctx;
-
-        let branch = branches.first()?.clone();
-        let branch_schema_hash = branch_schema_map.get(&branch).copied();
-        let translated_column = if let Some(target_hash) = branch_schema_hash {
-            if target_hash != schema_context.current_hash {
-                translate_column_for_index(
-                    schema_context,
-                    plan.table.as_str(),
-                    &ordered_plan.column,
-                    &target_hash,
-                )
-                .unwrap_or_else(|| ordered_plan.column.clone())
-            } else {
-                ordered_plan.column.clone()
-            }
-        } else {
-            ordered_plan.column.clone()
-        };
-        let scan_column_name = ColumnName::new(&translated_column);
-
-        let mut graph = QueryGraph::new(plan.table, descriptor.clone());
-        let mut ordered_node = OrderedPaginationNode::new(OrderedPaginationNodeConfig {
-            table: plan.table,
-            column: scan_column_name,
-            branch,
-            start: ordered_plan.start,
-            end: ordered_plan.end,
-            direction: ordered_plan.direction,
-            limit: plan.limit,
-            offset: plan.offset,
-            descriptor: descriptor.clone(),
-        });
-        if let (Some(session), Some(policy)) = (session, select_policy)
-            && policy != PolicyExpr::True
-        {
-            ordered_node = ordered_node.with_policy(policy, session, schema.clone());
-        }
-        let dependency_tables = ordered_node.policy_dependency_tables().to_vec();
-        let ordered_id = graph.add_node(GraphNode::OrderedPagination(ordered_node));
-        graph
-            .ordered_scan_nodes
-            .push((ordered_id, plan.table, scan_column_name));
-        for table in dependency_tables {
-            graph.policy_filter_tables.push((ordered_id, table));
-        }
-        graph.pagination_node = Some(ordered_id);
-
-        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
-        let materialize_node = MaterializeNode::new_all(tuple_desc.clone());
-        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
-        graph.add_edge(materialize_id, ordered_id);
-
-        graph.combined_descriptor = descriptor.clone();
-        let output_tuple_desc =
-            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
-        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
-        let output_id = graph.add_node(GraphNode::Output(output_node));
-        graph.add_edge(output_id, materialize_id);
-        graph.output_node = output_id;
-
-        Some(graph)
     }
 
     /// Mark a node as dirty using the bitmap.
@@ -438,9 +341,6 @@ impl QueryGraph {
             let mut scope = match node {
                 GraphNode::LimitOffset(limit_offset) => {
                     self.scope_from_tuples(limit_offset.sync_input_tuples())
-                }
-                GraphNode::OrderedPagination(ordered) => {
-                    self.scope_from_tuples(ordered.sync_input_tuples())
                 }
                 GraphNode::IndexedQuery(indexed) => {
                     self.scope_from_tuples(indexed.sync_input_tuples())
@@ -632,24 +532,6 @@ impl QueryGraph {
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
         let select_policy = table_schema.policies.select.using.clone();
-
-        if let Some(ordered_plan) =
-            ordered_pagination_plan_for_execution_plan(plan, &descriptor, &branches)
-        {
-            return Self::compile_ordered_pagination_plan(
-                OrderedPaginationCompileContext {
-                    plan,
-                    branches: &branches,
-                    branch_schema_map: &branch_schema_map,
-                    schema_context,
-                    schema,
-                    session,
-                    select_policy,
-                },
-                descriptor,
-                ordered_plan,
-            );
-        }
 
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
@@ -2127,7 +2009,6 @@ impl QueryGraph {
     fn ordered_tuples_for_node(&self, node_id: NodeId) -> Option<Vec<Tuple>> {
         match self.get_node(node_id)? {
             GraphNode::IndexedQuery(node) => Some(node.windowed_tuples().to_vec()),
-            GraphNode::OrderedPagination(node) => Some(node.windowed_tuples().to_vec()),
             GraphNode::LimitOffset(node) => Some(node.windowed_tuples().to_vec()),
             GraphNode::Sort(node) => Some(node.sorted_tuples().to_vec()),
             GraphNode::Materialize(node) => {
@@ -2220,7 +2101,6 @@ impl QueryGraph {
             let node_type = match self.get_node(node_id) {
                 Some(GraphNode::IndexScan(_)) => "IndexScan",
                 Some(GraphNode::IndexedQuery(_)) => "IndexedQuery",
-                Some(GraphNode::OrderedPagination(_)) => "OrderedPagination",
                 Some(GraphNode::Union(_)) => "Union",
                 Some(GraphNode::Alias(_)) => "Alias",
                 Some(GraphNode::Join(_)) => "Join",
@@ -2255,25 +2135,6 @@ impl QueryGraph {
                 Some(GraphNode::IndexedQuery(_)) => {
                     if let Some(GraphNode::IndexedQuery(scan_node)) = self.get_node_mut(node_id) {
                         let delta = scan_node.scan_with_context(&ctx, &mut row_loader);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::OrderedPagination(_)) => {
-                    if let Some(GraphNode::OrderedPagination(scan_node)) =
-                        self.get_node_mut(node_id)
-                    {
-                        let delta = if scan_node.has_policy() {
-                            scan_node.scan_with_context(&ctx, &mut row_loader)
-                        } else {
-                            SourceNode::scan(scan_node, &ctx)
-                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -3087,127 +2948,6 @@ fn condition_to_scan(cond: &Condition) -> ScanCondition {
         },
         _ => ScanCondition::All,
     }
-}
-
-fn ordered_pagination_plan_for_execution_plan(
-    plan: &ExecutionQueryPlan,
-    descriptor: &RowDescriptor,
-    branches: &[String],
-) -> Option<OrderedPaginationPlan> {
-    if plan.limit.is_none() && plan.offset == 0 {
-        return None;
-    }
-    if plan.include_deleted
-        || plan.project_columns.is_some()
-        || !plan.array_subqueries.is_empty()
-        || plan.recursive.is_some()
-        || branches.len() != 1
-        || plan.disjuncts.len() != 1
-    {
-        return None;
-    }
-
-    let (column, direction) = if plan.order_by.is_empty() {
-        ("_id".to_string(), IndexScanDirection::Ascending)
-    } else if plan.order_by.len() == 1 {
-        let (column, direction) = &plan.order_by[0];
-        (
-            if column == "id" {
-                "_id".to_string()
-            } else {
-                column.clone()
-            },
-            match direction {
-                SortDirection::Ascending => IndexScanDirection::Ascending,
-                SortDirection::Descending => IndexScanDirection::Descending,
-            },
-        )
-    } else {
-        return None;
-    };
-
-    if column != "_id" && descriptor.column_index(&column).is_none() {
-        return None;
-    }
-
-    let disjunct = plan.disjuncts.first()?;
-    if !disjunct.is_fully_covered_by_index(&column) {
-        return None;
-    }
-
-    let (start, end) = bounds_for_ordered_scan(disjunct, &column)?;
-
-    Some(OrderedPaginationPlan {
-        column,
-        start,
-        end,
-        direction,
-    })
-}
-
-fn bounds_for_ordered_scan(
-    conjunction: &Conjunction,
-    column: &str,
-) -> Option<(Bound<Value>, Bound<Value>)> {
-    let mut lower: Option<Bound<Value>> = None;
-    let mut upper: Option<Bound<Value>> = None;
-    let mut exact: Option<Value> = None;
-
-    for condition in &conjunction.conditions {
-        if condition.column() != column {
-            return None;
-        }
-
-        match condition {
-            Condition::Eq { value, .. } => {
-                if lower.is_some() || upper.is_some() || exact.is_some() {
-                    return None;
-                }
-                exact = Some(value.clone());
-            }
-            Condition::Gt { value, .. } => {
-                if lower.is_some() || exact.is_some() {
-                    return None;
-                }
-                lower = Some(Bound::Excluded(value.clone()));
-            }
-            Condition::Ge { value, .. } => {
-                if lower.is_some() || exact.is_some() {
-                    return None;
-                }
-                lower = Some(Bound::Included(value.clone()));
-            }
-            Condition::Lt { value, .. } => {
-                if upper.is_some() || exact.is_some() {
-                    return None;
-                }
-                upper = Some(Bound::Excluded(value.clone()));
-            }
-            Condition::Le { value, .. } => {
-                if upper.is_some() || exact.is_some() {
-                    return None;
-                }
-                upper = Some(Bound::Included(value.clone()));
-            }
-            Condition::Between { min, max, .. } => {
-                if lower.is_some() || upper.is_some() || exact.is_some() {
-                    return None;
-                }
-                lower = Some(Bound::Included(min.clone()));
-                upper = Some(Bound::Included(max.clone()));
-            }
-            _ => return None,
-        }
-    }
-
-    if let Some(value) = exact {
-        return Some((Bound::Included(value.clone()), Bound::Included(value)));
-    }
-
-    Some((
-        lower.unwrap_or(Bound::Unbounded),
-        upper.unwrap_or(Bound::Unbounded),
-    ))
 }
 
 #[cfg(test)]
