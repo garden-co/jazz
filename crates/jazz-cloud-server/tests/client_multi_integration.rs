@@ -6,7 +6,7 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::object::BranchName;
 use jazz_tools::query_manager::types::{ComposedBranchName, SchemaHash};
-use jazz_tools::storage::{Storage, SurrealKvStorage};
+use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
@@ -319,7 +319,7 @@ async fn wait_for_todos_count_on_disk(
     let db_path = data_root
         .join("apps")
         .join(app_id.to_string())
-        .join("jazz.surrealkv");
+        .join("jazz.fjall");
     let schema_hash = SchemaHash::compute(&test_schema());
     let branch = ComposedBranchName::new("client", schema_hash, "main")
         .to_branch_name()
@@ -329,7 +329,7 @@ async fn wait_for_todos_count_on_disk(
 
     while tokio::time::Instant::now() < deadline {
         if db_path.exists()
-            && let Ok(storage) = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+            && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
         {
             let branch_name = BranchName::new(&branch);
             let row_ids = storage.index_scan_all("todos", "_id", &branch);
@@ -377,13 +377,13 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
     let db_path = data_root
         .join("apps")
         .join(app_id.to_string())
-        .join("jazz.surrealkv");
+        .join("jazz.fjall");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
     while tokio::time::Instant::now() < deadline {
         if db_path.exists()
-            && let Ok(storage) = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+            && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
         {
             let manifest = storage
                 .load_catalogue_manifest(app_id.as_object_id())

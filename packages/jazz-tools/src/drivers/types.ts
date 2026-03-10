@@ -130,7 +130,7 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (OPFS in browser, SurrealKV in backend)
+ * - `persistent`: local persistence enabled (OPFS in browser, Fjall in backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =

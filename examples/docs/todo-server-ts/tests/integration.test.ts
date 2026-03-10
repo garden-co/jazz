@@ -1,7 +1,7 @@
 /**
  * Integration tests for the todo server.
  *
- * These tests start the server programmatically with SurrealKV-backed storage,
+ * These tests start the server programmatically with Fjall-backed storage,
  * exercise the full HTTP API, and clean up afterwards.
  */
 
@@ -22,7 +22,7 @@ describe("Todo Server Integration", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    // Create server with SurrealKV-backed storage (temp directory)
+    // Create server with Fjall-backed storage (temp directory)
     const todoServer = await createServer();
 
     // Start on random available port
@@ -176,7 +176,7 @@ describe("Todo Server Integration", () => {
 
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
-      // Use a shared data path so both server instances see the same SurrealKV file
+      // Use a shared data path so both server instances see the same Fjall file
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-cold-start-"));
       const dbPath = join(dataDir, "jazz.db");
 

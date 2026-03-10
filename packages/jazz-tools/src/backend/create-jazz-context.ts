@@ -18,7 +18,7 @@ export type BackendSchemaInput = WasmSchema | BackendSchemaSource | BackendQuery
 export type BackendDriver =
   | {
       type: "persistent";
-      /** Path to the SurrealKV file used by the server runtime. */
+      /** Path to the Fjall file used by the server runtime. */
       dataPath: string;
     }
   | {
