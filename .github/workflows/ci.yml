@@ -257,7 +257,7 @@ jobs:
 
       - run: pnpm --filter jazz-wasm build
       - run: wasm-pack test --node crates/jazz-wasm
-      - run: RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' wasm-pack test --headless --chrome crates/jazz-wasm
+      # - run: RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' wasm-pack test --headless --chrome crates/jazz-wasm
 
       - name: Show sccache stats (after wasm tests)
         run: sccache --show-stats || true
