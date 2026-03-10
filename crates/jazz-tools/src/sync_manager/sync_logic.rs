@@ -4,6 +4,33 @@ use crate::object::{BranchName, ObjectId};
 use std::collections::{HashMap, HashSet};
 
 impl SyncManager {
+    pub(super) fn is_catalogue_metadata(metadata: &HashMap<String, String>) -> bool {
+        matches!(
+            metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
+                .map(|value| value.as_str()),
+            Some(kind)
+                if kind == crate::metadata::ObjectType::CatalogueSchema.as_str()
+                    || kind == crate::metadata::ObjectType::CatalogueLens.as_str()
+        )
+    }
+
+    pub(super) fn track_catalogue_object(
+        &mut self,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+    ) {
+        if Self::is_catalogue_metadata(metadata) {
+            self.catalogue_objects.insert(object_id);
+        } else {
+            self.catalogue_objects.remove(&object_id);
+        }
+    }
+
+    pub(super) fn object_is_catalogue(&self, object_id: ObjectId) -> bool {
+        self.catalogue_objects.contains(&object_id)
+    }
+
     /// Queue all existing objects to sync to a new server.
     pub(super) fn queue_full_sync_to_server(&mut self, server_id: ServerId) {
         let _span = tracing::debug_span!("queue_full_sync_to_server", %server_id).entered();
@@ -24,6 +51,29 @@ impl SyncManager {
         // Now queue messages (borrowing self.servers mutably)
         for (object_id, metadata, branch_name, tips) in to_sync {
             self.queue_tips_to_server(server_id, object_id, metadata, branch_name, tips);
+        }
+    }
+
+    /// Queue all existing catalogue objects to sync to a new client.
+    pub(super) fn queue_catalogue_sync_to_client(&mut self, client_id: ClientId) {
+        let mut to_sync: Vec<BranchSyncData> = Vec::new();
+
+        for object_id in self.catalogue_objects.iter().copied() {
+            let Some(object) = self.object_manager.objects.get(&object_id) else {
+                continue;
+            };
+            for (branch_name, branch) in &object.branches {
+                to_sync.push((
+                    object_id,
+                    object.metadata.clone(),
+                    *branch_name,
+                    branch.tips.iter().copied().collect(),
+                ));
+            }
+        }
+
+        for (object_id, metadata, branch_name, tips) in to_sync {
+            self.queue_tips_to_client_unscoped(client_id, object_id, metadata, branch_name, tips);
         }
     }
 
@@ -121,6 +171,29 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
+        self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, true);
+    }
+
+    pub(super) fn queue_tips_to_client_unscoped(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        branch_name: BranchName,
+        tips: HashSet<CommitId>,
+    ) {
+        self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, false);
+    }
+
+    fn queue_tips_to_client_inner(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        branch_name: BranchName,
+        tips: HashSet<CommitId>,
+        require_scope: bool,
+    ) {
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -137,7 +210,7 @@ impl SyncManager {
             };
 
             // Check if in scope
-            let in_scope = client.is_in_scope(object_id, &branch_name);
+            let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
 
             let include_metadata = !client.sent_metadata.contains(&object_id);
 

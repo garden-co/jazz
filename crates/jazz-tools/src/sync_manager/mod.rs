@@ -32,6 +32,7 @@ pub use types::*;
 #[derive(Clone)]
 pub struct SyncManager {
     pub object_manager: ObjectManager,
+    pub(super) catalogue_objects: HashSet<ObjectId>,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
     pub(super) clients: HashMap<ClientId, ClientState>,
@@ -65,6 +66,7 @@ impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
+            .field("catalogue_objects", &self.catalogue_objects)
             .field("servers", &self.servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
@@ -101,8 +103,17 @@ impl SyncManager {
 
     /// Create with an existing ObjectManager.
     pub fn with_object_manager(object_manager: ObjectManager) -> Self {
+        let catalogue_objects = object_manager
+            .objects
+            .iter()
+            .filter_map(|(object_id, object)| {
+                Self::is_catalogue_metadata(&object.metadata).then_some(*object_id)
+            })
+            .collect();
+
         Self {
             object_manager,
+            catalogue_objects,
             servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
@@ -171,6 +182,7 @@ impl SyncManager {
     /// Add a client connection.
     pub fn add_client(&mut self, client_id: ClientId) {
         self.clients.insert(client_id, ClientState::default());
+        self.queue_catalogue_sync_to_client(client_id);
     }
 
     /// Remove a client connection.
@@ -256,6 +268,8 @@ impl SyncManager {
         metadata: HashMap<String, String>,
         content: Vec<u8>,
     ) {
+        self.track_catalogue_object(object_id, &metadata);
+
         // Create the object if it doesn't exist
         if self.object_manager.get(object_id).is_none() {
             self.object_manager
