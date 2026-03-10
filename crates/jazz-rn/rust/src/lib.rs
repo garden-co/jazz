@@ -10,13 +10,18 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 
+use jazz_tools::binding_support::{
+    align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
+    current_timestamp_ms as binding_current_timestamp_ms,
+    default_read_durability_options as default_binding_read_durability_options,
+    generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
+    parse_query_input, parse_session_input, query_rows_can_be_schema_aligned,
+    serialize_outbox_entry, subscription_delta_to_json,
+};
 use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::encoding::decode_row;
-use jazz_tools::query_manager::manager::LocalUpdates;
-use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{RowDescriptor, Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
     SyncSender,
@@ -24,8 +29,8 @@ use jazz_tools::runtime_core::{
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
-    Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
+    SyncManager, SyncPayload,
 };
 
 // ============================================================================
@@ -100,125 +105,21 @@ fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, JazzRnErro
     Ok(partial.into_iter().collect())
 }
 
-fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
-    query.joins.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.recursive.is_none()
-        && query.select_columns.is_none()
-        && query.result_element_index.is_none()
-}
-
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
-fn align_values_to_declared_schema(
-    declared_schema: &Schema,
-    table: &TableName,
-    source_descriptor: &RowDescriptor,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(source_descriptor, &declared_table.columns, &values)
-        .unwrap_or(values)
-}
-
-fn align_row_values_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    align_values_to_declared_schema(declared_schema, table, &runtime_table.columns, values)
-}
-
-fn align_query_rows_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    query: &Query,
-    rows: Vec<(ObjectId, Vec<Value>)>,
-) -> Vec<(ObjectId, Vec<Value>)> {
-    if !query_rows_can_be_schema_aligned(query) {
-        return rows;
-    }
-
-    let Some(declared_table) = declared_schema.get(&query.table) else {
-        return rows;
-    };
-    let Some(runtime_table) = runtime_schema.get(&query.table) else {
-        return rows;
-    };
-
-    rows.into_iter()
-        .map(|(id, values)| {
-            let values = reorder_values_by_column_name(
-                &runtime_table.columns,
-                &declared_table.columns,
-                &values,
-            )
-            .unwrap_or(values);
-            (id, values)
-        })
-        .collect()
-}
-
 fn parse_query(query_json: &str) -> Result<Query, JazzRnError> {
-    parse_query_json(query_json).map_err(|message| JazzRnError::InvalidJson { message })
+    parse_query_input(query_json).map_err(|message| JazzRnError::InvalidJson { message })
 }
 
 fn parse_session(session_json: Option<String>) -> Result<Option<Session>, JazzRnError> {
-    match session_json {
-        Some(json) => Ok(Some(serde_json::from_str(&json).map_err(json_err)?)),
-        None => Ok(None),
-    }
+    parse_session_input(session_json.as_deref())
+        .map_err(|message| JazzRnError::InvalidJson { message })
 }
 
 fn parse_tier(tier: &str) -> Result<DurabilityTier, JazzRnError> {
-    match tier {
-        "worker" => Ok(DurabilityTier::Worker),
-        "edge" => Ok(DurabilityTier::EdgeServer),
-        "global" => Ok(DurabilityTier::GlobalServer),
-        _ => Err(JazzRnError::InvalidTier {
-            message: format!(
-                "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
-                tier
-            ),
-        }),
-    }
+    parse_binding_tier(tier).map_err(|message| JazzRnError::InvalidTier { message })
 }
 
 fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
-    ReadDurabilityOptions {
-        tier,
-        local_updates: LocalUpdates::Immediate,
-    }
+    default_binding_read_durability_options(tier)
 }
 
 fn parse_subscription_inputs(
@@ -230,62 +131,6 @@ fn parse_subscription_inputs(
     let session = parse_session(session_json)?;
     let tier = tier.as_deref().map(parse_tier).transpose()?;
     Ok((query, session, default_read_durability_options(tier)))
-}
-
-fn subscription_delta_to_json(
-    delta: &SubscriptionDelta,
-    declared_schema: Option<&Schema>,
-    table: Option<&TableName>,
-) -> serde_json::Value {
-    let row_to_json = |row: &jazz_tools::query_manager::types::Row,
-                       descriptor: &jazz_tools::query_manager::types::RowDescriptor|
-     -> serde_json::Value {
-        let values = decode_row(descriptor, &row.data)
-            .map(|vals| vals.into_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let values = match (declared_schema, table) {
-            (Some(schema), Some(table)) => {
-                align_values_to_declared_schema(schema, table, descriptor, values)
-            }
-            _ => values,
-        };
-        serde_json::json!({
-            "id": row.id.uuid().to_string(),
-            "values": values,
-        })
-    };
-
-    let descriptor = &delta.descriptor;
-    let delta_obj = delta
-        .ordered_delta
-        .removed
-        .iter()
-        .map(|change| {
-            serde_json::json!({
-                "kind": 1,
-                "id": change.id.uuid().to_string(),
-                "index": change.index
-            })
-        })
-        .chain(delta.ordered_delta.updated.iter().map(|change| {
-            serde_json::json!({
-                "kind": 2,
-                "id": change.id.uuid().to_string(),
-                "index": change.new_index,
-                "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
-            })
-        }))
-        .chain(delta.ordered_delta.added.iter().map(|change| {
-            serde_json::json!({
-                "kind": 0,
-                "id": change.id.uuid().to_string(),
-                "index": change.index,
-                "row": row_to_json(&change.row, descriptor)
-            })
-        }))
-        .collect::<Vec<_>>();
-
-    serde_json::Value::Array(delta_obj)
 }
 
 fn make_subscription_callback(
@@ -393,23 +238,18 @@ impl RnSyncSender {
 
 impl SyncSender for RnSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
-        let is_catalogue = message.payload.is_catalogue();
-        let Ok(payload_json) = serde_json::to_string(&message.payload) else {
+        let Ok(serialized) = serialize_outbox_entry(&message) else {
             return;
-        };
-        let (destination_kind, destination_id) = match message.destination {
-            Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
-            Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
         };
 
         if let Ok(guard) = self.callback.lock() {
             if let Some(cb) = guard.as_ref() {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     cb.on_sync_message(
-                        destination_kind,
-                        destination_id,
-                        payload_json,
-                        is_catalogue,
+                        serialized.destination_kind,
+                        serialized.destination_id,
+                        serialized.payload_json,
+                        serialized.is_catalogue,
                     );
                 }));
             }
@@ -626,10 +466,7 @@ impl RnRuntime {
                     core.query_with_propagation(
                         query,
                         session,
-                        ReadDurabilityOptions {
-                            tier,
-                            local_updates: LocalUpdates::Immediate,
-                        },
+                        default_read_durability_options(tier),
                         QueryPropagation::Full,
                     ),
                     core.current_schema().clone(),
@@ -957,7 +794,7 @@ impl RnRuntime {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
+    use jazz_tools::binding_support::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
         query_rows_can_be_schema_aligned,
     };
@@ -1060,14 +897,10 @@ mod tests {
 
 #[uniffi::export]
 pub fn generate_id() -> String {
-    ObjectId::new().uuid().to_string()
+    generate_binding_id()
 }
 
 #[uniffi::export]
 pub fn current_timestamp_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    binding_current_timestamp_ms()
 }
