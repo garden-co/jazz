@@ -2520,6 +2520,11 @@ impl QueryGraph {
             size += std::mem::size_of::<NodeId>() + table.as_str().len();
         }
 
+        // Magic column tables
+        for (_, table) in &self.magic_column_tables {
+            size += std::mem::size_of::<NodeId>() + table.as_str().len();
+        }
+
         // Recursive relation tables
         for (_, table) in &self.recursive_relation_tables {
             size += std::mem::size_of::<NodeId>() + table.as_str().len();
@@ -2957,6 +2962,22 @@ mod tests {
 
         // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
         assert_eq!(graph.nodes.len(), 4);
+    }
+
+    #[test]
+    fn estimate_memory_size_counts_magic_column_dependencies() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users").build();
+        let mut graph = QueryGraph::compile(&query, &schema).unwrap();
+        let base_size = graph.estimate_memory_size();
+
+        let dependency_table = TableName::new("permission_edges");
+        let expected_extra = std::mem::size_of::<NodeId>() + dependency_table.as_str().len();
+        graph
+            .magic_column_tables
+            .push((NodeId(999), dependency_table));
+
+        assert_eq!(graph.estimate_memory_size(), base_size + expected_extra);
     }
 
     #[test]
