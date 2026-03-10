@@ -60,7 +60,11 @@ export function TodoList() {
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
-        <Pressable testID={`todo-delete-${titleId}`} onPress={() => db.delete(app.todos, item.id)} style={styles.deleteButton}>
+        <Pressable
+          testID={`todo-delete-${titleId}`}
+          onPress={() => db.delete(app.todos, item.id)}
+          style={styles.deleteButton}
+        >
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>
