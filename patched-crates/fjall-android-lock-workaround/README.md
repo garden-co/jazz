@@ -1,0 +1,206 @@
+<p align="center">
+  <img src="/kawaii.png" height="200">
+</p>
+
+<p align="center">
+  <a href="https://github.com/fjall-rs/fjall/actions/workflows/test.yml">
+    <img src="https://github.com/fjall-rs/fjall/actions/workflows/test.yml/badge.svg" alt="CI" />
+  </a>
+  <a href="https://docs.rs/fjall">
+    <img src="https://img.shields.io/docsrs/fjall?color=green" alt="docs.rs" />
+  </a>
+  <a href="https://crates.io/crates/fjall">
+    <img src="https://img.shields.io/crates/v/fjall?color=blue" alt="Crates.io" />
+  </a>
+  <img src="https://img.shields.io/badge/MSRV-1.91.0-blue" alt="MSRV" />
+  <a href="https://deps.rs/repo/github/fjall-rs/fjall">
+    <img src="https://deps.rs/repo/github/fjall-rs/fjall/status.svg" alt="dependency status" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://discord.com/invite/HvYGp4NFFk">
+    <img src="https://img.shields.io/discord/1240426554111164486" alt="Discord" />
+  </a>
+  <a href="https://bsky.app/profile/fjallrs.bsky.social">
+    <img src="https://img.shields.io/badge/bluesky-blue" alt="Bluesky" />
+  </a>
+</p>
+
+_Fjall_ _(Nordic: "Mountain")_ is a log-structured, embeddable key-value storage engine written in Rust.
+It features:
+
+- A thread-safe BTreeMap-like API
+- 100% safe & stable Rust
+- LSM-tree-based storage similar to `RocksDB`
+- Range & prefix searching with forward and reverse iteration
+- Multiple keyspaces (a.k.a. column families) with cross-keyspace atomic semantics
+- Built-in compression (default = `LZ4`)
+- Serializable transactions (optional)
+- Key-value separation for large blob use cases (optional)
+- Automatic background maintenance
+
+It is not:
+
+- A standalone database server
+- A relational or wide-column database: it has no built-in notion of columns or query language
+
+## Sponsors
+
+<a href="https://sqlsync.dev">
+  <picture>
+    <source width="240" alt="Orbitinghail" media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/fjall-rs/fjall-rs.github.io/d22fcb1e6966ce08327ea3bf6cf2ea86a840b071/public/logos/orbitinghail.svg" />
+    <source width="240" alt="Orbitinghail" media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/fjall-rs/fjall-rs.github.io/d22fcb1e6966ce08327ea3bf6cf2ea86a840b071/public/logos/orbitinghail_dark.svg" />
+    <img width="240" alt="Orbitinghail" src="https://raw.githubusercontent.com/fjall-rs/fjall-rs.github.io/d22fcb1e6966ce08327ea3bf6cf2ea86a840b071/public/logos/orbitinghail_dark.svg" />
+  </picture>
+</a>
+
+## Basic usage
+
+```bash
+cargo add fjall
+```
+
+```rust
+use fjall::{Database, KeyspaceCreateOptions, PersistMode};
+
+fn main() -> fjall::Result<()> {
+    // A database may contain multiple keyspaces
+    // You should probably only use a single database for your application
+    let db = Database::builder(path).open()?;
+    // TxDatabase::builder for transactional semantics
+
+    // Each keyspace is its own physical LSM-tree, and thus isolated from other keyspaces
+    let items = db.keyspace("my_items", KeyspaceCreateOptions::default)?;
+
+    // Write some data
+    items.insert("a", "hello")?;
+
+    // And retrieve it
+    let bytes = items.get("a")?;
+
+    // Or remove it again
+    items.remove("a")?;
+
+    // Search by prefix
+    for kv in items.prefix("prefix") {
+        // ...
+    }
+
+    // Search by range
+    for kv in items.range("a"..="z") {
+        // ...
+    }
+
+    // Iterators implement DoubleEndedIterator, so you can search backwards, too!
+    for kv in items.prefix("prefix").rev() {
+        // ...
+    }
+
+    // Sync the journal to disk to make sure data is definitely durable
+    // When the database is dropped, it will try to persist with `PersistMode::SyncAll` automatically
+    db.persist(PersistMode::SyncAll)
+}
+```
+
+> [!TIP]
+> Like any typical key-value store, keys are stored in lexicographic order.
+> If you are storing integer keys (e.g. timeseries data), you should use the big endian form to have predictable ordering.
+
+## Durability
+
+To support different kinds of workloads, Fjall is agnostic about the type of durability
+your application needs.
+After writing data (`insert`, `remove` or committing a write batch/transaction), you can choose to call [`Database::persist`](https://docs.rs/fjall/latest/fjall/struct.Database.html#method.persist) which takes a [`PersistMode`](https://docs.rs/fjall/latest/fjall/enum.PersistMode.html) parameter.
+By default, any operation will flush to OS buffers, but **not** to disk.
+This matches RocksDB's default durability.
+Also, when dropped, the database will try to persist the journal _to disk_ synchronously.
+
+## Multithreading, Async and Multiprocess
+
+> [!WARNING]
+> A single database may **not** be loaded in parallel from separate _processes_.
+
+Fjall is internally synchronized for multi-_threaded_ access, so you can clone around the `Database` and `Keyspace`s as needed, without needing to lock yourself.
+
+For an async example, see the [`tokio`](https://github.com/fjall-rs/fjall/tree/main/examples/tokio) example.
+
+## Memory usage
+
+Generally, memory for loaded data, indexes etc. is managed on a per-block basis, and capped by the block cache capacity.
+Note that this also applies to returned values: When you hold a `Slice`, it keeps the backing buffer alive (which may be a block).
+If you know that you are going to keep a value around for a long time, you may want to copy it out into a new `Vec<u8>`, `Box<[u8]>`, `Arc<[u8]>` or new `Slice` (using `Slice::new`).
+
+> [!NOTE]
+> It is recommended to configure the block cache capacity to be ~20-25% of the available memory - or more **if** the data set fits _fully_ into memory.
+
+Additionally, orthogonally to the block cache, each `Keyspace` has its own write buffer (["Memtable"](https://docs.rs/fjall/latest/fjall/struct.KeyspaceCreateOptions.html#method.max_memtable_size)) which is the unit of data flushed back into the "proper" index structure.
+
+## Error handling
+
+Fjall returns an [error enum](https://docs.rs/fjall/latest/fjall/enum.Error.html), however these variants are mostly used for debugging and tracing purposes, so your application is not expected to handle specific errors.
+
+It's best to let the application crash and restart, which is the [safest way to recover from transient I/O errors](https://ramalagappan.github.io/pdfs/papers/cuttlefs.pdf).
+
+## Transactional modes
+
+The backing store (`lsm-tree`) is a MVCC key-value store, allowing repeatable snapshot reads.
+However this isolation level can not do read-modify-write operations without the chance of lost updates.
+Also, `WriteBatch` does not allow reading the intermediary state back as you would expect from a proper transaction.
+For that reason, if you need transactional semantics, you need to use one of the transactional database implementation (`OptimisticTxDatabase` or `SingleWriterTxDatabase`).
+
+TL;DR: Fjall supports both transactional and non-transactional workloads.
+Chances are you want to use a transactional database, unless you know your workload does not need serializable transaction semantics.
+
+### Single writer
+
+Opens a transactional database for single-writer (serialized) transactions.
+Single writer means only a single **write** transaction can run at a time.
+This is trivially serializable because it _literally_ serializes write transactions.
+
+### Optimistic
+
+Opens a transactional database for multi-writer, serializable transactions.
+Conflict checking is done using optimistic concurrency control, meaning transactions can conflict and may have to be rerun.
+
+## Feature flags
+
+### lz4
+
+Allows using `LZ4` compression, powered by [`lz4_flex`](https://github.com/PSeitz/lz4_flex).
+
+_Enabled by default._
+
+### bytes_1
+
+Uses [`bytes`](https://github.com/tokio-rs/bytes) 1.x as the underlying `Slice` type.
+Otherwise, [`byteview`](https://github.com/fjall-rs/byteview) is used instead.
+
+_Disabled by default._
+
+## Stable disk format
+
+Future breaking changes will result in a major version bump and a migration path.
+
+For the underlying LSM-tree implementation, see: <https://crates.io/crates/lsm-tree>.
+
+## Examples
+
+[See here](https://github.com/fjall-rs/fjall/tree/main/examples) for practical examples.
+
+## Contributing
+
+How can you help?
+
+- [Ask a question](https://github.com/fjall-rs/fjall/discussions/new?category=q-a)
+  - or join the Discord server: [https://discord.com/invite/HvYGp4NFFk](https://discord.com/invite/HvYGp4NFFk)
+- [Post benchmarks and things you created](https://github.com/fjall-rs/fjall/discussions/new?category=show-and-tell)
+- [Open a PR](https://github.com/fjall-rs/fjall/compare),
+  - [See open issues to pick up here](https://github.com/search?q=org%3Afjall-rs+label%3A%22help+wanted%22+state%3Aopen+&type=issues)
+- [Open an issue](https://github.com/fjall-rs/fjall/issues/new) (bug report, weirdness)
+
+## License
+
+All source code is licensed under MIT OR Apache-2.0.
+
+All contributions are to be licensed as MIT OR Apache-2.0.
