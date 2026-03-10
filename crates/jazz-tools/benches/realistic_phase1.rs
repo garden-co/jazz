@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
@@ -11,7 +12,9 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
-use jazz_tools::object::ObjectId;
+use jazz_tools::commit::{Commit, CommitId, StoredState};
+use jazz_tools::object::{BranchName, Object, ObjectId};
+use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
@@ -110,6 +113,19 @@ struct R7ScenarioConfig {
     hot_task_count: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct R8ScenarioConfig {
+    id: String,
+    seed: u64,
+    branch_count: usize,
+    commits_per_branch: usize,
+    merge_fanin: usize,
+    payload_bytes: usize,
+    #[serde(default = "default_many_branches_cache_size_bytes")]
+    cache_size_bytes: usize,
+}
+
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy)]
 enum CrudOperation {
     InsertTask,
@@ -126,6 +142,7 @@ struct R1Scenario {
     weights: Vec<u32>,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy)]
 enum ReadOperation {
     QueryBoard,
@@ -189,6 +206,43 @@ struct R7Scenario {
     seed: u64,
     operation_count: usize,
     hot_task_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct R8Scenario {
+    id: String,
+    seed: u64,
+    branch_count: usize,
+    commits_per_branch: usize,
+    merge_fanin: usize,
+    payload_bytes: usize,
+    cache_size_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ManyBranchesDataset {
+    object_id: ObjectId,
+    prefix: String,
+    branch_names: Vec<String>,
+    leaf_branch_names: HashSet<String>,
+    total_commits: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BranchHeadScan {
+    branches_scanned: usize,
+    heads_found: usize,
+    checksum: u64,
+}
+
+fn default_many_branches_cache_size_bytes() -> usize {
+    32 * 1024 * 1024
+}
+
+impl R8Scenario {
+    fn total_commits(&self) -> usize {
+        self.branch_count * self.commits_per_branch.max(1)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1539,7 +1593,7 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
     configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
-    for fanout_clients in scenario.fanout_clients.iter().copied() {
+    for fanout_clients in &scenario.fanout_clients {
         let bench_id = format!(
             "{}_{}_n{}",
             scenario.id.to_lowercase(),
@@ -1551,7 +1605,7 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
         let operation_count = scenario.operation_count;
         group.bench_with_input(
             BenchmarkId::from_parameter(bench_id),
-            &fanout_clients,
+            fanout_clients,
             |b, fanout_clients| {
                 let mut state = FanoutR4State::new(
                     &profile,
@@ -1578,11 +1632,11 @@ fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &
     configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
-    for recursive_depth in scenario.recursive_depths.iter().copied() {
+    for recursive_depth in &scenario.recursive_depths {
         let bench_id = format!("{}_depth{recursive_depth}", scenario.id.to_lowercase());
         group.bench_with_input(
             BenchmarkId::from_parameter(bench_id),
-            &recursive_depth,
+            recursive_depth,
             |b, recursive_depth| {
                 let mut state = PermissionR5State::new(&scenario, *recursive_depth);
                 b.iter(|| {
@@ -1647,6 +1701,334 @@ fn realistic_r7_hotspot_history(c: &mut Criterion) {
     );
 
     group.finish();
+}
+
+fn realistic_r8_many_branches_write(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "write");
+
+    let mut group = c.benchmark_group("realistic_phase1/many_branches_write");
+    configure_group(&mut group, 10, 5);
+    group.throughput(Throughput::Elements(scenario.total_commits() as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            b.iter(|| {
+                let mut storage = MemoryStorage::new();
+                let mut manager = ObjectManager::new();
+                let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+                black_box(dataset.object_id);
+                black_box(dataset.branch_names.len());
+                black_box(dataset.leaf_branch_names.len());
+                black_box(dataset.total_commits);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_all_heads");
+
+    let mut storage = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let dataset = build_many_branches_dataset(&mut manager, &mut storage, &scenario);
+
+    let mut group = c.benchmark_group("realistic_phase1/many_branches_scan_heads");
+    configure_group(&mut group, 10, 5);
+    group.throughput(Throughput::Elements(scenario.branch_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &dataset,
+        |b, dataset| {
+            let object = manager
+                .get(dataset.object_id)
+                .expect("many-branches object should be loaded");
+            b.iter(|| {
+                let scan = scan_branch_heads(object, &dataset.prefix);
+                black_box(scan);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_leaf_heads");
+
+    let mut storage = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let dataset = build_many_branches_dataset(&mut manager, &mut storage, &scenario);
+
+    let mut group = c.benchmark_group("realistic_phase1/many_branches_scan_leaf_heads");
+    configure_group(&mut group, 10, 5);
+    group.throughput(Throughput::Elements(scenario.branch_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &dataset,
+        |b, dataset| {
+            let object = manager
+                .get(dataset.object_id)
+                .expect("many-branches object should be loaded");
+            b.iter(|| {
+                let scan = scan_leaf_like_branch_heads(
+                    object,
+                    &dataset.prefix,
+                    &dataset.leaf_branch_names,
+                );
+                black_box(scan);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "fjall_cold_load");
+    let seeded = ManyBranchesSeededDb::new(&scenario);
+
+    let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_fjall");
+    configure_group(&mut group, 10, 5);
+    group.throughput(Throughput::Elements(scenario.branch_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let storage = FjallStorage::open(&seeded.db_path, seeded.cache_size_bytes)
+                    .expect("open fjall for many-branches cold-load benchmark");
+                let mut manager = ObjectManager::new();
+                let object = manager
+                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
+                    .expect("cold-load many-branches object");
+                let scan = scan_branch_heads(object, &seeded.prefix);
+                storage.flush();
+                storage.close().expect("close many-branches fjall storage");
+                black_box(scan);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
+fn realistic_r8_many_branches_cold_load_fjall(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+struct ManyBranchesSeededDb {
+    _tempdir: TempDir,
+    db_path: PathBuf,
+    object_id: ObjectId,
+    branch_names: Vec<String>,
+    prefix: String,
+    cache_size_bytes: usize,
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+impl ManyBranchesSeededDb {
+    fn new(scenario: &R8Scenario) -> Self {
+        let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
+        let db_path = tempdir.path().join("many_branches_fjall");
+        let mut storage = FjallStorage::open(&db_path, scenario.cache_size_bytes)
+            .expect("open fjall for many-branches seed");
+        let mut manager = ObjectManager::new();
+        let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+        storage.flush();
+        storage
+            .close()
+            .expect("close seeded many-branches fjall storage");
+        Self {
+            _tempdir: tempdir,
+            db_path,
+            object_id: dataset.object_id,
+            branch_names: dataset.branch_names,
+            prefix: dataset.prefix,
+            cache_size_bytes: scenario.cache_size_bytes,
+        }
+    }
+}
+
+fn many_branches_benchmark_name(
+    scenario: &R8Scenario,
+    profile: &ProfileConfig,
+    suffix: &str,
+) -> String {
+    format!(
+        "{}_{}_b{}_c{}_f{}_{}",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.branch_count,
+        scenario.commits_per_branch,
+        scenario.merge_fanin,
+        suffix
+    )
+}
+
+fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
+    manager: &mut ObjectManager,
+    storage: &mut H,
+    scenario: &R8Scenario,
+) -> ManyBranchesDataset {
+    let object_id = manager.create(storage, None);
+    let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
+    let author = ObjectId::new();
+    let mut branch_names = Vec::with_capacity(scenario.branch_count);
+    let mut head_ids = Vec::with_capacity(scenario.branch_count);
+    let mut used_as_parent = vec![false; scenario.branch_count];
+    let mut root_timestamps = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
+
+    for branch_idx in 0..scenario.branch_count {
+        let branch_name = format!("{prefix}b{branch_idx:08}");
+        let parent_start = branch_idx.saturating_sub(scenario.merge_fanin);
+        let parent_ids: Vec<CommitId> = head_ids[parent_start..branch_idx].to_vec();
+        used_as_parent[parent_start..branch_idx].fill(true);
+
+        let root_commit = Commit {
+            parents: parent_ids.into(),
+            content: many_branches_payload(scenario, branch_idx, 0),
+            timestamp: root_timestamps,
+            author,
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state: Default::default(),
+        };
+        root_timestamps += 1;
+
+        let mut head_id = manager
+            .receive_commit(storage, object_id, &branch_name, root_commit)
+            .expect("seed many-branches root commit");
+
+        for commit_idx in 1..scenario.commits_per_branch {
+            head_id = manager
+                .add_commit(
+                    storage,
+                    object_id,
+                    &branch_name,
+                    vec![head_id],
+                    many_branches_payload(scenario, branch_idx, commit_idx),
+                    author,
+                    None,
+                )
+                .expect("append linear commit in many-branches benchmark");
+        }
+
+        branch_names.push(branch_name);
+        head_ids.push(head_id);
+    }
+
+    let leaf_branch_names = branch_names
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !used_as_parent[*idx])
+        .map(|(_, branch_name)| branch_name.clone())
+        .collect();
+
+    ManyBranchesDataset {
+        object_id,
+        prefix,
+        branch_names,
+        leaf_branch_names,
+        total_commits: scenario.total_commits(),
+    }
+}
+
+fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: usize) -> Vec<u8> {
+    let mut payload = vec![0u8; scenario.payload_bytes.max(32)];
+    let header = format!("branch={branch_idx};commit={commit_idx};");
+    let header_bytes = header.as_bytes();
+    let copy_len = header_bytes.len().min(payload.len());
+    payload[..copy_len].copy_from_slice(&header_bytes[..copy_len]);
+    for (offset, byte) in payload.iter_mut().enumerate().skip(copy_len) {
+        *byte = branch_idx
+            .wrapping_mul(31)
+            .wrapping_add(commit_idx.wrapping_mul(17))
+            .wrapping_add(offset) as u8;
+    }
+    payload
+}
+
+fn scan_branch_heads(object: &Object, prefix: &str) -> BranchHeadScan {
+    let mut scan = BranchHeadScan {
+        branches_scanned: 0,
+        heads_found: 0,
+        checksum: 0,
+    };
+
+    for (branch_name, branch) in &object.branches {
+        if !branch_name.as_str().starts_with(prefix) {
+            continue;
+        }
+        scan.branches_scanned += 1;
+        for head_id in &branch.tips {
+            scan.heads_found += 1;
+            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
+        }
+    }
+
+    scan
+}
+
+fn scan_leaf_like_branch_heads(
+    object: &Object,
+    prefix: &str,
+    leaf_branch_names: &HashSet<String>,
+) -> BranchHeadScan {
+    let mut scan = BranchHeadScan {
+        branches_scanned: 0,
+        heads_found: 0,
+        checksum: 0,
+    };
+
+    for (branch_name, branch) in &object.branches {
+        if !branch_name.as_str().starts_with(prefix) {
+            continue;
+        }
+        scan.branches_scanned += 1;
+        if !leaf_branch_names.contains(branch_name.as_str()) {
+            continue;
+        }
+        for head_id in &branch.tips {
+            scan.heads_found += 1;
+            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
+        }
+    }
+
+    scan
+}
+
+fn branch_head_checksum(branch_name: &BranchName, head_id: CommitId) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&head_id.0[..8]);
+    u64::from_le_bytes(bytes) ^ (branch_name.as_str().len() as u64)
 }
 
 fn load_r1_scenario(path: &str) -> R1Scenario {
@@ -1757,6 +2139,19 @@ fn load_r7_scenario(path: &str) -> R7Scenario {
         seed: raw.seed,
         operation_count: raw.operation_count,
         hot_task_count: raw.hot_task_count,
+    }
+}
+
+fn load_r8_scenario(path: &str) -> R8Scenario {
+    let raw: R8ScenarioConfig = load_json(path);
+    R8Scenario {
+        id: raw.id,
+        seed: raw.seed,
+        branch_count: raw.branch_count,
+        commits_per_branch: raw.commits_per_branch.max(1),
+        merge_fanin: raw.merge_fanin,
+        payload_bytes: raw.payload_bytes.max(32),
+        cache_size_bytes: raw.cache_size_bytes.max(1),
     }
 }
 
@@ -1986,6 +2381,10 @@ criterion_group!(
     realistic_r4_fanout_updates,
     realistic_r5_permission_recursive,
     realistic_r6_permission_write_heavy,
-    realistic_r7_hotspot_history
+    realistic_r7_hotspot_history,
+    realistic_r8_many_branches_write,
+    realistic_r8_many_branches_scan_heads,
+    realistic_r8_many_branches_scan_leaf_heads,
+    realistic_r8_many_branches_cold_load_fjall
 );
 criterion_main!(benches);
