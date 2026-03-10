@@ -17,7 +17,10 @@
 	// #endregion filtering-svelte
 
 	// #region reading-tier-svelte
-	const confirmedTodos = new QuerySubscription(app.todos, { tier: 'edge' });
+	const confirmedTodos = new QuerySubscription(app.todos, {
+		tier: 'edge',
+		localUpdates: 'deferred'
+	});
 	// #endregion reading-tier-svelte
 
 	let title = $state('');

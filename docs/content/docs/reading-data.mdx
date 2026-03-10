@@ -246,6 +246,7 @@ Recursive queries compute bounded transitive closures from a seed row set.
 - `db.subscribeAll(query, callback, options?)`
 - `useAll(query, options?)`
 - `useAllSuspense(query, options?)`
+- `new QuerySubscription(query, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
 - `options.localUpdates`: `"immediate" | "deferred"` (default: `"immediate"`)
 - `options.propagation`: `"full" | "local-only"` (default: `"full"`)
@@ -286,6 +287,7 @@ Read durability options pair naturally with write durability tiers:
 - Use write durability tiers to gate mutation durability checkpoints.
 - Use read durability options to gate query/subscription delivery checkpoints.
 - React hooks forward these options to the underlying `db.subscribeAll(...)` subscription.
+- Svelte `QuerySubscription` forwards these options to the underlying `db.subscribeAll(...)` subscription.
 
 See [Write Durability Tiers](/docs/writing-data#write-durability-tiers) for write-side semantics.
 
