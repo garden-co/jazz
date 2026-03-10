@@ -88,6 +88,19 @@ In `packages/jazz-tools/src/cli.ts`, pass `--checkpoint` to the Rust binary when
 
 ---
 
+## Out of scope — schema version conflicts
+
+If two developers simultaneously create checkpoints on different branches, or a single developer checkpoints across multiple branches, they may end up with conflicting version numbers after merging (e.g. two different `schema_v2_*.sql` files). Resolving this is a manual process:
+
+- **Keep one, drop the other:** if one schema is definitively correct, delete the other's versioned files and renumber if needed.
+- **Keep both, renumber:** if both represent real intermediate states, manually increment version numbers and add the missing migration between them.
+
+This pattern will be documented. The CLI could be extended to assist with conflict resolution in future, but it is not an MVP requirement.
+
+> Note: the existing branch-merge scenario (two v2 schemas coexisting, both migrating to v3) is already supported by the current `SchemaManager` lens DAG — this out-of-scope note is specifically about the manual triage step after a merge conflict.
+
+---
+
 ## Rejected alternatives
 
 - **Single `checkpoint.sql`:** Simpler on disk but breaks `SchemaManager`'s lens DAG construction, which relies on discrete versioned files.
