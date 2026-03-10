@@ -1828,6 +1828,7 @@ dependencies = [
  "bytes",
  "clap",
  "criterion",
+ "fjall",
  "futures",
  "hex",
  "internment",
