@@ -47,6 +47,18 @@ type Blake3State = Blake3Hasher;
 
 let wasmInit = initialize;
 let wasmInitSync = initializeSync;
+const RECURSIVE_WASM_BORROW_ERROR =
+  "recursive use of an object detected which would lead to unsafe aliasing in rust";
+
+function isRecursiveWasmBorrowError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    error.message.includes(RECURSIVE_WASM_BORROW_ERROR)
+  );
+}
 
 const wasmCryptoErrorMessage = (
   e: unknown,
@@ -281,6 +293,8 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
  * Adapter wrapping WasmSessionMap to implement SessionMapImpl interface
  */
 class SessionMapAdapter implements SessionMapImpl {
+  private hasWarnedAboutKnownStateWithStreamingError = false;
+
   constructor(private readonly sessionMap: WasmSessionMap) {}
 
   // === Header ===
@@ -394,14 +408,30 @@ class SessionMapAdapter implements SessionMapImpl {
   getKnownStateWithStreaming():
     | { id: string; header: boolean; sessions: Record<string, number> }
     | undefined {
-    // WASM returns a native JS object via serde_wasm_bindgen, or undefined
-    const result = this.sessionMap.getKnownStateWithStreaming();
-    if (!result || result === undefined) return undefined;
-    return result as {
-      id: string;
-      header: boolean;
-      sessions: Record<string, number>;
-    };
+    try {
+      // WASM returns a native JS object via serde_wasm_bindgen, or undefined
+      const result = this.sessionMap.getKnownStateWithStreaming();
+      if (!result || result === undefined) return undefined;
+      return result as {
+        id: string;
+        header: boolean;
+        sessions: Record<string, number>;
+      };
+    } catch (error) {
+      if (!isRecursiveWasmBorrowError(error)) {
+        throw error;
+      }
+
+      if (!this.hasWarnedAboutKnownStateWithStreamingError) {
+        this.hasWarnedAboutKnownStateWithStreamingError = true;
+        logger.error(
+          "WASM getKnownStateWithStreaming failed due to recursive re-entry; falling back to knownState()",
+          { err: error },
+        );
+      }
+
+      return undefined;
+    }
   }
 
   setStreamingKnownState(streamingJson: string): void {

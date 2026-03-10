@@ -193,4 +193,35 @@ describe("WasmCrypto", () => {
       },
     });
   });
+
+  it("falls back to knownState when getKnownStateWithStreaming hits a recursive wasm borrow error", () => {
+    const client = setupTestNode();
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    map.set("count", 1, "trusting");
+
+    const verified = map.core.verified!;
+    const impl = verified.impl as {
+      sessionMap: {
+        getKnownStateWithStreaming: () => unknown;
+      };
+    };
+    const originalGetKnownStateWithStreaming =
+      impl.sessionMap.getKnownStateWithStreaming;
+
+    impl.sessionMap.getKnownStateWithStreaming = () => {
+      throw new Error(
+        "recursive use of an object detected which would lead to unsafe aliasing in rust",
+      );
+    };
+
+    try {
+      expect(verified.knownStateWithStreaming()).toEqual(verified.knownState());
+      expect(verified.isStreaming()).toBe(false);
+    } finally {
+      impl.sessionMap.getKnownStateWithStreaming =
+        originalGetKnownStateWithStreaming;
+    }
+  });
 });
