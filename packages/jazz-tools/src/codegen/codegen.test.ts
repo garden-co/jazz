@@ -772,7 +772,7 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("export interface TodoInclude {");
     // Include types now include QueryBuilder union and only allow `true` for flags
-    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder;");
+    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder<any, any>;");
   });
 
   it("generates Relations types", () => {
@@ -880,8 +880,8 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("export interface TodoInclude {");
     // Include types now include QueryBuilder union and only allow `true` for flags
-    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder;");
-    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
   });
 
   it("does not generate relation types for tables without relations", () => {
@@ -1064,7 +1064,7 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder;");
+    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder<any, any>;");
   });
 
   it("QueryBuilder._build() returns valid JSON structure", () => {
@@ -1168,7 +1168,7 @@ describe("QueryBuilder self-referential relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder;");
-    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
   });
 });

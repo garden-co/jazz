@@ -46,11 +46,11 @@ export interface TodoWhereInput {
 }
 
 export interface ProjectInclude {
-  todosViaProject?: true | TodoInclude | TodoQueryBuilder;
+  todosViaProject?: true | TodoInclude | TodoQueryBuilder<any, any>;
 }
 
 export interface TodoInclude {
-  project?: true | ProjectInclude | ProjectQueryBuilder;
+  project?: true | ProjectInclude | ProjectQueryBuilder<any, any>;
 }
 
 export interface ProjectRelations {

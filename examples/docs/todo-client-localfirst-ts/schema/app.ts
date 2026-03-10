@@ -49,13 +49,13 @@ export interface TodoWhereInput {
 }
 
 export interface ProjectInclude {
-  todosViaProject?: true | TodoInclude | TodoQueryBuilder;
+  todosViaProject?: true | TodoInclude | TodoQueryBuilder<any, any>;
 }
 
 export interface TodoInclude {
-  parent?: true | TodoInclude | TodoQueryBuilder;
-  todosViaParent?: true | TodoInclude | TodoQueryBuilder;
-  project?: true | ProjectInclude | ProjectQueryBuilder;
+  parent?: true | TodoInclude | TodoQueryBuilder<any, any>;
+  todosViaParent?: true | TodoInclude | TodoQueryBuilder<any, any>;
+  project?: true | ProjectInclude | ProjectQueryBuilder<any, any>;
 }
 
 export interface ProjectRelations {

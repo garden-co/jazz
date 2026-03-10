@@ -119,21 +119,21 @@ export interface ParticipantWhereInput {
 }
 
 export interface InstrumentInclude {
-  beatsViaInstrument?: true | BeatInclude | BeatQueryBuilder;
+  beatsViaInstrument?: true | BeatInclude | BeatQueryBuilder<any, any>;
 }
 
 export interface JamInclude {
-  beatsViaJam?: true | BeatInclude | BeatQueryBuilder;
-  participantsViaJam?: true | ParticipantInclude | ParticipantQueryBuilder;
+  beatsViaJam?: true | BeatInclude | BeatQueryBuilder<any, any>;
+  participantsViaJam?: true | ParticipantInclude | ParticipantQueryBuilder<any, any>;
 }
 
 export interface BeatInclude {
-  jam?: true | JamInclude | JamQueryBuilder;
-  instrument?: true | InstrumentInclude | InstrumentQueryBuilder;
+  jam?: true | JamInclude | JamQueryBuilder<any, any>;
+  instrument?: true | InstrumentInclude | InstrumentQueryBuilder<any, any>;
 }
 
 export interface ParticipantInclude {
-  jam?: true | JamInclude | JamQueryBuilder;
+  jam?: true | JamInclude | JamQueryBuilder<any, any>;
 }
 
 export interface InstrumentRelations {
