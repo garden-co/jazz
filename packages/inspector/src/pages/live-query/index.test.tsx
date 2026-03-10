@@ -48,6 +48,7 @@ describe("LiveQuery", () => {
         id: "sub-1",
         table: "todos",
         tier: "worker",
+        propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
         query: '{"table":"todos"}',
@@ -59,6 +60,7 @@ describe("LiveQuery", () => {
     render(<LiveQuery />);
 
     expect(screen.getByRole("cell", { name: "todos" })).not.toBeNull();
+    expect(screen.getByRole("cell", { name: "full" })).not.toBeNull();
     expect(screen.getByText('{"table":"todos"}')).not.toBeNull();
     const summary = screen.getByText(/TodoList\.tsx:34:17/, { selector: "summary" });
     expect(summary).not.toBeNull();
@@ -74,6 +76,7 @@ describe("LiveQuery", () => {
         id: "sub-1",
         table: "todos",
         tier: "worker",
+        propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
         query: '{"table":"todos"}',
@@ -83,6 +86,7 @@ describe("LiveQuery", () => {
         id: "sub-2",
         table: "projects",
         tier: "edge",
+        propagation: "local-only",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
         query: '{"table":"projects"}',
@@ -112,6 +116,7 @@ describe("LiveQuery", () => {
         id: "sub-1",
         table: "todos",
         tier: "global",
+        propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
         query: '{"table":"todos"}',
@@ -121,6 +126,7 @@ describe("LiveQuery", () => {
         id: "sub-2",
         table: "projects",
         tier: "edge",
+        propagation: "local-only",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
         query: '{"table":"projects"}',
@@ -130,6 +136,7 @@ describe("LiveQuery", () => {
         id: "sub-3",
         table: "users",
         tier: "worker",
+        propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
         query: '{"table":"users"}',

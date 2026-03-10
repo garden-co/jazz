@@ -112,6 +112,7 @@ export interface ActiveQuerySubscriptionTrace {
   table: string;
   branches: string[];
   tier: DurabilityTier;
+  propagation: QueryPropagation;
   createdAt: string;
   stack?: string;
 }
@@ -1306,6 +1307,7 @@ export class Db {
       table: payload.table,
       branches: payload.branches,
       tier: resolvedOptions.tier,
+      propagation: resolvedOptions.propagation,
       createdAt: new Date().toISOString(),
       stack: trimSubscriptionTraceStack(new Error().stack),
       visibility: resolvedOptions.visibility ?? "public",

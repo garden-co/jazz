@@ -95,6 +95,11 @@ export function LiveQuery() {
         cell: (info) => info.getValue<string>(),
       },
       {
+        accessorKey: "propagation",
+        header: "Propagation",
+        cell: (info) => info.getValue<string>(),
+      },
+      {
         id: "branches",
         header: "Branches",
         cell: ({ row }) => row.original.branches.join(", "),
