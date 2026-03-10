@@ -254,6 +254,8 @@ pub(super) struct ServerQuerySubscription {
     pub(super) query: Query,
     /// Compiled QueryGraph (with client's session for policy filtering).
     pub(super) graph: QueryGraph,
+    /// Subscription-specific schema context derived from the downstream client schema.
+    pub(super) schema_context: SchemaContext,
     /// Client's session for permission evaluation.
     pub(super) session: Option<Session>,
     /// Resolved branches (from query.branches or schema context at creation time).
@@ -551,14 +553,20 @@ impl QueryManager {
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
+                let query_for_compile =
+                    Self::query_for_server_compile(&sub.query, &sub.schema_context);
                 // Recompile the graph
                 match Self::compile_graph(
-                    &sub.query,
-                    &self.schema,
+                    &query_for_compile,
+                    &sub.schema_context.current_schema,
                     sub.session.clone(),
-                    &self.schema_context,
+                    &sub.schema_context,
                 ) {
                     Ok(new_graph) => {
+                        sub.branches = Self::resolved_server_query_branches(
+                            &query_for_compile,
+                            &sub.schema_context,
+                        );
                         sub.graph = new_graph;
                         sub.needs_recompile = false;
                     }
