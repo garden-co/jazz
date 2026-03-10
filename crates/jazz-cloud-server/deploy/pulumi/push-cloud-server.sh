@@ -12,7 +12,7 @@ Options:
   --stack <name>        Pulumi stack (short name or org/project/stack; default: dev)
   --tag <tag>           Image tag (default: sha-<short git sha>)
   --image <uri>         Full image URI override
-  --repo <name>         ECR repository name (default: jazz-cloud-server)
+  --repo <name>         ECR repository name (default: jazz2-cloud-server)
   --account-id <id>     AWS account ID (default: from STS)
   --region <region>     AWS region (default: us-east-2)
   --aws-profile <name>  AWS profile to use
@@ -20,7 +20,7 @@ Options:
   -h, --help            Show help
 
 Examples:
-  ./push-cloud-server.sh --aws-profile jazz
+  ./push-cloud-server.sh --aws-profile jazz2:shared
   ./push-cloud-server.sh --stack dev --tag v0.1.0
 EOF
 }
@@ -40,7 +40,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 STACK="dev"
 TAG="sha-$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
 IMAGE_URI=""
-ECR_REPOSITORY="jazz-cloud-server"
+ECR_REPOSITORY="jazz2-cloud-server"
 ACCOUNT_ID=""
 AWS_REGION="${AWS_REGION:-us-east-2}"
 AWS_PROFILE_ARG=""
