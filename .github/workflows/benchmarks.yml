@@ -12,31 +12,60 @@ on:
         required: false
         default: false
         type: boolean
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled]
+  push:
+    branches: [main]
   schedule:
-    # Nightly UTC
     - cron: "0 5 * * *"
 
 concurrency:
-  # Prevent overlapping benchmark runs on the same dedicated runner pool.
   group: realistic-benchmarks
   cancel-in-progress: false
 
 env:
   BENCH_PROFILE: ${{ github.event.inputs.profile || 's' }}
+  BENCH_BRANCH: ${{ github.head_ref || github.ref_name }}
+  BENCH_REF: ${{ github.ref }}
+  BENCH_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  BENCH_TIMEOUT_SECONDS: "60"
+  BENCH_REPEAT_COUNT: "3"
+  BENCH_CPUSET: "1-5"
+  VERCEL_ORG_ID: team_xiRKInFi7lBd1gTqyAGuzmkC
+  VERCEL_PROJECT_ID: prj_RfjK9XUx0HaHkxGmvsMrPJhhuZVG
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   native:
-    name: Native Bench (SurrealKV)
+    name: Native Bench (Example + Criterion)
+    if: >-
+      ${{
+        (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
+      }}
     runs-on: [self-hosted, linux, x64, jazz-bench]
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
 
       - name: Collect host metadata
         run: |
@@ -48,8 +77,9 @@ jobs:
             "run_id": "${GITHUB_RUN_ID}",
             "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "repository": "${GITHUB_REPOSITORY}",
-            "sha": "${GITHUB_SHA}",
-            "ref": "${GITHUB_REF}",
+            "sha": "${BENCH_SHA}",
+            "ref": "${BENCH_REF}",
+            "branch": "${BENCH_BRANCH}",
             "profile": "${BENCH_PROFILE}",
             "runner_name": "${RUNNER_NAME}",
             "runner_os": "${RUNNER_OS}",
@@ -60,37 +90,66 @@ jobs:
           uname -a > bench-out/native/uname.txt
           lscpu > bench-out/native/lscpu.txt
 
-      - name: Run W1 (interactive)
+      - name: Build native benchmark binaries
         run: |
           set -euo pipefail
-          RUST_LOG=warn cargo run --release -p jazz-tools --features client --example realistic_bench -- \
-            --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
-            --scenario benchmarks/realistic/scenarios/w1_interactive.json \
-            > bench-out/native/w1_interactive.json
+          cargo build --release -p jazz-tools --features client --example realistic_bench
+          cargo bench -p jazz-tools --features fjall --bench realistic_phase1 --no-run
 
-      - name: Run W4 (cold start)
+      - name: Run native benchmark suite
         run: |
           set -euo pipefail
-          RUST_LOG=warn cargo run --release -p jazz-tools --features client --example realistic_bench -- \
-            --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
-            --scenario benchmarks/realistic/scenarios/w4_cold_start.json \
-            > bench-out/native/w4_cold_start.json
+          sleep 10
+          taskset -c "${BENCH_CPUSET}" node benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite native \
+            --out-dir bench-out/native \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+
+      - name: Export Criterion artifacts
+        run: |
+          set -euo pipefail
+          node benchmarks/realistic/export_criterion.mjs \
+            --allow-empty \
+            --out bench-out/native/criterion_realistic_phase1.json \
+            --summary-md bench-out/native/criterion_realistic_phase1.md
+
+      - name: Publish native execution summary
+        run: |
+          set -euo pipefail
+          cat bench-out/native/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build native manifest
         run: |
           set -euo pipefail
+          file_sha() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              printf ''
+            fi
+          }
           jq -n \
             --arg workflow "${GITHUB_WORKFLOW}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha "${GITHUB_SHA}" \
-            --arg ref "${GITHUB_REF}" \
+            --arg sha "${BENCH_SHA}" \
+            --arg ref "${BENCH_REF}" \
+            --arg branch "${BENCH_BRANCH}" \
             --arg profile "${BENCH_PROFILE}" \
             --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg w1_sha256 "$(sha256sum bench-out/native/w1_interactive.json | awk '{print $1}')" \
-            --arg w4_sha256 "$(sha256sum bench-out/native/w4_cold_start.json | awk '{print $1}')" \
-            '{
+            --arg w1_sha256 "$(file_sha bench-out/native/w1_interactive.json)" \
+            --arg w4_sha256 "$(file_sha bench-out/native/w4_cold_start.json)" \
+            --arg status_sha256 "$(file_sha bench-out/native/suite_status.json)" \
+            --arg summary_sha256 "$(file_sha bench-out/native/summary.md)" \
+            --arg skip_candidates_sha256 "$(file_sha bench-out/native/skip_candidates.json)" \
+            --arg criterion_json_sha256 "$(file_sha bench-out/native/criterion_realistic_phase1.json)" \
+            --arg criterion_md_sha256 "$(file_sha bench-out/native/criterion_realistic_phase1.md)" \
+            'def nullable($value): if $value == "" then null else $value end;
+            {
               kind: "realistic-bench-native",
               generated_at: $generated_at,
               workflow: $workflow,
@@ -99,14 +158,20 @@ jobs:
               repository: $repository,
               sha: $sha,
               ref: $ref,
+              branch: $branch,
               profile: $profile,
               files: [
                 { path: "metadata.json" },
                 { path: "rustc.txt" },
                 { path: "uname.txt" },
                 { path: "lscpu.txt" },
-                { path: "w1_interactive.json", sha256: $w1_sha256 },
-                { path: "w4_cold_start.json", sha256: $w4_sha256 }
+                { path: "suite_status.json", sha256: nullable($status_sha256) },
+                { path: "summary.md", sha256: nullable($summary_sha256) },
+                { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                { path: "w1_interactive.json", sha256: nullable($w1_sha256) },
+                { path: "w4_cold_start.json", sha256: nullable($w4_sha256) },
+                { path: "criterion_realistic_phase1.json", sha256: nullable($criterion_json_sha256) },
+                { path: "criterion_realistic_phase1.md", sha256: nullable($criterion_md_sha256) }
               ]
             }' > bench-out/native/manifest.json
 
@@ -119,15 +184,30 @@ jobs:
 
   browser:
     name: Browser Bench (TS + OPFS)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_browser }}
+    if: >-
+      ${{
+        (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+        && (
+          github.event_name != 'pull_request'
+          || (
+            contains(github.event.pull_request.labels.*.name, 'benchmark')
+            && github.event.pull_request.head.repo.full_name == github.repository
+          )
+        )
+        && (
+          github.event_name != 'workflow_dispatch'
+          || inputs.include_browser
+        )
+      }}
     runs-on: [self-hosted, linux, x64, jazz-bench]
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
       - uses: actions/setup-node@v6
@@ -136,6 +216,7 @@ jobs:
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium
 
       - name: Collect host metadata
         run: |
@@ -147,8 +228,9 @@ jobs:
             "run_id": "${GITHUB_RUN_ID}",
             "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "repository": "${GITHUB_REPOSITORY}",
-            "sha": "${GITHUB_SHA}",
-            "ref": "${GITHUB_REF}",
+            "sha": "${BENCH_SHA}",
+            "ref": "${BENCH_REF}",
+            "branch": "${BENCH_BRANCH}",
             "profile": "${BENCH_PROFILE}",
             "runner_name": "${RUNNER_NAME}",
             "runner_os": "${RUNNER_OS}",
@@ -169,29 +251,46 @@ jobs:
       - name: Run browser benchmark suite
         run: |
           set -euo pipefail
-          pnpm --dir packages/jazz-tools run bench:realistic:browser | tee bench-out/browser/realistic.log
+          sleep 10
+          taskset -c "${BENCH_CPUSET}" node benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite browser \
+            --out-dir bench-out/browser \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
-      - name: Extract benchmark JSON line
+      - name: Publish browser execution summary
         run: |
           set -euo pipefail
-          grep '^\[realistic-bench\]' bench-out/browser/realistic.log | tail -n1 | sed 's/^\[realistic-bench\] //' > bench-out/browser/realistic.json
-          test -s bench-out/browser/realistic.json
+          cat bench-out/browser/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build browser manifest
         run: |
           set -euo pipefail
+          file_sha() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              printf ''
+            fi
+          }
           jq -n \
             --arg workflow "${GITHUB_WORKFLOW}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha "${GITHUB_SHA}" \
-            --arg ref "${GITHUB_REF}" \
+            --arg sha "${BENCH_SHA}" \
+            --arg ref "${BENCH_REF}" \
+            --arg branch "${BENCH_BRANCH}" \
             --arg profile "${BENCH_PROFILE}" \
             --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg realistic_sha256 "$(sha256sum bench-out/browser/realistic.json | awk '{print $1}')" \
-            --arg log_sha256 "$(sha256sum bench-out/browser/realistic.log | awk '{print $1}')" \
-            '{
+            --arg realistic_sha256 "$(file_sha bench-out/browser/realistic.json)" \
+            --arg status_sha256 "$(file_sha bench-out/browser/suite_status.json)" \
+            --arg summary_sha256 "$(file_sha bench-out/browser/summary.md)" \
+            --arg skip_candidates_sha256 "$(file_sha bench-out/browser/skip_candidates.json)" \
+            'def nullable($value): if $value == "" then null else $value end;
+            {
               kind: "realistic-bench-browser",
               generated_at: $generated_at,
               workflow: $workflow,
@@ -200,6 +299,7 @@ jobs:
               repository: $repository,
               sha: $sha,
               ref: $ref,
+              branch: $branch,
               profile: $profile,
               files: [
                 { path: "metadata.json" },
@@ -207,8 +307,10 @@ jobs:
                 { path: "pnpm.txt" },
                 { path: "rustc.txt" },
                 { path: "uname.txt" },
-                { path: "realistic.json", sha256: $realistic_sha256 },
-                { path: "realistic.log", sha256: $log_sha256 }
+                { path: "suite_status.json", sha256: nullable($status_sha256) },
+                { path: "summary.md", sha256: nullable($summary_sha256) },
+                { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                { path: "realistic.json", sha256: nullable($realistic_sha256) }
               ]
             }' > bench-out/browser/manifest.json
 
@@ -223,10 +325,17 @@ jobs:
     name: Build Benchmark Site
     runs-on: ubuntu-latest
     needs: [native, browser]
-    if: ${{ always() && needs.native.result == 'success' && (needs.browser.result == 'success' || needs.browser.result == 'skipped') }}
+    if: >-
+      ${{
+        always()
+        && needs.native.result == 'success'
+        && (needs.browser.result == 'success' || needs.browser.result == 'skipped')
+      }}
     permissions:
       actions: read
       contents: write
+      issues: write
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v6
@@ -244,17 +353,73 @@ jobs:
           path: site-input/native
 
       - name: Download browser artifacts
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_browser }}
+        if: ${{ needs.browser.result == 'success' }}
         uses: actions/download-artifact@v5
         with:
           name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: site-input/browser
 
+      - name: Seed benchmark history snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/site-history
+          history_path=bench-out/site-history/working_history.json
+
+          if git cat-file -e origin/main:benchmarks/realistic/history/bench_history.json 2>/dev/null; then
+            git show origin/main:benchmarks/realistic/history/bench_history.json > "$history_path"
+          elif [ -f benchmarks/realistic/history/bench_history.json ]; then
+            cp benchmarks/realistic/history/bench_history.json "$history_path"
+          else
+            printf '{\n  "version": 1,\n  "updated_at": null,\n  "runs": []\n}\n' > "$history_path"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${PR_NUMBER}" ]; then
+            previous_run_id="$(
+              gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/benchmarks.yml/runs?branch=${BENCH_BRANCH}&status=success&per_page=20" \
+                --jq '[.workflow_runs[]
+                  | select(.id != '"${GITHUB_RUN_ID}"')
+                  | select(.event == "pull_request")
+                  | select(any(.pull_requests[]?; .number == '"${PR_NUMBER}"'))
+                  | .id][0] // empty'
+            )"
+
+            if [ -n "${previous_run_id}" ]; then
+              previous_artifact="$(
+                gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${previous_run_id}/artifacts" \
+                  --jq '[.artifacts[]
+                    | select(.expired == false and (.name | startswith("realistic-site-")))
+                    | .name][0] // empty'
+              )"
+
+              if [ -n "${previous_artifact}" ]; then
+                mkdir -p bench-out/previous-site
+                gh run download "${previous_run_id}" \
+                  --repo "${GITHUB_REPOSITORY}" \
+                  --name "${previous_artifact}" \
+                  --dir bench-out/previous-site
+
+                previous_history="$(find bench-out/previous-site -name history.json -print -quit || true)"
+                if [ -n "${previous_history}" ]; then
+                  node benchmarks/realistic/merge_histories.mjs \
+                    --out "$history_path" \
+                    --history "$history_path" \
+                    --history "$previous_history" \
+                    --max-runs 5000
+                fi
+              fi
+            fi
+          fi
+
+          echo "BENCH_WORKING_HISTORY=$history_path" >> "$GITHUB_ENV"
+
       - name: Update benchmark history
         run: |
           set -euo pipefail
           args=(
-            --history benchmarks/realistic/history/bench_history.json
+            --history "${BENCH_WORKING_HISTORY}"
             --native site-input/native
             --max-runs 5000
           )
@@ -263,12 +428,142 @@ jobs:
           fi
           node benchmarks/realistic/update_history.mjs "${args[@]}"
 
+      - name: Update benchmark skip set
+        run: |
+          set -euo pipefail
+          args=(
+            --skip-set benchmarks/realistic/ci_skip_set.json
+            --status site-input/native/suite_status.json
+          )
+          if [ -f site-input/browser/suite_status.json ]; then
+            args+=(--status site-input/browser/suite_status.json)
+          fi
+          node benchmarks/realistic/update_skip_set.mjs "${args[@]}"
+
       - name: Build static benchmark site
         run: |
           set -euo pipefail
           node benchmarks/realistic/build_site.mjs \
-            --history benchmarks/realistic/history/bench_history.json \
+            --history "${BENCH_WORKING_HISTORY}" \
             --out benchmarks/realistic/site
+
+      - name: Sync checked-in history from working snapshot
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          cp "${BENCH_WORKING_HISTORY}" benchmarks/realistic/history/bench_history.json
+
+      - name: Deploy benchmark site preview
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_BENCHMARKS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping preview deploy."
+            exit 0
+          fi
+          deploy_root="$(mktemp -d)"
+          trap 'rm -rf "${deploy_root}"' EXIT
+          mkdir -p "${deploy_root}/benchmarks/realistic"
+          cp -R benchmarks/realistic/site "${deploy_root}/benchmarks/realistic/site"
+          if ! deployment_url="$(
+            npx vercel@latest deploy "${deploy_root}" \
+              --yes \
+              --scope garden-co \
+              --token "${VERCEL_TOKEN}" \
+              --local-config "${deploy_root}/benchmarks/realistic/site/vercel.json" \
+              -m benchmark_branch="${BENCH_BRANCH}" \
+              -m benchmark_sha="${BENCH_SHA}" \
+              -m benchmark_run_id="${GITHUB_RUN_ID}" \
+              -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
+              | tail -n1
+          )"; then
+            echo "Vercel preview deploy failed; continuing without preview URL."
+            exit 0
+          fi
+          if ! npx vercel@latest inspect "${deployment_url}" \
+            --wait \
+            --timeout 5m \
+            --scope garden-co \
+            --token "${VERCEL_TOKEN}" >/dev/null; then
+            echo "Vercel preview deployment did not reach Ready; continuing without preview URL."
+            exit 0
+          fi
+          echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
+          {
+            echo "### Benchmark Preview"
+            echo ""
+            echo "${deployment_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy benchmark site to production
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_BENCHMARKS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "VERCEL_BENCHMARKS_TOKEN is not configured; skipping production deploy."
+            exit 0
+          fi
+          deploy_root="$(mktemp -d)"
+          trap 'rm -rf "${deploy_root}"' EXIT
+          mkdir -p "${deploy_root}/benchmarks/realistic"
+          cp -R benchmarks/realistic/site "${deploy_root}/benchmarks/realistic/site"
+          if ! deployment_url="$(
+            npx vercel@latest deploy "${deploy_root}" \
+              --prod \
+              --yes \
+              --scope garden-co \
+              --token "${VERCEL_TOKEN}" \
+              --local-config "${deploy_root}/benchmarks/realistic/site/vercel.json" \
+              -m benchmark_branch="${BENCH_BRANCH}" \
+              -m benchmark_sha="${BENCH_SHA}" \
+              -m benchmark_run_id="${GITHUB_RUN_ID}" \
+              -m benchmark_run_attempt="${GITHUB_RUN_ATTEMPT}" \
+              | tail -n1
+          )"; then
+            echo "Vercel production deploy failed; continuing without production URL."
+            exit 0
+          fi
+          if ! npx vercel@latest inspect "${deployment_url}" \
+            --wait \
+            --timeout 5m \
+            --scope garden-co \
+            --token "${VERCEL_TOKEN}" >/dev/null; then
+            echo "Vercel production deployment did not reach Ready; continuing without production URL."
+            exit 0
+          fi
+          echo "BENCH_SITE_URL=${deployment_url}" >> "$GITHUB_ENV"
+          {
+            echo "### Benchmark Production Site"
+            echo ""
+            echo "${deployment_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render PR benchmark report
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out
+          : > bench-out/pr-report.md
+          if [ -n "${BENCH_SITE_URL:-}" ]; then
+            printf 'Preview site: %s\n\n' "${BENCH_SITE_URL}" >> bench-out/pr-report.md
+          fi
+          for summary in site-input/native/summary.md site-input/browser/summary.md; do
+            if [ -f "$summary" ]; then
+              cat "$summary" >> bench-out/pr-report.md
+              printf '\n' >> bench-out/pr-report.md
+            fi
+          done
+          node benchmarks/realistic/render_history_report.mjs \
+            --history "${BENCH_WORKING_HISTORY}" \
+            --base-branch main \
+            --head-branch "${BENCH_BRANCH}" \
+            --out bench-out/history-report.md
+          cat bench-out/history-report.md >> bench-out/pr-report.md
+          cat bench-out/pr-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload site artifacts
         uses: actions/upload-artifact@v4
@@ -277,13 +572,59 @@ jobs:
           path: benchmarks/realistic/site
           if-no-files-found: error
 
+      - name: Update PR benchmark comment
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          REPORT_PATH: bench-out/pr-report.md
+        with:
+          script: |
+            const core = require("@actions/core");
+            const fs = require("fs");
+            const marker = "<!-- realistic-bench-report -->";
+            const body = `${marker}\n${fs.readFileSync(process.env.REPORT_PATH, "utf8")}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100,
+              });
+              const existing = comments.find(
+                (comment) =>
+                  comment.user?.login === "github-actions[bot]"
+                  && typeof comment.body === "string"
+                  && comment.body.includes(marker),
+              );
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body,
+                });
+              }
+            } catch (error) {
+              core.warning(`Skipping PR benchmark comment update: ${error instanceof Error ? error.message : String(error)}`);
+            }
+
       - name: Commit updated history and site
         if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/site
+          git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/ci_skip_set.json benchmarks/realistic/site
           if git diff --cached --quiet; then
             echo "No benchmark history/site changes to commit."
             exit 0

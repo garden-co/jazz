@@ -7,7 +7,7 @@ CRATE_ABS = File.expand_path(__dir__)
 Pod::Spec.new do |s|
   s.name         = "JazzNitro"
   s.version      = "0.1.0"
-  s.summary      = "SurrealKV storage spike via Nitro Modules Rust bridge."
+  s.summary      = "Fjall storage spike via Nitro Modules Rust bridge."
   s.homepage     = "https://github.com/gardencmp/jazz"
   s.license      = { :type => "MIT" }
   s.authors      = { "Jazz" => "jazz@garden.co" }

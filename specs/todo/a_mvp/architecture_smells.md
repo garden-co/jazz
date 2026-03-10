@@ -96,11 +96,11 @@ Schema manager copies known schema maps into query manager during processing.
 
 ## 9) Storage backend key-layout duplication
 
-`opfs_btree` and `surrealkv` repeat key encoding and namespace logic.
+`opfs_btree` and `fjall` repeat key encoding and namespace logic.
 
 - Evidence:
   - `crates/jazz-tools/src/storage/opfs_btree.rs`
-  - `crates/jazz-tools/src/storage/surrealkv.rs`
+  - `crates/jazz-tools/src/storage/fjall.rs`
 - Why it smells:
   - Parallel maintenance burden.
 - Direction:

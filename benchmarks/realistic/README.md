@@ -17,7 +17,7 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 - `scenarios/b5_server_permission_recursive.json`: recursive-permission read/update mix
 - `scenarios/b6_server_hotspot_history.json`: deep-history hotspot updates + storage delta
 
-## Native Runner (SurrealKV)
+## Native Runner (Fjall)
 
 Run from workspace root:
 
@@ -50,7 +50,7 @@ It currently loads:
 - scenario `R1`: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
 - scenario `R2`: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
 - scenario `R2B`: `benchmarks/realistic/scenarios/r2_reads_with_churn.json` (5% background write churn)
-- scenario `R3`: `benchmarks/realistic/scenarios/r3_cold_load_surrealkv.json` (cold open + first query, SurrealKV)
+- scenario `R3`: `benchmarks/realistic/scenarios/r3_cold_load_fjall.json` (cold open + first query, Fjall)
 - scenario `R4`: `benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
 - scenario `R5`: `benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
 - scenario `R6`: `benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
@@ -61,7 +61,7 @@ Current topology coverage:
 - `T0_local`: `realistic_phase1/crud_sustained` and `realistic_phase1/reads_sustained`
 - mixed read/write churn: `realistic_phase1/reads_sustained_with_write_churn`
 - `T1_single_hop`: `realistic_phase1/crud_sustained_single_hop` and `realistic_phase1/reads_sustained_single_hop`
-- persisted cold-load (`M1_surrealkv`): `realistic_phase1/cold_load_surrealkv` (requires `--features surrealkv`)
+- persisted cold-load (`M1_fjall`): `realistic_phase1/cold_load_fjall` (requires `--features fjall`)
 - fanout delivery: `realistic_phase1/fanout_updates`
 - recursive permission read/write: `realistic_phase1/permission_recursive`
 - recursive permission write-heavy: `realistic_phase1/permission_write_heavy`
@@ -70,7 +70,7 @@ Current topology coverage:
 Run only the cold-load benchmark:
 
 ```bash
-cargo bench -p jazz-tools --features surrealkv --bench realistic_phase1 cold_load_surrealkv
+cargo bench -p jazz-tools --features fjall --bench realistic_phase1 cold_load_fjall
 ```
 
 Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
@@ -106,21 +106,32 @@ Current browser scenarios:
 
 ## CI / Runner
 
-- Workflow: `/Users/anselm/.codex/worktrees/f472/jazz2-clean/.github/workflows/benchmarks.yml`
-- AWS setup: `/Users/anselm/.codex/worktrees/f472/jazz2-clean/benchmarks/realistic/aws_runner_setup.md`
+- Workflow: `.github/workflows/benchmarks.yml`
+- AWS setup: `benchmarks/realistic/aws_runner_setup.md`
 
 Artifacts include `manifest.json` as a stable ingestion entrypoint:
 
 - native: `bench-out/native/manifest.json`
 - browser: `bench-out/browser/manifest.json`
 
-The workflow also has a `site` job that:
+The workflow currently:
+
+- runs on `main` pushes and nightly schedule
+- runs on PRs only when the PR has the `benchmark` label
+- runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
+- keeps a checked-in skip set at `benchmarks/realistic/ci_skip_set.json`
+- records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
+- records browser outputs per scenario when they complete within budget
+
+The `site` job:
 
 - pulls the benchmark artifacts for that run
 - updates `history/bench_history.json` with absolute metrics
+- updates `ci_skip_set.json` with newly observed timed-out benchmarks
 - rebuilds `site/index.html` + `site/history.json`
 - uploads `site/` as an artifact
-- commits refreshed history/site back to `main` when the workflow itself runs on `main`
+- posts a markdown comparison report back to labeled PRs, including current-run status summaries
+- commits refreshed history/site/skip-set back to `main` when the workflow itself runs on `main`
 
 ## Delta Rendering (Local)
 
@@ -138,6 +149,7 @@ Notes:
 - Script: `benchmarks/realistic/render_deltas.mjs`
 - It auto-discovers `manifest.json` recursively under `--base` and `--head`.
 - It compares the newest native/browser manifests found in each tree.
+- For history-backed markdown reports in CI, use `benchmarks/realistic/render_history_report.mjs`.
 
 ## Static Site (Local + Vercel)
 
@@ -157,5 +169,7 @@ pnpm bench:realistic:build-site -- \
 For Vercel hosting:
 
 - set project root directory to `benchmarks/realistic/site`
+- keep [vercel.json](/Users/anselm/.codex/worktrees/30d1/jazz2/benchmarks/realistic/site/vercel.json) in that directory so routing stays explicit
 - use no install command and no build command (prebuilt static files)
+- framework preset: `Other`
 - deploy from `main` so each benchmark CI run refreshes the dashboard automatically

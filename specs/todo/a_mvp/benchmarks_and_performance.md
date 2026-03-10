@@ -22,7 +22,7 @@ These benchmarks should reflect current architecture, not an idealized one:
   - `batched_tick()` for sync message flush and parked-message processing
 - Query engine is reactive and graph-based (`QueryGraph`, subscriptions, incremental settle)
 - Policy checks use simple checks plus graph-backed evaluation for `EXISTS`/`INHERITS`
-- Storage API is synchronous (MemoryStorage, SurrealKvStorage, OpfsBTreeStorage)
+- Storage API is synchronous (MemoryStorage, FjallStorage, OpfsBTreeStorage)
 - Object model is commit-graph based per row object, so hotspot history depth is first-class
 - Three-tier sync wiring is already test-proven in `runtime_core` via synthetic message routing
 
@@ -79,7 +79,7 @@ Primary implementation location:
 ## Storage Modes
 
 - `M0_mem`: MemoryStorage (logic throughput, policy/query/graph pressure)
-- `M1_surrealkv`: SurrealKvStorage (cold-load + persistence effects)
+- `M1_fjall`: FjallStorage (cold-load + persistence effects)
 
 ## Execution Conventions
 
@@ -183,7 +183,7 @@ Setup:
 
 - schema/profile: `S1/P1`
 - topology: `T0_local`, `T1_single_hop`
-- storage: `M0_mem` baseline, `M1_surrealkv` variant
+- storage: `M0_mem` baseline, `M1_fjall` variant
 
 Operation mix (per writer stream):
 
@@ -210,7 +210,7 @@ Setup:
 
 - schema/profile: `S1/P1`
 - topology: `T0_local`, `T1_single_hop`
-- storage: `M0_mem`, `M1_surrealkv`
+- storage: `M0_mem`, `M1_fjall`
 
 Read mix:
 
@@ -240,7 +240,7 @@ Setup:
 
 - schema/profile: `S1/P2`, `S2/P1`
 - topology: `T0_local`
-- storage: `M1_surrealkv` only
+- storage: `M1_fjall` only
 
 Flow per cycle:
 
@@ -266,7 +266,7 @@ Setup:
 
 - schema/profile: `S1/P1` hot-project subset
 - topology: `T3_fanout` with `N in {10, 50, 200}`
-- storage: `M0_mem` first, `M1_surrealkv` optional
+- storage: `M0_mem` first, `M1_fjall` optional
 
 Pattern:
 
@@ -352,7 +352,7 @@ Setup:
 
 - schema/profile: `S3/P1`, `S3/P2`
 - topology: `T0_local`
-- storage: `M1_surrealkv` primary, `M0_mem` reference
+- storage: `M1_fjall` primary, `M0_mem` reference
 
 Pattern:
 
@@ -381,7 +381,7 @@ Setup:
 
 - schema/profile: `S1/P1` + permission variant `S2/P1`
 - topology: `T1_single_hop`
-- storage: `M1_surrealkv`
+- storage: `M1_fjall`
 
 Mix:
 

@@ -16,6 +16,9 @@ import b4Json from "../../../../benchmarks/realistic/scenarios/b4_server_fanout_
 import b5Json from "../../../../benchmarks/realistic/scenarios/b5_server_permission_recursive.json";
 import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
 
+declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
+declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
+
 type PersistenceTier = "worker" | "edge" | "core";
 
 function durabilityOptions(tier: PersistenceTier): { tier: "worker" | "edge" | "global" } {
@@ -220,6 +223,24 @@ interface ScenarioResult {
   extra: Record<string, unknown>;
 }
 
+const TARGET_TIMING_WINDOW_MS = 40;
+const MAX_BATCHED_TIMING_REPEATS = 64;
+const CI_BROWSER_LIMITS = {
+  w1OperationCount: 1200,
+  w4Cycles: 25,
+  b1InsertCount: 4096,
+  b1UpdateCount: 4096,
+  b1DeleteCount: 4096,
+  b2RequestCount: 768,
+  b3Cycles: 12,
+  b3LargeMultiplier: 8,
+  b4MaxSubscribers: 128,
+  b4Rounds: 12,
+  b5ReadRequests: 160,
+  b5UpdateAttempts: 120,
+  b6UpdateCount: 12000,
+} as const;
+
 const schema = (schemaJson as { tables: WasmSchema }).tables;
 const profile = profileJson as unknown as ProfileConfig;
 const w1 = w1Json as unknown as W1Scenario;
@@ -231,6 +252,13 @@ const b3 = b3Json as unknown as B3Scenario;
 const b4 = b4Json as unknown as B4Scenario;
 const b5 = b5Json as unknown as B5Scenario;
 const b6 = b6Json as unknown as B6Scenario;
+const browserScenarioSelection = new Set(
+  (__JAZZ_REALISTIC_BROWSER_SCENARIOS__ ?? "")
+    .split(",")
+    .map((value) => value.trim().toUpperCase())
+    .filter(Boolean),
+);
+const browserRunId = (__JAZZ_REALISTIC_BROWSER_RUN_ID__ ?? "").trim() || "local";
 
 const usersTable = tableProxy<UserRow, Omit<UserRow, "id">>("users");
 const organizationsTable = tableProxy<OrganizationRow, Omit<OrganizationRow, "id">>(
@@ -310,10 +338,31 @@ function nowMicros(): number {
 }
 
 function uniqueDbName(label: string): string {
-  return `realistic-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `realistic-${browserRunId}-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function summarizeLatencies(values: number[]): OpSummary {
+function hash32(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function benchmarkAppId(label: string): string {
+  const segments = ["a", "b", "c", "d"].map((suffix) =>
+    hash32(`${APP_ID}|${browserRunId}|${label}|${suffix}`).toString(16).padStart(8, "0"),
+  );
+  const s0 = segments[0];
+  const s1 = segments[1];
+  const s2 = segments[2];
+  const s3 = segments[3];
+  const variant = ((parseInt(s2[0], 16) & 0x3) | 0x8).toString(16);
+  return `${s0}-${s1.slice(0, 4)}-4${s1.slice(1, 4)}-${variant}${s2.slice(1, 4)}-${s2.slice(4)}${s3}`;
+}
+
+function summarizeLatencies(values: number[], count = values.length): OpSummary {
   if (values.length === 0) {
     return { count: 0, avg_ms: 0, p50_ms: 0, p95_ms: 0, p99_ms: 0 };
   }
@@ -324,11 +373,54 @@ function summarizeLatencies(values: number[]): OpSummary {
   };
   const avg = sorted.reduce((sum, x) => sum + x, 0) / sorted.length;
   return {
-    count: sorted.length,
+    count,
     avg_ms: avg,
     p50_ms: at(0.5),
     p95_ms: at(0.95),
     p99_ms: at(0.99),
+  };
+}
+
+function createProgressReporter(label: string, total: number): (done: number) => void {
+  const step = Math.max(1, Math.floor(total / 4));
+  let next = step;
+  return (done: number): void => {
+    while (done >= next && next < total) {
+      progressLog(`${label}: ${Math.min(done, total)}/${total}`);
+      next += step;
+    }
+  };
+}
+
+async function measureBatchedLatency(
+  remaining: number,
+  runOnce: (batchIndex: number) => Promise<void>,
+  options: {
+    minWindowMs?: number;
+    maxRepeats?: number;
+  } = {},
+): Promise<{ repeats: number; elapsedMs: number; perOpMs: number }> {
+  const minWindowMs = options.minWindowMs ?? TARGET_TIMING_WINDOW_MS;
+  const maxRepeats = Math.max(
+    1,
+    Math.min(remaining, options.maxRepeats ?? MAX_BATCHED_TIMING_REPEATS),
+  );
+
+  const startedAt = performance.now();
+  let repeats = 0;
+  while (repeats < maxRepeats) {
+    await runOnce(repeats);
+    repeats += 1;
+    if (repeats >= 1 && performance.now() - startedAt >= minWindowMs) {
+      break;
+    }
+  }
+
+  const elapsedMs = performance.now() - startedAt;
+  return {
+    repeats,
+    elapsedMs,
+    perOpMs: elapsedMs / Math.max(1, repeats),
   };
 }
 
@@ -375,6 +467,7 @@ function scaledLargeProfile(input: ProfileConfig, multiplier: number): ProfileCo
 }
 
 async function createServerDb(
+  appId: string,
   dbName: string,
   sub: string,
   claims: Record<string, unknown> = {},
@@ -387,7 +480,7 @@ async function createServerDb(
 ): Promise<Db> {
   const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
   const config: Parameters<typeof createDb>[0] = {
-    appId: APP_ID,
+    appId,
     dbName,
     serverUrl,
     adminSecret: options.includeAdminSecret === false ? undefined : ADMIN_SECRET,
@@ -540,110 +633,114 @@ async function seedDataset(db: Db, config: ProfileConfig): Promise<SeedState> {
 }
 
 async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<ScenarioResult> {
-  const operationCount = Math.min(w1.operation_count, 60);
+  const operationCount = Math.min(w1.operation_count, CI_BROWSER_LIMITS.w1OperationCount);
   progressLog(`W1 start operations=${operationCount}`);
   const rng = new Lcg(w1.seed ^ config.seed);
   const weights = w1.mix.map((x) => x.weight);
   const latencies: Record<string, number[]> = {};
+  const opCounts: Record<string, number> = {};
+  const reportProgress = createProgressReporter("W1 progress", operationCount);
 
   const wallStart = performance.now();
-  for (let i = 0; i < operationCount; i += 1) {
-    const step = Math.max(1, Math.floor(operationCount / 5));
-    if (i > 0 && i % step === 0) progressLog(`W1 progress ${i}/${operationCount}`);
+  for (let i = 0; i < operationCount; ) {
     const op = w1.mix[rng.pickWeightedIndex(weights)].operation;
-    const t0 = performance.now();
-    switch (op) {
-      case "query_board": {
-        const project = state.projects[rng.nextInt(state.hotProjectCount)];
-        await db.all(
-          query<TaskRow>(
-            "tasks",
-            [{ column: "project_id", op: "eq", value: project }],
-            [["updated_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        break;
+    const batch = await measureBatchedLatency(operationCount - i, async (batchIndex) => {
+      const currentIndex = i + batchIndex;
+      switch (op) {
+        case "query_board": {
+          const project = state.projects[rng.nextInt(state.hotProjectCount)];
+          await db.all(
+            query<TaskRow>(
+              "tasks",
+              [{ column: "project_id", op: "eq", value: project }],
+              [["updated_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          break;
+        }
+        case "query_my_work": {
+          const assignee = state.users[rng.nextInt(state.users.length)];
+          await db.all(
+            query<TaskRow>(
+              "tasks",
+              [
+                { column: "assignee_id", op: "eq", value: assignee },
+                { column: "status", op: "eq", value: "in_progress" },
+              ],
+              [["updated_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          break;
+        }
+        case "query_task_detail": {
+          const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+          await db.all(
+            query<CommentRow>(
+              "task_comments",
+              [{ column: "task_id", op: "eq", value: taskId }],
+              [["created_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          await db.all(
+            query<ActivityRow>(
+              "activity_events",
+              [{ column: "task_id", op: "eq", value: taskId }],
+              [["created_at", "desc"]],
+              200,
+            ),
+            "worker",
+          );
+          break;
+        }
+        case "update_task_status": {
+          const taskIdx = rng.nextInt(state.taskIds.length);
+          await db.update(tasksTable, state.taskIds[taskIdx], {
+            status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
+            priority: 1 + rng.nextInt(4),
+            assignee_id: state.users[rng.nextInt(state.users.length)],
+            updated_at: nowMicros(),
+          });
+          break;
+        }
+        case "insert_comment": {
+          const taskIdx = rng.nextInt(state.taskIds.length);
+          await db.insert(commentsTable, {
+            task_id: state.taskIds[taskIdx],
+            author_id: state.users[rng.nextInt(state.users.length)],
+            body: `interactive comment ${currentIndex}`,
+            created_at: nowMicros(),
+          });
+          state.commentsPerTask[taskIdx] += 1;
+          break;
+        }
+        case "update_project_meta": {
+          const projectIdx = rng.nextInt(state.projects.length);
+          await db.update(projectsTable, state.projects[projectIdx], {
+            name: `Project ${projectIdx} v${currentIndex}`,
+            updated_at: nowMicros(),
+          });
+          break;
+        }
+        default:
+          throw new Error(`Unknown operation in W1 mix: ${op}`);
       }
-      case "query_my_work": {
-        const assignee = state.users[rng.nextInt(state.users.length)];
-        await db.all(
-          query<TaskRow>(
-            "tasks",
-            [
-              { column: "assignee_id", op: "eq", value: assignee },
-              { column: "status", op: "eq", value: "in_progress" },
-            ],
-            [["updated_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        break;
-      }
-      case "query_task_detail": {
-        const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
-        await db.all(
-          query<CommentRow>(
-            "task_comments",
-            [{ column: "task_id", op: "eq", value: taskId }],
-            [["created_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        await db.all(
-          query<ActivityRow>(
-            "activity_events",
-            [{ column: "task_id", op: "eq", value: taskId }],
-            [["created_at", "desc"]],
-            200,
-          ),
-          "worker",
-        );
-        break;
-      }
-      case "update_task_status": {
-        const taskIdx = rng.nextInt(state.taskIds.length);
-        await db.update(tasksTable, state.taskIds[taskIdx], {
-          status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
-          priority: 1 + rng.nextInt(4),
-          assignee_id: state.users[rng.nextInt(state.users.length)],
-          updated_at: nowMicros(),
-        });
-        break;
-      }
-      case "insert_comment": {
-        const taskIdx = rng.nextInt(state.taskIds.length);
-        await db.insert(commentsTable, {
-          task_id: state.taskIds[taskIdx],
-          author_id: state.users[rng.nextInt(state.users.length)],
-          body: `interactive comment ${i}`,
-          created_at: nowMicros(),
-        });
-        state.commentsPerTask[taskIdx] += 1;
-        break;
-      }
-      case "update_project_meta": {
-        const projectIdx = rng.nextInt(state.projects.length);
-        await db.update(projectsTable, state.projects[projectIdx], {
-          name: `Project ${projectIdx} v${i}`,
-          updated_at: nowMicros(),
-        });
-        break;
-      }
-      default:
-        throw new Error(`Unknown operation in W1 mix: ${op}`);
-    }
-    const elapsed = performance.now() - t0;
-    (latencies[op] ||= []).push(elapsed);
+    });
+    (latencies[op] ||= []).push(batch.perOpMs);
+    opCounts[op] = (opCounts[op] || 0) + batch.repeats;
+    i += batch.repeats;
+    reportProgress(i);
   }
   const wallMs = performance.now() - wallStart;
 
   const operation_summaries: Record<string, OpSummary> = {};
   for (const [op, samples] of Object.entries(latencies)) {
-    operation_summaries[op] = summarizeLatencies(samples);
+    operation_summaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
   }
 
   return {
@@ -670,6 +767,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
 async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("W3 start");
   const dbName = uniqueDbName("w3");
+  const appId = benchmarkAppId("w3");
   const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
   const token = await signJwt("realistic-user", JWT_SECRET);
   const rng = new Lcg(w3.seed ^ config.seed);
@@ -678,7 +776,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   let onlineDb: Db | null = null;
 
   try {
-    offlineDb = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+    offlineDb = await createDb({ appId, dbName, logLevel: "warn" });
     const state = await seedDataset(offlineDb, config);
     const targetTaskIdx = rng.nextInt(state.taskIds.length);
     const targetTaskId = state.taskIds[targetTaskIdx];
@@ -703,7 +801,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 
     const reconnectStart = performance.now();
     onlineDb = await createDb({
-      appId: APP_ID,
+      appId,
       dbName,
       serverUrl,
       jwtToken: token,
@@ -776,13 +874,14 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
   const dbName = uniqueDbName("w4");
-  const cycles = Math.min(w4.reopen_cycles, 3);
+  const appId = benchmarkAppId("w4");
+  const cycles = Math.min(w4.reopen_cycles, CI_BROWSER_LIMITS.w4Cycles);
   progressLog(`W4 start cycles=${cycles}`);
   let db: Db | null = null;
   const latencies: number[] = [];
 
   try {
-    db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+    db = await createDb({ appId, dbName, logLevel: "warn" });
     const state = await seedDataset(db, config);
     const hotProjectId = state.projects[0];
     await db.all(
@@ -801,7 +900,7 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
     for (let i = 0; i < cycles; i += 1) {
       progressLog(`W4 cycle ${i + 1}/${cycles}`);
       const t0 = performance.now();
-      db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
+      db = await createDb({ appId, dbName, logLevel: "warn" });
       await db.all(
         query<TaskRow>(
           "tasks",
@@ -837,59 +936,76 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B1 start");
+  const appId = benchmarkAppId("b1");
   const dbName = uniqueDbName("b1");
   const rng = new Lcg(b1.seed ^ config.seed);
-  const insertCount = Math.min(b1.insert_count, 96);
-  const updateCount = Math.min(b1.update_count, 96);
-  const deleteCount = Math.min(b1.delete_count, insertCount);
+  const insertCount = Math.min(b1.insert_count, CI_BROWSER_LIMITS.b1InsertCount);
+  const updateCount = Math.min(b1.update_count, CI_BROWSER_LIMITS.b1UpdateCount);
+  const deleteCount = Math.min(
+    Math.min(b1.delete_count, CI_BROWSER_LIMITS.b1DeleteCount),
+    insertCount,
+  );
   const insertedCommentIds: string[] = [];
   const latencies: Record<string, number[]> = {};
+  const opCounts: Record<string, number> = {};
 
   let db: Db | null = null;
   try {
-    db = await createServerDb(dbName, "realistic-b1");
+    db = await createServerDb(appId, dbName, "realistic-b1");
     const state = await seedDataset(db, config);
     const wallStart = performance.now();
+    const reportInsertProgress = createProgressReporter("B1 inserts", insertCount);
+    const reportUpdateProgress = createProgressReporter("B1 updates", updateCount);
+    const reportDeleteProgress = createProgressReporter("B1 deletes", deleteCount);
 
-    for (let i = 0; i < insertCount; i += 1) {
-      reportLoopProgress("B1 inserts", i, insertCount);
-      const taskIdx = rng.nextInt(state.taskIds.length);
-      const t0 = performance.now();
-      const { id } = await db.insert(commentsTable, {
-        task_id: state.taskIds[taskIdx],
-        author_id: state.users[rng.nextInt(state.users.length)],
-        body: `b1_insert_comment_${i}`,
-        created_at: nowMicros(),
+    for (let i = 0; i < insertCount; ) {
+      const batch = await measureBatchedLatency(insertCount - i, async (batchIndex) => {
+        const currentIndex = i + batchIndex;
+        const taskIdx = rng.nextInt(state.taskIds.length);
+        const { id } = await db.insert(commentsTable, {
+          task_id: state.taskIds[taskIdx],
+          author_id: state.users[rng.nextInt(state.users.length)],
+          body: `b1_insert_comment_${currentIndex}`,
+          created_at: nowMicros(),
+        });
+        insertedCommentIds.push(id);
       });
-      insertedCommentIds.push(id);
-      (latencies.insert_sync ||= []).push(performance.now() - t0);
+      (latencies.insert_sync ||= []).push(batch.perOpMs);
+      opCounts.insert_sync = (opCounts.insert_sync || 0) + batch.repeats;
+      i += batch.repeats;
+      reportInsertProgress(i);
     }
 
-    for (let i = 0; i < updateCount; i += 1) {
-      reportLoopProgress("B1 updates", i, updateCount);
-      const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
-      const t0 = performance.now();
-      db.update(tasksTable, taskId, {
-        priority: 1 + rng.nextInt(4),
-        status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
-        updated_at: nowMicros(),
+    for (let i = 0; i < updateCount; ) {
+      const batch = await measureBatchedLatency(updateCount - i, async () => {
+        const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+        await db.update(tasksTable, taskId, {
+          priority: 1 + rng.nextInt(4),
+          status: ["todo", "in_progress", "review", "done"][rng.nextInt(4)],
+          updated_at: nowMicros(),
+        });
       });
-      (latencies.update_sync ||= []).push(performance.now() - t0);
+      (latencies.update_sync ||= []).push(batch.perOpMs);
+      opCounts.update_sync = (opCounts.update_sync || 0) + batch.repeats;
+      i += batch.repeats;
+      reportUpdateProgress(i);
     }
 
-    for (let i = 0; i < deleteCount; i += 1) {
-      reportLoopProgress("B1 deletes", i, deleteCount);
-      const id = insertedCommentIds[i];
-      const t0 = performance.now();
-      db.delete(commentsTable, id);
-      (latencies.delete_sync ||= []).push(performance.now() - t0);
+    for (let i = 0; i < deleteCount; ) {
+      const batch = await measureBatchedLatency(deleteCount - i, async (batchIndex) => {
+        await db.delete(commentsTable, insertedCommentIds[i + batchIndex]);
+      });
+      (latencies.delete_sync ||= []).push(batch.perOpMs);
+      opCounts.delete_sync = (opCounts.delete_sync || 0) + batch.repeats;
+      i += batch.repeats;
+      reportDeleteProgress(i);
     }
 
     const wallMs = performance.now() - wallStart;
     const totalOperations = insertCount + updateCount + deleteCount;
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
-      operationSummaries[op] = summarizeLatencies(samples);
+      operationSummaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
     }
 
     return {
@@ -914,80 +1030,86 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B2 start");
+  const appId = benchmarkAppId("b2");
   const dbName = uniqueDbName("b2");
   const rng = new Lcg(b2.seed ^ config.seed);
-  const requestCount = Math.min(b2.request_count, 160);
+  const requestCount = Math.min(b2.request_count, CI_BROWSER_LIMITS.b2RequestCount);
   const weights = b2.mix.map((x) => x.weight);
   const latencies: Record<string, number[]> = {};
+  const opCounts: Record<string, number> = {};
 
   let db: Db | null = null;
   try {
-    db = await createServerDb(dbName, "realistic-b2");
+    db = await createServerDb(appId, dbName, "realistic-b2");
     const state = await seedDataset(db, config);
 
     const wallStart = performance.now();
-    for (let i = 0; i < requestCount; i += 1) {
-      reportLoopProgress("B2 reads", i, requestCount);
+    const reportProgress = createProgressReporter("B2 reads", requestCount);
+    for (let i = 0; i < requestCount; ) {
       const op = b2.mix[rng.pickWeightedIndex(weights)].operation;
-      const t0 = performance.now();
-      switch (op) {
-        case "query_board": {
-          const project = state.projects[rng.nextInt(state.hotProjectCount)];
-          await db.all(
-            query<TaskRow>(
-              "tasks",
-              [{ column: "project_id", op: "eq", value: project }],
-              [["updated_at", "desc"]],
-              200,
-            ),
-          );
-          break;
+      const batch = await measureBatchedLatency(requestCount - i, async () => {
+        switch (op) {
+          case "query_board": {
+            const project = state.projects[rng.nextInt(state.hotProjectCount)];
+            await db.all(
+              query<TaskRow>(
+                "tasks",
+                [{ column: "project_id", op: "eq", value: project }],
+                [["updated_at", "desc"]],
+                200,
+              ),
+            );
+            break;
+          }
+          case "query_my_work": {
+            const assignee = state.users[rng.nextInt(state.users.length)];
+            await db.all(
+              query<TaskRow>(
+                "tasks",
+                [
+                  { column: "assignee_id", op: "eq", value: assignee },
+                  { column: "status", op: "eq", value: "in_progress" },
+                ],
+                [["updated_at", "desc"]],
+                200,
+              ),
+            );
+            break;
+          }
+          case "query_task_detail": {
+            const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
+            await db.all(
+              query<CommentRow>(
+                "task_comments",
+                [{ column: "task_id", op: "eq", value: taskId }],
+                [["created_at", "desc"]],
+                200,
+              ),
+            );
+            await db.all(
+              query<ActivityRow>(
+                "activity_events",
+                [{ column: "task_id", op: "eq", value: taskId }],
+                [["created_at", "desc"]],
+                200,
+              ),
+            );
+            break;
+          }
+          default:
+            throw new Error(`Unknown operation in B2 mix: ${op}`);
         }
-        case "query_my_work": {
-          const assignee = state.users[rng.nextInt(state.users.length)];
-          await db.all(
-            query<TaskRow>(
-              "tasks",
-              [
-                { column: "assignee_id", op: "eq", value: assignee },
-                { column: "status", op: "eq", value: "in_progress" },
-              ],
-              [["updated_at", "desc"]],
-              200,
-            ),
-          );
-          break;
-        }
-        case "query_task_detail": {
-          const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
-          await db.all(
-            query<CommentRow>(
-              "task_comments",
-              [{ column: "task_id", op: "eq", value: taskId }],
-              [["created_at", "desc"]],
-              200,
-            ),
-          );
-          await db.all(
-            query<ActivityRow>(
-              "activity_events",
-              [{ column: "task_id", op: "eq", value: taskId }],
-              [["created_at", "desc"]],
-              200,
-            ),
-          );
-          break;
-        }
-        default:
-          throw new Error(`Unknown operation in B2 mix: ${op}`);
-      }
-      (latencies[op] ||= []).push(performance.now() - t0);
+      });
+      (latencies[op] ||= []).push(batch.perOpMs);
+      opCounts[op] = (opCounts[op] || 0) + batch.repeats;
+      i += batch.repeats;
+      reportProgress(i);
     }
     const wallMs = performance.now() - wallStart;
 
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
-      operationSummaries[op] = summarizeLatencies(samples);
+      operationSummaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
     }
 
     return {
@@ -1009,9 +1131,13 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
 }
 
 async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
+  const appId = benchmarkAppId("b3");
   const dbName = uniqueDbName("b3");
-  const cycles = Math.min(b3.reopen_cycles, 4);
-  const largeConfig = scaledLargeProfile(config, b3.large_multiplier);
+  const cycles = Math.min(b3.reopen_cycles, CI_BROWSER_LIMITS.b3Cycles);
+  const largeConfig = scaledLargeProfile(
+    config,
+    Math.min(b3.large_multiplier, CI_BROWSER_LIMITS.b3LargeMultiplier),
+  );
   progressLog(
     `B3 start cycles=${cycles} tasks=${largeConfig.tasks} comments=${largeConfig.comments}`,
   );
@@ -1020,7 +1146,7 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
   let cycleDb: Db | null = null;
 
   try {
-    seedDb = await createServerDb(dbName, "realistic-b3-seed");
+    seedDb = await createServerDb(appId, dbName, "realistic-b3-seed");
     const state = await seedDataset(seedDb, largeConfig);
     const hotProjectId = state.projects[0];
     await seedDb.all(
@@ -1038,7 +1164,7 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
     for (let i = 0; i < cycles; i += 1) {
       progressLog(`B3 cycle ${i + 1}/${cycles}`);
       const t0 = performance.now();
-      cycleDb = await createServerDb(dbName, "realistic-b3-cycle");
+      cycleDb = await createServerDb(appId, dbName, "realistic-b3-cycle");
       await cycleDb.all(
         query<TaskRow>(
           "tasks",
@@ -1083,9 +1209,12 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B4 start");
+  const appId = benchmarkAppId("b4");
   const dbName = uniqueDbName("b4");
-  const subscriberCounts = b4.subscriber_counts.map((x) => Math.max(1, Math.min(40, x)));
-  const rounds = Math.min(b4.rounds, 8);
+  const subscriberCounts = b4.subscriber_counts.map((x) =>
+    Math.max(1, Math.min(CI_BROWSER_LIMITS.b4MaxSubscribers, x)),
+  );
+  const rounds = Math.min(b4.rounds, CI_BROWSER_LIMITS.b4Rounds);
   const timeoutMs = Math.min(b4.timeout_seconds, 30) * 1000;
   const fanoutDeliveryLatencies: number[] = [];
   const operationSummaries: Record<string, OpSummary> = {};
@@ -1093,7 +1222,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
   let writer: Db | null = null;
 
   try {
-    writer = await createServerDb(dbName, "realistic-b4-writer");
+    writer = await createServerDb(appId, dbName, "realistic-b4-writer");
     const state = await seedDataset(writer, config);
     const targetTaskId = state.taskIds[0];
     await writer.update(tasksTable, targetTaskId, {
@@ -1544,11 +1673,12 @@ async function seedPermissionDataset(
 
 async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B5 start");
+  const appId = benchmarkAppId("b5");
   const dbPrefix = uniqueDbName("b5");
   const rng = new Lcg(b5.seed ^ config.seed);
   const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
-  const reads = Math.min(b5.read_request_count, 160);
-  const updates = Math.min(b5.update_attempt_count, 120);
+  const reads = Math.min(b5.read_request_count, CI_BROWSER_LIMITS.b5ReadRequests);
+  const updates = Math.min(b5.update_attempt_count, CI_BROWSER_LIMITS.b5UpdateAttempts);
   const latencies: Record<string, number[]> = {};
   const documentTable = tableProxy<PermissionDocumentRow, Omit<PermissionDocumentRow, "id">>(
     "documents",
@@ -1589,13 +1719,13 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const deniedLocalToken = `${dbPrefix}-b5-denied-token`;
     const intermediateLocalToken = `${dbPrefix}-b5-intermediate-token`;
     const allowedPrincipalId = await deriveLocalPrincipalId(
-      APP_ID,
+      appId,
       localAuthMode,
       allowedLocalToken,
     );
-    const deniedPrincipalId = await deriveLocalPrincipalId(APP_ID, localAuthMode, deniedLocalToken);
+    const deniedPrincipalId = await deriveLocalPrincipalId(appId, localAuthMode, deniedLocalToken);
     const intermediatePrincipalId = await deriveLocalPrincipalId(
-      APP_ID,
+      appId,
       localAuthMode,
       intermediateLocalToken,
     );
@@ -1617,6 +1747,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     // Seed with a sync-enabled client, then validate with two non-privileged
     // browser clients that authenticate only via local-auth HTTP headers.
     seedDb = await createServerDb(
+      appId,
       `${dbPrefix}-seed`,
       "realistic-b5-seed",
       {},
@@ -1644,6 +1775,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     }
 
     allowedDb = await createServerDb(
+      appId,
       `${dbPrefix}-allowed`,
       "realistic-b5-allowed",
       {},
@@ -1655,6 +1787,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       },
     );
     deniedDb = await createServerDb(
+      appId,
       `${dbPrefix}-denied`,
       "realistic-b5-denied",
       {},
@@ -1763,55 +1896,67 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     let firstDeniedUpdateError: string | null = null;
 
     const wallStart = performance.now();
-    for (let i = 0; i < reads; i += 1) {
-      reportLoopProgress("B5 reads", i, reads);
-      const t0 = performance.now();
-      if (i % 2 === 0) {
-        await allowedDb.all(documentsQuery);
-      } else {
-        await allowedDb.all(foldersQuery);
-      }
-      (latencies.permission_reads ||= []).push(performance.now() - t0);
+    const opCounts: Record<string, number> = {};
+    const reportReadProgress = createProgressReporter("B5 reads", reads);
+    const reportUpdateProgress = createProgressReporter("B5 updates", updates);
+
+    for (let i = 0; i < reads; ) {
+      const batch = await measureBatchedLatency(reads - i, async (batchIndex) => {
+        if ((i + batchIndex) % 2 === 0) {
+          await allowedDb.all(documentsQuery);
+        } else {
+          await allowedDb.all(foldersQuery);
+        }
+      });
+      (latencies.permission_reads ||= []).push(batch.perOpMs);
+      opCounts.permission_reads = (opCounts.permission_reads || 0) + batch.repeats;
+      i += batch.repeats;
+      reportReadProgress(i);
     }
 
-    for (let i = 0; i < updates; i += 1) {
-      reportLoopProgress("B5 updates", i, updates);
+    for (let i = 0; i < updates; ) {
       const shouldAllow =
         hasAllowedUpdateCandidates &&
         (deniedUpdateIds.length === 0 || rng.nextInt(100) < Math.round(b5.allow_fraction * 100));
-      const targetId = shouldAllow
-        ? allowedUpdateIds[rng.nextInt(allowedUpdateIds.length)]
-        : deniedUpdateIds[rng.nextInt(deniedUpdateIds.length)];
-      const t0 = performance.now();
-      try {
-        await allowedDb.update(documentTable, targetId, {
-          body: `b5-update-${i}`,
-          revision: i + 1,
-          updated_at: nowMicros(),
-        });
-        if (shouldAllow) {
-          allowedUpdateSuccess += 1;
-          (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
-        } else {
-          unexpectedAllowedForDenied += 1;
-          (latencies.permission_updates_denied ||= []).push(performance.now() - t0);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (shouldAllow) {
-          unexpectedDeniedForAllowed += 1;
-          if (firstAllowedUpdateError == null) {
-            firstAllowedUpdateError = message;
+      const targetIds = shouldAllow ? allowedUpdateIds : deniedUpdateIds;
+      const batchKey = shouldAllow ? "permission_updates_allowed" : "permission_updates_denied";
+      const batch = await measureBatchedLatency(
+        updates - i,
+        async (batchIndex) => {
+          const currentIndex = i + batchIndex;
+          const targetId = targetIds[rng.nextInt(targetIds.length)];
+          try {
+            await allowedDb.update(documentTable, targetId, {
+              body: `b5-update-${currentIndex}`,
+              revision: currentIndex + 1,
+              updated_at: nowMicros(),
+            });
+            if (shouldAllow) {
+              allowedUpdateSuccess += 1;
+            } else {
+              unexpectedAllowedForDenied += 1;
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (shouldAllow) {
+              unexpectedDeniedForAllowed += 1;
+              if (firstAllowedUpdateError == null) {
+                firstAllowedUpdateError = message;
+              }
+            } else {
+              deniedUpdateRejected += 1;
+              if (firstDeniedUpdateError == null) {
+                firstDeniedUpdateError = message;
+              }
+            }
           }
-          (latencies.permission_updates_allowed ||= []).push(performance.now() - t0);
-        } else {
-          deniedUpdateRejected += 1;
-          if (firstDeniedUpdateError == null) {
-            firstDeniedUpdateError = message;
-          }
-          (latencies.permission_updates_denied ||= []).push(performance.now() - t0);
-        }
-      }
+        },
+        { maxRepeats: 1 },
+      );
+      (latencies[batchKey] ||= []).push(batch.perOpMs);
+      opCounts[batchKey] = (opCounts[batchKey] || 0) + batch.repeats;
+      i += batch.repeats;
+      reportUpdateProgress(i);
     }
     const wallMs = performance.now() - wallStart;
 
@@ -1834,7 +1979,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
 
     const operationSummaries: Record<string, OpSummary> = {};
     for (const [op, samples] of Object.entries(latencies)) {
-      operationSummaries[op] = summarizeLatencies(samples);
+      operationSummaries[op] = summarizeLatencies(samples, opCounts[op] ?? samples.length);
     }
 
     return {
@@ -1889,31 +2034,38 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B6 start");
+  const appId = benchmarkAppId("b6");
   const dbName = uniqueDbName("b6");
   const rng = new Lcg(b6.seed ^ config.seed);
-  const updateCount = Math.min(b6.update_count, 300);
+  const updateCount = Math.min(b6.update_count, CI_BROWSER_LIMITS.b6UpdateCount);
   const latencies: number[] = [];
+  let measuredUpdates = 0;
   let db: Db | null = null;
 
   try {
-    db = await createServerDb(dbName, "realistic-b6");
+    db = await createServerDb(appId, dbName, "realistic-b6");
     const state = await seedDataset(db, config);
     const hotTaskCount = Math.max(1, Math.min(state.taskIds.length, b6.hot_task_count));
     const hotTasks = state.taskIds.slice(0, hotTaskCount);
     const beforeBytes = await storageUsageBytes();
 
     const wallStart = performance.now();
-    for (let i = 0; i < updateCount; i += 1) {
-      reportLoopProgress("B6 hotspot updates", i, updateCount);
-      const taskId = hotTasks[rng.nextInt(hotTasks.length)];
-      const t0 = performance.now();
-      await db.update(tasksTable, taskId, {
-        title: `Hotspot ${taskId.slice(0, 8)} rev ${i}`,
-        priority: 1 + (i % 4),
-        status: ["todo", "in_progress", "review", "done"][i % 4],
-        updated_at: nowMicros(),
+    const reportProgress = createProgressReporter("B6 hotspot updates", updateCount);
+    for (let i = 0; i < updateCount; ) {
+      const batch = await measureBatchedLatency(updateCount - i, async (batchIndex) => {
+        const currentIndex = i + batchIndex;
+        const taskId = hotTasks[rng.nextInt(hotTasks.length)];
+        await db.update(tasksTable, taskId, {
+          title: `Hotspot ${taskId.slice(0, 8)} rev ${currentIndex}`,
+          priority: 1 + (currentIndex % 4),
+          status: ["todo", "in_progress", "review", "done"][currentIndex % 4],
+          updated_at: nowMicros(),
+        });
       });
-      latencies.push(performance.now() - t0);
+      latencies.push(batch.perOpMs);
+      measuredUpdates += batch.repeats;
+      i += batch.repeats;
+      reportProgress(i);
     }
     const wallMs = performance.now() - wallStart;
     const afterBytes = await storageUsageBytes();
@@ -1931,7 +2083,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
       wall_time_ms: wallMs,
       throughput_ops_per_sec: updateCount / Math.max(0.001, wallMs / 1000),
       operation_summaries: {
-        hotspot_update_sync: summarizeLatencies(latencies),
+        hotspot_update_sync: summarizeLatencies(latencies, measuredUpdates),
       },
       extra: {
         hot_task_count: hotTaskCount,
@@ -1949,55 +2101,108 @@ describe("realistic browser benchmark harness", () => {
   it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
-    const dbName = uniqueDbName("w1");
     progressLog(`bench start profile=${cfg.id}`);
 
-    let db: Db | null = null;
-    let w1Result: ScenarioResult;
     try {
-      try {
-        db = await createDb({ appId: APP_ID, dbName, logLevel: "warn" });
-        const state = await seedDataset(db, cfg);
-        w1Result = await runW1(db, cfg, state);
-      } finally {
-        if (db) await db.shutdown();
+      const runners = [
+        {
+          id: "W1",
+          run: async (): Promise<ScenarioResult> => {
+            const appId = benchmarkAppId("w1");
+            const dbName = uniqueDbName("w1");
+            let db: Db | null = null;
+            try {
+              db = await createDb({ appId, dbName, logLevel: "warn" });
+              const state = await seedDataset(db, cfg);
+              return await runW1(db, cfg, state);
+            } finally {
+              if (db) await db.shutdown();
+            }
+          },
+        },
+        { id: "W4", run: async (): Promise<ScenarioResult> => runW4(cfg) },
+        { id: "B1", run: async (): Promise<ScenarioResult> => runB1(cfg) },
+        { id: "B2", run: async (): Promise<ScenarioResult> => runB2(cfg) },
+        { id: "B3", run: async (): Promise<ScenarioResult> => runB3(cfg) },
+        { id: "B4", run: async (): Promise<ScenarioResult> => runB4(cfg) },
+        { id: "B5", run: async (): Promise<ScenarioResult> => runB5(cfg) },
+        { id: "B6", run: async (): Promise<ScenarioResult> => runB6(cfg) },
+      ];
+      const knownIds = new Set(runners.map((runner) => runner.id));
+      for (const requestedId of browserScenarioSelection) {
+        if (!knownIds.has(requestedId)) {
+          throw new Error(`Unknown browser benchmark scenario id '${requestedId}'`);
+        }
       }
 
-      const w4Result = await runW4(cfg);
-      const b1Result = await runB1(cfg);
-      const b2Result = await runB2(cfg);
-      const b3Result = await runB3(cfg);
-      const b4Result = await runB4(cfg);
-      const b5Result = await runB5(cfg);
-      const b6Result = await runB6(cfg);
+      const selectedRunners =
+        browserScenarioSelection.size === 0
+          ? runners
+          : runners.filter((runner) => browserScenarioSelection.has(runner.id));
+      const scenarioResults: ScenarioResult[] = [];
+      for (const runner of selectedRunners) {
+        scenarioResults.push(await runner.run());
+      }
+      const resultsById = new Map(scenarioResults.map((result) => [result.scenario_id, result]));
 
       const report = {
         runner: "jazz-ts-browser-opfs",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
-        scenarios: [w1Result, w4Result, b1Result, b2Result, b3Result, b4Result, b5Result, b6Result],
+        scenarios: scenarioResults,
       };
 
       // Keeping output machine-readable makes it easy to pipe into trend tooling.
       // eslint-disable-next-line no-console
       console.log("[realistic-bench]", JSON.stringify(report));
 
-      expect(w1Result.total_operations).toBeGreaterThan(0);
-      expect(w1Result.throughput_ops_per_sec).toBeGreaterThan(0);
-      expect(w4Result.operation_summaries.cold_reopen.count).toBeGreaterThan(0);
-      expect(b1Result.operation_summaries.insert_sync.count).toBeGreaterThan(0);
-      expect(b2Result.total_operations).toBeGreaterThan(0);
-      expect(b3Result.operation_summaries.cold_reopen_query.count).toBeGreaterThan(0);
-      expect(b4Result.operation_summaries.fanout_delivery.count).toBeGreaterThan(0);
-      expect(b5Result.operation_summaries.permission_reads.count).toBeGreaterThan(0);
-      expect(Number(b5Result.extra.allowed_documents_visible)).toBeGreaterThan(0);
-      expect(Number(b5Result.extra.denied_documents_seeded)).toBeGreaterThan(0);
-      expect(Number(b5Result.extra.denied_documents_visible)).toBe(0);
-      if (Number(b5Result.extra.allowed_update_candidates) > 0) {
-        expect(Number(b5Result.extra.allowed_updates_succeeded)).toBeGreaterThan(0);
+      const w1Result = resultsById.get("W1");
+      if (w1Result) {
+        expect(w1Result.total_operations).toBeGreaterThan(0);
+        expect(w1Result.throughput_ops_per_sec).toBeGreaterThan(0);
       }
-      expect(Number(b5Result.extra.denied_updates_rejected)).toBeGreaterThan(0);
-      expect(b6Result.operation_summaries.hotspot_update_sync.count).toBeGreaterThan(0);
+
+      const w4Result = resultsById.get("W4");
+      if (w4Result) {
+        expect(w4Result.operation_summaries.cold_reopen.count).toBeGreaterThan(0);
+      }
+
+      const b1Result = resultsById.get("B1");
+      if (b1Result) {
+        expect(b1Result.operation_summaries.insert_sync.count).toBeGreaterThan(0);
+      }
+
+      const b2Result = resultsById.get("B2");
+      if (b2Result) {
+        expect(b2Result.total_operations).toBeGreaterThan(0);
+      }
+
+      const b3Result = resultsById.get("B3");
+      if (b3Result) {
+        expect(b3Result.operation_summaries.cold_reopen_query.count).toBeGreaterThan(0);
+      }
+
+      const b4Result = resultsById.get("B4");
+      if (b4Result) {
+        expect(b4Result.operation_summaries.fanout_delivery.count).toBeGreaterThan(0);
+      }
+
+      const b5Result = resultsById.get("B5");
+      if (b5Result) {
+        expect(b5Result.operation_summaries.permission_reads.count).toBeGreaterThan(0);
+        expect(Number(b5Result.extra.allowed_documents_visible)).toBeGreaterThan(0);
+        expect(Number(b5Result.extra.denied_documents_seeded)).toBeGreaterThan(0);
+        expect(Number(b5Result.extra.denied_documents_visible)).toBe(0);
+        if (Number(b5Result.extra.allowed_update_candidates) > 0) {
+          expect(Number(b5Result.extra.allowed_updates_succeeded)).toBeGreaterThan(0);
+        }
+        expect(Number(b5Result.extra.denied_updates_rejected)).toBeGreaterThan(0);
+      }
+
+      const b6Result = resultsById.get("B6");
+      if (b6Result) {
+        expect(b6Result.operation_summaries.hotspot_update_sync.count).toBeGreaterThan(0);
+      }
     } finally {
       restoreLogs();
     }
