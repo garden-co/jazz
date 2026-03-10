@@ -1,11 +1,19 @@
 import { createContext, useContext, type PropsWithChildren } from "react";
 
+export interface StandaloneConnectionConfig {
+  serverUrl: string;
+  appId: string;
+  adminSecret: string;
+  serverPathPrefix?: string;
+}
+
 interface StandaloneContextValue {
   onReset: () => void;
   schemaHashes: string[];
   selectedSchemaHash: string | null;
   onSelectSchema: (schemaHash: string) => void;
   isSwitchingSchema: boolean;
+  connection: StandaloneConnectionConfig;
 }
 
 const StandaloneContext = createContext<StandaloneContextValue | null>(null);
@@ -17,10 +25,18 @@ export function StandaloneProvider({
   selectedSchemaHash,
   onSelectSchema,
   isSwitchingSchema,
+  connection,
 }: PropsWithChildren<StandaloneContextValue>) {
   return (
     <StandaloneContext.Provider
-      value={{ onReset, schemaHashes, selectedSchemaHash, onSelectSchema, isSwitchingSchema }}
+      value={{
+        onReset,
+        schemaHashes,
+        selectedSchemaHash,
+        onSelectSchema,
+        isSwitchingSchema,
+        connection,
+      }}
     >
       {children}
     </StandaloneContext.Provider>

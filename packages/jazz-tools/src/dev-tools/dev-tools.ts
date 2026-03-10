@@ -1,4 +1,5 @@
 import {
+  ActiveQuerySubscriptionTrace,
   JazzClient,
   DurabilityTier,
   QueryExecutionOptions,
@@ -26,6 +27,7 @@ type RuntimeBridgeState = {
   connected: boolean;
   listeners: Set<DevToolsStateListener>;
   activeSubscriptions: Map<string, { client: JazzClient; runtimeSubscriptionId: number }>;
+  activeQuerySubscriptionsUnsubscribe: (() => void) | null;
 };
 
 export interface DevToolsAttachment {
@@ -74,6 +76,52 @@ function clearRuntimeBridgeSubscriptions(db: Db): void {
     }
   }
   state.activeSubscriptions.clear();
+}
+
+function emitActiveQuerySubscriptionsChanged(
+  subscriptions: readonly ActiveQuerySubscriptionTrace[],
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.postMessage(
+    {
+      channel: DEVTOOLS_BRIDGE_CHANNEL,
+      kind: "event",
+      event: DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED,
+      payload: {
+        subscriptions: subscriptions.map((subscription) => ({
+          ...subscription,
+          branches: [...subscription.branches],
+        })),
+      },
+    },
+    "*",
+  );
+}
+
+function ensureActiveQuerySubscriptionBridge(db: Db): void {
+  const state = runtimeBridgeStateByDb.get(db);
+  if (!state || state.activeQuerySubscriptionsUnsubscribe) {
+    return;
+  }
+
+  state.activeQuerySubscriptionsUnsubscribe = db.onActiveQuerySubscriptionsChange(
+    (subscriptions) => {
+      emitActiveQuerySubscriptionsChanged(subscriptions);
+    },
+  );
+}
+
+function clearActiveQuerySubscriptionBridge(db: Db): void {
+  const state = runtimeBridgeStateByDb.get(db);
+  if (!state?.activeQuerySubscriptionsUnsubscribe) {
+    return;
+  }
+
+  state.activeQuerySubscriptionsUnsubscribe();
+  state.activeQuerySubscriptionsUnsubscribe = null;
 }
 
 function getFirstDbClient(db: Db): JazzClient | null {
@@ -148,6 +196,7 @@ function hookRegistration(
       connected: false,
       listeners: new Set(),
       activeSubscriptions: new Map(),
+      activeQuerySubscriptionsUnsubscribe: null,
     };
     runtimeBridgeStateByDb.set(db, state);
   } else {
@@ -175,6 +224,7 @@ function hookRegistration(
         }
         if (eventEnvelope.event === DEVTOOLS_EVENTS.DISCONNECTED) {
           clearRuntimeBridgeSubscriptions(db);
+          clearActiveQuerySubscriptionBridge(db);
           setRuntimeBridgeConnected(db, false);
         }
         return;
@@ -229,7 +279,17 @@ function hookRegistration(
           } else {
             respond({ ok: true, payload: { ready: false } });
           }
+          ensureActiveQuerySubscriptionBridge(db);
           setRuntimeBridgeConnected(db, true);
+          return;
+        }
+
+        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS) {
+          ensureActiveQuerySubscriptionBridge(db);
+          respond({
+            ok: true,
+            payload: db.getActiveQuerySubscriptions(),
+          });
           return;
         }
 
@@ -385,6 +445,7 @@ export async function attachDevTools(
 ): Promise<DevToolsAttachment> {
   const resolved = await Promise.resolve(clientOrDb as Promise<{ db: Db }> | { db: Db } | Db);
   const db = resolveDb(resolved as Db | { db: Db });
+  db.setDevMode(true);
   const dbConfig = resolveBridgeDbConfig(db);
   return hookRegistration(db, { wasmSchema, dbConfig: dbConfig ?? undefined });
 }
