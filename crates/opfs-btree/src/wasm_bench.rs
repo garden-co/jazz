@@ -6,7 +6,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::file::{OpfsIoCounters, opfs_io_counters_reset, opfs_io_counters_snapshot};
-use crate::{BTreeOptions, OpfsBTree, OpfsFile};
+use crate::{BTreeOptions, OpfsBTree, OpfsBTreeFiles, OpfsFile};
 
 #[derive(Debug, Clone, Serialize)]
 struct PhaseTiming {
@@ -220,10 +220,10 @@ fn find_mixed_scenario(name: &str) -> Option<MixedScenario> {
 }
 
 async fn open_db(namespace: &str) -> Result<OpfsBTree<OpfsFile>, JsValue> {
-    let file = OpfsFile::open(namespace)
+    let files = OpfsBTreeFiles::<OpfsFile>::open_opfs(namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    OpfsBTree::open(file, benchmark_options()).map_err(|e| JsValue::from_str(&e.to_string()))
+    OpfsBTree::open(files, benchmark_options()).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 fn to_js_value(result: &BenchmarkResult) -> Result<JsValue, JsValue> {

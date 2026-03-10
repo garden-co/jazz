@@ -24,9 +24,7 @@ use std::path::Path;
 use opfs_btree::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 use opfs_btree::StdFile;
-use opfs_btree::{
-    BTreeError, BTreeOptions, DurableBTreeFiles, DurableOpfsBTree, MemoryFile, SyncFile,
-};
+use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, OpfsBTreeFiles, SyncFile};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
@@ -109,34 +107,34 @@ impl SyncFile for AnyFile {
 }
 
 pub struct OpfsBTreeStorage {
-    tree: RefCell<DurableOpfsBTree<AnyFile>>,
+    tree: RefCell<OpfsBTree<AnyFile>>,
 }
 
 impl OpfsBTreeStorage {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let files = DurableBTreeFiles::<StdFile>::open(path)
+        let files = OpfsBTreeFiles::<StdFile>::open(path)
             .map(|files| files.map(AnyFile::Std))
             .map_err(map_storage_err)?;
         Self::open_with_files(files, cache_size_bytes)
     }
 
     pub fn memory(cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let files = DurableBTreeFiles::<MemoryFile>::memory().map(AnyFile::Memory);
+        let files = OpfsBTreeFiles::<MemoryFile>::memory().map(AnyFile::Memory);
         Self::open_with_files(files, cache_size_bytes)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub fn with_opfs(_file: OpfsFile, _cache_size_bytes: usize) -> Result<Self, StorageError> {
         Err(StorageError::IoError(
-            "OpfsBTreeStorage::with_opfs is unsupported for durable mode; use open_opfs"
+            "OpfsBTreeStorage::with_opfs is unsupported for sidecar-backed opfs-btree; use open_opfs"
                 .to_string(),
         ))
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn open_opfs(namespace: &str, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let files = DurableBTreeFiles::<OpfsFile>::open_opfs(namespace)
+        let files = OpfsBTreeFiles::<OpfsFile>::open_opfs(namespace)
             .await
             .map_err(map_storage_err)?
             .map(AnyFile::Opfs);
@@ -145,17 +143,17 @@ impl OpfsBTreeStorage {
 
     #[cfg(target_arch = "wasm32")]
     pub async fn destroy_opfs(namespace: &str) -> Result<(), StorageError> {
-        DurableBTreeFiles::<OpfsFile>::destroy_opfs(namespace)
+        OpfsBTreeFiles::<OpfsFile>::destroy_opfs(namespace)
             .await
             .map_err(map_storage_err)
     }
 
     fn open_with_files(
-        files: DurableBTreeFiles<AnyFile>,
+        files: OpfsBTreeFiles<AnyFile>,
         cache_size_bytes: usize,
     ) -> Result<Self, StorageError> {
-        let tree = DurableOpfsBTree::open(files, Self::options(cache_size_bytes))
-            .map_err(map_storage_err)?;
+        let tree =
+            OpfsBTree::open(files, Self::options(cache_size_bytes)).map_err(map_storage_err)?;
         Ok(Self {
             tree: RefCell::new(tree),
         })
@@ -172,7 +170,7 @@ impl OpfsBTreeStorage {
 
     fn with_tree_mut<R>(
         &self,
-        f: impl FnOnce(&mut DurableOpfsBTree<AnyFile>) -> Result<R, StorageError>,
+        f: impl FnOnce(&mut OpfsBTree<AnyFile>) -> Result<R, StorageError>,
     ) -> Result<R, StorageError> {
         let mut tree = self
             .tree

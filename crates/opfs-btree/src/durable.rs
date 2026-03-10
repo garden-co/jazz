@@ -1,5 +1,5 @@
 use crate::BTreeError;
-use crate::db::{BTreeOptions, OpfsBTree};
+use crate::db::{BTreeOptions, OpfsBTree as RawOpfsBTree};
 use crate::file::{MemoryFile, SyncFile};
 
 #[cfg(target_arch = "wasm32")]
@@ -116,7 +116,7 @@ impl WalEntry {
 }
 
 #[derive(Clone, Debug)]
-pub struct DurableBTreeFiles<F: Clone> {
+pub struct OpfsBTreeFiles<F: Clone> {
     snapshot_a: F,
     snapshot_b: F,
     wal_a: F,
@@ -124,7 +124,7 @@ pub struct DurableBTreeFiles<F: Clone> {
     manifest: F,
 }
 
-impl<F: Clone> DurableBTreeFiles<F> {
+impl<F: Clone> OpfsBTreeFiles<F> {
     pub fn new(snapshot_a: F, snapshot_b: F, wal_a: F, wal_b: F, manifest: F) -> Self {
         Self {
             snapshot_a,
@@ -135,8 +135,8 @@ impl<F: Clone> DurableBTreeFiles<F> {
         }
     }
 
-    pub fn map<G: Clone>(self, mut f: impl FnMut(F) -> G) -> DurableBTreeFiles<G> {
-        DurableBTreeFiles {
+    pub fn map<G: Clone>(self, mut f: impl FnMut(F) -> G) -> OpfsBTreeFiles<G> {
+        OpfsBTreeFiles {
             snapshot_a: f(self.snapshot_a),
             snapshot_b: f(self.snapshot_b),
             wal_a: f(self.wal_a),
@@ -164,7 +164,7 @@ impl<F: Clone> DurableBTreeFiles<F> {
     }
 }
 
-impl DurableBTreeFiles<MemoryFile> {
+impl OpfsBTreeFiles<MemoryFile> {
     pub fn memory() -> Self {
         Self::new(
             MemoryFile::new(),
@@ -177,7 +177,7 @@ impl DurableBTreeFiles<MemoryFile> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl DurableBTreeFiles<StdFile> {
+impl OpfsBTreeFiles<StdFile> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, BTreeError> {
         let path = path.as_ref();
         Ok(Self::new(
@@ -191,7 +191,7 @@ impl DurableBTreeFiles<StdFile> {
 }
 
 #[cfg(target_arch = "wasm32")]
-impl DurableBTreeFiles<OpfsFile> {
+impl OpfsBTreeFiles<OpfsFile> {
     pub async fn open_opfs(namespace: &str) -> Result<Self, BTreeError> {
         Ok(Self::new(
             OpfsFile::open(namespace).await?,
@@ -213,10 +213,10 @@ impl DurableBTreeFiles<OpfsFile> {
 }
 
 #[derive(Debug)]
-pub struct DurableOpfsBTree<F: SyncFile + Clone> {
-    files: DurableBTreeFiles<F>,
+pub struct OpfsBTree<F: SyncFile + Clone> {
+    files: OpfsBTreeFiles<F>,
     options: BTreeOptions,
-    tree: OpfsBTree<F>,
+    tree: RawOpfsBTree<F>,
     manifest_slot: ManifestSlot,
     manifest: DurableManifest,
     pending_wal: Vec<WalEntry>,
@@ -296,14 +296,14 @@ macro_rules! durable_failpoint {
     ($site:literal) => {};
 }
 
-impl<F: SyncFile + Clone> DurableOpfsBTree<F> {
-    pub fn open(files: DurableBTreeFiles<F>, options: BTreeOptions) -> Result<Self, BTreeError> {
+impl<F: SyncFile + Clone> OpfsBTree<F> {
+    pub fn open(files: OpfsBTreeFiles<F>, options: BTreeOptions) -> Result<Self, BTreeError> {
         let manifest_file = files.manifest();
         let (manifest_slot, manifest) = read_manifest(&manifest_file)?
             .unwrap_or((ManifestSlot::A, DurableManifest::bootstrap()));
         durable_failpoint!("open:after-read-manifest");
 
-        let mut tree = OpfsBTree::open(files.snapshot(manifest.active_snapshot), options)?;
+        let mut tree = RawOpfsBTree::open(files.snapshot(manifest.active_snapshot), options)?;
         durable_failpoint!("open:after-open-snapshot");
 
         let wal_entries = read_wal_entries(&files.wal(manifest.active_wal))?;
@@ -400,7 +400,7 @@ impl<F: SyncFile + Clone> DurableOpfsBTree<F> {
         snapshot_file.truncate(0)?;
         durable_failpoint!("checkpoint:after-truncate-snapshot");
 
-        let mut snapshot_tree = OpfsBTree::open(snapshot_file, self.options)?;
+        let mut snapshot_tree = RawOpfsBTree::open(snapshot_file, self.options)?;
         durable_failpoint!("checkpoint:after-open-target-snapshot");
 
         for (key, value) in self.full_scan()? {
@@ -435,7 +435,7 @@ impl<F: SyncFile + Clone> DurableOpfsBTree<F> {
         Ok(())
     }
 
-    pub fn into_files(self) -> DurableBTreeFiles<F> {
+    pub fn into_files(self) -> OpfsBTreeFiles<F> {
         self.files
     }
 
@@ -467,7 +467,7 @@ fn opfs_sidecar_name(namespace: &str, suffix: &str) -> String {
 }
 
 fn apply_wal_entry<F: SyncFile + Clone>(
-    tree: &mut OpfsBTree<F>,
+    tree: &mut RawOpfsBTree<F>,
     entry: &WalEntry,
 ) -> Result<(), BTreeError> {
     match entry {
@@ -749,28 +749,28 @@ fn read_wal_entries<F: SyncFile>(file: &F) -> Result<Vec<WalEntry>, BTreeError> 
 mod tests {
     use super::*;
 
-    fn durable_fixture() -> DurableBTreeFiles<MemoryFile> {
-        DurableBTreeFiles::memory()
+    fn durable_fixture() -> OpfsBTreeFiles<MemoryFile> {
+        OpfsBTreeFiles::memory()
     }
 
-    fn open_fixture(files: DurableBTreeFiles<MemoryFile>) -> DurableOpfsBTree<MemoryFile> {
-        DurableOpfsBTree::open(files, BTreeOptions::default()).expect("open durable fixture")
+    fn open_fixture(files: OpfsBTreeFiles<MemoryFile>) -> OpfsBTree<MemoryFile> {
+        OpfsBTree::open(files, BTreeOptions::default()).expect("open durable fixture")
     }
 
-    fn apply_baseline(tree: &mut DurableOpfsBTree<MemoryFile>) {
+    fn apply_baseline(tree: &mut OpfsBTree<MemoryFile>) {
         tree.put(b"kv:stable", b"old").expect("put stable");
         tree.put(b"kv:delete-me", b"remove-later")
             .expect("put delete-me");
         tree.checkpoint().expect("checkpoint baseline");
     }
 
-    fn apply_update(tree: &mut DurableOpfsBTree<MemoryFile>) {
+    fn apply_update(tree: &mut OpfsBTree<MemoryFile>) {
         tree.put(b"kv:stable", b"new").expect("update stable");
         tree.put(b"kv:new", b"fresh").expect("put new");
         tree.delete(b"kv:delete-me").expect("delete old key");
     }
 
-    fn collect_tree(tree: &mut DurableOpfsBTree<MemoryFile>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    fn collect_tree(tree: &mut OpfsBTree<MemoryFile>) -> Vec<(Vec<u8>, Vec<u8>)> {
         tree.range(b"", &FULL_SCAN_END_KEY, usize::MAX)
             .expect("scan full tree")
     }
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_failpoint_sweep_requires_clean_recovery_for_every_step() {
+    fn failpoint_sweep_requires_clean_recovery_for_every_step() {
         test_failpoints::clear();
         let probe_files = durable_fixture();
 

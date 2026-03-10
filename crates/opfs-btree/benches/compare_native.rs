@@ -12,7 +12,8 @@ use fjall::{
     Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions, PersistMode,
 };
 use opfs_btree::{
-    BTreeOptions as OpfsBTreeOptions, OpfsBTree as OpfsBTreeDb, StdFile as OpfsStdFile,
+    BTreeOptions as OpfsBTreeOptions, OpfsBTree as OpfsBTreeDb, OpfsBTreeFiles,
+    StdFile as OpfsStdFile,
 };
 use rocksdb::{Direction, IteratorMode, Options as RocksOptions, WriteOptions};
 use surrealkv::{
@@ -181,10 +182,11 @@ struct OpfsBTreeEngine {
 
 impl OpfsBTreeEngine {
     fn open(path: &Path) -> Self {
-        let file = OpfsStdFile::open(path.join("opfs-btree.data")).expect("open opfs-btree file");
+        let files = OpfsBTreeFiles::<OpfsStdFile>::open(path.join("opfs-btree.data"))
+            .expect("open opfs-btree files");
         let mut options = OpfsBTreeOptions::default();
         options.cache_bytes = 32 * 1024 * 1024;
-        let db = OpfsBTreeDb::open(file, options).expect("open opfs-btree");
+        let db = OpfsBTreeDb::open(files, options).expect("open opfs-btree");
         Self { db }
     }
 }
