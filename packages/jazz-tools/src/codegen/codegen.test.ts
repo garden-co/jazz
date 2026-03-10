@@ -843,9 +843,9 @@ describe("generateTypes with relations", () => {
       "export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn",
     );
     expect(output).toContain("export interface PermissionIntrospectionColumns {");
-    expect(output).toContain("  _canRead: boolean | null;");
-    expect(output).toContain("  _canEdit: boolean | null;");
-    expect(output).toContain("  _canDelete: boolean | null;");
+    expect(output).toContain("  $canRead: boolean | null;");
+    expect(output).toContain("  $canEdit: boolean | null;");
+    expect(output).toContain("  $canDelete: boolean | null;");
     expect(output).toContain(
       "export type TodoSelected<S extends TodoSelectableColumn = keyof Todo>",
     );

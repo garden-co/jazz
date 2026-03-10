@@ -1,6 +1,6 @@
 import type { ColumnType } from "./drivers/types.js";
 
-export const PERMISSION_INTROSPECTION_COLUMNS = ["_canRead", "_canEdit", "_canDelete"] as const;
+export const PERMISSION_INTROSPECTION_COLUMNS = ["$canRead", "$canEdit", "$canDelete"] as const;
 
 export type PermissionIntrospectionColumn = (typeof PERMISSION_INTROSPECTION_COLUMNS)[number];
 

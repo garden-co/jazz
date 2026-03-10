@@ -8,11 +8,11 @@ export type JsonValue =
   | { [key: string]: JsonValue }
   | JsonValue[];
 
-export type PermissionIntrospectionColumn = "_canRead" | "_canEdit" | "_canDelete";
+export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
-  _canRead: boolean | null;
-  _canEdit: boolean | null;
-  _canDelete: boolean | null;
+  $canRead: boolean | null;
+  $canEdit: boolean | null;
+  $canDelete: boolean | null;
 }
 
 export interface Project {
@@ -44,9 +44,9 @@ export interface TodoInit {
 export interface ProjectWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
-  _canRead?: boolean;
-  _canEdit?: boolean;
-  _canDelete?: boolean;
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface TodoWhereInput {
@@ -56,9 +56,9 @@ export interface TodoWhereInput {
   description?: string | { eq?: string; ne?: string; contains?: string };
   parent?: string | { eq?: string; ne?: string; isNull?: boolean };
   project?: string | { eq?: string; ne?: string; isNull?: boolean };
-  _canRead?: boolean;
-  _canEdit?: boolean;
-  _canDelete?: boolean;
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface ProjectInclude {

@@ -4157,7 +4157,7 @@ fn join_subscription_can_filter_and_project_magic_columns() {
                 join_kind: JoinKind::Inner,
             }),
             predicate: PredicateExpr::Cmp {
-                left: ColumnRef::scoped("posts", "_canDelete"),
+                left: ColumnRef::scoped("posts", "$canDelete"),
                 op: PredicateCmpOp::Eq,
                 right: ValueRef::Literal(Value::Boolean(true)),
             },
@@ -4173,11 +4173,11 @@ fn join_subscription_can_filter_and_project_magic_columns() {
             },
             ProjectColumn {
                 alias: "can_edit".into(),
-                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "_canEdit")),
+                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "$canEdit")),
             },
             ProjectColumn {
                 alias: "can_delete".into(),
-                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "_canDelete")),
+                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "$canDelete")),
             },
         ],
     };

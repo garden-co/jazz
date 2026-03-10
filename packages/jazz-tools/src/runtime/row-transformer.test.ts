@@ -345,16 +345,16 @@ describe("transformRows", () => {
     const result = transformRows<{
       id: string;
       title: string;
-      _canEdit: boolean;
-      _canDelete?: boolean;
-    }>(rows, schema, "todos", {}, ["title", "_canEdit", "_canDelete"]);
+      $canEdit: boolean;
+      $canDelete?: boolean;
+    }>(rows, schema, "todos", {}, ["title", "$canEdit", "$canDelete"]);
 
     expect(result).toEqual([
       {
         id: "uuid-1",
         title: "Buy milk",
-        _canEdit: true,
-        _canDelete: undefined,
+        $canEdit: true,
+        $canDelete: undefined,
       },
     ]);
   });

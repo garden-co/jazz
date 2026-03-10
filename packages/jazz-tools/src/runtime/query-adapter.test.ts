@@ -112,13 +112,13 @@ describe("translateQuery", () => {
         table: "todos",
         conditions: [],
         includes: {},
-        select: ["title", "_canRead", "_canEdit"],
+        select: ["title", "$canRead", "$canEdit"],
         orderBy: [],
       });
 
       const result = parseTranslatedQuery(builderJson, basicSchema);
 
-      expect(result.select_columns).toEqual(["title", "_canRead", "_canEdit"]);
+      expect(result.select_columns).toEqual(["title", "$canRead", "$canEdit"]);
       expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
     });
 
@@ -235,7 +235,7 @@ describe("translateQuery", () => {
     it("translates eq condition with magic boolean column", () => {
       const builderJson = JSON.stringify({
         table: "todos",
-        conditions: [{ column: "_canEdit", op: "eq", value: true }],
+        conditions: [{ column: "$canEdit", op: "eq", value: true }],
         includes: {},
         orderBy: [],
       });
@@ -243,7 +243,7 @@ describe("translateQuery", () => {
       const result = parseTranslatedQuery(builderJson, basicSchema);
       expect(expectFilterPredicate(result)).toEqual({
         type: "Cmp",
-        left: { scope: "todos", column: "_canEdit" },
+        left: { scope: "todos", column: "$canEdit" },
         op: "Eq",
         right: { type: "Literal", value: { Boolean: true } },
       });
@@ -674,13 +674,13 @@ describe("translateQuery", () => {
         table: "todos",
         conditions: [],
         includes: {},
-        orderBy: [["_canEdit", "desc"]],
+        orderBy: [["$canEdit", "desc"]],
       });
 
       const result = parseTranslatedQuery(builderJson, basicSchema);
       expect(result.relation_ir?.type).toBe("OrderBy");
       expect(result.relation_ir?.terms).toEqual([
-        { column: { column: "_canEdit" }, direction: "Desc" },
+        { column: { column: "$canEdit" }, direction: "Desc" },
       ]);
     });
 

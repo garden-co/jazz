@@ -8,18 +8,18 @@ pub enum MagicColumnKind {
 impl MagicColumnKind {
     pub fn column_name(self) -> &'static str {
         match self {
-            MagicColumnKind::CanRead => "_canRead",
-            MagicColumnKind::CanEdit => "_canEdit",
-            MagicColumnKind::CanDelete => "_canDelete",
+            MagicColumnKind::CanRead => "$canRead",
+            MagicColumnKind::CanEdit => "$canEdit",
+            MagicColumnKind::CanDelete => "$canDelete",
         }
     }
 }
 
 pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
     match name {
-        "_canRead" => Some(MagicColumnKind::CanRead),
-        "_canEdit" => Some(MagicColumnKind::CanEdit),
-        "_canDelete" => Some(MagicColumnKind::CanDelete),
+        "$canRead" => Some(MagicColumnKind::CanRead),
+        "$canEdit" => Some(MagicColumnKind::CanEdit),
+        "$canDelete" => Some(MagicColumnKind::CanDelete),
         _ => None,
     }
 }
