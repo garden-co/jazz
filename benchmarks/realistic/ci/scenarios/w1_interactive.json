@@ -3,13 +3,11 @@
   "name": "interactive_board_session",
   "seed": 9001,
   "mode": "interactive",
-  "operation_count": 80000,
+  "operation_count": 100000,
   "mix": [
     { "operation": "query_board", "weight": 30 },
-    { "operation": "query_my_work", "weight": 15 },
-    { "operation": "query_task_detail", "weight": 15 },
-    { "operation": "update_task_status", "weight": 25 },
-    { "operation": "insert_comment", "weight": 10 },
-    { "operation": "update_project_meta", "weight": 5 }
+    { "operation": "query_my_work", "weight": 20 },
+    { "operation": "query_task_detail", "weight": 20 },
+    { "operation": "insert_comment", "weight": 30 }
   ]
 }
