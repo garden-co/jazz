@@ -7,7 +7,7 @@ CREATE TABLE todos (
     done BOOLEAN NOT NULL,
     tags TEXT[] NOT NULL,
     project UUID REFERENCES projects NOT NULL,
-    owner UUID REFERENCES users NOT NULL
+    owner UUID REFERENCES users
 );
 
 CREATE TABLE users (

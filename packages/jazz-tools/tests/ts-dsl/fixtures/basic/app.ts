@@ -24,7 +24,7 @@ export interface Todo {
   done: boolean;
   tags: string[];
   project: string;
-  owner: string;
+  owner?: string;
 }
 
 export interface UserInit {
@@ -40,7 +40,7 @@ export interface TodoInit {
   done: boolean;
   tags: string[];
   project: string;
-  owner: string;
+  owner?: string;
 }
 
 export interface UserWhereInput {
@@ -59,7 +59,7 @@ export interface TodoWhereInput {
   done?: boolean;
   tags?: string[] | { eq?: string[]; contains?: string };
   project?: string | { eq?: string; ne?: string };
-  owner?: string | { eq?: string; ne?: string };
+  owner?: string | { eq?: string; ne?: string; isNull?: boolean };
 }
 
 type AnyUserQueryBuilder<T = any> = { readonly _table: "users" } & QueryBuilder<T>;
@@ -121,11 +121,11 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
     : K extends "owner"
       ? NonNullable<I["owner"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? User
+          ? User | undefined
           : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? QueryRow | undefined
             : RelationInclude extends UserInclude
-              ? UserWithIncludes<RelationInclude>
+              ? UserWithIncludes<RelationInclude> | undefined
               : never
         : never
       : never;
@@ -252,7 +252,7 @@ export const wasmSchema: WasmSchema = {
         column_type: {
           type: "Uuid",
         },
-        nullable: false,
+        nullable: true,
         references: "users",
       },
     ],

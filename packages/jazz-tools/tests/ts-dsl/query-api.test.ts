@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo } from "./fixtures/basic/app";
+import { app, Project, Todo, User } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -106,7 +106,7 @@ describe("TS Query API", () => {
     expect(results.length).toBe(1);
     const todo = results[0];
     expect(todo.title).toBe("Write tests");
-    expectTypeOf(todo.owner).toEqualTypeOf<string>();
+    expectTypeOf(todo.owner).toEqualTypeOf<string | undefined>();
     expect(todo.owner).toBe(ownerId);
     expectTypeOf(todo.project).toEqualTypeOf<Project>();
     expect(todo.project.name).toBe("Announcements");
@@ -179,10 +179,34 @@ describe("TS Query API", () => {
     );
 
     assert(result, "Result is not defined");
-    expectTypeOf(result.owner).toEqualTypeOf<string>();
+    expectTypeOf(result.owner).toEqualTypeOf<string | undefined>();
     expect(result.owner).toBe(ownerId);
     expectTypeOf(result.project).toEqualTypeOf<Project>();
     expect(result.project.name).toBe("Announcements");
+  });
+
+  it("include returns 'undefined' for null foreign key columns", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-root-columns") },
+      }),
+    );
+
+    const { id: projectId } = insertProject(db, "Announcements");
+    const { id: todoId } = db.insert(app.todos, {
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+      owner: undefined,
+    });
+
+    const result = await db.one(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
+
+    assert(result, "Result is not defined");
+    expectTypeOf(result.owner).toEqualTypeOf<User | undefined>();
+    expect(result.owner).toBeUndefined();
   });
 
   it('select("*") resets to all root columns', async () => {

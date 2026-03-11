@@ -82,11 +82,11 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
   [K in keyof I]-?: K extends "parent"
     ? NonNullable<I["parent"]> extends infer RelationInclude
       ? RelationInclude extends true
-        ? Todo
+        ? Todo | undefined
         : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
-          ? QueryRow
+          ? QueryRow | undefined
           : RelationInclude extends TodoInclude
-            ? TodoWithIncludes<RelationInclude>
+            ? TodoWithIncludes<RelationInclude> | undefined
             : never
       : never
     : K extends "todosViaParent"
@@ -102,11 +102,11 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
       : K extends "project"
         ? NonNullable<I["project"]> extends infer RelationInclude
           ? RelationInclude extends true
-            ? Project
+            ? Project | undefined
             : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
-              ? QueryRow
+              ? QueryRow | undefined
               : RelationInclude extends ProjectInclude
-                ? ProjectWithIncludes<RelationInclude>
+                ? ProjectWithIncludes<RelationInclude> | undefined
                 : never
           : never
         : never;

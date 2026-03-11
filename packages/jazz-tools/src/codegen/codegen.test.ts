@@ -833,6 +833,30 @@ describe("generateTypes with relations", () => {
     expect(output).not.toContain("WithIncludesArray<");
   });
 
+  it("preserves undefined for nullable forward includes", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users").optional() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("? User | undefined");
+    expect(output).toContain("? QueryRow | undefined");
+    expect(output).toContain("? UserWithIncludes<RelationInclude> | undefined");
+  });
+
+  it("preserves undefined for nullable forward array includes", () => {
+    table("users", { name: col.string() });
+    table("groups", { member_ids: col.array(col.ref("users")).optional() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("? User[] | undefined");
+    expect(output).toContain("? QueryRow[] | undefined");
+    expect(output).toContain("? UserWithIncludes<RelationInclude>[] | undefined");
+  });
+
   it("generates selection helper types", () => {
     table("users", { name: col.string() });
     table("todos", { owner_id: col.ref("users"), title: col.string() });

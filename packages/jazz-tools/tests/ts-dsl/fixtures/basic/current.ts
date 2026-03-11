@@ -13,5 +13,5 @@ table("todos", {
   done: col.boolean(),
   tags: col.array(col.string()),
   project: col.ref("projects"),
-  owner: col.ref("users"),
+  owner: col.ref("users").optional(),
 });
