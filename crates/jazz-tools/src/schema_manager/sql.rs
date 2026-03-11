@@ -882,7 +882,8 @@ impl Parser {
         if nullable {
             desc = desc.nullable();
         }
-        Ok((desc, default))
+        let coerced_default = coerce_default_for_column_type(&desc.column_type, default)?;
+        Ok((desc, coerced_default))
     }
 
     fn parse_create_table(&mut self) -> Result<(String, TableSchema), SqlParseError> {
@@ -1039,6 +1040,27 @@ impl Parser {
         }
 
         Ok(table_name)
+    }
+}
+
+fn coerce_default_for_column_type(
+    column_type: &ColumnType,
+    default: Value,
+) -> Result<Value, SqlParseError> {
+    match (column_type, default) {
+        (_, Value::Null) => Ok(Value::Null),
+        (ColumnType::Timestamp, Value::Integer(i)) if i >= 0 => Ok(Value::Timestamp(i as u64)),
+        (ColumnType::Timestamp, Value::BigInt(i)) if i >= 0 => Ok(Value::Timestamp(i as u64)),
+        (ColumnType::Timestamp, Value::Integer(i)) => Err(SqlParseError::InvalidDefaultValue(
+            format!("TIMESTAMP default must be non-negative, got {i}"),
+        )),
+        (ColumnType::Timestamp, Value::BigInt(i)) => Err(SqlParseError::InvalidDefaultValue(
+            format!("TIMESTAMP default must be non-negative, got {i}"),
+        )),
+        (ColumnType::Timestamp, other) => Err(SqlParseError::InvalidDefaultValue(format!(
+            "TIMESTAMP default must be integer, got {other:?}"
+        ))),
+        (_, other) => Ok(other),
     }
 }
 
@@ -2120,6 +2142,24 @@ mod tests {
                 assert_eq!(*default, Value::Boolean(true));
             }
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_timestamp_default_zero_as_timestamp() {
+        let sql = "ALTER TABLE events ADD COLUMN created_at TIMESTAMP DEFAULT 0;";
+        let transform = parse_lens(sql).unwrap();
+
+        match &transform.ops[0] {
+            LensOp::AddColumn {
+                column_type,
+                default,
+                ..
+            } => {
+                assert_eq!(*column_type, ColumnType::Timestamp);
+                assert_eq!(*default, Value::Timestamp(0));
+            }
+            _ => panic!("Expected AddColumn"),
         }
     }
 
