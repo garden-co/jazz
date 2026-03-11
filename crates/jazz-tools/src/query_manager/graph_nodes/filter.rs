@@ -148,6 +148,10 @@ impl FilterNode {
         self.evaluate_predicate_on_tuple(&self.predicate, tuple)
     }
 
+    pub fn matches_tuple(&self, tuple: &Tuple) -> bool {
+        self.evaluate_tuple(tuple)
+    }
+
     /// Recursively evaluate a predicate on a tuple.
     fn evaluate_predicate_on_tuple(&self, predicate: &Predicate, tuple: &Tuple) -> bool {
         match predicate {

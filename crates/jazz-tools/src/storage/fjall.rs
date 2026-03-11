@@ -19,12 +19,14 @@ use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, IndexScanDirection, LoadedBranch, OrderedIndexCursor,
+    OrderedIndexScan, Storage, StorageError,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
+        OrderedScanCollector, append_catalogue_manifest_op_core,
+        append_catalogue_manifest_ops_core, append_commit_core, create_object_core,
+        delete_commit_core, index_insert_core, index_lookup_core, index_range_core,
+        index_remove_core, index_scan_all_core, load_branch_core, load_catalogue_manifest_core,
+        load_object_metadata_core, ordered_index_scan_bounds, set_branch_tails_core,
         store_ack_tier_core,
     },
 };
@@ -131,6 +133,64 @@ impl FjallStorage {
             out.push(key);
         }
         Ok(out)
+    }
+
+    fn scan_ordered(
+        txn: &impl Readable,
+        keyspace: &SingleWriterTxKeyspace,
+        scan: OrderedIndexScan<'_>,
+    ) -> Result<Vec<OrderedIndexCursor>, StorageError> {
+        let Some((start_key, end_key)) = ordered_index_scan_bounds(scan) else {
+            return Ok(Vec::new());
+        };
+
+        let mut collector = OrderedScanCollector::with_cursor(
+            scan.direction,
+            scan.take,
+            scan.table,
+            scan.column,
+            scan.branch,
+            scan.resume_after,
+        );
+        if !collector.should_continue() {
+            return Ok(collector.finish());
+        }
+
+        match scan.direction {
+            IndexScanDirection::Ascending => {
+                for item in txn.range(keyspace, start_key.as_bytes()..end_key.as_bytes()) {
+                    let key = item
+                        .key()
+                        .map_err(|e| StorageError::IoError(format!("fjall range key: {e}")))?;
+                    let key = String::from_utf8(key.to_vec()).map_err(|e| {
+                        StorageError::IoError(format!("fjall invalid key utf8: {e}"))
+                    })?;
+                    if !collector.consume_key(&key) {
+                        break;
+                    }
+                }
+            }
+            IndexScanDirection::Descending => {
+                let mut keys = Vec::new();
+                for item in txn.range(keyspace, start_key.as_bytes()..end_key.as_bytes()) {
+                    let key = item
+                        .key()
+                        .map_err(|e| StorageError::IoError(format!("fjall range key: {e}")))?;
+                    let key = String::from_utf8(key.to_vec()).map_err(|e| {
+                        StorageError::IoError(format!("fjall invalid key utf8: {e}"))
+                    })?;
+                    keys.push(key);
+                }
+
+                for key in keys.iter().rev() {
+                    if !collector.consume_key(key) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(collector.finish())
     }
 
     fn set_on_tx(
@@ -415,6 +475,14 @@ impl Storage for FjallStorage {
         .unwrap_or_default()
     }
 
+    fn index_scan_ordered(&self, scan: OrderedIndexScan<'_>) -> Vec<OrderedIndexCursor> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            Self::scan_ordered(&tx, &inner.keyspace, scan)
+        })
+        .unwrap_or_default()
+    }
+
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
@@ -609,6 +677,63 @@ mod tests {
         let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&row3));
+    }
+
+    #[test]
+    fn fjall_ordered_index_scan_respects_direction_and_bounds() {
+        let (_temp_dir, mut storage) = test_storage();
+
+        let row20 = ObjectId::new();
+        let row25a = ObjectId::new();
+        let row25b = ObjectId::new();
+        let row30 = ObjectId::new();
+        let row35 = ObjectId::new();
+
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(20), row20)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row25b)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row25a)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(30), row30)
+            .unwrap();
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(35), row35)
+            .unwrap();
+
+        let asc = storage.index_scan_ordered(OrderedIndexScan {
+            table: "users",
+            column: "age",
+            branch: "main",
+            start: Bound::Included(&Value::Integer(25)),
+            end: Bound::Excluded(&Value::Integer(35)),
+            direction: IndexScanDirection::Ascending,
+            take: Some(3),
+            resume_after: None,
+        });
+        assert_eq!(
+            asc.iter().map(|cursor| cursor.row_id).collect::<Vec<_>>(),
+            vec![row25a, row25b, row30]
+        );
+
+        let desc = storage.index_scan_ordered(OrderedIndexScan {
+            table: "users",
+            column: "age",
+            branch: "main",
+            start: Bound::Unbounded,
+            end: Bound::Included(&Value::Integer(25)),
+            direction: IndexScanDirection::Descending,
+            take: Some(3),
+            resume_after: None,
+        });
+        assert_eq!(
+            desc.iter().map(|cursor| cursor.row_id).collect::<Vec<_>>(),
+            vec![row25a, row25b, row20]
+        );
     }
 
     #[test]
