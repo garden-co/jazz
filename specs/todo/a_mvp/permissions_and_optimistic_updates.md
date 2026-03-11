@@ -664,3 +664,215 @@ Behavior changes:
 1. Mutation records and accepted/rejected outcomes include wall-clock timestamps in microseconds since Unix epoch.
 2. Accepted/rejected outcomes are emitted only by the first authority for a client-originated mutation.
 3. Rejected outcomes awaiting acknowledgement are capped by a high count bound of `10_000`, with oldest-first forced compaction as a storage safety valve.
+
+## Detailed Implementation Plan
+
+The safest way to land this is as a sequence of narrow Rust-core steps, with bindings consuming the new primitives only after the core behavior is stable.
+
+### Phase 1: Core Types And Wire Format
+
+Target files:
+
+1. `crates/jazz-tools/src/sync_manager/types.rs`
+2. `crates/jazz-tools/src/sync_manager/mod.rs`
+3. `crates/jazz-tools/src/sync_manager/tests.rs`
+
+Work:
+
+1. Add `MutationId`, `MutationOperation`, `MutationRejectCode`, `MutationAcceptance`, `MutationRejection`, `MutationOutcome`, `MutationOutcomeState`, `ObjectOutcomeState`, and filter types.
+2. Add `SyncPayload::MutationOutcome(MutationOutcome)`.
+3. Add `received_mutation_outcomes` to `SyncManager`.
+4. Add serialization tests for new sync payloads.
+5. Remove write-denial use of `SyncError` in the RFC sense, while keeping `QuerySubscriptionRejected` on the generic error path.
+
+Exit criteria:
+
+1. New mutation outcome payloads serialize and deserialize in all Rust tests.
+2. Existing non-mutation sync payload behavior remains unchanged.
+
+### Phase 2: Storage Journal
+
+Target files:
+
+1. `crates/jazz-tools/src/storage/mod.rs`
+2. `crates/jazz-tools/src/storage/key_codec.rs`
+3. `crates/jazz-tools/src/storage/opfs_btree.rs`
+4. `crates/jazz-tools/src/storage/fjall.rs`
+
+Work:
+
+1. Add `put_mutation_record`, `load_mutation_record`, `load_mutation_record_by_commit`, `list_mutation_records_by_outcome`, and `delete_mutation_record`.
+2. Add storage keys/indexing for:
+   1. mutation record by `MutationId`
+   2. commit-to-mutation reverse lookup
+   3. rejected-outcome retention ordering by `rejected_at_micros`
+3. Add storage tests covering persistence across reopen/restart.
+4. Add bound-enforcement helpers for `MAX_RETAINED_UNACKNOWLEDGED_REJECTIONS`.
+
+Exit criteria:
+
+1. Mutation records survive restart.
+2. Commit lookup works without in-memory state.
+3. Forced compaction removes the oldest rejected records first.
+
+### Phase 3: Local Mutation Recording In RuntimeCore
+
+Target files:
+
+1. `crates/jazz-tools/src/runtime_core.rs`
+2. `crates/jazz-tools/src/runtime_core/writes.rs`
+3. `crates/jazz-tools/src/runtime_core/ticks.rs`
+
+Work:
+
+1. Record a `MutationRecord` immediately after each successful local insert/update/delete commit is created.
+2. Populate `commit_to_mutation`, `mutation_waiters`, and `mutation_events`.
+3. Add `take_mutation_events`, `get_mutation_record`, `get_mutation_record_by_commit`, `list_rejected_mutations`, `list_pending_mutations`, `list_mutations_for_object`, `get_object_outcome`, and `acknowledge_mutation_outcome`.
+4. Update durable waiters so remote-tier requests reject on `MutationOutcome::Rejected` instead of hanging forever.
+5. Keep `worker` durability semantics unchanged: worker-tier callers may resolve before later rejection.
+
+Exit criteria:
+
+1. Local writes create durable journal entries.
+2. Remote-tier durable waiters reject on terminal rejection.
+3. Lookup methods work after runtime restart.
+
+### Phase 4: Server Emission Of Outcomes
+
+Target files:
+
+1. `crates/jazz-tools/src/sync_manager/inbox.rs`
+2. `crates/jazz-tools/src/sync_manager/permissions.rs`
+3. `crates/jazz-tools/src/query_manager/manager.rs`
+4. `crates/jazz-tools/src/query_manager/server_queries.rs`
+
+Work:
+
+1. Emit `MutationOutcome::Rejected` for:
+   1. ReBAC denials
+   2. `SessionRequired`
+   3. `CatalogueWriteDenied`
+2. Emit `MutationOutcome::Accepted` after the first authority successfully applies a client-originated write.
+3. Ensure only the first authority emits the outcome.
+4. Queue inbound mutation outcomes into `received_mutation_outcomes`.
+
+Exit criteria:
+
+1. A client-originated write gets exactly one terminal accepted/rejected outcome from the first authority.
+2. Existing `PersistenceAck` behavior remains intact.
+
+### Phase 5: RuntimeCore Outcome Consumption
+
+Target files:
+
+1. `crates/jazz-tools/src/runtime_core/ticks.rs`
+2. `crates/jazz-tools/src/sync_manager/mod.rs`
+
+Work:
+
+1. Drain `received_mutation_outcomes` during tick processing.
+2. Update mutation journal entries to `Accepted`, `Rejected`, or `SupersededByRejection`.
+3. Emit `MutationEvent` values.
+4. Update object outcome overlays for affected `object_id`s.
+5. Trigger subscription invalidation when outcome overlays change, even when row data does not.
+
+Exit criteria:
+
+1. Pending -> accepted/rejected transitions are observable through `MutationEvent`.
+2. Visible rows can react to `$outcome` changes without requiring data-column changes.
+
+### Phase 6: Rollback, Dead Retention, And Acknowledge-Prune
+
+Target files:
+
+1. `crates/jazz-tools/src/query_manager/writes.rs`
+2. `crates/jazz-tools/src/object_manager/mod.rs`
+3. `crates/jazz-tools/src/runtime_core/ticks.rs`
+4. `crates/jazz-tools/src/storage/mod.rs`
+
+Work:
+
+1. Add a rollback helper that removes rejected commit chains from active tips without immediately pruning stored commits.
+2. Compute descendant pending mutations and mark them `SupersededByRejection`.
+3. On `acknowledge_mutation_outcome`, prune the retained dead commit chain and delete the journal entry.
+4. Apply the same prune-and-clear behavior for forced compaction caused by the rejection-count bound.
+
+Exit criteria:
+
+1. Rejected optimistic writes disappear from canonical query results immediately.
+2. The retained dead chain is still available for inspection until acknowledgement or forced compaction.
+3. Acknowledge clears the overlay and removes stored rejection state.
+
+### Phase 7: Subscription And Query Overlay Integration
+
+Target files:
+
+1. `crates/jazz-tools/src/query_manager/manager.rs`
+2. `crates/jazz-tools/src/query_manager/types/*`
+3. binding-layer query adapters that materialize rows
+
+Work:
+
+1. Decide the internal representation of the reserved `$outcome` overlay.
+2. Ensure row-level subscription updates include outcome-only changes.
+3. Define how bindings map `ObjectOutcomeState` to per-row `$outcome`.
+
+Exit criteria:
+
+1. Visible rows can surface `{ type: "pending" | "accepted" | "errored" }`.
+2. Rejected inserts still surface through the global event path after rollback removes the row itself.
+
+### Phase 8: Binding Surfaces
+
+Target files:
+
+1. `crates/jazz-wasm/src/runtime.rs`
+2. `crates/jazz-napi/src/lib.rs`
+3. `crates/jazz-rn/rust/src/lib.rs`
+4. `packages/jazz-tools/src/runtime/*`
+
+Work:
+
+1. Expose mutation events and lookup methods from Rust bindings.
+2. Add binding-level `acknowledge()` wrappers over `acknowledge_mutation_outcome(mutation_id)`.
+3. Add a global outcome hook for invisible data.
+4. Add row-level `$outcome` enrichment in the TS runtime layer.
+
+Exit criteria:
+
+1. No binding keeps a separate mutation journal.
+2. All bindings share the same Rust-core semantics for pending/accepted/rejected/acknowledged flow.
+
+### Phase 9: Docs And E2E Tests
+
+Target files:
+
+1. docs and examples
+2. browser integration tests
+3. native/NAPI integration tests
+
+Work:
+
+1. Document visible-row `$outcome` behavior.
+2. Document global rejected-outcome hooks.
+3. Document acknowledgement semantics and the difference between user acknowledgement and `PersistenceAck`.
+4. Add E2E tests for long-offline rejection followed by acknowledgement.
+
+Exit criteria:
+
+1. Docs explain the two notification surfaces clearly.
+2. End-to-end tests cover both visible and invisible rejection scenarios.
+
+## Recommended Landing Order
+
+1. Phase 1
+2. Phase 2
+3. Phase 3
+4. Phase 4
+5. Phase 5
+6. Phase 6
+7. Phase 7
+8. Phase 8
+9. Phase 9
+
+Do not start binding-level `$outcome` work before Phases 1 through 6 are stable. The binding surface depends on rollback, acknowledgement, and retained-dead-chain semantics being correct in Rust first.
