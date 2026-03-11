@@ -6,12 +6,12 @@
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
 //! ```text
-//! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
-//! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
-//! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
-//! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
+//! "obj:{uuid}:meta"                                       -> JSON metadata
+//! "obj:{uuid}:br:{branch}:tips"                           -> JSON HashSet<CommitId>
+//! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                -> JSON Commit
+//! "ack:{commit_hex}"                                      -> JSON HashSet<DurabilityTier>
+//! "catman:{app_uuid}:op:{object_uuid}"                    -> JSON CatalogueManifestOp
+//! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" -> empty (existence is the signal)
 //! ```
 
 use std::cell::RefCell;
@@ -24,7 +24,7 @@ use std::path::Path;
 use opfs_btree::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 use opfs_btree::StdFile;
-use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
+use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, OpfsBTreeFiles, SyncFile};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
@@ -113,37 +113,50 @@ pub struct OpfsBTreeStorage {
 impl OpfsBTreeStorage {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let file = StdFile::open(path).map_err(map_storage_err)?;
-        Self::open_with_file(AnyFile::Std(file), cache_size_bytes)
+        let files = OpfsBTreeFiles::<StdFile>::open(path)
+            .map(|files| files.map(AnyFile::Std))
+            .map_err(map_storage_err)?;
+        Self::open_with_files(files, cache_size_bytes)
     }
 
     pub fn memory(cache_size_bytes: usize) -> Result<Self, StorageError> {
-        Self::open_with_file(AnyFile::Memory(MemoryFile::new()), cache_size_bytes)
+        let files = OpfsBTreeFiles::<MemoryFile>::memory().map(AnyFile::Memory);
+        Self::open_with_files(files, cache_size_bytes)
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn with_opfs(file: OpfsFile, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        Self::open_with_file(AnyFile::Opfs(file), cache_size_bytes)
+    pub fn with_opfs(_file: OpfsFile, _cache_size_bytes: usize) -> Result<Self, StorageError> {
+        Err(StorageError::IoError(
+            "OpfsBTreeStorage::with_opfs is unsupported for sidecar-backed opfs-btree; use open_opfs"
+                .to_string(),
+        ))
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn open_opfs(namespace: &str, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let file = OpfsFile::open(namespace).await.map_err(map_storage_err)?;
-        Self::with_opfs(file, cache_size_bytes)
+        let files = OpfsBTreeFiles::<OpfsFile>::open_opfs(namespace)
+            .await
+            .map_err(map_storage_err)?
+            .map(AnyFile::Opfs);
+        Self::open_with_files(files, cache_size_bytes)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn destroy_opfs(namespace: &str) -> Result<(), StorageError> {
-        OpfsFile::destroy(namespace).await.map_err(map_storage_err)
+        OpfsBTreeFiles::<OpfsFile>::destroy_opfs(namespace)
+            .await
+            .map_err(map_storage_err)
     }
 
-    fn open_with_file(file: AnyFile, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let options = Self::options(cache_size_bytes);
-        let tree = OpfsBTree::open(file, options).map_err(map_storage_err)?;
-        let storage = Self {
+    fn open_with_files(
+        files: OpfsBTreeFiles<AnyFile>,
+        cache_size_bytes: usize,
+    ) -> Result<Self, StorageError> {
+        let tree =
+            OpfsBTree::open(files, Self::options(cache_size_bytes)).map_err(map_storage_err)?;
+        Ok(Self {
             tree: RefCell::new(tree),
-        };
-        Ok(storage)
+        })
     }
 
     fn options(cache_size_bytes: usize) -> BTreeOptions {
@@ -415,8 +428,9 @@ impl Storage for OpfsBTreeStorage {
 
     fn flush_wal(&self) {
         let _span = tracing::debug_span!("OpfsBTreeStorage::flush_wal").entered();
-        // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
-        self.flush();
+        if let Err(error) = self.with_tree_mut(|tree| tree.flush_wal().map_err(map_storage_err)) {
+            tracing::warn!(?error, "OpfsBTreeStorage WAL flush failed");
+        }
     }
 }
 
@@ -667,6 +681,26 @@ mod tests {
                 storage.index_lookup("users", "name", "main", &Value::Text("Alice".to_string()));
             assert_eq!(results.len(), 1);
             assert!(results.contains(&id));
+        }
+    }
+
+    #[test]
+    fn opfs_btree_flush_wal_persists_without_snapshot() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("wal-only.opfsbtree");
+
+        {
+            let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
+            storage.tree_insert("kv:stable", b"wal-value").unwrap();
+            storage.flush_wal();
+        }
+
+        {
+            let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
+            assert_eq!(
+                storage.tree_read("kv:stable").unwrap(),
+                Some(b"wal-value".to_vec())
+            );
         }
     }
 

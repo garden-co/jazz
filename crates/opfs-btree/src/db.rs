@@ -1,8 +1,14 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Path, PathBuf};
 
 use crate::BTreeError;
-use crate::file::SyncFile;
+#[cfg(target_arch = "wasm32")]
+use crate::file::OpfsFile;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::file::StdFile;
+use crate::file::{MemoryFile, SyncFile};
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
     ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
@@ -25,61 +31,10 @@ type OpfsSet<T> = FxHashSet<T>;
 
 #[cfg(test)]
 mod test_failpoints {
-    use std::cell::RefCell;
-
     use crate::BTreeError;
 
-    #[derive(Default)]
-    struct State {
-        armed_step: Option<usize>,
-        next_step: usize,
-        hit_sites: Vec<&'static str>,
-    }
-
-    std::thread_local! {
-        static STATE: RefCell<State> = RefCell::new(State::default());
-    }
-
-    pub(crate) fn arm(step: usize) {
-        STATE.with(|cell| {
-            let mut state = cell.borrow_mut();
-            state.armed_step = Some(step);
-            state.next_step = 0;
-            state.hit_sites.clear();
-        });
-    }
-
-    pub(crate) fn clear() {
-        STATE.with(|cell| {
-            let mut state = cell.borrow_mut();
-            state.armed_step = None;
-            state.next_step = 0;
-            state.hit_sites.clear();
-        });
-    }
-
-    pub(crate) fn step_count() -> usize {
-        STATE.with(|cell| cell.borrow().next_step)
-    }
-
-    pub(crate) fn hit_sites() -> Vec<&'static str> {
-        STATE.with(|cell| cell.borrow().hit_sites.clone())
-    }
-
-    pub(crate) fn hit(site: &'static str) -> Result<(), BTreeError> {
-        STATE.with(|cell| {
-            let mut state = cell.borrow_mut();
-            state.next_step = state.next_step.saturating_add(1);
-            let step = state.next_step;
-            state.hit_sites.push(site);
-            if state.armed_step == Some(step) {
-                return Err(BTreeError::Io(format!(
-                    "simulated failpoint at step {} ({})",
-                    step, site
-                )));
-            }
-            Ok(())
-        })
+    pub(crate) fn hit(_site: &'static str) -> Result<(), BTreeError> {
+        Ok(())
     }
 }
 
@@ -162,6 +117,7 @@ impl BTreeOptions {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointState {
     pub active_slot: char,
@@ -172,7 +128,7 @@ pub struct CheckpointState {
 }
 
 #[derive(Debug)]
-pub struct OpfsBTree<F: SyncFile> {
+pub struct SnapshotBTree<F: SyncFile> {
     file: F,
     options: BTreeOptions,
     active_slot: SuperblockSlot,
@@ -205,7 +161,7 @@ enum StagedValue {
     },
 }
 
-impl<F: SyncFile> OpfsBTree<F> {
+impl<F: SyncFile> SnapshotBTree<F> {
     pub fn open(file: F, options: BTreeOptions) -> Result<Self, BTreeError> {
         options.validate()?;
         test_failpoint!("open:start");
@@ -281,7 +237,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
-        let _span = tracing::trace_span!("OpfsBTree::get", key_len = key.len()).entered();
+        let _span = tracing::trace_span!("SnapshotBTree::get", key_len = key.len()).entered();
         let leaf_page_id = match self.find_leaf_page_id(key)? {
             Some(id) => id,
             None => return Ok(None),
@@ -304,7 +260,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!(
-            "OpfsBTree::put",
+            "SnapshotBTree::put",
             key_len = key.len(),
             value_len = value.len()
         )
@@ -338,7 +294,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
-        let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
+        let _span = tracing::trace_span!("SnapshotBTree::delete", key_len = key.len()).entered();
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -376,7 +332,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<KvPair>, BTreeError> {
-        let _span = tracing::trace_span!("OpfsBTree::range", limit).entered();
+        let _span = tracing::trace_span!("SnapshotBTree::range", limit).entered();
         if limit == 0 || start >= end {
             return Ok(Vec::new());
         }
@@ -441,7 +397,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
         let _span = tracing::debug_span!(
-            "OpfsBTree::checkpoint",
+            "SnapshotBTree::checkpoint",
             dirty_pages = self.dirty_pages.len(),
             total_pages = self.total_pages
         )
@@ -466,6 +422,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn checkpoint_state(&self) -> CheckpointState {
         CheckpointState {
             active_slot: slot_char(self.active_slot),
@@ -474,10 +431,6 @@ impl<F: SyncFile> OpfsBTree<F> {
             freelist_head_page_id: self.active.freelist_head_page_id,
             total_pages: self.active.total_pages,
         }
-    }
-
-    pub fn into_file(self) -> F {
-        self.file
     }
 
     fn insert_recursive(
@@ -1728,6 +1681,7 @@ fn choose_active(
     }
 }
 
+#[cfg(test)]
 fn slot_char(slot: SuperblockSlot) -> char {
     match slot {
         SuperblockSlot::A => 'A',
@@ -1789,6 +1743,704 @@ fn write_slot<F: SyncFile>(
     file.write_all_at(slot.byte_offset(page_size), &page)?;
     test_failpoint!("write_slot:after-write");
     Ok(())
+}
+
+const FULL_SCAN_END_KEY: [u8; 1] = [u8::MAX];
+const MANIFEST_MAGIC: [u8; 8] = *b"JAZZWAL1";
+const MANIFEST_VERSION: u32 = 1;
+const MANIFEST_SLOT_BYTES: usize = 128;
+const CHECKSUM_BYTES: usize = 4;
+const WAL_BATCH_MAGIC: [u8; 8] = *b"JAZZWLB1";
+const WAL_BATCH_HEADER_BYTES: usize = 8 + 4 + CHECKSUM_BYTES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicaSlot {
+    A,
+    B,
+}
+
+impl ReplicaSlot {
+    fn inactive(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    fn encode(self) -> u8 {
+        match self {
+            Self::A => 0,
+            Self::B => 1,
+        }
+    }
+
+    fn decode(raw: u8) -> Result<Self, BTreeError> {
+        match raw {
+            0 => Ok(Self::A),
+            1 => Ok(Self::B),
+            other => Err(BTreeError::Io(format!(
+                "durable manifest has invalid replica slot {}",
+                other
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestSlot {
+    A,
+    B,
+}
+
+impl ManifestSlot {
+    fn inactive(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    fn byte_offset(self) -> u64 {
+        match self {
+            Self::A => 0,
+            Self::B => MANIFEST_SLOT_BYTES as u64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableManifest {
+    generation: u64,
+    active_snapshot: ReplicaSlot,
+    active_wal: ReplicaSlot,
+    applied_wal_seq: u64,
+}
+
+impl DurableManifest {
+    fn bootstrap() -> Self {
+        Self {
+            generation: 1,
+            active_snapshot: ReplicaSlot::A,
+            active_wal: ReplicaSlot::A,
+            applied_wal_seq: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WalEntry {
+    Put {
+        seq: u64,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        seq: u64,
+        key: Vec<u8>,
+    },
+}
+
+impl WalEntry {
+    fn seq(&self) -> u64 {
+        match self {
+            Self::Put { seq, .. } | Self::Delete { seq, .. } => *seq,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpfsBTreeFiles<F: Clone> {
+    snapshot_a: F,
+    snapshot_b: F,
+    wal_a: F,
+    wal_b: F,
+    manifest: F,
+}
+
+impl<F: Clone> OpfsBTreeFiles<F> {
+    pub fn new(snapshot_a: F, snapshot_b: F, wal_a: F, wal_b: F, manifest: F) -> Self {
+        Self {
+            snapshot_a,
+            snapshot_b,
+            wal_a,
+            wal_b,
+            manifest,
+        }
+    }
+
+    pub fn map<G: Clone>(self, mut f: impl FnMut(F) -> G) -> OpfsBTreeFiles<G> {
+        OpfsBTreeFiles {
+            snapshot_a: f(self.snapshot_a),
+            snapshot_b: f(self.snapshot_b),
+            wal_a: f(self.wal_a),
+            wal_b: f(self.wal_b),
+            manifest: f(self.manifest),
+        }
+    }
+
+    fn snapshot(&self, slot: ReplicaSlot) -> F {
+        match slot {
+            ReplicaSlot::A => self.snapshot_a.clone(),
+            ReplicaSlot::B => self.snapshot_b.clone(),
+        }
+    }
+
+    fn wal(&self, slot: ReplicaSlot) -> F {
+        match slot {
+            ReplicaSlot::A => self.wal_a.clone(),
+            ReplicaSlot::B => self.wal_b.clone(),
+        }
+    }
+
+    fn manifest(&self) -> F {
+        self.manifest.clone()
+    }
+}
+
+impl OpfsBTreeFiles<MemoryFile> {
+    pub fn memory() -> Self {
+        Self::new(
+            MemoryFile::new(),
+            MemoryFile::new(),
+            MemoryFile::new(),
+            MemoryFile::new(),
+            MemoryFile::new(),
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OpfsBTreeFiles<StdFile> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, BTreeError> {
+        let path = path.as_ref();
+        Ok(Self::new(
+            StdFile::open(path)?,
+            StdFile::open(sidecar_path(path, ".snapshot-b"))?,
+            StdFile::open(sidecar_path(path, ".wal-a"))?,
+            StdFile::open(sidecar_path(path, ".wal-b"))?,
+            StdFile::open(sidecar_path(path, ".manifest"))?,
+        ))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OpfsBTreeFiles<OpfsFile> {
+    pub async fn open_opfs(namespace: &str) -> Result<Self, BTreeError> {
+        Ok(Self::new(
+            OpfsFile::open(namespace).await?,
+            OpfsFile::open(&opfs_sidecar_name(namespace, "snapshot-b")).await?,
+            OpfsFile::open(&opfs_sidecar_name(namespace, "wal-a")).await?,
+            OpfsFile::open(&opfs_sidecar_name(namespace, "wal-b")).await?,
+            OpfsFile::open(&opfs_sidecar_name(namespace, "manifest")).await?,
+        ))
+    }
+
+    pub async fn destroy_opfs(namespace: &str) -> Result<(), BTreeError> {
+        OpfsFile::destroy(namespace).await?;
+        let _ = OpfsFile::destroy(&opfs_sidecar_name(namespace, "snapshot-b")).await;
+        let _ = OpfsFile::destroy(&opfs_sidecar_name(namespace, "wal-a")).await;
+        let _ = OpfsFile::destroy(&opfs_sidecar_name(namespace, "wal-b")).await;
+        let _ = OpfsFile::destroy(&opfs_sidecar_name(namespace, "manifest")).await;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct OpfsBTree<F: SyncFile + Clone> {
+    files: OpfsBTreeFiles<F>,
+    options: BTreeOptions,
+    tree: SnapshotBTree<F>,
+    manifest_slot: ManifestSlot,
+    manifest: DurableManifest,
+    pending_wal: Vec<WalEntry>,
+    wal_flushed_seq: u64,
+    next_wal_seq: u64,
+}
+
+#[cfg(test)]
+mod durable_test_failpoints {
+    use std::cell::RefCell;
+
+    use crate::BTreeError;
+
+    #[derive(Default)]
+    struct State {
+        armed_step: Option<usize>,
+        next_step: usize,
+        hit_sites: Vec<&'static str>,
+    }
+
+    std::thread_local! {
+        static STATE: RefCell<State> = RefCell::new(State::default());
+    }
+
+    pub(crate) fn arm(step: usize) {
+        STATE.with(|cell| {
+            let mut state = cell.borrow_mut();
+            state.armed_step = Some(step);
+            state.next_step = 0;
+            state.hit_sites.clear();
+        });
+    }
+
+    pub(crate) fn clear() {
+        STATE.with(|cell| {
+            let mut state = cell.borrow_mut();
+            state.armed_step = None;
+            state.next_step = 0;
+            state.hit_sites.clear();
+        });
+    }
+
+    pub(crate) fn step_count() -> usize {
+        STATE.with(|cell| cell.borrow().next_step)
+    }
+
+    pub(crate) fn hit_sites() -> Vec<&'static str> {
+        STATE.with(|cell| cell.borrow().hit_sites.clone())
+    }
+
+    pub(crate) fn hit(site: &'static str) -> Result<(), BTreeError> {
+        STATE.with(|cell| {
+            let mut state = cell.borrow_mut();
+            state.next_step = state.next_step.saturating_add(1);
+            let step = state.next_step;
+            state.hit_sites.push(site);
+            if state.armed_step == Some(step) {
+                return Err(BTreeError::Io(format!(
+                    "simulated durable failpoint at step {} ({})",
+                    step, site
+                )));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+macro_rules! durable_failpoint {
+    ($site:literal) => {
+        durable_test_failpoints::hit($site)?;
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! durable_failpoint {
+    ($site:literal) => {};
+}
+
+impl<F: SyncFile + Clone> OpfsBTree<F> {
+    pub fn open(files: OpfsBTreeFiles<F>, options: BTreeOptions) -> Result<Self, BTreeError> {
+        let manifest_file = files.manifest();
+        let (manifest_slot, manifest) = read_manifest(&manifest_file)?
+            .unwrap_or((ManifestSlot::A, DurableManifest::bootstrap()));
+        durable_failpoint!("open:after-read-manifest");
+
+        let mut tree = SnapshotBTree::open(files.snapshot(manifest.active_snapshot), options)?;
+        durable_failpoint!("open:after-open-snapshot");
+
+        let wal_entries = read_wal_entries(&files.wal(manifest.active_wal))?;
+        let mut wal_flushed_seq = manifest.applied_wal_seq;
+        for entry in wal_entries {
+            wal_flushed_seq = wal_flushed_seq.max(entry.seq());
+            if entry.seq() > manifest.applied_wal_seq {
+                apply_wal_entry(&mut tree, &entry)?;
+            }
+        }
+        durable_failpoint!("open:after-replay-wal");
+
+        Ok(Self {
+            files,
+            options,
+            tree,
+            manifest_slot,
+            manifest,
+            pending_wal: Vec::new(),
+            wal_flushed_seq,
+            next_wal_seq: wal_flushed_seq.saturating_add(1),
+        })
+    }
+
+    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
+        self.tree.get(key)
+    }
+
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BTreeError> {
+        self.tree.put(key, value)?;
+        let seq = self.alloc_seq();
+        self.pending_wal.push(WalEntry::Put {
+            seq,
+            key: key.to_vec(),
+            value: value.to_vec(),
+        });
+        Ok(())
+    }
+
+    pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
+        self.tree.delete(key)?;
+        let seq = self.alloc_seq();
+        self.pending_wal.push(WalEntry::Delete {
+            seq,
+            key: key.to_vec(),
+        });
+        Ok(())
+    }
+
+    pub fn range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KvPair>, BTreeError> {
+        self.tree.range(start, end, limit)
+    }
+
+    pub fn flush_wal(&mut self) -> Result<(), BTreeError> {
+        if self.pending_wal.is_empty() {
+            return Ok(());
+        }
+
+        let active_wal = self.files.wal(self.manifest.active_wal);
+        let batch = encode_wal_batch(&self.pending_wal)?;
+        let offset = active_wal.len()?;
+        durable_failpoint!("flush_wal:before-write");
+        active_wal.write_all_at(offset, &batch)?;
+        durable_failpoint!("flush_wal:after-write");
+        active_wal.flush()?;
+        durable_failpoint!("flush_wal:after-flush");
+
+        self.wal_flushed_seq = self
+            .pending_wal
+            .last()
+            .map(WalEntry::seq)
+            .unwrap_or(self.wal_flushed_seq);
+        self.pending_wal.clear();
+        Ok(())
+    }
+
+    pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
+        self.flush_wal()?;
+        durable_failpoint!("checkpoint:after-flush-wal");
+
+        if self.wal_flushed_seq == self.manifest.applied_wal_seq {
+            return Ok(());
+        }
+
+        let target_snapshot = self.manifest.active_snapshot.inactive();
+        let target_wal = self.manifest.active_wal.inactive();
+
+        let snapshot_file = self.files.snapshot(target_snapshot);
+        snapshot_file.truncate(0)?;
+        durable_failpoint!("checkpoint:after-truncate-snapshot");
+
+        let mut snapshot_tree = SnapshotBTree::open(snapshot_file, self.options)?;
+        durable_failpoint!("checkpoint:after-open-target-snapshot");
+
+        for (key, value) in self.full_scan()? {
+            snapshot_tree.put(&key, &value)?;
+        }
+        durable_failpoint!("checkpoint:after-build-snapshot");
+        snapshot_tree.checkpoint()?;
+        durable_failpoint!("checkpoint:after-snapshot-checkpoint");
+
+        let next_wal_file = self.files.wal(target_wal);
+        next_wal_file.truncate(0)?;
+        next_wal_file.flush()?;
+        durable_failpoint!("checkpoint:after-prepare-inactive-wal");
+
+        let next_manifest = DurableManifest {
+            generation: self.manifest.generation.saturating_add(1),
+            active_snapshot: target_snapshot,
+            active_wal: target_wal,
+            applied_wal_seq: self.wal_flushed_seq,
+        };
+        let next_manifest_slot = self.manifest_slot.inactive();
+        write_manifest(&self.files.manifest(), next_manifest_slot, next_manifest)?;
+        durable_failpoint!("checkpoint:after-manifest-write");
+        self.files.manifest().flush()?;
+        durable_failpoint!("checkpoint:after-manifest-flush");
+
+        self.tree = snapshot_tree;
+        self.manifest = next_manifest;
+        self.manifest_slot = next_manifest_slot;
+        self.pending_wal.clear();
+        durable_failpoint!("checkpoint:after-tree-swap");
+        Ok(())
+    }
+
+    pub fn into_files(self) -> OpfsBTreeFiles<F> {
+        self.files
+    }
+
+    fn alloc_seq(&mut self) -> u64 {
+        let seq = self.next_wal_seq;
+        self.next_wal_seq = self.next_wal_seq.saturating_add(1);
+        seq
+    }
+
+    fn full_scan(&mut self) -> Result<Vec<KvPair>, BTreeError> {
+        self.tree.range(b"", &FULL_SCAN_END_KEY, usize::MAX)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "opfs-btree".to_string());
+    let mut out = path.to_path_buf();
+    out.set_file_name(format!("{}{}", file_name, suffix));
+    out
+}
+
+#[cfg(target_arch = "wasm32")]
+fn opfs_sidecar_name(namespace: &str, suffix: &str) -> String {
+    format!("{namespace}__{suffix}")
+}
+
+fn apply_wal_entry<F: SyncFile + Clone>(
+    tree: &mut SnapshotBTree<F>,
+    entry: &WalEntry,
+) -> Result<(), BTreeError> {
+    match entry {
+        WalEntry::Put { key, value, .. } => tree.put(key, value),
+        WalEntry::Delete { key, .. } => tree.delete(key),
+    }
+}
+
+fn read_manifest<F: SyncFile>(
+    file: &F,
+) -> Result<Option<(ManifestSlot, DurableManifest)>, BTreeError> {
+    let a = read_manifest_slot(file, ManifestSlot::A)?;
+    let b = read_manifest_slot(file, ManifestSlot::B)?;
+    Ok(match (a, b) {
+        (Some(a), Some(b)) => {
+            if b.1.generation > a.1.generation {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    })
+}
+
+fn read_manifest_slot<F: SyncFile>(
+    file: &F,
+    slot: ManifestSlot,
+) -> Result<Option<(ManifestSlot, DurableManifest)>, BTreeError> {
+    let needed = slot.byte_offset() + MANIFEST_SLOT_BYTES as u64;
+    if file.len()? < needed {
+        return Ok(None);
+    }
+
+    let mut page = vec![0u8; MANIFEST_SLOT_BYTES];
+    file.read_exact_at(slot.byte_offset(), &mut page)?;
+    if page.iter().all(|b| *b == 0) {
+        return Ok(None);
+    }
+    if page[..8] != MANIFEST_MAGIC {
+        return Ok(None);
+    }
+
+    let checksum_offset = MANIFEST_SLOT_BYTES - CHECKSUM_BYTES;
+    let stored_checksum = u32::from_le_bytes(
+        page[checksum_offset..checksum_offset + CHECKSUM_BYTES]
+            .try_into()
+            .expect("checksum slice"),
+    );
+    let computed_checksum = crc32fast::hash(&page[..checksum_offset]);
+    if stored_checksum != computed_checksum {
+        return Ok(None);
+    }
+
+    let version = u32::from_le_bytes(page[8..12].try_into().expect("version slice"));
+    if version != MANIFEST_VERSION {
+        return Ok(None);
+    }
+
+    let generation = u64::from_le_bytes(page[12..20].try_into().expect("generation slice"));
+    let active_snapshot = ReplicaSlot::decode(page[20])?;
+    let active_wal = ReplicaSlot::decode(page[21])?;
+    let applied_wal_seq = u64::from_le_bytes(page[24..32].try_into().expect("applied wal slice"));
+
+    Ok(Some((
+        slot,
+        DurableManifest {
+            generation,
+            active_snapshot,
+            active_wal,
+            applied_wal_seq,
+        },
+    )))
+}
+
+fn write_manifest<F: SyncFile>(
+    file: &F,
+    slot: ManifestSlot,
+    manifest: DurableManifest,
+) -> Result<(), BTreeError> {
+    let required_len = MANIFEST_SLOT_BYTES as u64 * 2;
+    if file.len()? < required_len {
+        file.truncate(required_len)?;
+    }
+
+    let mut page = vec![0u8; MANIFEST_SLOT_BYTES];
+    page[..8].copy_from_slice(&MANIFEST_MAGIC);
+    page[8..12].copy_from_slice(&MANIFEST_VERSION.to_le_bytes());
+    page[12..20].copy_from_slice(&manifest.generation.to_le_bytes());
+    page[20] = manifest.active_snapshot.encode();
+    page[21] = manifest.active_wal.encode();
+    page[24..32].copy_from_slice(&manifest.applied_wal_seq.to_le_bytes());
+
+    let checksum_offset = MANIFEST_SLOT_BYTES - CHECKSUM_BYTES;
+    let checksum = crc32fast::hash(&page[..checksum_offset]);
+    page[checksum_offset..checksum_offset + CHECKSUM_BYTES]
+        .copy_from_slice(&checksum.to_le_bytes());
+    file.write_all_at(slot.byte_offset(), &page)?;
+    Ok(())
+}
+
+fn encode_wal_batch(entries: &[WalEntry]) -> Result<Vec<u8>, BTreeError> {
+    let mut payload = Vec::new();
+    for entry in entries {
+        match entry {
+            WalEntry::Put { seq, key, value } => {
+                payload.push(1);
+                payload.extend_from_slice(&seq.to_le_bytes());
+                payload.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                payload.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                payload.extend_from_slice(key);
+                payload.extend_from_slice(value);
+            }
+            WalEntry::Delete { seq, key } => {
+                payload.push(2);
+                payload.extend_from_slice(&seq.to_le_bytes());
+                payload.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                payload.extend_from_slice(key);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(WAL_BATCH_HEADER_BYTES + payload.len());
+    out.extend_from_slice(&WAL_BATCH_MAGIC);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    let checksum = crc32fast::hash(&payload);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+fn read_wal_entries<F: SyncFile>(file: &F) -> Result<Vec<WalEntry>, BTreeError> {
+    let len = file.len()? as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; len];
+    file.read_exact_at(0, &mut bytes)?;
+
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        if bytes.len().saturating_sub(offset) < WAL_BATCH_HEADER_BYTES {
+            break;
+        }
+        if bytes[offset..offset + 8] != WAL_BATCH_MAGIC {
+            break;
+        }
+
+        let payload_len = u32::from_le_bytes(
+            bytes[offset + 8..offset + 12]
+                .try_into()
+                .expect("payload len"),
+        ) as usize;
+        let stored_checksum = u32::from_le_bytes(
+            bytes[offset + 12..offset + 16]
+                .try_into()
+                .expect("batch checksum"),
+        );
+        let payload_start = offset + WAL_BATCH_HEADER_BYTES;
+        let payload_end = payload_start + payload_len;
+        if payload_end > bytes.len() {
+            break;
+        }
+        let payload = &bytes[payload_start..payload_end];
+        if crc32fast::hash(payload) != stored_checksum {
+            break;
+        }
+
+        let batch = decode_wal_payload(payload)?;
+        if batch.is_empty() {
+            break;
+        }
+        entries.extend(batch);
+        offset = payload_end;
+    }
+
+    Ok(entries)
+}
+
+fn decode_wal_payload(payload: &[u8]) -> Result<Vec<WalEntry>, BTreeError> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < payload.len() {
+        let kind = *payload
+            .get(cursor)
+            .ok_or_else(|| BTreeError::Io("wal payload truncated at kind".to_string()))?;
+        cursor += 1;
+
+        let seq = read_u64(payload, &mut cursor, "seq")?;
+        match kind {
+            1 => {
+                let key_len = read_u32(payload, &mut cursor, "put key_len")? as usize;
+                let value_len = read_u32(payload, &mut cursor, "put value_len")? as usize;
+                let key = read_bytes(payload, &mut cursor, key_len, "put key")?.to_vec();
+                let value = read_bytes(payload, &mut cursor, value_len, "put value")?.to_vec();
+                out.push(WalEntry::Put { seq, key, value });
+            }
+            2 => {
+                let key_len = read_u32(payload, &mut cursor, "delete key_len")? as usize;
+                let key = read_bytes(payload, &mut cursor, key_len, "delete key")?.to_vec();
+                out.push(WalEntry::Delete { seq, key });
+            }
+            other => {
+                return Err(BTreeError::Io(format!("unknown wal entry kind {}", other)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize, label: &str) -> Result<u32, BTreeError> {
+    let slice = read_bytes(bytes, cursor, 4, label)?;
+    Ok(u32::from_le_bytes(slice.try_into().expect("u32 slice")))
+}
+
+fn read_u64(bytes: &[u8], cursor: &mut usize, label: &str) -> Result<u64, BTreeError> {
+    let slice = read_bytes(bytes, cursor, 8, label)?;
+    Ok(u64::from_le_bytes(slice.try_into().expect("u64 slice")))
+}
+
+fn read_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+    label: &str,
+) -> Result<&'a [u8], BTreeError> {
+    let end = cursor.saturating_add(len);
+    if end > bytes.len() {
+        return Err(BTreeError::Io(format!(
+            "wal payload truncated while reading {}",
+            label
+        )));
+    }
+    let slice = &bytes[*cursor..end];
+    *cursor = end;
+    Ok(slice)
 }
 
 #[cfg(test)]
@@ -1902,145 +2554,16 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct SuperblockCrashFile {
-        inner: MemoryFile,
-        page_size: usize,
-        crash_superblock_writes: Rc<RefCell<bool>>,
-    }
-
-    impl SuperblockCrashFile {
-        fn new(page_size: usize) -> Self {
-            Self {
-                inner: MemoryFile::new(),
-                page_size,
-                crash_superblock_writes: Rc::new(RefCell::new(false)),
-            }
-        }
-
-        fn arm_superblock_crash(&self) {
-            *self.crash_superblock_writes.borrow_mut() = true;
-        }
-
-        fn disarm_superblock_crash(&self) {
-            *self.crash_superblock_writes.borrow_mut() = false;
-        }
-
-        fn memory_file(&self) -> MemoryFile {
-            self.inner.clone()
-        }
-    }
-
-    impl SyncFile for SuperblockCrashFile {
-        fn len(&self) -> Result<u64, BTreeError> {
-            self.inner.len()
-        }
-
-        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
-            self.inner.read_exact_at(offset, buf)
-        }
-
-        fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
-            let superblock_bytes = (2 * self.page_size) as u64;
-            if *self.crash_superblock_writes.borrow() && offset < superblock_bytes {
-                return Err(BTreeError::Io(
-                    "simulated crash before superblock swap".to_string(),
-                ));
-            }
-            self.inner.write_all_at(offset, buf)
-        }
-
-        fn truncate(&self, len: u64) -> Result<(), BTreeError> {
-            self.inner.truncate(len)
-        }
-
-        fn flush(&self) -> Result<(), BTreeError> {
-            self.inner.flush()
-        }
-    }
-
     fn corrupt_slot(file: &MemoryFile, slot: SuperblockSlot, page_size: usize) {
         let offset = slot.byte_offset(page_size) + 8;
         file.write_all_at(offset, &[0xFF, 0x00, 0xAA, 0x55])
             .expect("corrupt slot bytes");
     }
 
-    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-        if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
-            (*message).to_string()
-        } else {
-            "non-string panic payload".to_string()
-        }
-    }
-
-    fn prepare_growth_base_fixture() -> (OpfsBTree<MemoryFile>, CheckpointState, u32) {
-        let options = small_options();
-        let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, options).expect("open tree");
-
-        let mut next_seed = 0u32;
-        loop {
-            let key = format!("base-{next_seed:05}");
-            let value = format!("value-{next_seed:05}");
-            tree.put(key.as_bytes(), value.as_bytes())
-                .expect("seed put");
-            next_seed += 1;
-
-            let Some(root_page_id) = tree.root_page_id else {
-                continue;
-            };
-            if tree.page_kind(root_page_id).expect("root kind") == PageKind::Internal {
-                break;
-            }
-        }
-
-        tree.checkpoint().expect("checkpoint stable tree");
-        let stable = tree.checkpoint_state();
-        let stable_root = tree.root_page_id.expect("stable root");
-        assert_eq!(
-            tree.page_kind(stable_root).expect("stable root kind"),
-            PageKind::Internal
-        );
-
-        (tree, stable, next_seed)
-    }
-
-    fn apply_pending_growth(
-        tree: &mut OpfsBTree<MemoryFile>,
-        stable: CheckpointState,
-        next_seed: &mut u32,
-    ) -> Result<(String, String), BTreeError> {
-        let stable_root = tree.root_page_id.expect("stable root");
-        assert_eq!(
-            tree.page_kind(stable_root).expect("stable root kind"),
-            PageKind::Internal
-        );
-
-        let (crash_key, crash_value) = loop {
-            let key = format!("tail-{next_seed:05}");
-            let value = format!("value-{next_seed:05}");
-            tree.put(key.as_bytes(), value.as_bytes())?;
-            *next_seed += 1;
-
-            if tree.total_pages > stable.total_pages && tree.root_page_id == Some(stable_root) {
-                break (key, value);
-            }
-        };
-
-        assert!(
-            tree.total_pages > stable.total_pages,
-            "expected tree growth beyond stable checkpoint"
-        );
-
-        Ok((crash_key, crash_value))
-    }
-
     #[test]
     fn bootstrap_creates_checkpoint_state() {
         let file = MemoryFile::new();
-        let tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open tree");
+        let tree = SnapshotBTree::open(file, BTreeOptions::default()).expect("open tree");
         let state = tree.checkpoint_state();
         assert_eq!(state.generation, 1);
         assert_eq!(state.total_pages, 2);
@@ -2049,7 +2572,7 @@ mod tests {
     #[test]
     fn checkpoint_swaps_slots_and_increments_generation() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, BTreeOptions::default()).expect("open tree");
 
         let before = tree.checkpoint_state();
         tree.checkpoint_superblock(7, 11, 42)
@@ -2066,11 +2589,12 @@ mod tests {
     #[test]
     fn reopen_picks_latest_valid_superblock() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
+        let mut tree =
+            SnapshotBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
         tree.checkpoint_superblock(0, 0, 10).expect("checkpoint 1");
         tree.checkpoint_superblock(0, 0, 20).expect("checkpoint 2");
 
-        let reopened = OpfsBTree::open(file, BTreeOptions::default()).expect("reopen tree");
+        let reopened = SnapshotBTree::open(file, BTreeOptions::default()).expect("reopen tree");
         let state = reopened.checkpoint_state();
         assert_eq!(state.root_page_id, 0);
         assert_eq!(state.total_pages, 20);
@@ -2082,7 +2606,8 @@ mod tests {
         let page_size = BTreeOptions::default().page_size;
         let file = MemoryFile::new();
 
-        let mut tree = OpfsBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
+        let mut tree =
+            SnapshotBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
         let initial = tree.checkpoint_state();
         tree.checkpoint_superblock(99, 0, 33)
             .expect("checkpoint to inactive slot");
@@ -2096,7 +2621,7 @@ mod tests {
         };
         corrupt_slot(&file, latest_slot, page_size);
 
-        let reopened = OpfsBTree::open(file, BTreeOptions::default()).expect("reopen tree");
+        let reopened = SnapshotBTree::open(file, BTreeOptions::default()).expect("reopen tree");
         let state = reopened.checkpoint_state();
         assert_eq!(state.generation, initial.generation);
         assert_eq!(state.root_page_id, initial.root_page_id);
@@ -2108,14 +2633,14 @@ mod tests {
         file.write_all_at(0, &[1, 2, 3, 4, 5, 6, 7, 8])
             .expect("seed invalid bytes");
 
-        let err = OpfsBTree::open(file, BTreeOptions::default()).expect_err("must error");
+        let err = SnapshotBTree::open(file, BTreeOptions::default()).expect_err("must error");
         assert!(matches!(err, BTreeError::Corrupt(_)));
     }
 
     #[test]
     fn put_get_delete_and_range_work() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, small_options()).expect("open tree");
 
         tree.put(b"a", b"1").expect("put a");
         tree.put(b"b", b"2").expect("put b");
@@ -2143,13 +2668,13 @@ mod tests {
     #[test]
     fn overflow_values_round_trip() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), small_options()).expect("open tree");
 
         let big = vec![7u8; 25_000];
         tree.put(b"big", &big).expect("put big");
         tree.checkpoint().expect("checkpoint");
 
-        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = SnapshotBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(reopened.get(b"big").expect("get big"), Some(big.clone()));
 
         reopened.delete(b"big").expect("delete big");
@@ -2160,7 +2685,7 @@ mod tests {
     #[test]
     fn overflow_large_patterned_value_round_trip() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), small_options()).expect("open tree");
 
         let len = 1_048_576 + 513;
         let big: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
@@ -2171,7 +2696,7 @@ mod tests {
         );
 
         tree.checkpoint().expect("checkpoint");
-        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = SnapshotBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(
             reopened
                 .get(b"big-pattern")
@@ -2183,7 +2708,7 @@ mod tests {
     #[test]
     fn overflow_update_reuses_existing_extent_when_page_count_matches() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, small_options()).expect("open tree");
 
         // Keep both values within the same 4KiB-page extent footprint.
         let value_v1 = vec![1u8; 179_000];
@@ -2207,7 +2732,7 @@ mod tests {
     #[test]
     fn overflow_update_shrink_frees_tail_pages() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, small_options()).expect("open tree");
 
         let value_large = vec![3u8; 180_000];
         let value_small = vec![4u8; 170_000];
@@ -2227,7 +2752,7 @@ mod tests {
     #[test]
     fn many_inserts_create_multiple_levels() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), small_options()).expect("open tree");
 
         for i in 0..2_000u32 {
             let key = format!("k{:05}", i);
@@ -2254,7 +2779,7 @@ mod tests {
         assert_eq!(slice.len(), 100);
 
         tree.checkpoint().expect("checkpoint");
-        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = SnapshotBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(
             reopened.get(b"k01999").expect("reopen get last"),
             Some(b"v01999".to_vec())
@@ -2264,13 +2789,13 @@ mod tests {
     #[test]
     fn checkpoint_persists_data_across_reopen() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), small_options()).expect("open tree");
 
         tree.put(b"k1", b"value1").expect("put k1");
         tree.put(b"k2", b"value2").expect("put k2");
         tree.checkpoint().expect("checkpoint");
 
-        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = SnapshotBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(
             reopened.get(b"k1").expect("get k1"),
             Some(b"value1".to_vec())
@@ -2290,7 +2815,7 @@ mod tests {
     fn checkpoint_writes_only_dirty_data_pages() {
         let options = small_options();
         let file = CountingFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), options).expect("open tree");
 
         tree.put(b"k", b"v1").expect("put v1");
         tree.checkpoint().expect("checkpoint v1");
@@ -2311,7 +2836,7 @@ mod tests {
     fn checkpoint_coalesces_contiguous_data_page_writes() {
         let options = small_options();
         let file = CountingFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), options).expect("open tree");
 
         for i in 0..2_000u32 {
             let key = format!("k{:05}", i);
@@ -2333,7 +2858,7 @@ mod tests {
         let file = CountingFile::new();
         let mut build_options = small_options();
         build_options.read_coalesce_pages = 1;
-        let mut tree = OpfsBTree::open(file.clone(), build_options).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), build_options).expect("open tree");
 
         for i in 0..4_000u32 {
             let key = format!("k{:05}", i);
@@ -2345,7 +2870,8 @@ mod tests {
 
         let mut baseline_options = small_options();
         baseline_options.read_coalesce_pages = 1;
-        let mut baseline = OpfsBTree::open(file.clone(), baseline_options).expect("open baseline");
+        let mut baseline =
+            SnapshotBTree::open(file.clone(), baseline_options).expect("open baseline");
         file.reset_io_stats();
         for i in (0..4_000usize).step_by(17) {
             let key = format!("k{:05}", i);
@@ -2357,7 +2883,7 @@ mod tests {
         let mut coalesced_options = small_options();
         coalesced_options.read_coalesce_pages = 8;
         let mut coalesced =
-            OpfsBTree::open(file.clone(), coalesced_options).expect("open coalesced");
+            SnapshotBTree::open(file.clone(), coalesced_options).expect("open coalesced");
         file.reset_io_stats();
         for i in (0..4_000usize).step_by(17) {
             let key = format!("k{:05}", i);
@@ -2380,7 +2906,7 @@ mod tests {
     #[test]
     fn latest_checkpoint_wins_across_reopen() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file.clone(), small_options()).expect("open tree");
 
         tree.put(b"k", b"v1").expect("put v1");
         tree.checkpoint().expect("checkpoint v1");
@@ -2389,7 +2915,7 @@ mod tests {
         tree.put(b"k2", b"v3").expect("put v3");
         tree.checkpoint().expect("checkpoint v2");
 
-        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = SnapshotBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(reopened.get(b"k").expect("get k"), Some(b"v2".to_vec()));
         assert_eq!(reopened.get(b"k2").expect("get k2"), Some(b"v3".to_vec()));
     }
@@ -2399,14 +2925,14 @@ mod tests {
         let file = MemoryFile::new();
 
         {
-            let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+            let mut tree = SnapshotBTree::open(file.clone(), small_options()).expect("open tree");
             tree.put(b"persist", b"v1").expect("put persist");
             tree.checkpoint().expect("checkpoint persist");
         }
 
         {
-            let mut recovered =
-                OpfsBTree::open(file.clone(), small_options()).expect("reopen after first crash");
+            let mut recovered = SnapshotBTree::open(file.clone(), small_options())
+                .expect("reopen after first crash");
             assert_eq!(
                 recovered.get(b"persist").expect("get persisted"),
                 Some(b"v1".to_vec())
@@ -2415,7 +2941,7 @@ mod tests {
         }
 
         let mut reopened =
-            OpfsBTree::open(file, small_options()).expect("reopen after second crash");
+            SnapshotBTree::open(file, small_options()).expect("reopen after second crash");
         assert_eq!(
             reopened
                 .get(b"persist")
@@ -2426,194 +2952,9 @@ mod tests {
     }
 
     #[test]
-    fn crash_between_data_flush_and_superblock_swap_can_expose_out_of_bounds_page_id() {
-        let options = small_options();
-        let file = SuperblockCrashFile::new(options.page_size);
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
-
-        let mut next_seed = 0u32;
-        loop {
-            let key = format!("base-{next_seed:05}");
-            let value = format!("value-{next_seed:05}");
-            tree.put(key.as_bytes(), value.as_bytes())
-                .expect("seed put");
-            next_seed += 1;
-
-            let Some(root_page_id) = tree.root_page_id else {
-                continue;
-            };
-            if tree.page_kind(root_page_id).expect("root kind") == PageKind::Internal {
-                break;
-            }
-        }
-
-        tree.checkpoint().expect("checkpoint stable tree");
-        let stable = tree.checkpoint_state();
-        let stable_root = tree.root_page_id.expect("stable root");
-        assert_eq!(
-            tree.page_kind(stable_root).expect("stable root kind"),
-            PageKind::Internal
-        );
-
-        let mut crash_key = None;
-        while tree.total_pages == stable.total_pages || tree.root_page_id != Some(stable_root) {
-            let key = format!("tail-{next_seed:05}");
-            let value = format!("value-{next_seed:05}");
-            tree.put(key.as_bytes(), value.as_bytes())
-                .expect("growth put");
-            next_seed += 1;
-
-            if tree.total_pages > stable.total_pages && tree.root_page_id == Some(stable_root) {
-                crash_key = Some(key);
-                break;
-            }
-        }
-
-        let crash_key = crash_key.expect("insert that allocates a new child page");
-        assert!(
-            tree.total_pages > stable.total_pages,
-            "expected tree growth beyond stable checkpoint"
-        );
-
-        file.arm_superblock_crash();
-        let err = tree
-            .checkpoint()
-            .expect_err("simulated crash during checkpoint");
-        assert!(
-            err.to_string()
-                .contains("simulated crash before superblock swap"),
-            "unexpected checkpoint error: {err}"
-        );
-        file.disarm_superblock_crash();
-
-        let mut reopened =
-            OpfsBTree::open(file.memory_file(), options).expect("reopen after simulated crash");
-        let recovered = reopened.checkpoint_state();
-        assert_eq!(recovered.total_pages, stable.total_pages);
-        assert_eq!(recovered.root_page_id, stable.root_page_id);
-
-        let err = reopened
-            .get(crash_key.as_bytes())
-            .expect_err("mixed checkpoint generations should fail");
-        let message = err.to_string();
-        assert!(
-            message.contains("out of bounds for total_pages"),
-            "unexpected reopen error: {message}"
-        );
-    }
-
-    #[test]
-    fn failpoint_sweep_requires_clean_recovery_for_every_step() {
-        test_failpoints::clear();
-
-        let (max_step, crash_key, crash_value) = {
-            let (mut tree, stable, mut next_seed) = prepare_growth_base_fixture();
-            test_failpoints::clear();
-            let (crash_key, crash_value) =
-                apply_pending_growth(&mut tree, stable, &mut next_seed).expect("baseline growth");
-            tree.checkpoint().expect("baseline checkpoint");
-            (test_failpoints::step_count(), crash_key, crash_value)
-        };
-        assert!(max_step > 0, "expected at least one failpoint site");
-        test_failpoints::clear();
-
-        let mut committed_steps = 0usize;
-        let mut rolled_back_steps = 0usize;
-        let mut failures = Vec::new();
-        for step in 1..=max_step {
-            let (mut tree, stable, mut next_seed) = prepare_growth_base_fixture();
-            test_failpoints::arm(step);
-
-            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                apply_pending_growth(&mut tree, stable, &mut next_seed)
-                    .and_then(|_| tree.checkpoint())
-            }));
-            let hit_sites = test_failpoints::hit_sites();
-            let site = hit_sites
-                .get(step.saturating_sub(1))
-                .copied()
-                .or_else(|| hit_sites.last().copied())
-                .unwrap_or("<no-site-recorded>");
-            match run {
-                Ok(Err(err)) => {
-                    if !err.to_string().contains("simulated failpoint") {
-                        failures.push(format!(
-                            "step {step}: {site} -> unexpected error during run: {err}"
-                        ));
-                    }
-                }
-                Err(payload) => {
-                    let message = panic_message(payload);
-                    if !message.contains("simulated failpoint") {
-                        failures.push(format!(
-                            "step {step}: {site} -> unexpected panic during run: {message}"
-                        ));
-                    }
-                }
-                Ok(Ok(())) => failures.push(format!(
-                    "step {step}: {site} -> armed failpoint did not abort growth/checkpoint"
-                )),
-            }
-            test_failpoints::clear();
-
-            let file = tree.into_file();
-            let outcome = match OpfsBTree::open(file, small_options()) {
-                Ok(mut reopened) => match reopened.get(crash_key.as_bytes()) {
-                    Ok(Some(value)) if value == crash_value.as_bytes() => {
-                        committed_steps = committed_steps.saturating_add(1);
-                        "committed".to_string()
-                    }
-                    Ok(None) => {
-                        rolled_back_steps = rolled_back_steps.saturating_add(1);
-                        "rolled_back".to_string()
-                    }
-                    Err(BTreeError::Corrupt(message))
-                        if message.contains("out of bounds for total_pages") =>
-                    {
-                        let detail =
-                            format!("step {step}: {site} -> corrupt-out-of-bounds ({message})");
-                        failures.push(detail.clone());
-                        detail
-                    }
-                    Err(error) => {
-                        let detail = format!("step {step}: {site} -> read error: {error}");
-                        failures.push(detail.clone());
-                        detail
-                    }
-                    Ok(Some(value)) => {
-                        let detail = format!(
-                            "step {step}: {site} -> unexpected value: {}",
-                            String::from_utf8_lossy(&value)
-                        );
-                        failures.push(detail.clone());
-                        detail
-                    }
-                },
-                Err(error) => {
-                    let detail = format!("step {step}: {site} -> open error: {error}");
-                    failures.push(detail.clone());
-                    detail
-                }
-            };
-
-            println!("failpoint step {step}: {site} -> {outcome}");
-        }
-
-        if !failures.is_empty() {
-            panic!(
-                "failpoint sweep found {} failing step(s); committed={}, rolled_back={}\n{}",
-                failures.len(),
-                committed_steps,
-                rolled_back_steps,
-                failures.join("\n")
-            );
-        }
-    }
-
-    #[test]
     fn cache_eviction_keeps_root_and_budget_after_checkpoint() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, tiny_cache_options()).expect("open tree");
 
         for i in 0..20_000u32 {
             let key = format!("k{:05}", i);
@@ -2648,7 +2989,7 @@ mod tests {
     #[test]
     fn cache_eviction_allowance_defers_until_threshold() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, tiny_cache_options()).expect("open tree");
         let max_cached = tree.max_cached_pages();
         let steady_cached = max_cached.saturating_sub(max_cached / 4).max(1);
         let allowance = 4usize;
@@ -2684,7 +3025,7 @@ mod tests {
         let file = MemoryFile::new();
         let mut options = tiny_cache_options();
         options.read_coalesce_pages = 8;
-        let mut tree = OpfsBTree::open(file, options).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, options).expect("open tree");
 
         for i in 0..8_000u32 {
             let key = format!("k{:05}", i);
@@ -2710,7 +3051,7 @@ mod tests {
     #[test]
     fn cache_eviction_never_drops_dirty_pages() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, tiny_cache_options()).expect("open tree");
         let big = vec![9u8; 9_000];
 
         for i in 0..8u32 {
@@ -2734,7 +3075,7 @@ mod tests {
     #[test]
     fn cache_eviction_preserves_loaded_internal_pages_when_pinned() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_pinned_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, tiny_cache_pinned_options()).expect("open tree");
         let key_suffix = "x".repeat(256);
 
         for i in 0..20_000u32 {
@@ -2770,7 +3111,7 @@ mod tests {
     #[test]
     fn alloc_page_near_prefers_adjacent_free_page() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, small_options()).expect("open tree");
 
         tree.total_pages = 32;
         tree.add_free_page(7);
@@ -2786,11 +3127,135 @@ mod tests {
     #[test]
     fn alloc_page_near_appends_when_preferred_at_tail() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        let mut tree = SnapshotBTree::open(file, small_options()).expect("open tree");
 
         tree.total_pages = 18;
         let allocated = tree.alloc_page_near(17);
         assert_eq!(allocated, 18);
         assert_eq!(tree.total_pages, 19);
+    }
+
+    fn durable_fixture() -> OpfsBTreeFiles<MemoryFile> {
+        OpfsBTreeFiles::memory()
+    }
+
+    fn open_durable_fixture(files: OpfsBTreeFiles<MemoryFile>) -> OpfsBTree<MemoryFile> {
+        OpfsBTree::open(files, BTreeOptions::default()).expect("open durable fixture")
+    }
+
+    fn apply_durable_baseline(tree: &mut OpfsBTree<MemoryFile>) {
+        tree.put(b"kv:stable", b"old").expect("put stable");
+        tree.put(b"kv:delete-me", b"remove-later")
+            .expect("put delete-me");
+        tree.checkpoint().expect("checkpoint baseline");
+    }
+
+    fn apply_durable_update(tree: &mut OpfsBTree<MemoryFile>) {
+        tree.put(b"kv:stable", b"new").expect("update stable");
+        tree.put(b"kv:new", b"fresh").expect("put new");
+        tree.delete(b"kv:delete-me").expect("delete old key");
+    }
+
+    fn collect_durable_tree(tree: &mut OpfsBTree<MemoryFile>) -> Vec<KvPair> {
+        tree.range(b"", &FULL_SCAN_END_KEY, usize::MAX)
+            .expect("scan full tree")
+    }
+
+    fn durable_baseline_tree() -> Vec<KvPair> {
+        vec![
+            (b"kv:delete-me".to_vec(), b"remove-later".to_vec()),
+            (b"kv:stable".to_vec(), b"old".to_vec()),
+        ]
+    }
+
+    fn durable_updated_tree() -> Vec<KvPair> {
+        vec![
+            (b"kv:new".to_vec(), b"fresh".to_vec()),
+            (b"kv:stable".to_vec(), b"new".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn flush_wal_persists_without_checkpoint() {
+        let files = durable_fixture();
+        {
+            let mut tree = open_durable_fixture(files.clone());
+            tree.put(b"kv:stable", b"wal-value").expect("put");
+            tree.flush_wal().expect("flush wal");
+        }
+
+        let mut reopened = open_durable_fixture(files);
+        assert_eq!(
+            reopened.get(b"kv:stable").expect("get reopened"),
+            Some(b"wal-value".to_vec())
+        );
+    }
+
+    #[test]
+    fn failpoint_sweep_requires_clean_recovery_for_every_step() {
+        super::durable_test_failpoints::clear();
+        let probe_files = durable_fixture();
+
+        let max_step = {
+            let mut tree = open_durable_fixture(probe_files.clone());
+            apply_durable_baseline(&mut tree);
+            apply_durable_update(&mut tree);
+            super::durable_test_failpoints::clear();
+            tree.checkpoint().expect("probe checkpoint");
+            super::durable_test_failpoints::step_count()
+        };
+        assert!(max_step > 0, "expected at least one durable failpoint");
+        super::durable_test_failpoints::clear();
+
+        let baseline = durable_baseline_tree();
+        let updated = durable_updated_tree();
+        let mut failures = Vec::new();
+
+        for step in 1..=max_step {
+            let files = durable_fixture();
+            {
+                let mut tree = open_durable_fixture(files.clone());
+                apply_durable_baseline(&mut tree);
+            }
+
+            let mut tree = open_durable_fixture(files.clone());
+            apply_durable_update(&mut tree);
+            super::durable_test_failpoints::arm(step);
+            let result = tree.checkpoint();
+            let hit_sites = super::durable_test_failpoints::hit_sites();
+            let site = hit_sites
+                .get(step.saturating_sub(1))
+                .copied()
+                .or_else(|| hit_sites.last().copied())
+                .unwrap_or("<no-site-recorded>");
+            match result {
+                Ok(()) => failures.push(format!(
+                    "step {step}: {site} -> armed failpoint did not abort durable checkpoint"
+                )),
+                Err(err) if err.to_string().contains("simulated durable failpoint") => {}
+                Err(err) => failures.push(format!(
+                    "step {step}: {site} -> unexpected checkpoint error: {err}"
+                )),
+            }
+            drop(tree);
+            super::durable_test_failpoints::clear();
+
+            let mut reopened = open_durable_fixture(files);
+            let recovered = collect_durable_tree(&mut reopened);
+            if recovered != baseline && recovered != updated {
+                failures.push(format!(
+                    "step {step}: {site} -> mixed durable recovery state: {:?}",
+                    recovered
+                ));
+            }
+        }
+
+        if !failures.is_empty() {
+            panic!(
+                "durable failpoint sweep found {} failing step(s)\n{}",
+                failures.len(),
+                failures.join("\n")
+            );
+        }
     }
 }
