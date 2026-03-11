@@ -51,15 +51,66 @@ export interface TodoWhereInput {
   project?: string | { eq?: string; ne?: string; isNull?: boolean };
 }
 
+type AnyProjectQueryBuilder<T = any> = { readonly _table: "projects" } & QueryBuilder<T>;
+type AnyTodoQueryBuilder<T = any> = { readonly _table: "todos" } & QueryBuilder<T>;
+
 export interface ProjectInclude {
-  todosViaProject?: true | TodoInclude | TodoQueryBuilder;
+  todosViaProject?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
 
 export interface TodoInclude {
-  parent?: true | TodoInclude | TodoQueryBuilder;
-  todosViaParent?: true | TodoInclude | TodoQueryBuilder;
-  project?: true | ProjectInclude | ProjectQueryBuilder;
+  parent?: true | TodoInclude | AnyTodoQueryBuilder<any>;
+  todosViaParent?: true | TodoInclude | AnyTodoQueryBuilder<any>;
+  project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
 }
+
+export type ProjectIncludedRelations<I extends ProjectInclude = {}> = {
+  [K in keyof I]-?: K extends "todosViaProject"
+    ? NonNullable<I["todosViaProject"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo[]
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude>[]
+            : never
+      : never
+    : never;
+};
+
+export type TodoIncludedRelations<I extends TodoInclude = {}> = {
+  [K in keyof I]-?: K extends "parent"
+    ? NonNullable<I["parent"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo | undefined
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? QueryRow | undefined
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude> | undefined
+            : never
+      : never
+    : K extends "todosViaParent"
+      ? NonNullable<I["todosViaParent"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Todo[]
+          : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends TodoInclude
+              ? TodoWithIncludes<RelationInclude>[]
+              : never
+        : never
+      : K extends "project"
+        ? NonNullable<I["project"]> extends infer RelationInclude
+          ? RelationInclude extends true
+            ? Project | undefined
+            : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
+              ? QueryRow | undefined
+              : RelationInclude extends ProjectInclude
+                ? ProjectWithIncludes<RelationInclude> | undefined
+                : never
+          : never
+        : never;
+};
 
 export interface ProjectRelations {
   todosViaProject: Todo[];
@@ -71,79 +122,36 @@ export interface TodoRelations {
   project: Project;
 }
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}> = Project & {
-  todosViaProject?: NonNullable<I["todosViaProject"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Todo[]
-      : RelationInclude extends TodoQueryBuilder<
-            infer QueryInclude extends TodoInclude,
-            infer QuerySelect extends keyof Todo
-          >
-        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends TodoInclude
-          ? TodoWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
-
-export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
-  parent?: NonNullable<I["parent"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Todo
-      : RelationInclude extends TodoQueryBuilder<
-            infer QueryInclude extends TodoInclude,
-            infer QuerySelect extends keyof Todo
-          >
-        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends TodoInclude
-          ? TodoWithIncludes<RelationInclude>
-          : never
-    : never;
-  todosViaParent?: NonNullable<I["todosViaParent"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Todo[]
-      : RelationInclude extends TodoQueryBuilder<
-            infer QueryInclude extends TodoInclude,
-            infer QuerySelect extends keyof Todo
-          >
-        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends TodoInclude
-          ? TodoWithIncludes<RelationInclude>[]
-          : never
-    : never;
-  project?: NonNullable<I["project"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Project
-      : RelationInclude extends ProjectQueryBuilder<
-            infer QueryInclude extends ProjectInclude,
-            infer QuerySelect extends keyof Project
-          >
-        ? ProjectSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends ProjectInclude
-          ? ProjectWithIncludes<RelationInclude>
-          : never
-    : never;
-};
-
-export type ProjectSelected<S extends keyof Project = keyof Project> = Pick<
+export type ProjectWithIncludes<I extends ProjectInclude = {}> = Omit<
   Project,
-  Extract<S | "id", keyof Project>
->;
+  Extract<keyof I, keyof Project>
+> &
+  ProjectIncludedRelations<I>;
+
+export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<
+  Todo,
+  Extract<keyof I, keyof Todo>
+> &
+  TodoIncludedRelations<I>;
+
+export type ProjectSelected<S extends keyof Project | "*" = keyof Project> = "*" extends S
+  ? Project
+  : Pick<Project, Extract<S | "id", keyof Project>>;
 
 export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
-  S extends keyof Project = keyof Project,
-> = ProjectSelected<S> & Omit<ProjectWithIncludes<I>, keyof Project>;
+  S extends keyof Project | "*" = keyof Project,
+> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
+  ProjectIncludedRelations<I>;
 
-export type TodoSelected<S extends keyof Todo = keyof Todo> = Pick<
-  Todo,
-  Extract<S | "id", keyof Todo>
->;
+export type TodoSelected<S extends keyof Todo | "*" = keyof Todo> = "*" extends S
+  ? Todo
+  : Pick<Todo, Extract<S | "id", keyof Todo>>;
 
 export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
-  S extends keyof Todo = keyof Todo,
-> = TodoSelected<S> & Omit<TodoWithIncludes<I>, keyof Todo>;
+  S extends keyof Todo | "*" = keyof Todo,
+> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
   projects: {
@@ -258,7 +266,7 @@ export const wasmSchema: WasmSchema = {
 
 export class ProjectQueryBuilder<
   I extends ProjectInclude = {},
-  S extends keyof Project = keyof Project,
+  S extends keyof Project | "*" = keyof Project,
 > implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
@@ -296,7 +304,9 @@ export class ProjectQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Project>(...columns: [NewS, ...NewS[]]): ProjectQueryBuilder<I, NewS> {
+  select<NewS extends keyof Project | "*">(
+    ...columns: [NewS, ...NewS[]]
+  ): ProjectQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -427,9 +437,13 @@ export class ProjectQueryBuilder<
     });
   }
 
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
   private _clone<
     CloneI extends ProjectInclude = I,
-    CloneS extends keyof Project = S,
+    CloneS extends keyof Project | "*" = S,
   >(): ProjectQueryBuilder<CloneI, CloneS> {
     const clone = new ProjectQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
@@ -452,7 +466,7 @@ export class ProjectQueryBuilder<
 
 export class TodoQueryBuilder<
   I extends TodoInclude = {},
-  S extends keyof Todo = keyof Todo,
+  S extends keyof Todo | "*" = keyof Todo,
 > implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
@@ -490,7 +504,7 @@ export class TodoQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Todo>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS> {
+  select<NewS extends keyof Todo | "*">(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -621,10 +635,14 @@ export class TodoQueryBuilder<
     });
   }
 
-  private _clone<CloneI extends TodoInclude = I, CloneS extends keyof Todo = S>(): TodoQueryBuilder<
-    CloneI,
-    CloneS
-  > {
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends TodoInclude = I,
+    CloneS extends keyof Todo | "*" = S,
+  >(): TodoQueryBuilder<CloneI, CloneS> {
     const clone = new TodoQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };

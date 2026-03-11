@@ -95,7 +95,10 @@ describe("TableDataGrid", () => {
     expect(mockSubscribeAll).toHaveBeenCalledWith(
       expect.any(Object),
       expect.any(Function),
-      expect.objectContaining({ propagation: "local-only" }),
+      expect.objectContaining({
+        propagation: "local-only",
+        visibility: "hidden_from_live_query_list",
+      }),
     );
   });
 });

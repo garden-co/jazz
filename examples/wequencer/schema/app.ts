@@ -118,23 +118,104 @@ export interface ParticipantWhereInput {
   display_name?: string | { eq?: string; ne?: string; contains?: string };
 }
 
+type AnyInstrumentQueryBuilder<T = any> = { readonly _table: "instruments" } & QueryBuilder<T>;
+type AnyJamQueryBuilder<T = any> = { readonly _table: "jams" } & QueryBuilder<T>;
+type AnyBeatQueryBuilder<T = any> = { readonly _table: "beats" } & QueryBuilder<T>;
+type AnyParticipantQueryBuilder<T = any> = { readonly _table: "participants" } & QueryBuilder<T>;
+
 export interface InstrumentInclude {
-  beatsViaInstrument?: true | BeatInclude | BeatQueryBuilder;
+  beatsViaInstrument?: true | BeatInclude | AnyBeatQueryBuilder<any>;
 }
 
 export interface JamInclude {
-  beatsViaJam?: true | BeatInclude | BeatQueryBuilder;
-  participantsViaJam?: true | ParticipantInclude | ParticipantQueryBuilder;
+  beatsViaJam?: true | BeatInclude | AnyBeatQueryBuilder<any>;
+  participantsViaJam?: true | ParticipantInclude | AnyParticipantQueryBuilder<any>;
 }
 
 export interface BeatInclude {
-  jam?: true | JamInclude | JamQueryBuilder;
-  instrument?: true | InstrumentInclude | InstrumentQueryBuilder;
+  jam?: true | JamInclude | AnyJamQueryBuilder<any>;
+  instrument?: true | InstrumentInclude | AnyInstrumentQueryBuilder<any>;
 }
 
 export interface ParticipantInclude {
-  jam?: true | JamInclude | JamQueryBuilder;
+  jam?: true | JamInclude | AnyJamQueryBuilder<any>;
 }
+
+export type InstrumentIncludedRelations<I extends InstrumentInclude = {}> = {
+  [K in keyof I]-?: K extends "beatsViaInstrument"
+    ? NonNullable<I["beatsViaInstrument"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Beat[]
+        : RelationInclude extends AnyBeatQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends BeatInclude
+            ? BeatWithIncludes<RelationInclude>[]
+            : never
+      : never
+    : never;
+};
+
+export type JamIncludedRelations<I extends JamInclude = {}> = {
+  [K in keyof I]-?: K extends "beatsViaJam"
+    ? NonNullable<I["beatsViaJam"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Beat[]
+        : RelationInclude extends AnyBeatQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends BeatInclude
+            ? BeatWithIncludes<RelationInclude>[]
+            : never
+      : never
+    : K extends "participantsViaJam"
+      ? NonNullable<I["participantsViaJam"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Participant[]
+          : RelationInclude extends AnyParticipantQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends ParticipantInclude
+              ? ParticipantWithIncludes<RelationInclude>[]
+              : never
+        : never
+      : never;
+};
+
+export type BeatIncludedRelations<I extends BeatInclude = {}> = {
+  [K in keyof I]-?: K extends "jam"
+    ? NonNullable<I["jam"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Jam
+        : RelationInclude extends AnyJamQueryBuilder<infer QueryRow>
+          ? QueryRow
+          : RelationInclude extends JamInclude
+            ? JamWithIncludes<RelationInclude>
+            : never
+      : never
+    : K extends "instrument"
+      ? NonNullable<I["instrument"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Instrument
+          : RelationInclude extends AnyInstrumentQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends InstrumentInclude
+              ? InstrumentWithIncludes<RelationInclude>
+              : never
+        : never
+      : never;
+};
+
+export type ParticipantIncludedRelations<I extends ParticipantInclude = {}> = {
+  [K in keyof I]-?: K extends "jam"
+    ? NonNullable<I["jam"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Jam
+        : RelationInclude extends AnyJamQueryBuilder<infer QueryRow>
+          ? QueryRow
+          : RelationInclude extends JamInclude
+            ? JamWithIncludes<RelationInclude>
+            : never
+      : never
+    : never;
+};
 
 export interface InstrumentRelations {
   beatsViaInstrument: Beat[];
@@ -154,126 +235,63 @@ export interface ParticipantRelations {
   jam: Jam;
 }
 
-export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Instrument & {
-  beatsViaInstrument?: NonNullable<I["beatsViaInstrument"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Beat[]
-      : RelationInclude extends BeatQueryBuilder<
-            infer QueryInclude extends BeatInclude,
-            infer QuerySelect extends keyof Beat
-          >
-        ? BeatSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends BeatInclude
-          ? BeatWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
-
-export type JamWithIncludes<I extends JamInclude = {}> = Jam & {
-  beatsViaJam?: NonNullable<I["beatsViaJam"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Beat[]
-      : RelationInclude extends BeatQueryBuilder<
-            infer QueryInclude extends BeatInclude,
-            infer QuerySelect extends keyof Beat
-          >
-        ? BeatSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends BeatInclude
-          ? BeatWithIncludes<RelationInclude>[]
-          : never
-    : never;
-  participantsViaJam?: NonNullable<I["participantsViaJam"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Participant[]
-      : RelationInclude extends ParticipantQueryBuilder<
-            infer QueryInclude extends ParticipantInclude,
-            infer QuerySelect extends keyof Participant
-          >
-        ? ParticipantSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends ParticipantInclude
-          ? ParticipantWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
-
-export type BeatWithIncludes<I extends BeatInclude = {}> = Beat & {
-  jam?: NonNullable<I["jam"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Jam
-      : RelationInclude extends JamQueryBuilder<
-            infer QueryInclude extends JamInclude,
-            infer QuerySelect extends keyof Jam
-          >
-        ? JamSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends JamInclude
-          ? JamWithIncludes<RelationInclude>
-          : never
-    : never;
-  instrument?: NonNullable<I["instrument"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Instrument
-      : RelationInclude extends InstrumentQueryBuilder<
-            infer QueryInclude extends InstrumentInclude,
-            infer QuerySelect extends keyof Instrument
-          >
-        ? InstrumentSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends InstrumentInclude
-          ? InstrumentWithIncludes<RelationInclude>
-          : never
-    : never;
-};
-
-export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Participant & {
-  jam?: NonNullable<I["jam"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Jam
-      : RelationInclude extends JamQueryBuilder<
-            infer QueryInclude extends JamInclude,
-            infer QuerySelect extends keyof Jam
-          >
-        ? JamSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends JamInclude
-          ? JamWithIncludes<RelationInclude>
-          : never
-    : never;
-};
-
-export type InstrumentSelected<S extends keyof Instrument = keyof Instrument> = Pick<
+export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Omit<
   Instrument,
-  Extract<S | "id", keyof Instrument>
->;
+  Extract<keyof I, keyof Instrument>
+> &
+  InstrumentIncludedRelations<I>;
+
+export type JamWithIncludes<I extends JamInclude = {}> = Omit<Jam, Extract<keyof I, keyof Jam>> &
+  JamIncludedRelations<I>;
+
+export type BeatWithIncludes<I extends BeatInclude = {}> = Omit<
+  Beat,
+  Extract<keyof I, keyof Beat>
+> &
+  BeatIncludedRelations<I>;
+
+export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Omit<
+  Participant,
+  Extract<keyof I, keyof Participant>
+> &
+  ParticipantIncludedRelations<I>;
+
+export type InstrumentSelected<S extends keyof Instrument | "*" = keyof Instrument> = "*" extends S
+  ? Instrument
+  : Pick<Instrument, Extract<S | "id", keyof Instrument>>;
 
 export type InstrumentSelectedWithIncludes<
   I extends InstrumentInclude = {},
-  S extends keyof Instrument = keyof Instrument,
-> = InstrumentSelected<S> & Omit<InstrumentWithIncludes<I>, keyof Instrument>;
+  S extends keyof Instrument | "*" = keyof Instrument,
+> = Omit<InstrumentSelected<S>, Extract<keyof I, keyof InstrumentSelected<S>>> &
+  InstrumentIncludedRelations<I>;
 
-export type JamSelected<S extends keyof Jam = keyof Jam> = Pick<Jam, Extract<S | "id", keyof Jam>>;
+export type JamSelected<S extends keyof Jam | "*" = keyof Jam> = "*" extends S
+  ? Jam
+  : Pick<Jam, Extract<S | "id", keyof Jam>>;
 
 export type JamSelectedWithIncludes<
   I extends JamInclude = {},
-  S extends keyof Jam = keyof Jam,
-> = JamSelected<S> & Omit<JamWithIncludes<I>, keyof Jam>;
+  S extends keyof Jam | "*" = keyof Jam,
+> = Omit<JamSelected<S>, Extract<keyof I, keyof JamSelected<S>>> & JamIncludedRelations<I>;
 
-export type BeatSelected<S extends keyof Beat = keyof Beat> = Pick<
-  Beat,
-  Extract<S | "id", keyof Beat>
->;
+export type BeatSelected<S extends keyof Beat | "*" = keyof Beat> = "*" extends S
+  ? Beat
+  : Pick<Beat, Extract<S | "id", keyof Beat>>;
 
 export type BeatSelectedWithIncludes<
   I extends BeatInclude = {},
-  S extends keyof Beat = keyof Beat,
-> = BeatSelected<S> & Omit<BeatWithIncludes<I>, keyof Beat>;
+  S extends keyof Beat | "*" = keyof Beat,
+> = Omit<BeatSelected<S>, Extract<keyof I, keyof BeatSelected<S>>> & BeatIncludedRelations<I>;
 
-export type ParticipantSelected<S extends keyof Participant = keyof Participant> = Pick<
-  Participant,
-  Extract<S | "id", keyof Participant>
->;
+export type ParticipantSelected<S extends keyof Participant | "*" = keyof Participant> =
+  "*" extends S ? Participant : Pick<Participant, Extract<S | "id", keyof Participant>>;
 
 export type ParticipantSelectedWithIncludes<
   I extends ParticipantInclude = {},
-  S extends keyof Participant = keyof Participant,
-> = ParticipantSelected<S> & Omit<ParticipantWithIncludes<I>, keyof Participant>;
+  S extends keyof Participant | "*" = keyof Participant,
+> = Omit<ParticipantSelected<S>, Extract<keyof I, keyof ParticipantSelected<S>>> &
+  ParticipantIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
   instruments: {
@@ -397,7 +415,7 @@ export const wasmSchema: WasmSchema = {
 
 export class InstrumentQueryBuilder<
   I extends InstrumentInclude = {},
-  S extends keyof Instrument = keyof Instrument,
+  S extends keyof Instrument | "*" = keyof Instrument,
 > implements QueryBuilder<InstrumentSelectedWithIncludes<I, S>> {
   readonly _table = "instruments";
   readonly _schema: WasmSchema = wasmSchema;
@@ -435,7 +453,7 @@ export class InstrumentQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Instrument>(
+  select<NewS extends keyof Instrument | "*">(
     ...columns: [NewS, ...NewS[]]
   ): InstrumentQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
@@ -571,9 +589,13 @@ export class InstrumentQueryBuilder<
     });
   }
 
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
   private _clone<
     CloneI extends InstrumentInclude = I,
-    CloneS extends keyof Instrument = S,
+    CloneS extends keyof Instrument | "*" = S,
   >(): InstrumentQueryBuilder<CloneI, CloneS> {
     const clone = new InstrumentQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
@@ -596,7 +618,7 @@ export class InstrumentQueryBuilder<
 
 export class JamQueryBuilder<
   I extends JamInclude = {},
-  S extends keyof Jam = keyof Jam,
+  S extends keyof Jam | "*" = keyof Jam,
 > implements QueryBuilder<JamSelectedWithIncludes<I, S>> {
   readonly _table = "jams";
   readonly _schema: WasmSchema = wasmSchema;
@@ -634,7 +656,7 @@ export class JamQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Jam>(...columns: [NewS, ...NewS[]]): JamQueryBuilder<I, NewS> {
+  select<NewS extends keyof Jam | "*">(...columns: [NewS, ...NewS[]]): JamQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -765,10 +787,14 @@ export class JamQueryBuilder<
     });
   }
 
-  private _clone<CloneI extends JamInclude = I, CloneS extends keyof Jam = S>(): JamQueryBuilder<
-    CloneI,
-    CloneS
-  > {
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends JamInclude = I,
+    CloneS extends keyof Jam | "*" = S,
+  >(): JamQueryBuilder<CloneI, CloneS> {
     const clone = new JamQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -790,7 +816,7 @@ export class JamQueryBuilder<
 
 export class BeatQueryBuilder<
   I extends BeatInclude = {},
-  S extends keyof Beat = keyof Beat,
+  S extends keyof Beat | "*" = keyof Beat,
 > implements QueryBuilder<BeatSelectedWithIncludes<I, S>> {
   readonly _table = "beats";
   readonly _schema: WasmSchema = wasmSchema;
@@ -828,7 +854,7 @@ export class BeatQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Beat>(...columns: [NewS, ...NewS[]]): BeatQueryBuilder<I, NewS> {
+  select<NewS extends keyof Beat | "*">(...columns: [NewS, ...NewS[]]): BeatQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -959,10 +985,14 @@ export class BeatQueryBuilder<
     });
   }
 
-  private _clone<CloneI extends BeatInclude = I, CloneS extends keyof Beat = S>(): BeatQueryBuilder<
-    CloneI,
-    CloneS
-  > {
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends BeatInclude = I,
+    CloneS extends keyof Beat | "*" = S,
+  >(): BeatQueryBuilder<CloneI, CloneS> {
     const clone = new BeatQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -984,7 +1014,7 @@ export class BeatQueryBuilder<
 
 export class ParticipantQueryBuilder<
   I extends ParticipantInclude = {},
-  S extends keyof Participant = keyof Participant,
+  S extends keyof Participant | "*" = keyof Participant,
 > implements QueryBuilder<ParticipantSelectedWithIncludes<I, S>> {
   readonly _table = "participants";
   readonly _schema: WasmSchema = wasmSchema;
@@ -1022,7 +1052,7 @@ export class ParticipantQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Participant>(
+  select<NewS extends keyof Participant | "*">(
     ...columns: [NewS, ...NewS[]]
   ): ParticipantQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
@@ -1158,9 +1188,13 @@ export class ParticipantQueryBuilder<
     });
   }
 
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
   private _clone<
     CloneI extends ParticipantInclude = I,
-    CloneS extends keyof Participant = S,
+    CloneS extends keyof Participant | "*" = S,
   >(): ParticipantQueryBuilder<CloneI, CloneS> {
     const clone = new ParticipantQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];

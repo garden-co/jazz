@@ -9,6 +9,7 @@ export {
   type QueryExecutionOptions,
   type QueryInput,
   type QueryPropagation,
+  type QueryVisibility,
   type RequestLike,
   type Row,
   type Runtime,
@@ -21,6 +22,7 @@ export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transpor
 export {
   createDb,
   Db,
+  type ActiveQuerySubscriptionTrace,
   type DbConfig,
   type QueryBuilder,
   type QueryOptions,
@@ -33,6 +35,12 @@ export {
   fetchStoredWasmSchema,
   type FetchStoredWasmSchemaOptions,
 } from "./schema-fetch.js";
+export {
+  fetchServerSubscriptions,
+  type FetchServerSubscriptionsOptions,
+  type IntrospectionSubscriptionGroup,
+  type IntrospectionSubscriptionResponse,
+} from "./introspection-fetch.js";
 export { resolveLocalAuthDefaults } from "./local-auth.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";

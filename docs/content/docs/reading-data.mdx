@@ -87,6 +87,18 @@ useEffect(() => {
 }, [rows]);
 ```
 
+### Running queries conditionally
+
+There are some cases where you want to defer running a query. This could happen if the query depends on an input the user hasn't provided yet,
+or on the output of a previous query. In these cases, you can pass `undefined` to `useAll` to defer the query until the condition is met.
+
+```ts
+const [filter, setFilter] = useState<string | null>(null);
+const rows = useAll(filter ? app.todos.where({ title: { contains: filter } }) : undefined);
+```
+
+When an undefined query is passed to `useAll`, it will return `undefined` until the query is provided.
+
 ### React Suspense and Transitions
 
 The docs React example app includes a Suspense-based list that keeps the previous result visible
@@ -249,8 +261,12 @@ Recursive queries compute bounded transitive closures from a seed row set.
 - `db.all(query, options?)`
 - `db.one(query, options?)`
 - `db.subscribeAll(query, callback, options?)`
+- `useAll(query, options?)`
+- `useAllSuspense(query, options?)`
+- `new QuerySubscription(query, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
 - `options.localUpdates`: `"immediate" | "deferred"` (default: `"immediate"`)
+- `options.propagation`: `"full" | "local-only"` (default: `"full"`)
 
 Durability tiers control when initial query delivery is considered confirmed:
 
@@ -263,6 +279,7 @@ Defaults:
 - Browser/client default tier is `worker`.
 - Backend/server-connected default tier is `edge`.
 - `localUpdates: "immediate"` keeps local subscription updates synchronous after the first tier-confirmed snapshot. The initial delivery remains tier-gated.
+- `propagation: "full"` sends query updates through the normal local+remote path. `propagation: "local-only"` limits delivery to local changes.
 
 Tradeoff summary:
 
@@ -286,6 +303,8 @@ Read durability options pair naturally with write durability tiers:
 
 - Use write durability tiers to gate mutation durability checkpoints.
 - Use read durability options to gate query/subscription delivery checkpoints.
+- React hooks forward these options to the underlying `db.subscribeAll(...)` subscription.
+- Svelte `QuerySubscription` forwards these options to the underlying `db.subscribeAll(...)` subscription.
 
 See [Write Durability Tiers](/docs/writing-data#write-durability-tiers) for write-side semantics.
 

@@ -1,0 +1,127 @@
+name: Build jazz-rn (React Native)
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      concurrency:
+        type: string
+        default: rn
+        description: Concurrency group suffix for this workflow
+      disableAndroid:
+        type: boolean
+        default: false
+        description: Skip Android build job
+      disableIOS:
+        type: boolean
+        default: false
+        description: Skip iOS build job
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency }}
+  cancel-in-progress: true
+
+env:
+  PACKAGE_PATH: crates/jazz-rn
+  PACKAGE_NAME: jazz-rn
+
+jobs:
+  build-android:
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+    name: Build Android artifacts
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ !inputs.disableAndroid }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+            i686-linux-android
+            x86_64-linux-android
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-ndk
+        run: cargo binstall cargo-ndk
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Show sccache stats (before build)
+        run: sccache --show-stats || true
+
+      - name: Build Android artifacts
+        run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:android
+
+      - name: Show sccache stats (after build)
+        run: sccache --show-stats || true
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jazz-rn-android
+          if-no-files-found: error
+          path: |
+            ${{ env.PACKAGE_PATH }}/android/src/main/jniLibs
+            ${{ env.PACKAGE_PATH }}/android/src/main/java
+            ${{ env.PACKAGE_PATH }}/cpp/generated
+
+  build-ios:
+    name: Build iOS artifacts
+    runs-on: macos-latest
+    if: ${{ !inputs.disableIOS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+        with:
+          cache: "false"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: |
+            aarch64-apple-ios
+            aarch64-apple-ios-sim
+            x86_64-apple-ios
+
+      - name: Build iOS artifacts
+        run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:ios
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jazz-rn-ios
+          if-no-files-found: error
+          path: |
+            ${{ env.PACKAGE_PATH }}/JazzRnFramework.xcframework
+            ${{ env.PACKAGE_PATH }}/ios
+            ${{ env.PACKAGE_PATH }}/cpp/generated

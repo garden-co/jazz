@@ -179,7 +179,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ///
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
-    /// - `storage` - The storage backend (e.g., MemoryStorage, SurrealKvStorage)
+    /// - `storage` - The storage backend (e.g., MemoryStorage, FjallStorage)
     /// - `sync_callback` - Called when sync messages need to be sent
     pub fn new<F>(schema_manager: SchemaManager, storage: S, sync_callback: F) -> Self
     where
@@ -451,6 +451,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
+    }
+
+    /// Return grouped telemetry for active downstream server subscriptions.
+    pub fn server_subscription_telemetry(
+        &self,
+    ) -> Result<Vec<crate::query_manager::manager::ServerSubscriptionTelemetryGroup>, RuntimeError>
+    {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core
+            .schema_manager()
+            .query_manager()
+            .server_subscription_telemetry())
     }
 
     /// Access the underlying storage (for flushing, etc).

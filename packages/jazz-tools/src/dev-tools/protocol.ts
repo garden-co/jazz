@@ -1,4 +1,10 @@
-import type { DurabilityTier, QueryExecutionOptions, QueryInput, WasmSchema } from "../index.js";
+import type {
+  ActiveQuerySubscriptionTrace,
+  DurabilityTier,
+  QueryExecutionOptions,
+  QueryInput,
+  WasmSchema,
+} from "../index.js";
 import type { DbConfig } from "../runtime/db.js";
 
 export const DEVTOOLS_BRIDGE_CHANNEL = "jazz-devtools-v1" as const;
@@ -10,12 +16,14 @@ export const DEVTOOLS_COMMANDS = {
   CLIENT_QUERY: "client.query",
   CLIENT_SUBSCRIBE: "client.subscribe",
   CLIENT_UNSUBSCRIBE: "client.unsubscribe",
+  CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS: "client.listActiveQuerySubscriptions",
 } as const;
 
 export const DEVTOOLS_EVENTS = {
   CONNECTED: "devtools.connected",
   DISCONNECTED: "devtools.disconnected",
   CLIENT_SUBSCRIPTION_DELTA: "client.subscription.delta",
+  CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED: "client.activeQuerySubscriptions.changed",
 } as const;
 
 export type DevtoolsBridgeCommand = (typeof DEVTOOLS_COMMANDS)[keyof typeof DEVTOOLS_COMMANDS];
@@ -52,12 +60,17 @@ export type DevtoolsClientUnsubscribeRequestPayload = {
 };
 export type DevtoolsClientUnsubscribeResponsePayload = { unsubscribed: true };
 
+export type DevtoolsClientListActiveQuerySubscriptionsRequestPayload = Record<string, never>;
+export type DevtoolsClientListActiveQuerySubscriptionsResponsePayload =
+  ActiveQuerySubscriptionTrace[];
+
 export interface DevtoolsRequestPayloadByCommand {
   [DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE]: DevtoolsBridgeHandshakeRequestPayload;
   [DEVTOOLS_COMMANDS.ANNOUNCE]: DevtoolsAnnounceRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_QUERY]: DevtoolsClientQueryRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS]: DevtoolsClientListActiveQuerySubscriptionsRequestPayload;
 }
 
 export interface DevtoolsResponsePayloadByCommand {
@@ -66,6 +79,7 @@ export interface DevtoolsResponsePayloadByCommand {
   [DEVTOOLS_COMMANDS.CLIENT_QUERY]: DevtoolsClientQueryResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS]: DevtoolsClientListActiveQuerySubscriptionsResponsePayload;
 }
 
 export type DevtoolsRequestEnvelope =
@@ -103,6 +117,13 @@ export type DevtoolsRequestEnvelope =
       requestId: string;
       command: (typeof DEVTOOLS_COMMANDS)["CLIENT_UNSUBSCRIBE"];
       payload: DevtoolsClientUnsubscribeRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS"];
+      payload: DevtoolsClientListActiveQuerySubscriptionsRequestPayload;
     };
 
 export type DevtoolsResponseEnvelope<
@@ -121,10 +142,15 @@ export type DevtoolsSubscriptionDeltaEventPayload = {
   delta: unknown;
 };
 
+export type DevtoolsActiveQuerySubscriptionsChangedEventPayload = {
+  subscriptions: ActiveQuerySubscriptionTrace[];
+};
+
 export interface DevtoolsEventPayloadByEvent {
   [DEVTOOLS_EVENTS.CONNECTED]: undefined;
   [DEVTOOLS_EVENTS.DISCONNECTED]: undefined;
   [DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA]: DevtoolsSubscriptionDeltaEventPayload;
+  [DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED]: DevtoolsActiveQuerySubscriptionsChangedEventPayload;
 }
 
 export type DevtoolsEventEnvelope<TEvent extends DevtoolsBridgeEvent = DevtoolsBridgeEvent> = {
@@ -159,6 +185,7 @@ export function sanitizeDbConfigForBridge(dbConfig: DbConfig | null): DbConfig |
     serverPathPrefix: dbConfig.serverPathPrefix,
     env: dbConfig.env,
     userBranch: dbConfig.userBranch,
+    devMode: dbConfig.devMode,
     jwtToken: dbConfig.jwtToken,
     localAuthMode: dbConfig.localAuthMode,
     localAuthToken: dbConfig.localAuthToken,

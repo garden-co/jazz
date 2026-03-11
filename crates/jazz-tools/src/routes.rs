@@ -1,7 +1,7 @@
 //! HTTP routes for the Jazz server.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
@@ -25,6 +25,7 @@ use crate::middleware::auth::{
     validate_backend_secret, validate_jwt_identity,
 };
 use jazz_tools::query_manager::types::SchemaHash;
+use jazz_tools::schema_manager::AppId;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -32,6 +33,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/sync", post(sync_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
+        .route(
+            "/admin/introspection/subscriptions",
+            get(admin_subscription_introspection_handler),
+        )
         // Link a local anonymous/demo principal to an external identity.
         .route("/auth/link-external", post(link_external_handler))
         // Health check
@@ -55,6 +60,20 @@ struct EventsParams {
 #[derive(Debug, Serialize)]
 struct SchemaHashesResponse {
     hashes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminSubscriptionIntrospectionParams {
+    #[serde(rename = "appId")]
+    app_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminSubscriptionIntrospectionResponse {
+    app_id: String,
+    generated_at: u64,
+    queries: Vec<jazz_tools::query_manager::manager::ServerSubscriptionTelemetryGroup>,
 }
 
 #[derive(Debug, Serialize)]
@@ -470,6 +489,71 @@ async fn schema_hashes_handler(
     }
 }
 
+async fn admin_subscription_introspection_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<AdminSubscriptionIntrospectionParams>,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    let Some(app_id_text) = params.app_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "appId query parameter is required",
+            )),
+        )
+            .into_response();
+    };
+
+    let requested_app_id = match parse_app_id_param(app_id_text) {
+        Ok(app_id) => app_id,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
+
+    if requested_app_id != state.app_id {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "app not found: {}",
+                app_id_text.trim()
+            ))),
+        )
+            .into_response();
+    }
+
+    match state.runtime.server_subscription_telemetry() {
+        Ok(queries) => Json(AdminSubscriptionIntrospectionResponse {
+            app_id: state.app_id.to_string(),
+            generated_at: unix_timestamp_millis(),
+            queries,
+        })
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to read subscription telemetry: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
 fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, String> {
     let decoded_hash_bytes = hex::decode(hash_text)
         .map_err(|_| "invalid schema hash: expected hex string".to_string())?;
@@ -480,6 +564,34 @@ fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, String> {
     let mut hash_bytes = [0u8; 32];
     hash_bytes.copy_from_slice(&decoded_hash_bytes);
     Ok(SchemaHash::from_bytes(hash_bytes))
+}
+
+fn parse_app_id_param(app_id_text: &str) -> Result<AppId, String> {
+    let trimmed = app_id_text.trim();
+    if trimmed.is_empty() {
+        return Err("invalid appId: expected UUID or app identifier".to_string());
+    }
+
+    if let Ok(app_id) = AppId::from_string(trimmed) {
+        return Ok(app_id);
+    }
+
+    if trimmed
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '-' | '_' | '.'))
+    {
+        return Ok(AppId::from_name(trimmed));
+    }
+
+    Err("invalid appId: expected UUID or app identifier".to_string())
+}
+
+fn unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 async fn link_external_handler(
@@ -683,11 +795,17 @@ mod tests {
 
     use axum::body;
     use axum::routing::get;
-    use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
-    use groove::runtime_tokio::TokioRuntime;
-    use groove::schema_manager::{AppId, SchemaManager};
-    use groove::storage::SurrealKvStorage;
-    use groove::sync_manager::{ClientId, DurabilityTier, SyncManager, SyncPayload};
+    use jazz_tools::query_manager::query::QueryBuilder;
+    use jazz_tools::query_manager::types::{
+        ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
+    };
+    use jazz_tools::runtime_tokio::TokioRuntime;
+    use jazz_tools::schema_manager::{AppId, SchemaManager};
+    use jazz_tools::storage::FjallStorage;
+    use jazz_tools::sync_manager::{
+        ClientId, DurabilityTier, InboxEntry, QueryId, QueryPropagation, Source, SyncManager,
+        SyncPayload,
+    };
     use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::{RwLock, broadcast};
@@ -696,12 +814,70 @@ mod tests {
     use crate::commands::server::{ExternalIdentityStore, ServerState};
     use crate::middleware::AuthConfig;
 
+    fn test_auth_config() -> AuthConfig {
+        AuthConfig {
+            backend_secret: None,
+            admin_secret: Some("admin-secret".to_string()),
+            allow_anonymous: true,
+            allow_demo: true,
+            jwks_url: None,
+            jwks_set: None,
+        }
+    }
+
+    fn make_state_with_schema(
+        schema: jazz_tools::query_manager::types::Schema,
+    ) -> (TempDir, Arc<ServerState>) {
+        let data_dir = TempDir::new().expect("temp dir");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+        let schema_manager = SchemaManager::new(
+            sync_manager,
+            schema,
+            AppId::from_name("test-app"),
+            "prod",
+            "main",
+        )
+        .expect("schema manager");
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
+
+        let state = Arc::new(ServerState {
+            runtime,
+            app_id: AppId::from_name("test-app"),
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            sync_broadcast: sync_tx,
+            auth_config: test_auth_config(),
+            external_identity_store: Arc::new(
+                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
+            ),
+            external_identities: RwLock::new(HashMap::new()),
+        });
+
+        (data_dir, state)
+    }
+
+    fn make_test_router(state: Arc<ServerState>) -> axum::Router {
+        axum::Router::new()
+            .route("/schema/:hash", get(schema_handler))
+            .route("/schemas", get(schema_hashes_handler))
+            .route(
+                "/admin/introspection/subscriptions",
+                get(admin_subscription_introspection_handler),
+            )
+            .with_state(state)
+    }
+
     #[tokio::test]
     async fn schema_handler_requires_admin_secret() {
         let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.surrealkv");
-        let storage =
-            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
 
         let sync_manager = SyncManager::new()
             .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
@@ -780,11 +956,6 @@ mod tests {
 
     #[tokio::test]
     async fn schema_handlers_return_hashes_and_requested_schema() {
-        let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.surrealkv");
-        let storage =
-            SurrealKvStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
-
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -793,46 +964,9 @@ mod tests {
             )
             .build();
         let schema_hash = SchemaHash::compute(&schema);
-        let sync_manager = SyncManager::new()
-            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_name("test-app"),
-            "prod",
-            "main",
-        )
-        .expect("schema manager");
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+        let (_data_dir, state) = make_state_with_schema(schema);
 
-        let auth_config = AuthConfig {
-            backend_secret: None,
-            admin_secret: Some("admin-secret".to_string()),
-            allow_anonymous: true,
-            allow_demo: true,
-            jwks_url: None,
-            jwks_set: None,
-        };
-
-        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
-
-        let state = Arc::new(ServerState {
-            runtime,
-            app_id: AppId::from_name("test-app"),
-            connections: RwLock::new(HashMap::new()),
-            next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            sync_broadcast: sync_tx,
-            auth_config,
-            external_identity_store: Arc::new(
-                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
-            ),
-            external_identities: RwLock::new(HashMap::new()),
-        });
-
-        let app = axum::Router::new()
-            .route("/schema/:hash", get(schema_handler))
-            .route("/schemas", get(schema_hashes_handler))
-            .with_state(state);
+        let app = make_test_router(state);
 
         let hashes_response = app
             .clone()
@@ -880,5 +1014,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_hash_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_subscription_introspection_requires_admin_secret_and_valid_app_id() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let (_data_dir, state) = make_state_with_schema(schema);
+        let app = make_test_router(state.clone());
+
+        let without_secret = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/introspection/subscriptions?appId=test-app")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(without_secret.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_secret = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/introspection/subscriptions?appId=test-app")
+                    .header("X-Jazz-Admin-Secret", "wrong-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_secret.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_app_id = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/introspection/subscriptions")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_app_id.status(), StatusCode::BAD_REQUEST);
+
+        let invalid_app_id = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/introspection/subscriptions?appId=bad/id")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_app_id.status(), StatusCode::BAD_REQUEST);
+
+        let mismatched_app_id = make_test_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/introspection/subscriptions?appId=other-app")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched_app_id.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_subscription_introspection_groups_active_server_subscriptions() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let (_data_dir, state) = make_state_with_schema(schema);
+
+        let repeated_query = QueryBuilder::new("users").build();
+        let filtered_query = QueryBuilder::new("users")
+            .filter_eq("name", QueryValue::Text("Alice".to_string()))
+            .build();
+
+        for (index, query, propagation) in [
+            (1_u64, repeated_query.clone(), QueryPropagation::Full),
+            (2_u64, repeated_query.clone(), QueryPropagation::Full),
+            (3_u64, repeated_query.clone(), QueryPropagation::LocalOnly),
+            (4_u64, filtered_query, QueryPropagation::Full),
+        ] {
+            let client_id = ClientId::new();
+            state.runtime.add_client(client_id, None).unwrap();
+            state
+                .runtime
+                .push_sync_inbox(InboxEntry {
+                    source: Source::Client(client_id),
+                    payload: SyncPayload::QuerySubscription {
+                        query_id: QueryId(index),
+                        query: Box::new(query),
+                        session: None,
+                        propagation,
+                    },
+                })
+                .unwrap();
+        }
+        state.runtime.flush().await.unwrap();
+
+        let response = make_test_router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/introspection/subscriptions?appId=test-app")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("telemetry body");
+        let json: Value = serde_json::from_slice(&body).expect("telemetry json");
+
+        let expected_app_id = state.app_id.to_string();
+        assert_eq!(json["appId"].as_str(), Some(expected_app_id.as_str()));
+        assert!(json["generatedAt"].as_u64().is_some());
+
+        let groups = json["queries"].as_array().expect("queries array");
+        assert_eq!(groups.len(), 3);
+
+        let repeated_full = groups.iter().find(|group| {
+            group["count"].as_u64() == Some(2) && group["propagation"].as_str() == Some("full")
+        });
+        let repeated_full = repeated_full.expect("expected grouped full subscriptions");
+        assert_eq!(repeated_full["table"].as_str(), Some("users"));
+        assert_eq!(
+            repeated_full["branches"]
+                .as_array()
+                .map(|branches| branches.len())
+                .unwrap_or_default(),
+            1
+        );
+        assert!(repeated_full["groupKey"].as_str().is_some());
+
+        assert!(groups.iter().any(|group| {
+            group["count"].as_u64() == Some(1)
+                && group["propagation"].as_str() == Some("local-only")
+        }));
+        assert!(groups.iter().any(|group| {
+            group["count"].as_u64() == Some(1)
+                && group["query"]
+                    .as_str()
+                    .map(|query| query.contains("\"name\""))
+                    .unwrap_or(false)
+        }));
     }
 }

@@ -13,10 +13,10 @@ mod key_codec;
 mod opfs_btree;
 mod storage_core;
 pub use opfs_btree::OpfsBTreeStorage;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-mod surrealkv;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-pub use surrealkv::SurrealKvStorage;
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+mod fjall;
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+pub use fjall::FjallStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
