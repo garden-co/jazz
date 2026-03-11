@@ -1063,6 +1063,63 @@ fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
 }
 
 #[test]
+fn exact_match_sorted_subscription_reorders_without_scanning_global_top_k() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .order_by_desc("score")
+        .limit(10)
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    for score in [1000, 999, 998, 997, 996] {
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(score)],
+        )
+        .unwrap();
+    }
+    for score in [50, 40] {
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(score)],
+        )
+        .unwrap();
+    }
+    qm.process(&mut storage);
+    let _initial_updates = qm.take_updates();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(60)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("filtered top-k subscription should emit an update for the new matching row");
+    assert_eq!(delta.added.len(), 1);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
+    assert_eq!(results[0].1[1], Value::Integer(60));
+    assert_eq!(results[1].1[1], Value::Integer(50));
+    assert_eq!(results[2].1[1], Value::Integer(40));
+}
+
+#[test]
 fn offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

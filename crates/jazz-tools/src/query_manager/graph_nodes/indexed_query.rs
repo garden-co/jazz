@@ -20,6 +20,8 @@ use crate::storage::{IndexScanDirection, OrderedIndexCursor, OrderedIndexScan, S
 use super::{SourceContext, SourceNode};
 
 const DRIVER_BATCH_SIZE: usize = 64;
+const DIRECT_REQUIRED_IDS_MIN: usize = 256;
+const DIRECT_REQUIRED_IDS_PREFIX_MULTIPLIER: usize = 4;
 
 #[derive(Debug)]
 pub(crate) struct IndexedQueryNodeConfig {
@@ -224,6 +226,16 @@ impl IndexedQueryNode {
             .map(|limit| self.config.offset.saturating_add(limit))
     }
 
+    fn max_direct_required_ids(&self) -> usize {
+        self.desired_prefix_len()
+            .map(|prefix_len| {
+                prefix_len
+                    .saturating_mul(DIRECT_REQUIRED_IDS_PREFIX_MULTIPLIER)
+                    .max(DIRECT_REQUIRED_IDS_MIN)
+            })
+            .unwrap_or(DIRECT_REQUIRED_IDS_MIN)
+    }
+
     fn build_streams(&self, storage: &dyn Storage) -> Vec<StreamState> {
         let mut streams = Vec::new();
         for branch in &self.config.branches {
@@ -418,6 +430,10 @@ impl IndexedQueryNode {
         ctx: &SourceContext,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) {
+        if self.seed_stream_from_required_ids(stream, ctx.storage, row_loader) {
+            return;
+        }
+
         while stream.buffer.is_empty() && !stream.exhausted {
             let cursors = ctx.storage.index_scan_ordered(OrderedIndexScan {
                 table: self.config.driver.table.as_str(),
@@ -480,6 +496,82 @@ impl IndexedQueryNode {
                 stream.exhausted = true;
             }
         }
+    }
+
+    fn seed_stream_from_required_ids(
+        &self,
+        stream: &mut StreamState,
+        storage: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+    ) -> bool {
+        // Small exact-match candidate sets are cheaper to load and sort directly
+        // than to rediscover by walking the full ordered index on every refresh.
+        if stream.cursor.is_some() || !stream.buffer.is_empty() || stream.exhausted {
+            return false;
+        }
+
+        let Some(required_ids) = stream.required_ids.as_ref() else {
+            return false;
+        };
+        if required_ids.len() > self.max_direct_required_ids() {
+            return false;
+        }
+
+        let Some(driver_descriptor) = self
+            .config
+            .tuple_descriptor
+            .element(self.config.driver.scope_index)
+            .map(|element| &element.descriptor)
+        else {
+            return false;
+        };
+
+        let branch_name = BranchName::new(&stream.branch);
+        let mut candidates = Vec::with_capacity(required_ids.len());
+        for row_id in required_ids {
+            let Some(loaded) = row_loader(*row_id) else {
+                continue;
+            };
+            let row = Row::new(*row_id, loaded.data, loaded.commit_id);
+            let provenance = if loaded.provenance.is_empty() {
+                [(*row_id, branch_name)].into_iter().collect()
+            } else {
+                loaded.provenance
+            };
+            let scoped_row = ScopedRow {
+                row,
+                provenance,
+                branch: stream.branch.clone(),
+            };
+            if !self.row_passes_policy(
+                self.config.driver.scope_index,
+                &scoped_row,
+                storage,
+                row_loader,
+            ) {
+                continue;
+            }
+            let Some(lead_value) = self
+                .config
+                .driver
+                .key
+                .extract_value(&scoped_row.row, driver_descriptor)
+            else {
+                continue;
+            };
+
+            candidates.push(DriverCandidate {
+                lead_key_bytes: encode_value(&lead_value),
+                row: scoped_row.row,
+                provenance: scoped_row.provenance,
+                branch: scoped_row.branch,
+            });
+        }
+
+        candidates.sort_by(|left, right| self.compare_candidates(left, right));
+        stream.buffer.extend(candidates);
+        stream.exhausted = true;
+        true
     }
 
     fn row_passes_policy(
