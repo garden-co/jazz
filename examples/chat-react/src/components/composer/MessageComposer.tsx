@@ -30,7 +30,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
         text: html.trim(),
         sender: myProfile.id,
         senderId: userId,
-        createdAt: Math.floor(Date.now() / 1000),
+        createdAt: new Date(),
       });
     },
     [userId, chatId, db, myProfile],
@@ -40,16 +40,16 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
     (attachment: AttachmentData) => {
       if (!userId || !myProfile) return;
 
-      const messageId = db.insert(app.messages, {
+      const message = db.insert(app.messages, {
         chat: chatId,
         text: "",
         sender: myProfile.id,
         senderId: userId,
-        createdAt: Math.floor(Date.now() / 1000),
+        createdAt: new Date(),
       });
 
       db.insert(app.attachments, {
-        message: messageId,
+        message: message.id,
         type: attachment.type,
         name: attachment.name,
         data: attachment.data,

@@ -22,7 +22,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   // After a brief sync window, if the chat row is still not visible to this
   // user, we know they don't have permission (private chat, not a member).
-  const chatRows = useAll(app.chats.where({ id: chatId }));
+  const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
   const chatKnown = chatRows.length > 0;
 
   const [accessChecked, setAccessChecked] = useState(false);
@@ -50,17 +50,18 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     }
   }, []);
 
-  const messages = useAll(
-    app.messages
-      .where({ chat: chatId })
-      .orderBy("createdAt", "desc")
-      .limit(showNLastMessages + 1),
-  );
+  const messages =
+    useAll(
+      app.messages
+        .where({ chat: chatId })
+        .orderBy("createdAt", "desc")
+        .limit(showNLastMessages + 1),
+    ) ?? [];
 
   const hasMore = messages.length > showNLastMessages;
 
   const handleDelete = (messageId: string) => {
-    db.deleteFrom(app.messages, messageId);
+    db.delete(app.messages, messageId);
   };
 
   if (accessChecked && !chatKnown && userId) {

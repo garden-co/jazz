@@ -13,26 +13,25 @@ export const ChatList = () => {
 
   const myProfile = useMyProfile();
 
-  const memberships = useAll(
-    app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true }),
-  );
+  const memberships =
+    useAll(app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true })) ?? [];
 
   const createPublicChat = () => {
     if (!userId || !myProfile) return;
 
-    const chatId = db.insert(app.chats, {
+    const chat = db.insert(app.chats, {
       isPublic: true,
       createdBy: userId,
     });
-    db.insert(app.chatMembers, { chat: chatId, userId });
+    db.insert(app.chatMembers, { chat: chat.id, userId });
     db.insert(app.messages, {
-      chat: chatId,
+      chat: chat.id,
       text: "Hello world",
       sender: myProfile.id,
       senderId: userId,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: new Date(),
     });
-    navigate(`/#/chat/${chatId}`);
+    navigate(`/#/chat/${chat.id}`);
   };
 
   const createPrivateChat = () => {
@@ -40,23 +39,23 @@ export const ChatList = () => {
 
     const shareCode = crypto.randomUUID().slice(0, 8);
 
-    const chatId = db.insert(app.chats, {
+    const chat = db.insert(app.chats, {
       isPublic: false,
       createdBy: userId,
     });
     db.insert(app.chatMembers, {
-      chat: chatId,
+      chat: chat.id,
       userId,
       joinCode: shareCode,
     });
     db.insert(app.messages, {
-      chat: chatId,
+      chat: chat.id,
       text: "This is a private chat.",
       sender: myProfile.id,
       senderId: userId,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: new Date(),
     });
-    navigate(`/#/chat/${chatId}`);
+    navigate(`/#/chat/${chat.id}`);
   };
 
   return (
@@ -78,7 +77,7 @@ export const ChatList = () => {
             key={membership.id}
             chatId={chat?.id ?? membership.id}
             chat={chat}
-            onDelete={() => db.deleteFrom(app.chatMembers, membership.id)}
+            onDelete={() => db.delete(app.chatMembers, membership.id)}
           />
         );
       })}

@@ -11,7 +11,7 @@ CREATE POLICY attachments_insert_policy ON attachments FOR INSERT WITH CHECK (IN
 
 CREATE TABLE canvases (
     chat UUID REFERENCES chats NOT NULL,
-    createdAt INTEGER NOT NULL
+    createdAt TIMESTAMP NOT NULL
 );
 CREATE POLICY canvases_select_policy ON canvases FOR SELECT USING ((INHERITS SELECT VIA chat) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.chat) AND (userId = @session.user_id))));
 CREATE POLICY canvases_insert_policy ON canvases FOR INSERT WITH CHECK (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.chat) AND (userId = @session.user_id)));
@@ -28,7 +28,7 @@ CREATE TABLE chats (
     isPublic BOOLEAN NOT NULL,
     createdBy TEXT NOT NULL
 );
-CREATE POLICY chats_select_policy ON chats FOR SELECT USING ((isPublic = TRUE) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.id) AND (userId = @session.user_id))));
+CREATE POLICY chats_select_policy ON chats FOR SELECT USING ((isPublic = TRUE) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.id) AND (userId = @session.user_id))) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.id) AND (joinCode = @session.claims.join_code))));
 CREATE POLICY chats_insert_policy ON chats FOR INSERT WITH CHECK (createdBy = @session.user_id);
 
 CREATE TABLE messages (
@@ -36,7 +36,7 @@ CREATE TABLE messages (
     text TEXT NOT NULL,
     sender UUID REFERENCES profiles NOT NULL,
     senderId TEXT NOT NULL,
-    createdAt INTEGER NOT NULL
+    createdAt TIMESTAMP NOT NULL
 );
 CREATE POLICY messages_select_policy ON messages FOR SELECT USING ((INHERITS SELECT VIA chat) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.chat) AND (userId = @session.user_id))));
 CREATE POLICY messages_insert_policy ON messages FOR INSERT WITH CHECK (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.chat) AND (userId = @session.user_id)));
@@ -66,7 +66,7 @@ CREATE TABLE strokes (
     color TEXT NOT NULL,
     width INTEGER NOT NULL,
     pointsJson TEXT NOT NULL,
-    createdAt INTEGER NOT NULL
+    createdAt TIMESTAMP NOT NULL
 );
 CREATE POLICY strokes_select_policy ON strokes FOR SELECT USING (INHERITS SELECT VIA canvas);
 CREATE POLICY strokes_insert_policy ON strokes FOR INSERT WITH CHECK (INHERITS SELECT VIA canvas);
