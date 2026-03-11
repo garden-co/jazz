@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project } from "./fixtures/basic/app";
+import { app, Project, Todo } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -47,6 +47,7 @@ describe("TS Query API", () => {
     const results = await db.all(app.projects.where({ id: { eq: id } }));
     expect(results.length).toBe(1);
 
+    expectTypeOf(results[0]).branded.toEqualTypeOf<Project>();
     expect(results[0].id).toBe(id);
     expect(results[0].name).toBe("Project A");
   });
@@ -105,9 +106,10 @@ describe("TS Query API", () => {
     expect(results.length).toBe(1);
     const todo = results[0];
     expect(todo.title).toBe("Write tests");
+    expectTypeOf(todo.owner).toEqualTypeOf<string>();
     expect(todo.owner).toBe(ownerId);
-    expect(todo.project).toBeDefined();
-    expect(todo.project?.name).toBe("Announcements");
+    expectTypeOf(todo.project).toEqualTypeOf<Project>();
+    expect(todo.project.name).toBe("Announcements");
   });
 
   it("select narrows root columns while preserving id and includes", async () => {
@@ -128,28 +130,30 @@ describe("TS Query API", () => {
       owner: ownerId,
     });
 
-    const results = await db.all(
+    const result = await db.one(
       app.todos
         .select("title")
         .where({ id: { eq: todoId } })
         .include({ project: true }),
     );
 
-    expect(results).toEqual([
-      {
-        id: todoId,
-        title: "Write tests",
-        project: {
-          id: projectId,
-          name: "Announcements",
-        },
+    assert(result, "Result is not defined");
+    expectTypeOf(result.id).toEqualTypeOf<string>();
+    expectTypeOf(result.title).toEqualTypeOf<string>();
+    expectTypeOf(result.project).toEqualTypeOf<Project>();
+    expect(result).toEqual({
+      id: todoId,
+      title: "Write tests",
+      project: {
+        id: projectId,
+        name: "Announcements",
       },
-    ]);
-    expect("done" in results[0]).toBe(false);
-    expect("tags" in results[0]).toBe(false);
+    });
+    expect("done" in result).toBe(false);
+    expect("tags" in result).toBe(false);
   });
 
-  it("included columns are returned even if they are not part of the top-level select", async () => {
+  it("include only resolves the provided columns, not all references", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -199,18 +203,18 @@ describe("TS Query API", () => {
       owner: ownerId,
     });
 
-    const results = await db.all(app.todos.select("*").where({ id: { eq: todoId } }));
+    const result = await db.one(app.todos.select("*").where({ id: { eq: todoId } }));
 
-    expect(results).toEqual([
-      {
-        id: todoId,
-        title: "Write tests",
-        done: false,
-        tags: ["dev"],
-        project: projectId,
-        owner: ownerId,
-      },
-    ]);
+    assert(result, "Result is not defined");
+    expectTypeOf(result).branded.toEqualTypeOf<Todo>();
+    expect(result).toEqual({
+      id: todoId,
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+      owner: ownerId,
+    });
   });
 
   it("include builders can project nested relation columns", async () => {
@@ -231,27 +235,28 @@ describe("TS Query API", () => {
       owner: ownerId,
     });
 
-    const results = await db.all(
+    const result = await db.one(
       app.projects
         .where({ id: { eq: projectId } })
         .include({ todosViaProject: app.todos.select("title") }),
     );
 
-    expect(results).toEqual([
-      {
-        id: projectId,
-        name: "Announcements",
-        todosViaProject: [
-          {
-            id: todoId,
-            title: "Write tests",
-          },
-        ],
-      },
-    ]);
-    expect("done" in results[0].todosViaProject![0]).toBe(false);
-    expect("tags" in results[0].todosViaProject![0]).toBe(false);
-    expect("project" in results[0].todosViaProject![0]).toBe(false);
+    assert(result, "Result is not defined");
+    expect(result).toEqual({
+      id: projectId,
+      name: "Announcements",
+      todosViaProject: [
+        {
+          id: todoId,
+          title: "Write tests",
+        },
+      ],
+    });
+    expectTypeOf(result.name).toEqualTypeOf<string>();
+    expectTypeOf(result.todosViaProject).branded.toEqualTypeOf<{ id: string; title: string }[]>();
+    expect("done" in result.todosViaProject[0]).toBe(false);
+    expect("tags" in result.todosViaProject[0]).toBe(false);
+    expect("project" in result.todosViaProject[0]).toBe(false);
   });
 
   it("subscribeAll preserves projected root columns with includes", async () => {

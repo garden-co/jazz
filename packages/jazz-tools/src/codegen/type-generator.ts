@@ -140,13 +140,30 @@ export function tableNameToInterface(name: string): string {
   return parts.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join("");
 }
 
+function generateAnyQueryBuilderAliases(schema: WasmSchema): string[] {
+  const lines: string[] = [];
+
+  for (const tableName of Object.keys(schema)) {
+    const baseInterface = tableNameToInterface(tableName);
+    lines.push(
+      `type Any${baseInterface}QueryBuilder<T = any> = { readonly _table: "${tableName}" } & QueryBuilder<T>;`,
+    );
+  }
+
+  if (lines.length > 0) {
+    lines.push("");
+  }
+
+  return lines;
+}
+
 /**
  * Generate Include types for nested relation loading.
  *
  * Example output:
  *   export interface TodoInclude {
- *     parent?: true | TodoInclude | TodoQueryBuilder<any, any>;
- *     owner?: true | UserInclude | UserQueryBuilder<any, any>;
+ *     parent?: true | TodoInclude | AnyTodoQueryBuilder<any>;
+ *     owner?: true | UserInclude | AnyUserQueryBuilder<any>;
  *   }
  */
 function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
@@ -160,9 +177,9 @@ function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
     for (const rel of rels) {
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
-      const targetQueryBuilder = targetInterface + "QueryBuilder";
-      // Accept any valid specialization of the relation query builder.
-      lines.push(`  ${rel.name}?: true | ${targetInclude} | ${targetQueryBuilder}<any, any>;`);
+      lines.push(
+        `  ${rel.name}?: true | ${targetInclude} | Any${targetInterface}QueryBuilder<any>;`,
+      );
     }
     lines.push(`}`);
     lines.push(``);
@@ -230,7 +247,7 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
       lines.push(`        ? RelationInclude extends true`);
       lines.push(`          ? ${trueType}`);
       lines.push(
-        `          : RelationInclude extends ({ readonly _table: "${rel.toTable}" } & QueryBuilder<infer QueryRow>)`,
+        `          : RelationInclude extends Any${targetInterface}QueryBuilder<infer QueryRow>`,
       );
       lines.push(`            ? ${queryBuilderSelectedType}`);
       lines.push(`            : RelationInclude extends ${targetInclude}`);
@@ -368,6 +385,9 @@ export function generateTypes(schema: WasmSchema): string {
       wasmTypeToTs(columnType, jsonTypeBySchemaKey),
     ),
   );
+
+  // Helper aliases for any query builder specializations
+  lines.push(...generateAnyQueryBuilderAliases(schema));
 
   // Analyze relations and generate relation types
   const relations = analyzeRelations(schema);
