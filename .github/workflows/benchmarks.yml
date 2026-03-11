@@ -580,7 +580,6 @@ jobs:
           REPORT_PATH: bench-out/pr-report.md
         with:
           script: |
-            const core = require("@actions/core");
             const fs = require("fs");
             const marker = "<!-- realistic-bench-report -->";
             const body = `${marker}\n${fs.readFileSync(process.env.REPORT_PATH, "utf8")}`;
