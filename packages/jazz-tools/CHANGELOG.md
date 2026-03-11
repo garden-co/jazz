@@ -1,5 +1,49 @@
 # jazz-tools
 
+## 2.0.0-alpha.15
+
+### Patch Changes
+
+- 5684a18: Normalize schema manager table columns before hashing sorting by name.
+
+  This makes logically equivalent schemas produce the same schema hash even when their column declarations are ordered differently.
+
+- 6664ee5: Use the derived local anonymous/demo session for `JazzClient` query and subscription permission checks when no JWT is configured.
+- 8877b8b: Fix runtime schema-order compatibility after sorted table columns.
+
+  `Db` mutations and query transforms now tolerate runtime schemas returned as `Map`s, and low-level `JazzClient` create/query/subscribe APIs preserve the declared schema column order expected by generated bindings and app code.
+
+- ac3a73e: Fix Rust schema-order compatibility when runtime table columns are sorted differently from the declared app schema, including `JazzClient` create/query flows and `SchemaManager` inserts.
+- f9812d7: Fix lens SQL parsing for `TIMESTAMP` defaults so numeric defaults like `DEFAULT 0` are coerced to timestamp values instead of integers.
+
+  This resolves type mismatches when applying migrations that add timestamp columns with numeric defaults, and adds regression coverage for `TIMESTAMP DEFAULT 0`.
+
+- 4871b02: Switch the native persistent storage engine from SurrealKV to Fjall for the CLI, NAPI bindings, and React Native bindings.
+
+  Native local data now lives in Fjall-backed stores and uses `.fjall` database paths by default.
+
+- 4fff7e9: Improve type inference for `include` and `select` in TS queries
+- e32e6a9: Fix backend N-API sync regression where outbound messages were dropped before they reached the server.
+
+  `createJazzContext(...).asBackend()` now accepts the real nested N-API sync callback shape used by published alpha builds, so backend query subscriptions and other upstream sync traffic can leave the local runtime again.
+
+- 971f8cf: Add `$canRead`, `$canEdit`, and `$canDelete` permission introspection magic columns to queries, and reserve the `$` column prefix for system magic fields.
+- bb39e15: Modify inserts to return the inserted row instead of just the id
+- 8571fdb: Make query optional in `useAll` to support conditionally running queries when inputs are missing
+- 9accce0: `QuerySubscription` in the Svelte bindings now accepts an options object as its second argument (e.g. `{ tier: 'edge' }`), matching the React `useAll` API. The previous bare-string form is removed.
+- 78e074f: Split the local-first insert APIs in `jazz-tools`.
+  - `db.insert(...)` now applies the write immediately and returns the inserted row synchronously.
+  - `db.insertDurable(...)` waits for the requested durability tier before resolving.
+
+- 4fd041c: Split the local-first update/delete APIs in `jazz-tools`.
+  - `db.update(...)` and `db.delete(...)` now apply immediately and return `void`.
+  - `db.updateDurable(...)` and `db.deleteDurable(...)` wait for the requested durability tier before resolving.
+  - `db.deleteFrom(...)` has been renamed to `db.delete(...)`.
+
+- Add Vue bindings and a `jazz-tools/vue` entrypoint, with matching docs and example coverage.
+- Updated dependencies [bb39e15]
+  - jazz-wasm@2.0.0-alpha.15
+
 ## 2.0.0-alpha.14
 
 ### Patch Changes

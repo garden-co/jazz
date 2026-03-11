@@ -1,5 +1,11 @@
 # jazz-wasm
 
+## 2.0.0-alpha.15
+
+### Patch Changes
+
+- bb39e15: Modify inserts to return the inserted row instead of just the id
+
 ## 2.0.0-alpha.14
 
 ### Patch Changes

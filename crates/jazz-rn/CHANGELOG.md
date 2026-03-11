@@ -1,5 +1,15 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.15
+
+### Patch Changes
+
+- 4871b02: Switch the native persistent storage engine from SurrealKV to Fjall for the CLI, NAPI bindings, and React Native bindings.
+
+  Native local data now lives in Fjall-backed stores and uses `.fjall` database paths by default.
+
+- bb39e15: Modify inserts to return the inserted row instead of just the id
+
 ## 2.0.0-alpha.14
 
 ### Patch Changes
