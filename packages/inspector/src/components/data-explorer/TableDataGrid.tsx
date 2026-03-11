@@ -54,7 +54,7 @@ export function TableDataGrid() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const { wasmSchema: schema, queryPropagation } = useDevtoolsContext();
+  const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
   const [rows, setRows] = useState<DynamicTableRow[]>([]);
   const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
@@ -62,6 +62,8 @@ export function TableDataGrid() {
   const [pageIndex, setPageIndex] = useState(0);
   const [filters, setFilters] = useState<TableFilterClause[]>([]);
   const [mutationState, setMutationState] = useState<MutationState | null>(null);
+  const [isSidebarMutationPending, setIsSidebarMutationPending] = useState(false);
+  const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
   const activeSort = sorting[0] ?? { id: "id", desc: false };
   const sortColumn = activeSort.id;
@@ -83,6 +85,7 @@ export function TableDataGrid() {
     }
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
+  const mutationDurabilityTier = runtime === "standalone" ? "edge" : "worker";
 
   useEffect(() => {
     const unsubscribe = db.subscribeAll(
@@ -176,6 +179,7 @@ export function TableDataGrid() {
           onClick={() => {
             setMutationState({ mode: "insert", rowId: null });
           }}
+          disabled={isSidebarMutationPending || deletingRowId !== null}
         >
           Insert
         </button>
@@ -237,15 +241,44 @@ export function TableDataGrid() {
                       </td>
                     ))}
                     <td className={styles.actionsCell}>
-                      <button
-                        type="button"
-                        className={styles.actionButton}
-                        onClick={() => {
-                          setMutationState({ mode: "edit", rowId: String(row.original.id) });
-                        }}
-                      >
-                        Edit
-                      </button>
+                      <div className={styles.rowActions}>
+                        <button
+                          type="button"
+                          className={styles.actionButton}
+                          disabled={isSidebarMutationPending || deletingRowId !== null}
+                          onClick={() => {
+                            setMutationState({ mode: "edit", rowId: String(row.original.id) });
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.dangerActionButton}
+                          disabled={isSidebarMutationPending || deletingRowId !== null}
+                          onClick={async () => {
+                            const rowId = String(row.original.id);
+                            const confirmed = globalThis.confirm(
+                              `Delete row "${rowId}" from "${table}"?`,
+                            );
+                            if (!confirmed) return;
+
+                            try {
+                              setDeletingRowId(rowId);
+                              await db.deleteDurable(tableProxy, rowId, {
+                                tier: mutationDurabilityTier,
+                              });
+                              if (mutationState?.mode === "edit" && mutationState.rowId === rowId) {
+                                setMutationState(null);
+                              }
+                            } finally {
+                              setDeletingRowId(null);
+                            }
+                          }}
+                        >
+                          {deletingRowId === String(row.original.id) ? "Deleting..." : "Delete"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -299,6 +332,7 @@ export function TableDataGrid() {
           className={styles.sidebarOverlay}
           data-testid="row-mutation-overlay"
           onClick={() => {
+            if (isSidebarMutationPending) return;
             setMutationState(null);
           }}
         >
@@ -315,16 +349,26 @@ export function TableDataGrid() {
               targetRowId={mutationState.mode === "edit" ? (editingRow?.id ?? null) : null}
               rowValues={mutationState.mode === "edit" ? editingRow : insertRowValues}
               onCancel={() => {
+                if (isSidebarMutationPending) return;
                 setMutationState(null);
               }}
               onSave={async (updates) => {
-                if (mutationState.mode === "edit") {
-                  if (!editingRow) return;
-                  db.update(tableProxy, editingRow.id, updates);
-                } else {
-                  db.insert(tableProxy, updates);
+                try {
+                  setIsSidebarMutationPending(true);
+                  if (mutationState.mode === "edit") {
+                    if (!editingRow) return;
+                    await db.updateDurable(tableProxy, editingRow.id, updates, {
+                      tier: mutationDurabilityTier,
+                    });
+                  } else {
+                    await db.insertDurable(tableProxy, updates, {
+                      tier: mutationDurabilityTier,
+                    });
+                  }
+                  setMutationState(null);
+                } finally {
+                  setIsSidebarMutationPending(false);
                 }
-                setMutationState(null);
               }}
             />
           </div>
