@@ -157,6 +157,16 @@ function generateAnyQueryBuilderAliases(schema: WasmSchema): string[] {
   return lines;
 }
 
+function maybeUndefined(type: string, nullable: boolean): string {
+  return nullable ? `${type} | undefined` : type;
+}
+
+function relationResultType(baseType: string, rel: Relation): string {
+  return rel.isArray
+    ? maybeUndefined(`${baseType}[]`, rel.nullable)
+    : maybeUndefined(baseType, rel.nullable);
+}
+
 /**
  * Generate Include types for nested relation loading.
  *
@@ -235,11 +245,9 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
       const targetWithIncludes = targetInterface + "WithIncludes";
-      const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
-      const queryBuilderSelectedType = rel.isArray ? `QueryRow[]` : `QueryRow`;
-      const nestedIncludeType = rel.isArray
-        ? `${targetWithIncludes}<RelationInclude>[]`
-        : `${targetWithIncludes}<RelationInclude>`;
+      const trueType = relationResultType(targetInterface, rel);
+      const queryBuilderSelectedType = relationResultType(`QueryRow`, rel);
+      const nestedIncludeType = relationResultType(`${targetWithIncludes}<RelationInclude>`, rel);
       const prefix = index === 0 ? "    " : "    : ";
 
       lines.push(`${prefix}K extends "${rel.name}"`);
