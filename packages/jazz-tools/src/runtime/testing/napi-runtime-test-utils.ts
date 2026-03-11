@@ -11,6 +11,16 @@ const require = createRequire(import.meta.url);
 
 let napiModulePromise: Promise<NapiModule> | null = null;
 
+function registerRuntimeCleanup(runtime: { close?: () => void }): void {
+  onTestFinished(() => {
+    try {
+      runtime.close?.();
+    } catch {
+      // Best effort cleanup for native runtimes during test shutdown.
+    }
+  });
+}
+
 function formatNapiLoadError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   return new Error(
@@ -59,13 +69,32 @@ export async function createNapiRuntime(
     opts?.tier,
   );
 
-  onTestFinished(() => {
-    try {
-      runtime.close();
-    } catch {
-      // Best effort cleanup for native runtimes during test shutdown.
-    }
-  });
+  registerRuntimeCleanup(runtime);
+
+  return runtime as unknown as TestNapiRuntime;
+}
+
+export async function createPersistentNapiRuntime(
+  schema: WasmSchema,
+  dataPath: string,
+  opts?: {
+    appId?: string;
+    env?: string;
+    userBranch?: string;
+    tier?: string;
+  },
+): Promise<TestNapiRuntime> {
+  const { NapiRuntime } = await loadNapiModule();
+  const runtime = new NapiRuntime(
+    serializeRuntimeSchema(schema),
+    opts?.appId ?? "test-app",
+    opts?.env ?? "test",
+    opts?.userBranch ?? "main",
+    dataPath,
+    opts?.tier,
+  );
+
+  registerRuntimeCleanup(runtime);
 
   return runtime as unknown as TestNapiRuntime;
 }
