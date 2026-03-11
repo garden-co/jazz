@@ -826,7 +826,7 @@ describe("generateTypes with relations", () => {
     expect(output).toContain('K extends "todosViaOwner"');
     expect(output).toContain("? Todo[]");
     expect(output).toContain(": RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>");
-    expect(output).toContain('? Omit<QueryRow, "id">[]');
+    expect(output).toContain("? QueryRow[]");
     expect(output).toContain(": RelationInclude extends TodoInclude");
     expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
     expect(output).not.toContain("WithIncludesFor<");
