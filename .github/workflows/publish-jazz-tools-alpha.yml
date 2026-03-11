@@ -53,15 +53,96 @@ jobs:
             const eventName = process.env.EVENT_NAME;
             const ref = process.env.REF;
             const sha = process.env.SHA;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
             let shouldRun = "false";
             let reason = "";
             let releasePrNumber = "";
             let releasePrHeadRef = "";
             let releasePrHeadSha = "";
 
+            async function listRecentMergedReleasePrs() {
+              const mergedPulls = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: "closed",
+                base: "main",
+                sort: "updated",
+                direction: "desc",
+                per_page: 100,
+              });
+
+              return mergedPulls.filter(
+                (pr) => pr.merged_at !== null && pr.head.ref.startsWith("changeset-release/"),
+              );
+            }
+
+            async function getToolsVersion(refish) {
+              const response = await github.rest.repos.getContent({
+                owner,
+                repo,
+                path: "packages/jazz-tools/package.json",
+                ref: refish,
+              });
+
+              if (Array.isArray(response.data) || response.data.type !== "file") {
+                throw new Error(`packages/jazz-tools/package.json is not a file at ${refish}`);
+              }
+
+              return JSON.parse(
+                Buffer.from(response.data.content, response.data.encoding).toString("utf8"),
+              ).version;
+            }
+
+            function applyReleasePrMetadata(releasePr) {
+              releasePrNumber = String(releasePr.number);
+              releasePrHeadRef = releasePr.head.ref;
+              releasePrHeadSha = releasePr.head.sha;
+            }
+
             if (eventName !== "push") {
               shouldRun = "true";
               reason = `non-push invocation (${eventName})`;
+
+              if (ref === "refs/heads/main") {
+                const mergedReleasePrs = await listRecentMergedReleasePrs();
+                const currentVersion = await getToolsVersion(sha).catch((error) => {
+                  core.info(`Failed to read current tools version at ${sha}: ${error.message}`);
+                  return "";
+                });
+
+                let releasePr = null;
+                let matchSource = "";
+
+                if (currentVersion) {
+                  for (const pr of mergedReleasePrs) {
+                    const prVersion = await getToolsVersion(pr.head.sha).catch((error) => {
+                      core.info(
+                        `Failed to read release PR head version for #${pr.number}: ${error.message}`,
+                      );
+                      return "";
+                    });
+
+                    if (prVersion === currentVersion) {
+                      releasePr = pr;
+                      matchSource = `merged changeset release PR matching packages/jazz-tools version ${currentVersion}`;
+                      break;
+                    }
+                  }
+                }
+
+                if (!releasePr && mergedReleasePrs.length > 0) {
+                  releasePr = mergedReleasePrs[0];
+                  matchSource = "latest merged changeset release PR";
+                }
+
+                if (releasePr) {
+                  applyReleasePrMetadata(releasePr);
+                  reason = `${reason}; matched release PR #${releasePr.number} (${matchSource})`;
+                } else {
+                  reason = `${reason}; no merged changeset-release/* PR metadata found`;
+                }
+              }
             } else if (ref !== "refs/heads/main") {
               shouldRun = "false";
               reason = `push is not on main (${ref})`;
@@ -70,8 +151,8 @@ jobs:
               const associatedPulls = await github.request(
                 "GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls",
                 {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
+                  owner,
+                  repo,
                   commit_sha: sha,
                 },
               );
@@ -85,30 +166,15 @@ jobs:
 
               if (!releasePr) {
                 matchSource = "recent merged PR scan by merge_commit_sha";
-                const mergedPulls = await github.paginate(github.rest.pulls.list, {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: "closed",
-                  base: "main",
-                  sort: "updated",
-                  direction: "desc",
-                  per_page: 100,
-                });
+                const mergedReleasePrs = await listRecentMergedReleasePrs();
 
-                releasePr = mergedPulls.find(
-                  (pr) =>
-                    pr.merged_at !== null &&
-                    pr.merge_commit_sha === sha &&
-                    pr.head.ref.startsWith("changeset-release/"),
-                );
+                releasePr = mergedReleasePrs.find((pr) => pr.merge_commit_sha === sha);
               }
 
               if (releasePr) {
                 shouldRun = "true";
                 reason = `merged changeset release PR #${releasePr.number} (${matchSource})`;
-                releasePrNumber = String(releasePr.number);
-                releasePrHeadRef = releasePr.head.ref;
-                releasePrHeadSha = releasePr.head.sha;
+                applyReleasePrMetadata(releasePr);
               } else {
                 shouldRun = "false";
                 reason = "main push is not from a merged changeset-release/* PR";
@@ -161,20 +227,37 @@ jobs:
             const releasePrNumber = process.env.RELEASE_PR_NUMBER;
             const releasePrHeadRef = process.env.RELEASE_PR_HEAD_REF;
             const releasePrHeadSha = process.env.RELEASE_PR_HEAD_SHA;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
             let usePreviewArtifacts = "false";
             let previewRunId = "";
             let reason = "";
 
+            async function getToolsVersion(refish) {
+              const response = await github.rest.repos.getContent({
+                owner,
+                repo,
+                path: "packages/jazz-tools/package.json",
+                ref: refish,
+              });
+
+              if (Array.isArray(response.data) || response.data.type !== "file") {
+                throw new Error(`packages/jazz-tools/package.json is not a file at ${refish}`);
+              }
+
+              return JSON.parse(
+                Buffer.from(response.data.content, response.data.encoding).toString("utf8"),
+              ).version;
+            }
+
             if (releaseMode !== "publish") {
               reason = `preview artifact reuse disabled for mode=${releaseMode}`;
-            } else if (eventName !== "push" || ref !== "refs/heads/main") {
+            } else if (ref !== "refs/heads/main") {
               reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
             } else if (!releasePrNumber || !releasePrHeadRef || !releasePrHeadSha) {
               reason = "release PR metadata unavailable for artifact reuse";
             } else {
-              const owner = context.repo.owner;
-              const repo = context.repo.repo;
-              const [mergeCommit, previewCommit] = await Promise.all([
+              const [currentCommit, previewCommit, currentVersion, previewVersion] = await Promise.all([
                 github.rest.git.getCommit({
                   owner,
                   repo,
@@ -185,14 +268,50 @@ jobs:
                   repo,
                   commit_sha: releasePrHeadSha,
                 }),
+                getToolsVersion(sha),
+                getToolsVersion(releasePrHeadSha),
               ]);
 
-              const mergeTree = mergeCommit.data.tree.sha;
+              const currentTree = currentCommit.data.tree.sha;
               const previewTree = previewCommit.data.tree.sha;
 
-              if (mergeTree !== previewTree) {
-                reason = `main merge tree ${mergeTree} differs from release PR head tree ${previewTree}`;
-              } else {
+              let treeReuseSafe = currentTree === previewTree;
+              let treeReason = "";
+
+              if (!treeReuseSafe && eventName === "workflow_dispatch") {
+                const compare = await github.rest.repos.compareCommits({
+                  owner,
+                  repo,
+                  base: releasePrHeadSha,
+                  head: sha,
+                });
+                const changedFiles = (compare.data.files || [])
+                  .map((file) => file.filename)
+                  .filter(Boolean);
+                const nonWorkflowFiles = changedFiles.filter(
+                  (filename) => !filename.startsWith(".github/workflows/"),
+                );
+
+                if (changedFiles.length > 0 && nonWorkflowFiles.length === 0) {
+                  treeReuseSafe = true;
+                  treeReason = `workflow-only drift since release PR head (${changedFiles.join(", ")})`;
+                } else {
+                  const changedSummary =
+                    nonWorkflowFiles.length > 0
+                      ? nonWorkflowFiles.slice(0, 10).join(", ")
+                      : "unknown changes";
+                  reason = `main differs from release PR head outside workflow files: ${changedSummary}`;
+                }
+              } else if (!treeReuseSafe) {
+                reason = `main tree ${currentTree} differs from release PR head tree ${previewTree}`;
+              }
+
+              if (treeReuseSafe && currentVersion !== previewVersion) {
+                reason = `main version ${currentVersion} differs from release PR head version ${previewVersion}`;
+                treeReuseSafe = false;
+              }
+
+              if (treeReuseSafe) {
                 const runsResponse = await github.rest.actions.listWorkflowRuns({
                   owner,
                   repo,
@@ -255,7 +374,9 @@ jobs:
                   } else {
                     usePreviewArtifacts = "true";
                     previewRunId = String(previewRun.id);
-                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
+                    reason = treeReason
+                      ? `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber} (${treeReason})`
+                      : `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
                   }
                 }
               }
@@ -881,21 +1002,32 @@ jobs:
 
       - name: Resolve lock-stepped npm package versions
         run: |
+          set_pkg_version_if_needed() {
+            local pkg_dir="$1"
+            local current_version
+
+            current_version=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version' "${pkg_dir}/package.json")
+
+            if [ "${current_version}" != "${VERSION}" ]; then
+              npm --prefix "${pkg_dir}" version "${VERSION}" --no-git-tag-version
+            fi
+          }
+
           if [ "${RELEASE_MODE}" = "dry-run" ]; then
             VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version || '' }}"
             if [ -n "${VERSION}" ]; then
-              npm --prefix packages/jazz-tools version "${VERSION}" --no-git-tag-version
-              npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
-              npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
-              npm --prefix crates/jazz-rn version "${VERSION}" --no-git-tag-version
+              set_pkg_version_if_needed packages/jazz-tools
+              set_pkg_version_if_needed crates/jazz-wasm
+              set_pkg_version_if_needed crates/jazz-napi
+              set_pkg_version_if_needed crates/jazz-rn
             else
               pnpm release:version
               VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
-              npm --prefix crates/jazz-wasm version "${VERSION}" --no-git-tag-version
-              npm --prefix crates/jazz-napi version "${VERSION}" --no-git-tag-version
-              npm --prefix crates/jazz-rn version "${VERSION}" --no-git-tag-version
+              set_pkg_version_if_needed crates/jazz-wasm
+              set_pkg_version_if_needed crates/jazz-napi
+              set_pkg_version_if_needed crates/jazz-rn
             fi
           else
             VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
