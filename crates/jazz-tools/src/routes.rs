@@ -1,5 +1,6 @@
 //! HTTP routes for the Jazz server.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -7,7 +8,7 @@ use axum::{
     Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Redirect},
     routing::{get, post},
 };
 use bytes::Bytes;
@@ -17,6 +18,7 @@ use jazz_tools::jazz_transport::{
 use jazz_tools::sync_manager::ClientId;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::commands::server::{ConnectionState, ServerState};
@@ -27,8 +29,26 @@ use crate::middleware::auth::{
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::schema_manager::AppId;
 
+fn mount_inspector_routes<S>(router: Router<S>, inspector_assets_dir: Option<PathBuf>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if let Some(assets_dir) = inspector_assets_dir {
+        let index = assets_dir.join("index.html");
+        let inspector_service = ServeDir::new(assets_dir)
+            .append_index_html_on_directories(true)
+            .fallback(ServeFile::new(index));
+        router
+            .route("/", get(inspector_redirect_handler))
+            .route("/_inspector", get(inspector_redirect_handler))
+            .nest_service("/_inspector/", inspector_service)
+    } else {
+        router
+    }
+}
+
 /// Create the router with all routes.
-pub fn create_router(state: Arc<ServerState>) -> Router {
+pub fn create_router(state: Arc<ServerState>, inspector_assets_dir: Option<PathBuf>) -> Router {
     let traced_routes = Router::new()
         .route("/sync", post(sync_handler))
         .route("/schema/:hash", get(schema_handler))
@@ -43,11 +63,28 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/health", get(health_handler))
         .layer(TraceLayer::new_for_http());
 
-    Router::new()
+    let mut router = Router::new()
         .route("/events", get(events_handler))
         .merge(traced_routes)
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .layer(CorsLayer::permissive());
+
+    router = mount_inspector_routes(router, inspector_assets_dir);
+
+    router.with_state(state)
+}
+
+/// Create a router for running only the standalone inspector UI.
+pub fn create_inspector_router(inspector_assets_dir: PathBuf) -> Router {
+    mount_inspector_routes(
+        Router::new()
+            .layer(CorsLayer::permissive())
+            .layer(TraceLayer::new_for_http()),
+        Some(inspector_assets_dir),
+    )
+}
+
+async fn inspector_redirect_handler() -> impl IntoResponse {
+    Redirect::temporary("/_inspector/")
 }
 
 /// Query parameters for events endpoint.

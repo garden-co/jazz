@@ -4,10 +4,11 @@ import react from "@vitejs/plugin-react-swc";
 
 export default defineConfig(({ mode }) => {
   const isExtensionBuild = mode === "extension";
+  const isStandaloneBuild = mode === "standalone";
 
   return {
     plugins: [react()],
-    base: isExtensionBuild ? "./" : "/",
+    base: isExtensionBuild ? "./" : isStandaloneBuild ? "/_inspector/" : "/",
     publicDir: isExtensionBuild ? "chrome-extension" : "public",
     worker: {
       format: "es",

@@ -75,7 +75,7 @@ axum = { version = "0.7", optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-tower-http = { version = "0.5", features = ["cors", "trace"], optional = true }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"], optional = true }
 async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 base64 = { version = "0.22", optional = true }

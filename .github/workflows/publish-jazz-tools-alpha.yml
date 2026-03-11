@@ -857,6 +857,9 @@ jobs:
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
 
+      - name: Build inspector standalone web bundle
+        run: pnpm --filter inspector build:standalone
+
       - name: Verify jazz-tools publish artifacts
         run: |
           test -f packages/jazz-tools/dist/index.js
@@ -864,6 +867,14 @@ jobs:
           test -f packages/jazz-tools/dist/backend/index.js
           test -f packages/jazz-tools/dist/react/index.js
           test -f packages/jazz-tools/dist/permissions/index.js
+
+      - name: Stage inspector bundle into npm package
+        run: |
+          rm -rf packages/jazz-tools/dist/inspector
+          mkdir -p packages/jazz-tools/dist
+          cp -R packages/inspector/dist packages/jazz-tools/dist/inspector
+          test -f packages/jazz-tools/dist/inspector/index.html
+          test -d packages/jazz-tools/dist/inspector/assets
 
       - name: Stage binaries into npm package
         run: |
@@ -972,6 +983,10 @@ jobs:
           node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --help >/dev/null
           test -x "${EXTRACT_DIR}/package/bin/native/${HOST_LINUX_BIN}" || {
             echo "Packed native binary ${HOST_LINUX_BIN} is not executable after runtime bootstrap."
+            exit 1
+          }
+          test -f "${EXTRACT_DIR}/package/dist/inspector/index.html" || {
+            echo "Missing packed inspector index.html"
             exit 1
           }
 

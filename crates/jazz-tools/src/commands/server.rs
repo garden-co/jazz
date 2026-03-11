@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -214,12 +214,19 @@ pub async fn run(
     port: u16,
     data_dir: &str,
     mut auth_config: AuthConfig,
+    inspector_assets_dir: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse app ID
     let app_id = AppId::from_string(app_id_str)?;
 
     info!("Starting Jazz server for app: {}", app_id);
     info!("Data directory: {}", data_dir);
+
+    let inspector_assets_dir = resolve_inspector_assets_dir(inspector_assets_dir)?;
+    if let Some(path) = &inspector_assets_dir {
+        info!("Inspector enabled at /_inspector");
+        info!("Inspector assets directory: {}", path.display());
+    }
 
     // Create data directory if it doesn't exist
     std::fs::create_dir_all(data_dir)?;
@@ -304,7 +311,7 @@ pub async fn run(
     });
 
     // Build router
-    let app = routes::create_router(state);
+    let app = routes::create_router(state, inspector_assets_dir);
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -321,4 +328,57 @@ fn now_timestamp_us() -> u64 {
         Ok(duration) => duration.as_micros().min(u128::from(u64::MAX)) as u64,
         Err(_) => 0,
     }
+}
+
+pub fn resolve_inspector_assets_dir(
+    inspector_assets_dir: Option<String>,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let inspector_assets_dir: Option<PathBuf> = match inspector_assets_dir {
+        Some(dir) => {
+            let path = PathBuf::from(dir);
+            if !path.exists() {
+                return Err(format!(
+                    "Inspector assets directory does not exist: {}",
+                    path.display()
+                )
+                .into());
+            }
+            let index_path = path.join("index.html");
+            if !index_path.exists() {
+                return Err(format!(
+                    "Inspector assets missing index.html: {}",
+                    index_path.display()
+                )
+                .into());
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    Ok(inspector_assets_dir)
+}
+
+/// Run only the standalone inspector UI static server.
+pub async fn run_inspector(
+    port: u16,
+    host: &str,
+    inspector_assets_dir: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inspector_assets_dir = resolve_inspector_assets_dir(inspector_assets_dir)?
+        .ok_or("Inspector assets directory is required to run inspector")?;
+
+    info!("Starting standalone inspector");
+    info!(
+        "Inspector assets directory: {}",
+        inspector_assets_dir.display()
+    );
+
+    let app = routes::create_inspector_router(inspector_assets_dir);
+
+    let bind_addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    info!("Inspector listening on http://{}", bind_addr);
+    info!("Inspector URL: http://{}/_inspector/", bind_addr);
+    axum::serve(listener, app).await?;
+    Ok(())
 }

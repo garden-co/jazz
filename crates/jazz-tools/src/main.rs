@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! jazz-tools create app [--name <NAME>]    # Returns AppId (random or deterministic from name)
-//! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory]
+//! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory] [--inspector]
+//! jazz-tools inspector [--port 8625] [--host 127.0.0.1]
 //! ```
 
 mod commands;
@@ -121,6 +122,32 @@ enum Commands {
         /// Secret for admin operations (schema/policy sync)
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
+
+        /// Serve the standalone inspector UI at /_inspector.
+        #[arg(long)]
+        inspector: bool,
+
+        /// Path to built inspector assets directory.
+        ///
+        /// Intended for the npm launcher to pass staged assets.
+        #[arg(long, env = "JAZZ_INSPECTOR_ASSETS_DIR", hide = true)]
+        inspector_assets_dir: Option<String>,
+    },
+    /// Run standalone inspector UI without starting sync server
+    Inspector {
+        /// Port to listen on
+        #[arg(short, long, default_value = "8625")]
+        port: u16,
+
+        /// Host/interface to bind
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Path to built inspector assets directory.
+        ///
+        /// Intended for the npm launcher to pass staged assets.
+        #[arg(long, env = "JAZZ_INSPECTOR_ASSETS_DIR", hide = true)]
+        inspector_assets_dir: Option<String>,
     },
 }
 
@@ -185,6 +212,8 @@ async fn main() {
             allow_demo,
             backend_secret,
             admin_secret,
+            inspector,
+            inspector_assets_dir,
         } => {
             let data_dir = if in_memory {
                 let tmp =
@@ -215,8 +244,29 @@ async fn main() {
                 backend_secret,
                 admin_secret,
             };
-            if let Err(e) = commands::server::run(&app_id, port, &data_dir, auth_config).await {
+            if let Err(e) = commands::server::run(
+                &app_id,
+                port,
+                &data_dir,
+                auth_config,
+                inspector.then_some(inspector_assets_dir).flatten(),
+            )
+            .await
+            {
                 eprintln!("Server error: {}", e);
+                shutdown_tracing();
+                std::process::exit(1);
+            }
+            shutdown_tracing();
+        }
+        Commands::Inspector {
+            port,
+            host,
+            inspector_assets_dir,
+        } => {
+            if let Err(e) = commands::server::run_inspector(port, &host, inspector_assets_dir).await
+            {
+                eprintln!("Inspector error: {}", e);
                 shutdown_tracing();
                 std::process::exit(1);
             }

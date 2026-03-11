@@ -8,6 +8,18 @@ CLI package for Jazz 2.
 npx jazz-tools@alpha server
 ```
 
+Run with bundled standalone inspector:
+
+```bash
+npx jazz-tools@alpha server <APP_ID> --inspector
+```
+
+Run inspector as a standalone process (without running the sync server):
+
+```bash
+npx jazz-tools@alpha inspector --port 8625
+```
+
 To use a specific prerelease:
 
 ```bash
