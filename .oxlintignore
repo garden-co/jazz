@@ -3,3 +3,4 @@ examples/*/schema/app.ts
 examples/docs/*/schema/app.ts
 crates/jazz-napi/index.d.ts
 crates/jazz-napi/index.js
+benchmarks/**/*.json
