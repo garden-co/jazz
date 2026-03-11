@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { useDb, useSession, useAll } from "jazz-tools/react";
+import { useEffect, useRef, useState } from "react";
+import { useDb, useSession } from "jazz-tools/react";
 import { navigate } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../schema/app.js";
@@ -13,17 +13,28 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const db = useDb();
   const session = useSession();
   const handled = useRef(false);
+  const [chatLoaded, setChatLoaded] = useState(false);
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
 
-  // Chats are now publicly readable. Subscribe so the row syncs locally,
-  // satisfying the FK check before we insert the chatMembers row.
-  const chats = useAll(app.chats.where({ id: chatId }));
-  const chat = chats[0] ?? null;
+  // Subscribe to the chat with claims.join_code so the server returns the
+  // private chat row before Bob has a chatMember row.
+  useEffect(() => {
+    if (!userId) return;
+    const unsubscribe = db.subscribeAll(
+      app.chats.where({ id: chatId }),
+      (delta) => {
+        if (delta.all.length > 0) setChatLoaded(true);
+      },
+      undefined,
+      { user_id: userId, claims: { join_code: code } },
+    );
+    return unsubscribe;
+  }, [db, userId, chatId, code]);
 
   useEffect(() => {
-    if (handled.current || !userId || !myProfile || !chat) return;
+    if (!chatLoaded || handled.current || !userId || !myProfile) return;
     handled.current = true;
 
     db.insert(app.chatMembers, {
@@ -33,7 +44,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     });
 
     navigate(`/#/chat/${chatId}`);
-  }, [db, userId, myProfile, chatId, code, chat]);
+  }, [chatLoaded, db, userId, myProfile, chatId]);
 
   return (
     <div id="joining-chat" className="p-8 text-center text-muted-foreground italic">

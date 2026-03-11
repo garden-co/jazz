@@ -12,7 +12,6 @@
     "guides",
     "permissions",
     "migrations",
-    "mcp",
-    "troubleshooting"
+    "mcp"
   ]
 }
