@@ -200,23 +200,7 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
   return lines;
 }
 
-/**
- * Generate WithIncludes types for type-safe include results.
- *
- * Example output:
- *   export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, keyof TodoInclude> & {
- *     project?: NonNullable<I["project"]> extends infer RelationInclude
- *       ? RelationInclude extends true
- *         ? Project
- *         : RelationInclude extends ProjectQueryBuilder<infer QueryInclude extends ProjectInclude>
- *           ? ProjectWithIncludes<QueryInclude>
- *           : RelationInclude extends ProjectInclude
- *             ? ProjectWithIncludes<RelationInclude>
- *             : never
- *       : never;
- *   };
- */
-function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
+function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): string[] {
   const lines: string[] = [];
 
   for (const [tableName, rels] of relations) {
@@ -226,35 +210,59 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     const includeInterface = baseInterface + "Include";
 
     lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = Omit<${baseInterface}, keyof ${includeInterface}> & {`,
+      `export type ${baseInterface}IncludedRelations<I extends ${includeInterface} = {}> = {`,
     );
-    for (const rel of rels) {
+    lines.push(`  [K in keyof I]-?:`);
+
+    rels.forEach((rel, index) => {
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
-      const targetQueryBuilder = targetInterface + "QueryBuilder";
       const targetWithIncludes = targetInterface + "WithIncludes";
-      const includeSelector = `NonNullable<I["${rel.name}"]>`;
       const trueType = rel.isArray ? `${targetInterface}[]` : targetInterface;
-      const queryBuilderSelectedType = rel.isArray
-        ? `${targetInterface}SelectedWithIncludes<QueryInclude, QuerySelect>[]`
-        : `${targetInterface}SelectedWithIncludes<QueryInclude, QuerySelect>`;
+      const queryBuilderSelectedType = rel.isArray ? `QueryRow[]` : `QueryRow`;
       const nestedIncludeType = rel.isArray
         ? `${targetWithIncludes}<RelationInclude>[]`
         : `${targetWithIncludes}<RelationInclude>`;
+      const prefix = index === 0 ? "    " : "    : ";
 
-      lines.push(`  ${rel.name}?: ${includeSelector} extends infer RelationInclude`);
-      lines.push(`    ? RelationInclude extends true`);
-      lines.push(`      ? ${trueType}`);
+      lines.push(`${prefix}K extends "${rel.name}"`);
+      lines.push(`      ? NonNullable<I["${rel.name}"]> extends infer RelationInclude`);
+      lines.push(`        ? RelationInclude extends true`);
+      lines.push(`          ? ${trueType}`);
       lines.push(
-        `      : RelationInclude extends ${targetQueryBuilder}<infer QueryInclude extends ${targetInclude}, infer QuerySelect extends keyof ${targetInterface} | "*">`,
+        `          : RelationInclude extends ({ readonly _table: "${rel.toTable}" } & QueryBuilder<infer QueryRow>)`,
       );
-      lines.push(`        ? ${queryBuilderSelectedType}`);
-      lines.push(`        : RelationInclude extends ${targetInclude}`);
-      lines.push(`          ? ${nestedIncludeType}`);
-      lines.push(`          : never`);
-      lines.push(`    : never;`);
-    }
+      lines.push(`            ? ${queryBuilderSelectedType}`);
+      lines.push(`            : RelationInclude extends ${targetInclude}`);
+      lines.push(`              ? ${nestedIncludeType}`);
+      lines.push(`              : never`);
+      lines.push(`        : never`);
+    });
+
+    lines.push(`    : never;`);
     lines.push(`};`);
+    lines.push(``);
+  }
+
+  return lines;
+}
+
+/**
+ * Generate WithIncludes types for type-safe include results.
+ */
+function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
+  const lines: string[] = [];
+
+  for (const [tableName, rels] of relations) {
+    if (rels.length === 0) continue;
+
+    const baseInterface = tableNameToInterface(tableName);
+    const includeInterface = baseInterface + "Include";
+    const includedRelationsType = baseInterface + "IncludedRelations";
+
+    lines.push(
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = Omit<${baseInterface}, Extract<keyof I, keyof ${baseInterface}>> & ${includedRelationsType}<I>;`,
+    );
     lines.push(``);
   }
 
@@ -267,7 +275,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
   for (const tableName of Object.keys(schema)) {
     const baseInterface = tableNameToInterface(tableName);
     const includeInterface = baseInterface + "Include";
-    const withIncludesType = baseInterface + "WithIncludes";
+    const includedRelationsType = baseInterface + "IncludedRelations";
     const hasRelations = (relations.get(tableName) ?? []).length > 0;
 
     lines.push(
@@ -277,7 +285,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, keyof ${includeInterface}> & Omit<${withIncludesType}<I>, keyof Omit<${baseInterface}, keyof ${includeInterface}>>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
       );
       lines.push("");
     }
@@ -366,6 +374,9 @@ export function generateTypes(schema: WasmSchema): string {
 
   // Include types (for specifying which relations to load)
   lines.push(...generateIncludeTypes(relations));
+
+  // Helper types for explicitly included relations only
+  lines.push(...generateIncludedRelationsTypes(relations));
 
   // Relations types (mapping relation names to their result types)
   lines.push(...generateRelationsTypes(relations));
