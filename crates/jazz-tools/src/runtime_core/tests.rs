@@ -200,12 +200,40 @@ fn test_park_sync_message() {
     assert_eq!(core.parked_sync_messages.len(), 1);
 }
 
+#[test]
+fn runtime_core_drains_received_mutation_outcomes() {
+    use crate::object::BranchName;
+
+    let mut core = create_test_runtime();
+    let outcome = MutationOutcome::Rejected(MutationRejection {
+        object_id: ObjectId::new(),
+        branch_name: BranchName::new("main"),
+        operation: MutationOperation::Update,
+        commit_ids: vec![CommitId([1; 32])],
+        previous_commit_ids: vec![CommitId([0; 32])],
+        code: MutationRejectCode::PermissionDenied,
+        reason: "policy denied write".into(),
+        rejected_at_micros: 123,
+    });
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::MutationOutcome(outcome.clone()),
+    });
+
+    core.batched_tick();
+
+    assert_eq!(core.take_mutation_outcomes(), vec![outcome]);
+    assert!(core.take_mutation_outcomes().is_empty());
+}
+
 // =========================================================================
 // Durability API Tests (3-tier: A ↔ B[Worker] ↔ C[EdgeServer])
 // =========================================================================
 
 use crate::sync_manager::{
-    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
+    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, MutationOperation,
+    MutationOutcome, MutationRejectCode, MutationRejection, OutboxEntry, ServerId, Source,
     SyncPayload,
 };
 

@@ -11,8 +11,8 @@ use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
-    ClientId, Destination, InboxEntry, ObjectMetadata, QueryId, Source, SyncError, SyncManager,
-    SyncPayload,
+    ClientId, Destination, InboxEntry, MutationOutcome, MutationRejectCode, MutationRejection,
+    ObjectMetadata, QueryId, Source, SyncManager, SyncPayload,
 };
 
 use crate::query_manager::encoding::{decode_row, encode_row};
@@ -298,8 +298,13 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let denied = outbox.iter().any(|entry| {
         matches!(
             (&entry.destination, &entry.payload),
-            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
-                if *id == client_id
+            (
+                Destination::Client(id),
+                SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+                    code: MutationRejectCode::PermissionDenied,
+                    ..
+                }))
+            ) if *id == client_id
         )
     });
 
@@ -447,7 +452,11 @@ fn rebac_insert_denied_by_simple_policy() {
         .expect("Should receive error response");
 
     match &error.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
+        SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+            reason,
+            code: MutationRejectCode::PermissionDenied,
+            ..
+        })) => {
             assert!(
                 reason.contains("denied by policy"),
                 "Error should mention policy denial: {reason}"
@@ -825,7 +834,10 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     );
 
     match &error.unwrap().payload {
-        SyncPayload::Error(SyncError::PermissionDenied { .. }) => {
+        SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+            code: MutationRejectCode::PermissionDenied,
+            ..
+        })) => {
             // Expected
         }
         other => panic!("Expected PermissionDenied error, got {:?}", other),
@@ -975,7 +987,10 @@ fn rebac_update_denied_by_using_policy() {
     );
 
     match &error.unwrap().payload {
-        SyncPayload::Error(SyncError::PermissionDenied { .. }) => {
+        SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+            code: MutationRejectCode::PermissionDenied,
+            ..
+        })) => {
             // Expected
         }
         other => panic!("Expected PermissionDenied error, got {:?}", other),
@@ -1511,7 +1526,10 @@ fn rebac_update_denied_by_using_exists_policy() {
         "Bob's update should be denied by EXISTS in USING policy"
     );
     match &bob_error.unwrap().payload {
-        SyncPayload::Error(SyncError::PermissionDenied { .. }) => {
+        SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+            code: MutationRejectCode::PermissionDenied,
+            ..
+        })) => {
             // Expected
         }
         other => panic!("Expected PermissionDenied error for Bob, got {:?}", other),
@@ -1580,7 +1598,13 @@ fn rebac_update_denied_by_using_exists_policy() {
     let alice_error = outbox.iter().find(|e| {
         matches!(
             (&e.destination, &e.payload),
-            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. })) if *id == alice_client
+            (
+                Destination::Client(id),
+                SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+                    code: MutationRejectCode::PermissionDenied,
+                    ..
+                }))
+            ) if *id == alice_client
         )
     });
 

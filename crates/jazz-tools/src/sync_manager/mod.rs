@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::commit::CommitId;
+use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
@@ -59,6 +59,8 @@ pub struct SyncManager {
 
     /// Acks received during inbox processing, for RuntimeCore to consume.
     pub(super) received_acks: Vec<(CommitId, DurabilityTier)>,
+    /// Mutation outcomes received during inbox processing, for RuntimeCore to consume.
+    pub(super) received_mutation_outcomes: Vec<MutationOutcome>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -84,6 +86,10 @@ impl std::fmt::Debug for SyncManager {
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("received_acks", &self.received_acks)
+            .field(
+                "received_mutation_outcomes",
+                &self.received_mutation_outcomes,
+            )
             .finish()
     }
 }
@@ -116,6 +122,7 @@ impl SyncManager {
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
             received_acks: Vec::new(),
+            received_mutation_outcomes: Vec::new(),
         }
     }
 
@@ -435,6 +442,11 @@ impl SyncManager {
         std::mem::take(&mut self.received_acks)
     }
 
+    /// Take received mutation outcomes since last call.
+    pub fn take_received_mutation_outcomes(&mut self) -> Vec<MutationOutcome> {
+        std::mem::take(&mut self.received_mutation_outcomes)
+    }
+
     /// Emit a QuerySettled notification to a client.
     ///
     /// Called by QueryManager when a server subscription settles for the first time.
@@ -465,5 +477,107 @@ impl SyncManager {
                 reason: reason.into(),
             }),
         });
+    }
+
+    pub(crate) fn mutation_previous_commit_ids(
+        &self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+    ) -> Vec<CommitId> {
+        self.object_manager
+            .get_tip_ids(object_id, branch_name.as_str())
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn emit_mutation_rejected_from_payload(
+        &mut self,
+        client_id: ClientId,
+        payload: &SyncPayload,
+        code: MutationRejectCode,
+        reason: impl Into<String>,
+    ) {
+        let Some(rejection) = self.build_mutation_rejection_from_payload(payload, code, reason)
+        else {
+            return;
+        };
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(rejection)),
+        });
+    }
+
+    pub(crate) fn relay_mutation_outcome_to_interested_clients(
+        &mut self,
+        outcome: &MutationOutcome,
+        exclude_client_id: Option<ClientId>,
+    ) {
+        let mut interested = HashSet::new();
+        for &commit_id in outcome.commit_ids() {
+            if let Some(clients) = self.commit_interest.get(&commit_id) {
+                interested.extend(clients);
+            }
+        }
+
+        if let Some(client_id) = exclude_client_id {
+            interested.remove(&client_id);
+        }
+
+        for client_id in interested {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::MutationOutcome(outcome.clone()),
+            });
+        }
+    }
+
+    fn build_mutation_rejection_from_payload(
+        &self,
+        payload: &SyncPayload,
+        code: MutationRejectCode,
+        reason: impl Into<String>,
+    ) -> Option<MutationRejection> {
+        match payload {
+            SyncPayload::ObjectUpdated {
+                object_id,
+                branch_name,
+                commits,
+                ..
+            } => {
+                let previous_commit_ids =
+                    self.mutation_previous_commit_ids(*object_id, branch_name);
+                let operation = if previous_commit_ids.is_empty() {
+                    MutationOperation::Insert
+                } else {
+                    MutationOperation::Update
+                };
+                Some(MutationRejection {
+                    object_id: *object_id,
+                    branch_name: *branch_name,
+                    operation,
+                    commit_ids: commits.iter().map(Commit::id).collect(),
+                    previous_commit_ids,
+                    code,
+                    reason: reason.into(),
+                    rejected_at_micros: current_timestamp_micros(),
+                })
+            }
+            SyncPayload::ObjectTruncated {
+                object_id,
+                branch_name,
+                tails,
+            } => Some(MutationRejection {
+                object_id: *object_id,
+                branch_name: *branch_name,
+                operation: MutationOperation::Delete,
+                commit_ids: tails.iter().copied().collect(),
+                previous_commit_ids: self.mutation_previous_commit_ids(*object_id, branch_name),
+                code,
+                reason: reason.into(),
+                rejected_at_micros: current_timestamp_micros(),
+            }),
+            _ => None,
+        }
     }
 }

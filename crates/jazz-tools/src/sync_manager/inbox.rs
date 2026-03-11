@@ -133,6 +133,14 @@ impl SyncManager {
                     }
                 }
             }
+            SyncPayload::MutationOutcome(outcome) => {
+                tracing::debug!(
+                    commits = outcome.commit_ids().len(),
+                    "server→MutationOutcome"
+                );
+                self.received_mutation_outcomes.push(outcome.clone());
+                self.relay_mutation_outcome_to_interested_clients(&outcome, None);
+            }
             SyncPayload::Error(err) => {
                 // Log or handle server error
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
@@ -172,13 +180,15 @@ impl SyncManager {
                     }
                     ClientRole::Backend => {
                         if payload.is_catalogue() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
+                            self.emit_mutation_rejected_from_payload(
+                                client_id,
+                                &payload,
+                                MutationRejectCode::CatalogueWriteDenied,
+                                format!(
+                                    "catalogue write denied for object {} on branch {}",
+                                    object_id, branch_name
+                                ),
+                            );
                             return;
                         }
                         self.apply_payload_from_client(storage, client_id, payload, false);
@@ -186,24 +196,28 @@ impl SyncManager {
                     ClientRole::User => {
                         // User requires session
                         let Some(session) = &client.session else {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::SessionRequired {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
+                            self.emit_mutation_rejected_from_payload(
+                                client_id,
+                                &payload,
+                                MutationRejectCode::SessionRequired,
+                                format!(
+                                    "session required for object {} on branch {}",
+                                    object_id, branch_name
+                                ),
+                            );
                             return;
                         };
                         // User cannot write catalogue objects
                         if payload.is_catalogue() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
+                            self.emit_mutation_rejected_from_payload(
+                                client_id,
+                                &payload,
+                                MutationRejectCode::CatalogueWriteDenied,
+                                format!(
+                                    "catalogue write denied for object {} on branch {}",
+                                    object_id, branch_name
+                                ),
+                            );
                             return;
                         }
                         // Row data — queue for ReBAC permission check
@@ -256,26 +270,30 @@ impl SyncManager {
                     }
                     ClientRole::Backend => {
                         if payload.is_catalogue() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
+                            self.emit_mutation_rejected_from_payload(
+                                client_id,
+                                &payload,
+                                MutationRejectCode::CatalogueWriteDenied,
+                                format!(
+                                    "catalogue write denied for object {} on branch {}",
+                                    object_id, branch_name
+                                ),
+                            );
                             return;
                         }
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
                     ClientRole::User => {
                         let Some(session) = &client.session else {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::SessionRequired {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
+                            self.emit_mutation_rejected_from_payload(
+                                client_id,
+                                &payload,
+                                MutationRejectCode::SessionRequired,
+                                format!(
+                                    "session required for object {} on branch {}",
+                                    object_id, branch_name
+                                ),
+                            );
                             return;
                         };
                         let (metadata, old_content) = self
@@ -415,6 +433,10 @@ impl SyncManager {
             } => {
                 // Client relaying a QuerySettled from downstream
                 self.pending_query_settled.push((*query_id, *tier));
+            }
+            SyncPayload::MutationOutcome(outcome) => {
+                self.received_mutation_outcomes.push(outcome.clone());
+                self.relay_mutation_outcome_to_interested_clients(outcome, Some(client_id));
             }
             // Clients shouldn't send these
             SyncPayload::Error(_) => {}

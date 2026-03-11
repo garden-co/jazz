@@ -4647,7 +4647,8 @@ fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
 fn server_permission_checks_reject_missing_scalar_fk_writes() {
     use crate::commit::{Commit, StoredState};
     use crate::sync_manager::{
-        ClientId, ClientRole, InboxEntry, ObjectMetadata, Source, SyncError, SyncPayload,
+        ClientId, ClientRole, InboxEntry, MutationOutcome, MutationRejectCode, MutationRejection,
+        ObjectMetadata, Source, SyncPayload,
     };
 
     let sync_manager = SyncManager::new();
@@ -4709,7 +4710,11 @@ fn server_permission_checks_reject_missing_scalar_fk_writes() {
 
     let outbox = qm.sync_manager_mut().take_outbox();
     let insert_rejection = outbox.iter().find_map(|entry| match &entry.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => Some(reason.as_str()),
+        SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+            reason,
+            code: MutationRejectCode::PermissionDenied,
+            ..
+        })) => Some(reason.as_str()),
         _ => None,
     });
     assert!(
@@ -4760,7 +4765,11 @@ fn server_permission_checks_reject_missing_scalar_fk_writes() {
 
     let outbox = qm.sync_manager_mut().take_outbox();
     let update_rejection = outbox.iter().find_map(|entry| match &entry.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => Some(reason.as_str()),
+        SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+            reason,
+            code: MutationRejectCode::PermissionDenied,
+            ..
+        })) => Some(reason.as_str()),
         _ => None,
     });
     assert!(

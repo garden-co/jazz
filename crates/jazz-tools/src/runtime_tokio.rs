@@ -26,7 +26,9 @@ use crate::runtime_core::{
 };
 use crate::schema_manager::{QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
+use crate::sync_manager::{
+    ClientId, InboxEntry, MutationOutcome, OutboxEntry, QueryPropagation, ServerId,
+};
 
 // ============================================================================
 // TokioScheduler
@@ -358,6 +360,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.park_sync_message_with_sequence(entry, sequence);
         Ok(())
+    }
+
+    /// Take mutation outcomes received since the last call.
+    pub fn take_mutation_outcomes(&self) -> Result<Vec<MutationOutcome>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.take_mutation_outcomes())
     }
 
     /// Set the next expected stream sequence for a server.

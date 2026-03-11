@@ -39,7 +39,9 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
+use crate::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, MutationOutcome, OutboxEntry, ServerId,
+};
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -351,6 +353,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Get access to the underlying SchemaManager.
     pub fn schema_manager(&self) -> &SchemaManager {
         &self.schema_manager
+    }
+
+    /// Take mutation outcomes received since the last call.
+    pub fn take_mutation_outcomes(&mut self) -> Vec<MutationOutcome> {
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_received_mutation_outcomes()
     }
 }
 

@@ -15,6 +15,79 @@ fn can_create_sync_manager() {
     assert!(sm.clients.is_empty());
 }
 
+#[test]
+fn mutation_outcome_payload_roundtrips_json_and_postcard() {
+    let payload = SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+        object_id: ObjectId::new(),
+        branch_name: "main".into(),
+        operation: MutationOperation::Update,
+        commit_ids: vec![CommitId([1; 32]), CommitId([2; 32])],
+        previous_commit_ids: vec![CommitId([0; 32])],
+        code: MutationRejectCode::PermissionDenied,
+        reason: "denied by policy".into(),
+        rejected_at_micros: 123,
+    }));
+
+    let json = payload.to_json().expect("json encode should succeed");
+    assert_eq!(
+        SyncPayload::from_json(&json).expect("json decode should succeed"),
+        payload
+    );
+
+    let bytes = payload.to_bytes().expect("postcard encode should succeed");
+    assert_eq!(
+        SyncPayload::from_bytes(&bytes).expect("postcard decode should succeed"),
+        payload
+    );
+}
+
+#[test]
+fn server_mutation_outcome_is_queued_and_relayed_to_interested_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let client_id = ClientId::new();
+    let commit_id = CommitId([9; 32]);
+
+    sm.add_server(server_id);
+    sm.add_client(client_id);
+    sm.commit_interest
+        .insert(commit_id, std::collections::HashSet::from([client_id]));
+    sm.take_outbox();
+
+    let outcome = MutationOutcome::Rejected(MutationRejection {
+        object_id: ObjectId::new(),
+        branch_name: "main".into(),
+        operation: MutationOperation::Update,
+        commit_ids: vec![commit_id],
+        previous_commit_ids: vec![CommitId([1; 32])],
+        code: MutationRejectCode::PermissionDenied,
+        reason: "denied".into(),
+        rejected_at_micros: 123,
+    });
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::MutationOutcome(outcome.clone()),
+    });
+    sm.process_inbox(&mut io);
+
+    assert_eq!(sm.take_received_mutation_outcomes(), vec![outcome.clone()]);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+    assert!(matches!(
+        &outbox[0],
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
+                code: MutationRejectCode::PermissionDenied,
+                ..
+            })),
+        } if *id == client_id
+    ));
+}
+
 // ========================================================================
 // Phase 2: Server Sync Tests
 // ========================================================================
@@ -768,7 +841,13 @@ fn backend_catalogue_writes_are_denied() {
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied { object_id, .. }),
+                payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(
+                    MutationRejection {
+                        object_id,
+                        code: MutationRejectCode::CatalogueWriteDenied,
+                        ..
+                    }
+                )),
             } if *id == client_id && *object_id == obj_id
         )
     }));
@@ -875,10 +954,12 @@ fn user_without_session_rejected() {
         OutboxEntry {
             destination: Destination::Client(id),
             payload:
-                SyncPayload::Error(SyncError::SessionRequired {
+                SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
                     object_id,
                     branch_name,
-                }),
+                    code: MutationRejectCode::SessionRequired,
+                    ..
+                })),
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
@@ -944,10 +1025,12 @@ fn user_catalogue_write_rejected() {
         OutboxEntry {
             destination: Destination::Client(id),
             payload:
-                SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
                     object_id,
                     branch_name,
-                }),
+                    code: MutationRejectCode::CatalogueWriteDenied,
+                    ..
+                })),
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
@@ -1181,11 +1264,13 @@ fn reject_permission_check_sends_error() {
         OutboxEntry {
             destination: Destination::Client(id),
             payload:
-                SyncPayload::Error(SyncError::PermissionDenied {
+                SyncPayload::MutationOutcome(MutationOutcome::Rejected(MutationRejection {
                     object_id,
                     branch_name,
                     reason,
-                }),
+                    code: MutationRejectCode::PermissionDenied,
+                    ..
+                })),
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
@@ -80,6 +81,28 @@ impl std::fmt::Display for ClientId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueryId(pub u64);
 
+/// Unique identifier for a locally recorded mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MutationId(pub Uuid);
+
+impl MutationId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for MutationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for MutationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum QueryPropagation {
     #[default]
@@ -100,6 +123,13 @@ pub(super) type BranchSyncData = (
     BranchName,
     HashSet<CommitId>,
 );
+
+pub(crate) fn current_timestamp_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros() as u64)
+        .unwrap_or(0)
+}
 
 // ============================================================================
 // Client Roles
@@ -178,6 +208,70 @@ impl ClientState {
 // ============================================================================
 // Errors
 // ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOperation {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl MutationOperation {
+    pub fn from_write_operation(operation: Operation) -> Option<Self> {
+        match operation {
+            Operation::Insert => Some(Self::Insert),
+            Operation::Update => Some(Self::Update),
+            Operation::Delete => Some(Self::Delete),
+            Operation::Select => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationRejectCode {
+    PermissionDenied,
+    SessionRequired,
+    CatalogueWriteDenied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationAcceptance {
+    pub object_id: ObjectId,
+    pub branch_name: BranchName,
+    pub operation: MutationOperation,
+    pub commit_ids: Vec<CommitId>,
+    pub previous_commit_ids: Vec<CommitId>,
+    pub accepted_at_micros: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationRejection {
+    pub object_id: ObjectId,
+    pub branch_name: BranchName,
+    pub operation: MutationOperation,
+    pub commit_ids: Vec<CommitId>,
+    pub previous_commit_ids: Vec<CommitId>,
+    pub code: MutationRejectCode,
+    pub reason: String,
+    pub rejected_at_micros: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationOutcome {
+    Accepted(MutationAcceptance),
+    Rejected(MutationRejection),
+}
+
+impl MutationOutcome {
+    pub fn commit_ids(&self) -> &[CommitId] {
+        match self {
+            Self::Accepted(acceptance) => &acceptance.commit_ids,
+            Self::Rejected(rejection) => &rejection.commit_ids,
+        }
+    }
+}
 
 /// Strongly typed errors for sync operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +354,9 @@ pub enum SyncPayload {
         /// Highest stream sequence known to be emitted before this notification.
         through_seq: u64,
     },
+
+    /// Terminal outcome for a client-originated mutation.
+    MutationOutcome(MutationOutcome),
 
     /// Error response.
     Error(SyncError),
@@ -372,6 +469,7 @@ impl SyncPayload {
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::PersistenceAck { .. } => "PersistenceAck",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
+            SyncPayload::MutationOutcome(_) => "MutationOutcome",
             SyncPayload::Error(_) => "Error",
         }
     }

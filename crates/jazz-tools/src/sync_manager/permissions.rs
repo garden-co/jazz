@@ -29,28 +29,22 @@ impl SyncManager {
     /// This takes the full PendingPermissionCheck since it was already taken
     /// from the queue by take_pending_permission_checks().
     pub fn reject_permission_check(&mut self, check: PendingPermissionCheck, reason: String) {
-        // Extract object_id and branch_name from payload
-        let (object_id, branch_name) = match &check.payload {
-            SyncPayload::ObjectUpdated {
-                object_id,
-                branch_name,
-                ..
-            } => (*object_id, *branch_name),
-            SyncPayload::ObjectTruncated {
-                object_id,
-                branch_name,
-                ..
-            } => (*object_id, *branch_name),
-            _ => return,
+        let Some(operation) = MutationOperation::from_write_operation(check.operation) else {
+            return;
         };
+        let payload = &check.payload;
+        let Some(mut rejection) = self.build_mutation_rejection_from_payload(
+            payload,
+            MutationRejectCode::PermissionDenied,
+            reason,
+        ) else {
+            return;
+        };
+        rejection.operation = operation;
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(check.client_id),
-            payload: SyncPayload::Error(SyncError::PermissionDenied {
-                object_id,
-                branch_name,
-                reason,
-            }),
+            payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(rejection)),
         });
     }
 
