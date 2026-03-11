@@ -589,7 +589,7 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 
         Value::Bytea(bytes_value) => {
             // Raw bytes for exact-match index semantics.
-            let mut bytes = vec![0x09];
+            let mut bytes = vec![0x0A];
             bytes.extend_from_slice(bytes_value);
             bytes
         }
@@ -645,6 +645,7 @@ pub(crate) fn decode_index_value(bytes: &[u8]) -> Option<Value> {
             };
             Some(Value::Double(f64::from_bits(bits)))
         }
+        0x0A => Some(Value::Bytea(rest.to_vec())),
         _ => None,
     }
 }
@@ -969,13 +970,9 @@ impl Storage for MemoryStorage {
             Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
             Bound::Unbounded => Bound::Unbounded,
         };
-        let resume_after = scan.resume_after.map(|cursor| {
-            let value = match &cursor.value {
-                Value::Double(v) if *v == 0.0 => encode_value(&Value::Double(-0.0)),
-                value => encode_value(value),
-            };
-            (value, cursor.row_id)
-        });
+        let resume_after = scan
+            .resume_after
+            .map(|cursor| (encode_value(&cursor.value), cursor.row_id));
 
         let mut results = Vec::new();
         let mut push_ids = |value: &[u8], ids: &HashSet<ObjectId>| {
@@ -1277,6 +1274,83 @@ mod tests {
     }
 
     #[test]
+    fn memory_storage_index_scan_ordered_resume_after_positive_zero_does_not_repeat_cursor() {
+        let mut storage = MemoryStorage::new();
+
+        let row_neg_one = ObjectId::new();
+        let row_neg_zero = ObjectId::new();
+        let row_pos_zero = ObjectId::new();
+        let row_one = ObjectId::new();
+
+        storage
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(-1.0),
+                row_neg_one,
+            )
+            .unwrap();
+        storage
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(-0.0),
+                row_neg_zero,
+            )
+            .unwrap();
+        storage
+            .index_insert(
+                "prices",
+                "amount",
+                "main",
+                &Value::Double(0.0),
+                row_pos_zero,
+            )
+            .unwrap();
+        storage
+            .index_insert("prices", "amount", "main", &Value::Double(1.0), row_one)
+            .unwrap();
+
+        let first_page = storage.index_scan_ordered(OrderedIndexScan {
+            table: "prices",
+            column: "amount",
+            branch: "main",
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+            direction: IndexScanDirection::Ascending,
+            take: Some(3),
+            resume_after: None,
+        });
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|cursor| cursor.row_id)
+                .collect::<Vec<_>>(),
+            vec![row_neg_one, row_neg_zero, row_pos_zero]
+        );
+
+        let second_page = storage.index_scan_ordered(OrderedIndexScan {
+            table: "prices",
+            column: "amount",
+            branch: "main",
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+            direction: IndexScanDirection::Ascending,
+            take: Some(3),
+            resume_after: first_page.last(),
+        });
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|cursor| cursor.row_id)
+                .collect::<Vec<_>>(),
+            vec![row_one]
+        );
+    }
+
+    #[test]
     fn memory_storage_index_scan_all() {
         let mut storage = MemoryStorage::new();
 
@@ -1417,14 +1491,37 @@ mod tests {
 
     #[test]
     fn real_cross_type_ordering() {
-        // Double should sort after all existing types (tag 0x09 > 0x08)
+        // Double sorts after rows and before byte arrays.
         let row = encode_value(&Value::Row {
             id: None,
             values: vec![],
         });
         let double = encode_value(&Value::Double(0.0));
+        let bytea = encode_value(&Value::Bytea(vec![0x00]));
 
         assert!(row < double);
+        assert!(double < bytea);
+    }
+
+    #[test]
+    fn real_ordered_cursor_parsing_roundtrips_bytea() {
+        let row_id = ObjectId::new();
+        let key = key_codec::index_entry_key(
+            "files",
+            "blob",
+            "main",
+            &Value::Bytea(vec![0x00, 0x7F, 0x80, 0xFF]),
+            row_id,
+        );
+
+        let cursor = key_codec::parse_ordered_cursor_from_index_key(&key).unwrap();
+        assert_eq!(
+            cursor,
+            OrderedIndexCursor {
+                value: Value::Bytea(vec![0x00, 0x7F, 0x80, 0xFF]),
+                row_id,
+            }
+        );
     }
 
     // ----------------------------------------------------------------
