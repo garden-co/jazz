@@ -1,4 +1,5 @@
 .container {
+  position: relative;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 10px;
@@ -56,6 +57,28 @@
   border-radius: 8px;
 }
 
+.contentArea {
+  min-height: 0;
+  display: block;
+  border: 1px solid #2f3a4b;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.contentArea .gridFrame {
+  border: 0;
+  border-radius: 0;
+}
+
+.sidebarOverlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  box-shadow: -18px 0 28px rgba(6, 12, 20, 0.5);
+}
+
 .table {
   width: 100%;
   border-collapse: separate;
@@ -99,6 +122,42 @@
 
 .table tbody tr:hover td {
   background: #1c2534;
+}
+
+.actionsHeader {
+  composes: headerCell;
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  min-width: 106px;
+}
+
+.actionsCell {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  min-width: 106px;
+  border-bottom: 1px solid #293445;
+  padding: 8px 10px;
+  background: #151a24;
+}
+
+.table tbody tr:hover .actionsCell {
+  background: #1c2534;
+}
+
+.actionButton {
+  border: 1px solid #3f5067;
+  background: #273245;
+  color: #d7e1f1;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.actionButton:hover {
+  background: #30415a;
 }
 
 .footer {
