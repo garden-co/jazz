@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder";
+import type { ColumnDescriptor } from "jazz-tools";
 
 const schemaColumns = [
   { name: "title", column_type: { type: "Text" }, nullable: false },
@@ -8,7 +9,7 @@ const schemaColumns = [
   { name: "count", column_type: { type: "Integer" }, nullable: false },
   { name: "assignee_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
   { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
-] as const;
+] satisfies ColumnDescriptor[];
 
 describe("TableFilterBuilder", () => {
   afterEach(() => {
