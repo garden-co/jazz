@@ -9,11 +9,9 @@ use crate::query_manager::graph_nodes::filter::FilterNode;
 use crate::query_manager::graph_nodes::policy_filter::PolicyFilterNode;
 use crate::query_manager::graph_nodes::sort::SortDirection;
 use crate::query_manager::graph_nodes::tuple_delta::compute_tuple_delta;
-use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::{Condition, Conjunction};
-use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnType, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta,
+    ColumnType, LoadedRow, Row, RowDescriptor, SchemaHash, TableName, Tuple, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
 };
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
@@ -28,7 +26,6 @@ pub(crate) struct IndexedQueryNodeConfig {
     pub branches: Vec<String>,
     pub branch_schema_map: std::collections::HashMap<String, SchemaHash>,
     pub schema_context: SchemaContext,
-    pub schema: Schema,
     pub tuple_descriptor: TupleDescriptor,
     pub table_descriptors: Vec<RowDescriptor>,
     pub disjuncts: Vec<Conjunction>,
@@ -59,13 +56,10 @@ pub(crate) struct JoinEdgePlan {
     pub right_key: ResolvedRowKey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct TablePolicySpec {
     pub scope_index: usize,
-    pub table: TableName,
-    pub descriptor: RowDescriptor,
-    pub policy: PolicyExpr,
-    pub session: Session,
+    pub evaluators_by_branch: std::collections::HashMap<String, PolicyFilterNode>,
 }
 
 #[derive(Debug, Clone)]
@@ -503,15 +497,9 @@ impl IndexedQueryNode {
         else {
             return true;
         };
-
-        let evaluator = PolicyFilterNode::new_with_branch(
-            policy.descriptor.clone(),
-            policy.policy.clone(),
-            policy.session.clone(),
-            self.config.schema.clone(),
-            policy.table.as_str(),
-            &scoped_row.branch,
-        );
+        let Some(evaluator) = policy.evaluators_by_branch.get(&scoped_row.branch) else {
+            return true;
+        };
         evaluator.row_passes_with_context(&scoped_row.row, storage, row_loader)
     }
 

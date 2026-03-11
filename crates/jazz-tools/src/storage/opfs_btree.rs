@@ -46,6 +46,7 @@ use super::{
 };
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
+const ORDERED_SCAN_BATCH_SIZE: usize = 256;
 
 #[derive(Clone, Debug)]
 enum AnyFile {
@@ -224,29 +225,62 @@ impl OpfsBTreeStorage {
                 return Ok(collector.finish());
             }
 
-            let entries = tree
-                .range(start_key.as_bytes(), end_key.as_bytes(), usize::MAX)
-                .map_err(map_storage_err)?;
-
+            let batch_limit = scan
+                .take
+                .unwrap_or(ORDERED_SCAN_BATCH_SIZE)
+                .max(ORDERED_SCAN_BATCH_SIZE);
             match scan.direction {
                 IndexScanDirection::Ascending => {
-                    for (key, _) in &entries {
-                        let key = std::str::from_utf8(key)
-                            .map_err(|e| BTreeError::Corrupt(format!("invalid key utf8: {}", e)))
+                    let mut current_start = start_key.into_bytes();
+                    let end_key = end_key.into_bytes();
+                    while current_start < end_key && collector.should_continue() {
+                        let entries = tree
+                            .range(&current_start, &end_key, batch_limit)
                             .map_err(map_storage_err)?;
-                        if !collector.consume_key(key) {
+                        let Some((last_key, _)) = entries.last() else {
+                            break;
+                        };
+                        for (key, _) in &entries {
+                            let key = std::str::from_utf8(key)
+                                .map_err(|e| {
+                                    BTreeError::Corrupt(format!("invalid key utf8: {}", e))
+                                })
+                                .map_err(map_storage_err)?;
+                            if !collector.consume_key(key) {
+                                return Ok(collector.finish());
+                            }
+                        }
+                        if entries.len() < batch_limit {
                             break;
                         }
+                        current_start = last_key.clone();
+                        increment_bytes(&mut current_start);
                     }
                 }
                 IndexScanDirection::Descending => {
-                    for (key, _) in entries.iter().rev() {
-                        let key = std::str::from_utf8(key)
-                            .map_err(|e| BTreeError::Corrupt(format!("invalid key utf8: {}", e)))
+                    let start_key = start_key.into_bytes();
+                    let mut current_end = end_key.into_bytes();
+                    while start_key < current_end && collector.should_continue() {
+                        let entries = tree
+                            .range_desc(&start_key, &current_end, batch_limit)
                             .map_err(map_storage_err)?;
-                        if !collector.consume_key(key) {
+                        let Some((smallest_key, _)) = entries.last() else {
+                            break;
+                        };
+                        for (key, _) in &entries {
+                            let key = std::str::from_utf8(key)
+                                .map_err(|e| {
+                                    BTreeError::Corrupt(format!("invalid key utf8: {}", e))
+                                })
+                                .map_err(map_storage_err)?;
+                            if !collector.consume_key(key) {
+                                return Ok(collector.finish());
+                            }
+                        }
+                        if entries.len() < batch_limit {
                             break;
                         }
+                        current_end = smallest_key.clone();
                     }
                 }
             }
