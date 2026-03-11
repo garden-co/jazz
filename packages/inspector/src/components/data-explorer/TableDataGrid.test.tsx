@@ -4,6 +4,7 @@ import { TableDataGrid } from "./TableDataGrid";
 
 const mockSubscribeAll = vi.fn();
 const mockUpdate = vi.fn();
+const mockInsert = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 
 const mockWasmSchema = {
@@ -22,6 +23,7 @@ vi.mock("jazz-tools/react", () => ({
   useDb: () => ({
     subscribeAll: (...args: unknown[]) => mockSubscribeAll(...args),
     update: (...args: unknown[]) => mockUpdate(...args),
+    insert: (...args: unknown[]) => mockInsert(...args),
   }),
 }));
 
@@ -67,6 +69,7 @@ describe("TableDataGrid", () => {
     ];
 
     mockUpdate.mockReset();
+    mockInsert.mockReset();
     mockSubscribeAll.mockImplementation((_, callback) => {
       callback({ all: currentRows, delta: [] });
       return vi.fn();
@@ -161,5 +164,37 @@ describe("TableDataGrid", () => {
         done: true,
       }),
     );
+  });
+
+  it("opens insert sidebar and inserts a new row", () => {
+    render(<TableDataGrid />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+
+    expect(screen.getByRole("heading", { name: "Insert row" })).not.toBeNull();
+    expect(screen.getByDisplayValue("auto-generated")).not.toBeNull();
+
+    fireEvent.change(screen.getByLabelText("title"), { target: { value: "new todo" } });
+    fireEvent.change(screen.getByLabelText("done"), { target: { value: "true" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Insert" })[1] as Element);
+
+    expect(mockInsert).toHaveBeenCalledWith(
+      expect.objectContaining({ _table: "todos" }),
+      expect.objectContaining({
+        title: "new todo",
+        done: true,
+        meta: null,
+      }),
+    );
+  });
+
+  it("closes sidebar when clicking outside", () => {
+    render(<TableDataGrid />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0] as Element);
+    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+
+    fireEvent.click(screen.getByTestId("row-mutation-overlay"));
+    expect(screen.queryByRole("heading", { name: "Edit row" })).toBeNull();
   });
 });

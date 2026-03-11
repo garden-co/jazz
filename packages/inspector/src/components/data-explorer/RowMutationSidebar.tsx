@@ -1,4 +1,4 @@
-import type { ColumnDescriptor, DynamicTableRow } from "jazz-tools";
+import type { ColumnDescriptor } from "jazz-tools";
 import { useEffect, useMemo, useState } from "react";
 import {
   buildMutationFormFields,
@@ -17,7 +17,8 @@ interface RowMutationSidebarProps {
   mode: MutationFormMode;
   tableName: string;
   schemaColumns: ColumnDescriptor[];
-  targetRow: DynamicTableRow | null;
+  targetRowId: string | null;
+  rowValues: Record<string, unknown> | null;
   onCancel: () => void;
   onSave: (updates: Record<string, unknown>) => void | Promise<void>;
 }
@@ -30,7 +31,18 @@ function saveLabel(mode: MutationFormMode): string {
   return mode === "edit" ? "Save" : "Insert";
 }
 
-function getInitialFieldState(value: unknown): FieldState {
+function getInitialFieldState(
+  value: unknown,
+  mode: MutationFormMode,
+  column: ColumnDescriptor,
+): FieldState {
+  if (mode === "insert") {
+    return {
+      text: formatMutationFieldValue(value),
+      isNull: column.nullable,
+    };
+  }
+
   return {
     text: formatMutationFieldValue(value),
     isNull: value === null || value === undefined,
@@ -41,7 +53,8 @@ export function RowMutationSidebar({
   mode,
   tableName,
   schemaColumns,
-  targetRow,
+  targetRowId,
+  rowValues,
   onCancel,
   onSave,
 }: RowMutationSidebarProps) {
@@ -53,7 +66,7 @@ export function RowMutationSidebar({
   const formFields = useMemo(() => buildMutationFormFields(schemaColumns), [schemaColumns]);
 
   useEffect(() => {
-    if (!targetRow) {
+    if (!rowValues) {
       setFields({});
       setErrors({});
       setSaveError(null);
@@ -62,15 +75,15 @@ export function RowMutationSidebar({
     }
     const nextFields: Record<string, FieldState> = {};
     for (const column of schemaColumns) {
-      nextFields[column.name] = getInitialFieldState(targetRow[column.name]);
+      nextFields[column.name] = getInitialFieldState(rowValues[column.name], mode, column);
     }
     setFields(nextFields);
     setErrors({});
     setSaveError(null);
     setIsSaving(false);
-  }, [targetRow, schemaColumns]);
+  }, [rowValues, mode, schemaColumns]);
 
-  if (!targetRow) {
+  if (!rowValues) {
     return null;
   }
 
@@ -86,7 +99,8 @@ export function RowMutationSidebar({
           for (const field of formFields) {
             const { column, readOnlyReason } = field;
             if (readOnlyReason) continue;
-            const fieldState = fields[column.name] ?? getInitialFieldState(targetRow[column.name]);
+            const fieldState =
+              fields[column.name] ?? getInitialFieldState(rowValues[column.name], mode, column);
 
             if (fieldState.isNull) {
               if (!column.nullable) {
@@ -122,18 +136,23 @@ export function RowMutationSidebar({
         <header className={styles.header}>
           <h3 className={styles.title}>{modeLabel(mode)}</h3>
           <p className={styles.meta}>
-            {tableName} · {targetRow.id}
+            {tableName} · {mode === "edit" ? targetRowId : "new row"}
           </p>
         </header>
 
         <div className={styles.fields}>
           <label className={styles.field}>
             <span className={styles.label}>id</span>
-            <input className={styles.input} value={targetRow.id} readOnly />
+            <input
+              className={styles.input}
+              value={mode === "edit" ? (targetRowId ?? "") : "auto-generated"}
+              readOnly
+            />
           </label>
 
           {formFields.map(({ column, readOnlyReason }) => {
-            const fieldState = fields[column.name] ?? getInitialFieldState(targetRow[column.name]);
+            const fieldState =
+              fields[column.name] ?? getInitialFieldState(rowValues[column.name], mode, column);
             const fieldError = errors[column.name];
             const isReadOnly = readOnlyReason !== null;
             const value = fieldState.text;
