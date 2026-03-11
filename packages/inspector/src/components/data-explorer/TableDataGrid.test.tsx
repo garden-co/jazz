@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
 const mockSubscribeAll = vi.fn();
-const mockUpdate = vi.fn();
-const mockInsert = vi.fn();
+const mockUpdateDurable = vi.fn();
+const mockInsertDurable = vi.fn();
+const mockDeleteDurable = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 
 const mockWasmSchema = {
@@ -22,8 +23,9 @@ const mockWasmSchema = {
 vi.mock("jazz-tools/react", () => ({
   useDb: () => ({
     subscribeAll: (...args: unknown[]) => mockSubscribeAll(...args),
-    update: (...args: unknown[]) => mockUpdate(...args),
-    insert: (...args: unknown[]) => mockInsert(...args),
+    updateDurable: (...args: unknown[]) => mockUpdateDurable(...args),
+    insertDurable: (...args: unknown[]) => mockInsertDurable(...args),
+    deleteDurable: (...args: unknown[]) => mockDeleteDurable(...args),
   }),
 }));
 
@@ -68,8 +70,12 @@ describe("TableDataGrid", () => {
       },
     ];
 
-    mockUpdate.mockReset();
-    mockInsert.mockReset();
+    mockUpdateDurable.mockReset();
+    mockInsertDurable.mockReset();
+    mockDeleteDurable.mockReset();
+    mockUpdateDurable.mockResolvedValue(undefined);
+    mockInsertDurable.mockResolvedValue({ id: "new-row" });
+    mockDeleteDurable.mockResolvedValue(undefined);
     mockSubscribeAll.mockImplementation((_, callback) => {
       callback({ all: currentRows, delta: [] });
       return vi.fn();
@@ -156,13 +162,14 @@ describe("TableDataGrid", () => {
     fireEvent.change(screen.getByLabelText("done"), { target: { value: "true" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(mockUpdate).toHaveBeenCalledWith(
+    expect(mockUpdateDurable).toHaveBeenCalledWith(
       expect.objectContaining({ _table: "todos" }),
       "row-2",
       expect.objectContaining({
         title: "zeta updated",
         done: true,
       }),
+      { tier: "worker" },
     );
   });
 
@@ -178,13 +185,14 @@ describe("TableDataGrid", () => {
     fireEvent.change(screen.getByLabelText("done"), { target: { value: "true" } });
     fireEvent.click(screen.getAllByRole("button", { name: "Insert" })[1] as Element);
 
-    expect(mockInsert).toHaveBeenCalledWith(
+    expect(mockInsertDurable).toHaveBeenCalledWith(
       expect.objectContaining({ _table: "todos" }),
       expect.objectContaining({
         title: "new todo",
         done: true,
         meta: null,
       }),
+      { tier: "worker" },
     );
   });
 
@@ -196,5 +204,30 @@ describe("TableDataGrid", () => {
 
     fireEvent.click(screen.getByTestId("row-mutation-overlay"));
     expect(screen.queryByRole("heading", { name: "Edit row" })).toBeNull();
+  });
+
+  it("deletes a row when delete is confirmed", () => {
+    const confirmSpy = vi.spyOn(globalThis, "confirm").mockReturnValue(true);
+    render(<TableDataGrid />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0] as Element);
+
+    expect(confirmSpy).toHaveBeenCalledWith('Delete row "row-2" from "todos"?');
+    expect(mockDeleteDurable).toHaveBeenCalledWith(
+      expect.objectContaining({ _table: "todos" }),
+      "row-2",
+      { tier: "worker" },
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it("does not delete when delete is canceled", () => {
+    const confirmSpy = vi.spyOn(globalThis, "confirm").mockReturnValue(false);
+    render(<TableDataGrid />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0] as Element);
+
+    expect(mockDeleteDurable).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 });

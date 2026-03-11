@@ -168,6 +168,25 @@
   background: #30415a;
 }
 
+.rowActions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dangerActionButton {
+  border: 1px solid #6a3c49;
+  background: #4a2530;
+  color: #f1d6dc;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dangerActionButton:hover {
+  background: #5a2c3a;
+}
+
 .footer {
   display: flex;
   justify-content: space-between;
