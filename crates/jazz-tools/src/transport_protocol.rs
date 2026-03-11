@@ -32,17 +32,30 @@ pub struct ConnectionId(pub u64);
 // Client -> Server Requests
 // ============================================================================
 
-/// Request to push a sync payload to the server's inbox.
+/// Request to push an ordered batch of sync payloads to the server's inbox.
 ///
-/// This is the unified request type for all client→server communication.
-/// Session context is extracted from HTTP headers at connection time.
+/// All payloads share the same auth context (one auth check per POST).
+/// The server applies them sequentially and returns one result per payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncPayloadRequest {
-    /// The sync payload from the client's outbox.
-    /// Can be any SyncPayload variant: ObjectUpdated, QuerySubscription, etc.
-    pub payload: SyncPayload,
+pub struct SyncBatchRequest {
+    /// Ordered list of payloads from the client's outbox.
+    pub payloads: Vec<SyncPayload>,
     /// Client ID for source tracking.
     pub client_id: ClientId,
+}
+
+/// Per-payload result within a `SyncBatchResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPayloadResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response to a `SyncBatchRequest` — one result per input payload, in order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncBatchResponse {
+    pub results: Vec<SyncPayloadResult>,
 }
 
 // ============================================================================
@@ -258,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_payload_request_serialization() {
+    fn test_sync_batch_request_serialization() {
         use crate::object::BranchName;
         use crate::object::ObjectId;
         use crate::sync_manager::ClientId;
@@ -269,16 +282,44 @@ mod tests {
             branch_name: BranchName::new("main"),
             commits: vec![],
         };
-        let request = SyncPayloadRequest {
-            payload,
+        let request = SyncBatchRequest {
+            payloads: vec![payload],
             client_id: ClientId::new(),
         };
 
         let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("payloads"));
         assert!(json.contains("ObjectUpdated"));
         assert!(json.contains("main"));
 
-        let parsed: SyncPayloadRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed.payload, SyncPayload::ObjectUpdated { .. }));
+        let parsed: SyncBatchRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.payloads.len(), 1);
+        assert!(matches!(
+            parsed.payloads[0],
+            SyncPayload::ObjectUpdated { .. }
+        ));
+    }
+
+    #[test]
+    fn test_sync_batch_response_serialization() {
+        let response = SyncBatchResponse {
+            results: vec![
+                SyncPayloadResult {
+                    ok: true,
+                    error: None,
+                },
+                SyncPayloadResult {
+                    ok: false,
+                    error: Some("bad payload".into()),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("results"));
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("bad payload"));
+
+        // ok:true entries must not include the error field
+        assert!(!json.contains("\"error\":null"));
     }
 }
