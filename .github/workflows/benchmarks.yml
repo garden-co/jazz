@@ -346,6 +346,9 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
       - name: Download native artifacts
         uses: actions/download-artifact@v5
         with:
@@ -624,6 +627,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          pnpm run format
           git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/ci_skip_set.json benchmarks/realistic/site
           if git diff --cached --quiet; then
             echo "No benchmark history/site changes to commit."
