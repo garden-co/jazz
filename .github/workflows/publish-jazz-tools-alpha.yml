@@ -193,17 +193,14 @@ jobs:
               if (mergeTree !== previewTree) {
                 reason = `main merge tree ${mergeTree} differs from release PR head tree ${previewTree}`;
               } else {
-                const runs = await github.paginate(
-                  github.rest.actions.listWorkflowRuns,
-                  {
-                    owner,
-                    repo,
-                    workflow_id: "preview-jazz-tools-alpha-release.yml",
-                    branch: releasePrHeadRef,
-                    per_page: 100,
-                  },
-                  (response) => response.data.workflow_runs,
-                );
+                const runsResponse = await github.rest.actions.listWorkflowRuns({
+                  owner,
+                  repo,
+                  workflow_id: "preview-jazz-tools-alpha-release.yml",
+                  branch: releasePrHeadRef,
+                  per_page: 100,
+                });
+                const runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
 
                 const previewRun = runs
                   .filter(
@@ -220,16 +217,13 @@ jobs:
                 if (!previewRun) {
                   reason = `no successful preview run found for ${releasePrHeadRef}@${releasePrHeadSha}`;
                 } else {
-                  const artifacts = await github.paginate(
-                    github.rest.actions.listWorkflowRunArtifacts,
-                    {
-                      owner,
-                      repo,
-                      run_id: previewRun.id,
-                      per_page: 100,
-                    },
-                    (response) => response.data.artifacts,
-                  );
+                  const artifactsResponse = await github.rest.actions.listWorkflowRunArtifacts({
+                    owner,
+                    repo,
+                    run_id: previewRun.id,
+                    per_page: 100,
+                  });
+                  const artifacts = (artifactsResponse.data.artifacts || []).filter(Boolean);
 
                   const requiredArtifacts = [
                     "jazz-tools-darwin-arm64",
