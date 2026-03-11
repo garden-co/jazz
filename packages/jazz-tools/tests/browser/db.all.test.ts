@@ -383,6 +383,81 @@ describe("db.all browser integration", () => {
     expect(rows[0].title).toBe("p2");
   });
 
+  it("supports filtered top-k when filter and sort use the same column", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("filtered-topk-same-column") },
+      }),
+    );
+
+    for (const [title, priority] of [
+      ["Alice", 100],
+      ["Bob", 50],
+      ["Charlie", 75],
+      ["Diana", 60],
+    ] as const) {
+      await db.insert(todos, {
+        title,
+        done: false,
+        priority,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+    }
+
+    const rows = await db.all<Todo>(
+      makeQuery<Todo>("todos", {
+        conditions: [{ column: "priority", op: "gte", value: 60 }],
+        orderBy: [["priority", "asc"]],
+        limit: 2,
+      }),
+    );
+
+    expect(rows.map((row) => ({ title: row.title, priority: row.priority }))).toEqual([
+      { title: "Diana", priority: 60 },
+      { title: "Charlie", priority: 75 },
+    ]);
+  });
+
+  it("supports filtered top-k when filter and sort use different columns", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("filtered-topk-different-columns") },
+      }),
+    );
+
+    for (const [title, priority] of [
+      ["Alice", 10],
+      ["Bob", 60],
+      ["Alice", 50],
+      ["Alice", 40],
+      ["Cara", 70],
+    ] as const) {
+      await db.insert(todos, {
+        title,
+        done: false,
+        priority,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+    }
+
+    const rows = await db.all<Todo>(
+      makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "eq", value: "Alice" }],
+        orderBy: [["priority", "desc"]],
+        limit: 2,
+      }),
+    );
+
+    expect(rows.map((row) => ({ title: row.title, priority: row.priority }))).toEqual([
+      { title: "Alice", priority: 50 },
+      { title: "Alice", priority: 40 },
+    ]);
+  });
+
   it("supports include relations", async () => {
     const db = track(
       await createDb({
@@ -459,6 +534,48 @@ describe("db.all browser integration", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({ id: orgId, name: "Org A" });
+  });
+
+  it("supports top-k hop queries ordered by joined-table columns", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("join-topk-hop") },
+      }),
+    );
+
+    const { id: teamAId } = await db.insert(teams, {
+      name: "Alpha",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const { id: teamBId } = await db.insert(teams, {
+      name: "Gamma",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const { id: teamCId } = await db.insert(teams, {
+      name: "Beta",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+
+    await db.insert(users, { name: "User A", team_id: teamAId });
+    await db.insert(users, { name: "User B", team_id: teamBId });
+    await db.insert(users, { name: "User C", team_id: teamCId });
+
+    const rows = await db.all<Team>(
+      makeQuery<Team>("users", {
+        hops: ["team"],
+        orderBy: [["__hop_0.name", "desc"]],
+        limit: 2,
+      }),
+    );
+
+    expect(rows.map((row) => ({ id: row.id, name: row.name }))).toEqual([
+      { id: teamBId, name: "Gamma" },
+      { id: teamCId, name: "Beta" },
+    ]);
   });
 
   it("supports one-off all queries across scalar and UUID[] foreign-key hops", async () => {

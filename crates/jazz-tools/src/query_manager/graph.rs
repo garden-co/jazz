@@ -1143,7 +1143,7 @@ impl QueryGraph {
         if plan.include_deleted || plan.recursive.is_some() {
             return None;
         }
-        if plan.joins.is_empty() && plan.limit.is_none() && plan.offset == 0 {
+        if plan.limit.is_none() && plan.offset == 0 {
             return None;
         }
         if !plan.joins.is_empty() && !plan.array_subqueries.is_empty() {
@@ -1282,12 +1282,23 @@ impl QueryGraph {
                         .iter()
                         .map(|table| TableName::new(table.as_str())),
                 );
+                let mut evaluators_by_branch = HashMap::with_capacity(branches.len());
+                for branch in branches {
+                    evaluators_by_branch.insert(
+                        branch.clone(),
+                        PolicyFilterNode::new_with_branch(
+                            table_descriptors[scope_index].clone(),
+                            policy.clone(),
+                            session.clone(),
+                            schema.clone(),
+                            table.as_str(),
+                            branch,
+                        ),
+                    );
+                }
                 policies.push(TablePolicySpec {
                     scope_index,
-                    table: *table,
-                    descriptor: table_descriptors[scope_index].clone(),
-                    policy,
-                    session: session.clone(),
+                    evaluators_by_branch,
                 });
             }
         }
@@ -1296,7 +1307,6 @@ impl QueryGraph {
             branches: branches.to_vec(),
             branch_schema_map: branch_schema_map.clone(),
             schema_context: schema_context.clone(),
-            schema: schema.clone(),
             tuple_descriptor: tuple_descriptor.clone(),
             table_descriptors: table_descriptors.clone(),
             disjuncts: plan.disjuncts.clone(),
@@ -3419,11 +3429,11 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
+        assert!(has_join_node(&graph), "Should have a JoinNode");
         assert!(
-            has_indexed_query_node(&graph),
-            "Should use IndexedQueryNode"
+            !has_indexed_query_node(&graph),
+            "Non-paginated joins should keep the incremental JoinNode path"
         );
-        assert!(!has_join_node(&graph), "JoinNode should be elided");
         assert_eq!(graph.index_scan_nodes.len(), 2);
     }
 
@@ -3438,12 +3448,30 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
+        assert!(has_join_node(&graph), "Should have a JoinNode");
+        assert!(
+            !has_indexed_query_node(&graph),
+            "Projection alone should not switch joins onto the indexed top-k path"
+        );
+        assert!(has_project_node(&graph), "Should have a ProjectNode");
+    }
+
+    #[test]
+    fn compile_join_with_limit_uses_indexed_query() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users")
+            .join("posts")
+            .on("id", "author_id")
+            .limit(5)
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
         assert!(
             has_indexed_query_node(&graph),
-            "Should use IndexedQueryNode"
+            "Paginated joins should use IndexedQueryNode"
         );
         assert!(!has_join_node(&graph), "JoinNode should be elided");
-        assert!(has_project_node(&graph), "Should have a ProjectNode");
     }
 
     #[test]

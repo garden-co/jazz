@@ -518,6 +518,72 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("hydrates a filtered top-k subscription when filter and sort use different columns", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("filtered-topk-different-columns"),
+        },
+      }),
+    );
+
+    for (const [title, priority] of [
+      ["Alice", 10],
+      ["Bob", 60],
+      ["Alice", 50],
+      ["Alice", 40],
+      ["Cara", 70],
+    ] as const) {
+      await db.insert(todos, {
+        title,
+        done: false,
+        priority,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+    }
+
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<Todo>("todos", {
+          conditions: [{ column: "title", op: "eq", value: "Alice" }],
+          orderBy: [["priority", "desc"]],
+          limit: 2,
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return (
+          latestAll.length === 2 &&
+          latestAll[0]?.title === "Alice" &&
+          latestAll[0]?.priority === 50 &&
+          latestAll[1]?.priority === 40
+        );
+      },
+      10_000,
+      "expected filtered top-k subscription for different filter/sort columns",
+    );
+
+    expect(
+      deltas[deltas.length - 1]?.all.map((row) => ({
+        title: row.title,
+        priority: row.priority,
+      })),
+    ).toEqual([
+      { title: "Alice", priority: 50 },
+      { title: "Alice", priority: 40 },
+    ]);
+
+    unsubscribe();
+  });
+
   it("does not emit add for non-matching text contains", async () => {
     const db = track(
       await createDb({
@@ -670,6 +736,81 @@ describe("db.subscribeAll browser integration", () => {
 
     expect(deltas.some((delta) => delta.all.some((row) => row.id === teamAId))).toBe(true);
     expect(deltas.some((delta) => delta.all.some((row) => row.id === teamBId))).toBe(true);
+
+    unsubscribe();
+  });
+
+  it("reorders top-k hop subscriptions when joined rows change", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("join-topk-hop") },
+      }),
+    );
+
+    const { id: teamAId } = await db.insert(teams, {
+      name: "Alpha",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const { id: teamBId } = await db.insert(teams, {
+      name: "Gamma",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+    const { id: teamCId } = await db.insert(teams, {
+      name: "Beta",
+      org_id: undefined,
+      parent_id: undefined,
+    });
+
+    await db.insert(users, { name: "User A", team_id: teamAId });
+    await db.insert(users, { name: "User B", team_id: teamBId });
+    await db.insert(users, { name: "User C", team_id: teamCId });
+
+    const deltas: Array<SubscriptionDelta<Team>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<Team>("users", {
+          hops: ["team"],
+          orderBy: [["__hop_0.name", "desc"]],
+          limit: 2,
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return (
+          latestAll.length === 2 &&
+          latestAll[0]?.id === teamBId &&
+          latestAll[0]?.name === "Gamma" &&
+          latestAll[1]?.id === teamCId &&
+          latestAll[1]?.name === "Beta"
+        );
+      },
+      10_000,
+      "expected initial top-k hop subscription result",
+    );
+
+    await db.update(teams, teamAId, { name: "Zulu" });
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return (
+          latestAll.length === 2 &&
+          latestAll[0]?.id === teamAId &&
+          latestAll[0]?.name === "Zulu" &&
+          latestAll[1]?.id === teamBId &&
+          latestAll[1]?.name === "Gamma"
+        );
+      },
+      10_000,
+      "expected top-k hop subscription to reorder after joined-row update",
+    );
 
     unsubscribe();
   });

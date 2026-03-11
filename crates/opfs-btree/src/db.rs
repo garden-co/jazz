@@ -347,6 +347,87 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(out)
     }
 
+    pub fn range_desc(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KvPair>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::range_desc", limit).entered();
+        if limit == 0 || start >= end {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        let mut visited = OpfsSet::default();
+        let Some(anchor_key) = descending_search_key(end, self.options.page_size) else {
+            return Ok(out);
+        };
+        let Some(mut current) = self.find_leaf_page_id(&anchor_key)? else {
+            return Ok(out);
+        };
+
+        loop {
+            if !visited.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
+            }
+
+            self.ensure_page_loaded(current)?;
+            let page = {
+                let raw = self.raw_page_bytes(current)?;
+                decode_page(raw, self.options.page_size)?
+            };
+            let Page::Leaf { entries, .. } = page else {
+                return Err(BTreeError::Corrupt(format!(
+                    "expected leaf page {}, found non-leaf during reverse scan",
+                    current
+                )));
+            };
+            let Some((first_key, _)) = entries.first() else {
+                return Ok(out);
+            };
+
+            for (key, value) in entries.iter().rev() {
+                if key.as_slice() >= end {
+                    continue;
+                }
+                if key.as_slice() < start {
+                    return Ok(out);
+                }
+
+                let value = match value {
+                    ValueCell::Inline(value) => value.clone(),
+                    ValueCell::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => self.read_overflow_value(*head_page_id, *total_len as usize)?,
+                };
+                out.push((key.clone(), value));
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+
+            if first_key.as_slice() <= start {
+                return Ok(out);
+            }
+
+            let Some(prev_search_key) = descending_search_key(first_key, self.options.page_size)
+            else {
+                return Ok(out);
+            };
+            let Some(prev) = self.find_leaf_page_id(&prev_search_key)? else {
+                return Ok(out);
+            };
+            if prev == current {
+                return Ok(out);
+            }
+            current = prev;
+        }
+    }
+
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
         let _span = tracing::debug_span!(
             "OpfsBTree::checkpoint",
@@ -1555,6 +1636,14 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 }
 
+fn descending_search_key(key: &[u8], pad_len: usize) -> Option<Vec<u8>> {
+    let index = key.iter().rposition(|byte| *byte > 0)?;
+    let mut out = key[..=index].to_vec();
+    out[index] -= 1;
+    out.resize(out.len().saturating_add(pad_len.max(1)), 0xFF);
+    Some(out)
+}
+
 fn child_index(keys: &[Vec<u8>], key: &[u8]) -> usize {
     keys.partition_point(|separator| separator.as_slice() <= key)
 }
@@ -1873,6 +1962,14 @@ mod tests {
                 (b"a".to_vec(), b"1".to_vec()),
                 (b"b".to_vec(), b"20".to_vec()),
                 (b"c".to_vec(), b"3".to_vec()),
+            ]
+        );
+        let reverse = tree.range_desc(b"a", b"d", 2).expect("range d..a desc");
+        assert_eq!(
+            reverse,
+            vec![
+                (b"c".to_vec(), b"3".to_vec()),
+                (b"b".to_vec(), b"20".to_vec()),
             ]
         );
 
