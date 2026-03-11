@@ -12,12 +12,26 @@ import {
 import { useAll, useDb, useSession } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema/app";
 
+function normalizeText(value: string | null | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
+function toTestIdSegment(value: string | null | undefined, fallback: string): string {
+  const normalized = normalizeText(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || fallback;
+}
+
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const [title, setTitle] = useState("");
 
-  const trimmedFilterTitle = filterTitle.trim();
+  const trimmedFilterTitle = normalizeText(filterTitle).trim();
   let todosQuery = app.todos;
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
@@ -32,24 +46,32 @@ export function TodoList() {
   const sessionUserId = session?.user_id ?? null;
 
   const addTodo = () => {
-    const trimmed = title.trim();
+    const trimmed = normalizeText(title).trim();
     if (!trimmed || !sessionUserId) return;
     db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 
   const renderItem: ListRenderItem<Todo> = ({ item }) => {
+    const displayTitle = normalizeText(item.title).trim() || "Untitled todo";
+    const titleId = toTestIdSegment(item.title, item.id);
+
     return (
       <View style={styles.todoRow}>
         <Switch
+          testID={`todo-toggle-${titleId}`}
           value={item.done}
           onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
         />
         <View style={styles.todoTextWrap}>
-          <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{item.title}</Text>
+          <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{displayTitle}</Text>
           {item.description ? <Text style={styles.todoDescription}>{item.description}</Text> : null}
         </View>
-        <Pressable onPress={() => db.delete(app.todos, item.id)} style={styles.deleteButton}>
+        <Pressable
+          testID={`todo-delete-${titleId}`}
+          onPress={() => db.delete(app.todos, item.id)}
+          style={styles.deleteButton}
+        >
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>
@@ -60,7 +82,8 @@ export function TodoList() {
     <View style={styles.wrapper}>
       <View style={styles.inputRow}>
         <TextInput
-          value={title}
+          testID="todo-input"
+          value={normalizeText(title)}
           onChangeText={setTitle}
           placeholder="What needs to be done?"
           style={styles.input}
@@ -69,6 +92,7 @@ export function TodoList() {
         />
         <Pressable
           onPress={addTodo}
+          testID="todo-add"
           style={[styles.addButton, !sessionUserId && styles.addButtonDisabled]}
           disabled={!sessionUserId}
         >
@@ -78,14 +102,18 @@ export function TodoList() {
 
       <View style={styles.filters}>
         <TextInput
-          value={filterTitle}
+          value={normalizeText(filterTitle)}
           onChangeText={setFilterTitle}
           placeholder="Filter by title (contains)"
           style={styles.filterInput}
         />
         <View style={styles.doneOnlyRow}>
           <Text style={styles.doneOnlyLabel}>Done only</Text>
-          <Switch value={showDoneOnly} onValueChange={setShowDoneOnly} />
+          <Switch
+            testID="todo-filter-done-only"
+            value={showDoneOnly}
+            onValueChange={setShowDoneOnly}
+          />
         </View>
       </View>
 

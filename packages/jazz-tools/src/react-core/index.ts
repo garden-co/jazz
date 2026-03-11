@@ -5,6 +5,7 @@ export { useAll, useAllSuspense } from "./use-all.js";
 export type {
   DurabilityTier,
   QueryBuilder,
+  QueryOptions,
   RowDelta,
   SubscriptionDelta,
   TableProxy,

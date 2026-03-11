@@ -10,7 +10,7 @@ import {
   type SubscriptionsOrchestrator,
 } from "../../src/subscriptions-orchestrator.js";
 import type { Session } from "../../src/runtime/context.js";
-import type { QueryBuilder } from "../../src/runtime/db.js";
+import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 
 type Todo = {
@@ -28,12 +28,19 @@ type ControlledEntry<T extends { id: string }> = CacheEntryHandle<T> & {
 class ControlledManager {
   private readonly entries = new Map<string, ControlledEntry<any>>();
 
-  register<T extends { id: string }>(query: QueryBuilder<T>, entry: ControlledEntry<T>): void {
-    this.entries.set(query._build(), entry);
+  register<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    entry: ControlledEntry<T>,
+    options?: QueryOptions,
+  ): void {
+    this.entries.set(this.makeQueryKey(query, options), entry);
   }
 
-  makeQueryKey<T extends { id: string }>(query: QueryBuilder<T>): string {
-    return query._build();
+  makeQueryKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
+    if (!options) {
+      return query._build();
+    }
+    return `${JSON.stringify(options)}:${query._build()}`;
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -231,7 +238,26 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Alpha|Beta");
   });
 
-  it("RCB-B09: useAllSuspense suspends then renders resolved data", async () => {
+  it("RCB-B09: useAll forwards QueryOptions to the matching cache entry", async () => {
+    const manager = new ControlledManager();
+    const entry = createEntry<Todo>({
+      status: "fulfilled",
+      data: [{ id: "a", title: "Edge" }],
+      error: null,
+    });
+    manager.register(BASE_QUERY, entry, { tier: "edge", propagation: "local-only" });
+    const client = makeClient({ manager });
+
+    render(
+      <JazzProvider client={client}>
+        <UseAllView query={BASE_QUERY} options={{ tier: "edge", propagation: "local-only" }} />
+      </JazzProvider>,
+    );
+
+    await expectText("rows", "Edge");
+  });
+
+  it("RCB-B10: useAllSuspense suspends then renders resolved data", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
     manager.register(BASE_QUERY, entry);
@@ -257,7 +283,68 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Alpha|Beta");
   });
 
-  it("RCB-B10: delta change stream is reflected in rendered list", async () => {
+  it("RCB-B11: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
+    const manager = new ControlledManager();
+    const entry = createEntry<Todo>();
+    manager.register(BASE_QUERY, entry, { localUpdates: "deferred" });
+    const client = makeClient({ manager });
+
+    render(
+      <CaptureErrorBoundary>
+        <React.Suspense fallback={<div data-testid="rows-fallback">loading-rows</div>}>
+          <JazzProvider client={client}>
+            <UseAllSuspenseView query={BASE_QUERY} options={{ localUpdates: "deferred" }} />
+          </JazzProvider>
+        </React.Suspense>
+      </CaptureErrorBoundary>,
+    );
+
+    await expectText("rows-fallback", "loading-rows");
+
+    entry.resolvePending([{ id: "a", title: "Deferred" }]);
+
+    await expectText("rows", "Deferred");
+  });
+
+  it("RCB-B12: changing QueryOptions switches to the matching cache entry", async () => {
+    const manager = new ControlledManager();
+    manager.register(
+      BASE_QUERY,
+      createEntry<Todo>({
+        status: "fulfilled",
+        data: [{ id: "a", title: "Immediate" }],
+        error: null,
+      }),
+    );
+    manager.register(
+      BASE_QUERY,
+      createEntry<Todo>({
+        status: "fulfilled",
+        data: [{ id: "b", title: "Deferred" }],
+        error: null,
+      }),
+      { localUpdates: "deferred" },
+    );
+    const client = makeClient({ manager });
+
+    render(
+      <JazzProvider client={client}>
+        <UseAllView query={BASE_QUERY} />
+      </JazzProvider>,
+    );
+
+    await expectText("rows", "Immediate");
+
+    render(
+      <JazzProvider client={client}>
+        <UseAllView query={BASE_QUERY} options={{ localUpdates: "deferred" }} />
+      </JazzProvider>,
+    );
+
+    await expectText("rows", "Deferred");
+  });
+
+  it("RCB-B13: delta change stream is reflected in rendered list", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>({
       status: "fulfilled",
@@ -300,7 +387,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Beta*");
   });
 
-  it("RCB-B11: rejected entry state throws through suspense/error boundary path", async () => {
+  it("RCB-B14: rejected entry state throws through suspense/error boundary path", async () => {
     const manager = new ControlledManager();
     const rejection = new Error("boom");
     const entry = createEntry<Todo>({
@@ -324,7 +411,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("error", "boom");
   });
 
-  it("RCB-B12: hook usage outside provider throws expected invariant error", async () => {
+  it("RCB-B15: hook usage outside provider throws expected invariant error", async () => {
     const cases: Array<{ key: string; element: React.ReactNode }> = [
       { key: "useDb", element: <OutsideProviderDbView /> },
       { key: "useSession", element: <OutsideProviderSessionView /> },
@@ -382,15 +469,21 @@ function SessionView() {
   return <div data-testid="session">{session ? session.user_id : "null"}</div>;
 }
 
-function UseAllView({ query }: { query: QueryBuilder<Todo> }) {
-  const rows = useAll(query);
+function UseAllView({ query, options }: { query: QueryBuilder<Todo>; options?: QueryOptions }) {
+  const rows = useAll(query, options);
   return (
     <div data-testid="rows">{rows ? rows.map((row) => row.title).join("|") : "undefined"}</div>
   );
 }
 
-function UseAllSuspenseView({ query }: { query: QueryBuilder<Todo> }) {
-  const rows = useAllSuspense(query);
+function UseAllSuspenseView({
+  query,
+  options,
+}: {
+  query: QueryBuilder<Todo>;
+  options?: QueryOptions;
+}) {
+  const rows = useAllSuspense(query, options);
   return <div data-testid="rows">{rows.map((row) => row.title).join("|")}</div>;
 }
 

@@ -2,11 +2,11 @@
 
 **Owner: Antonio**
 
-De-risk synchronous storage and SurrealKV on React Native.
+De-risk synchronous storage and Fjall on React Native.
 
 ## Overview
 
-React Native can't use OPFS or Web Workers. The first step is proving that SurrealKV-backed synchronous storage works on mobile:
+React Native can't use OPFS or Web Workers. The first step is proving that Fjall-backed synchronous storage works on mobile:
 
 - Compile and wire the native storage stack for iOS (xcframework) and Android (JNI/NDK)
 - Wire up filesystem access (Documents directory on iOS, internal storage on Android)

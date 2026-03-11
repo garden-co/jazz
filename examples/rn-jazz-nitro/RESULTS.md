@@ -1,10 +1,10 @@
-# SurrealKV Spike Results — iOS Simulator
+# Fjall Spike Results — iOS Simulator
 
 **Date:** 2026-02-18
 **Device:** iPhone 17 Pro Simulator (aarch64-apple-ios-sim)
 **Host:** Apple Silicon Mac
 **Build:** release (`cargo build --release --target aarch64-apple-ios-sim`)
-**Engine:** SurrealKV via Nitro Modules Rust bridge (JazzNitro)
+**Engine:** Fjall via Nitro Modules Rust bridge (JazzNitro)
 
 ## Basic ops
 
@@ -40,7 +40,7 @@
 | p99    | 2µs     |
 
 > Reads return `undefined` (0 hits) because the stress write ran without a flush before close.
-> SurrealKV's write path is in-memory until flushed; this is expected and validates the flush contract.
+> Fjall's write path is in-memory until flushed; this is expected and validates the flush contract.
 
 ### Flush (after 10K writes)
 
@@ -50,11 +50,11 @@
 
 ## Observations
 
-- SurrealKV opens, writes, reads, flushes, and closes successfully on iOS Simulator with no crashes or errors.
+- Fjall opens, writes, reads, flushes, and closes successfully on iOS Simulator with no crashes or errors.
 - Write throughput (~166K ops/s) and p99 (11µs) are well within acceptable bounds for a local storage engine.
 - Read throughput on cache-miss (~924K ops/s, p99 2µs) reflects fast negative lookups in the LSM index.
 - Flush latency (5–8ms for 10K keys) is acceptable; production usage will batch writes and flush infrequently.
-- The Nitro Rust bridge (via `aarch64-apple-ios-sim` static lib) adds no observable overhead relative to expected SurrealKV performance.
+- The Nitro Rust bridge (via `aarch64-apple-ios-sim` static lib) adds no observable overhead relative to expected Fjall performance.
 
 ## Checklist
 

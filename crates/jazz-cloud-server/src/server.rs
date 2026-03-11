@@ -31,7 +31,7 @@ use jazz_tools::query_manager::types::{
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::storage::FjallStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncManager, SyncPayload,
 };
@@ -1067,7 +1067,7 @@ struct MetaExternalIdentityRow {
 }
 
 struct MetaStore {
-    runtime: TokioRuntime<SurrealKvStorage>,
+    runtime: TokioRuntime<FjallStorage>,
     secret_hash_key: String,
     apps_insert_descriptor: RowDescriptor,
     apps_descriptor: RowDescriptor,
@@ -1152,8 +1152,8 @@ impl MetaStore {
         )
         .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
 
-        let db_path = meta_dir.join("jazz.surrealkv");
-        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+        let db_path = meta_dir.join("jazz.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
         // Meta app is local-only; no sync callback needed yet.
@@ -1562,7 +1562,7 @@ struct CachedJwks {
 }
 
 struct AppRuntime {
-    runtime: TokioRuntime<SurrealKvStorage>,
+    runtime: TokioRuntime<FjallStorage>,
 }
 
 impl AppRuntime {
@@ -1585,8 +1585,8 @@ impl AppRuntime {
         ]);
         let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
-        let db_path = data_dir.join("jazz.surrealkv");
-        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
+        let db_path = data_dir.join("jazz.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
 
         rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;

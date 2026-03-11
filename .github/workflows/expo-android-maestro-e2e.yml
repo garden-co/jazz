@@ -1,0 +1,182 @@
+name: Expo Android E2E (Maestro Cloud)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - crates/**
+      - packages/jazz-tools/**
+      - examples/todo-client-localfirst-expo/**
+      - Cargo.toml
+      - Cargo.lock
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - turbo.json
+      - .github/workflows/expo-android-maestro-e2e.yml
+
+concurrency:
+  group: expo-android-maestro-e2e-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-rn:
+    name: Build jazz-rn (Android) artifacts
+    uses: ./.github/workflows/rn-build-reusable.yml
+    with:
+      concurrency: e2e-rn-test
+      disableAndroid: false
+      disableIOS: true
+
+  expo-android-e2e:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: build-rn
+    timeout-minutes: 60
+    env:
+      JAZZ_E2E_APP_ID: 6316f08d-d5d1-41df-82b8-8c16aa26db84
+      JAZZ_E2E_ADMIN_SECRET: d0a2f110-36a8-45b9-8632-ecbc09128e2a
+      JAZZ_E2E_SERVER_PORT: "1625"
+      COREPACK_HOME: /home/runner/.local/share/corepack
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Download React Native Android artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: jazz-rn-android
+          path: crates/jazz-rn
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+          components: clippy, rustfmt
+
+      - name: pnpm build
+        run: pnpm build
+
+      - name: Expo prebuild
+        working-directory: examples/todo-client-localfirst-expo
+        run: pnpm expo prebuild --clean
+
+      - name: Install Vercel Sandbox CLI
+        run: npm install -g sandbox
+
+      - name: Create sandbox and start jazz-tools server
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          COMMON=(--token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}")
+
+          CREATE_OUT="$(sandbox create "${COMMON[@]}" --runtime node22 --timeout 60m --publish-port "$JAZZ_E2E_SERVER_PORT" 2>&1)"
+          echo "$CREATE_OUT" | tee vercel-sandbox.log
+
+          SANDBOX_ID="$(echo "$CREATE_OUT" | grep -Eo 'sbx_[[:alnum:]]+|sb_[[:alnum:]]+' | head -n1)"
+          if [ -z "$SANDBOX_ID" ]; then echo "::error::Could not parse sandbox ID"; exit 1; fi
+          echo "SANDBOX_ID=$SANDBOX_ID" >> "$GITHUB_ENV"
+
+          SERVER_PUBLIC_URL="$(echo "$CREATE_OUT" | grep -Eo 'https://[^[:space:]]+' | head -n1)"
+          if [ -z "$SERVER_PUBLIC_URL" ]; then echo "::error::Could not parse sandbox public URL"; exit 1; fi
+          echo "SERVER_PUBLIC_URL=$SERVER_PUBLIC_URL" >> "$GITHUB_ENV"
+
+          ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" uname -m | tr -d '\r' | tail -n1)"
+          case "$ARCH" in
+            x86_64|amd64)  TARGET=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            *) echo "::error::Unsupported sandbox arch: $ARCH"; exit 1 ;;
+          esac
+
+          cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "$TARGET"
+          sandbox copy "${COMMON[@]}" "target/$TARGET/release/jazz-tools" "$SANDBOX_ID:/tmp/jazz-tools"
+
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" chmod +x /tmp/jazz-tools
+
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" sh -c \
+            "(/tmp/jazz-tools server '$JAZZ_E2E_APP_ID' --admin-secret '$JAZZ_E2E_ADMIN_SECRET' --port '$JAZZ_E2E_SERVER_PORT' </dev/null >/tmp/server.log 2>&1 &)"
+
+          sleep 5
+
+          sandbox exec "${COMMON[@]}" "$SANDBOX_ID" tail -n 200 /tmp/server.log | tee -a vercel-sandbox.log
+
+      - name: Verify Server URL
+        run: |
+          echo "Verifying server URL: ${SERVER_PUBLIC_URL}"
+          curl --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health"
+
+      - name: Build release APK
+        working-directory: examples/todo-client-localfirst-expo/android
+        env:
+          EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
+          EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
+          EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Run Maestro Cloud flows
+        id: maestro
+        uses: mobile-dev-inc/action-maestro-cloud@v2
+        with:
+          api-key: ${{ secrets.MAESTRO_KEY }}
+          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
+          app-file: examples/todo-client-localfirst-expo/android/app/build/outputs/apk/release/app-release.apk
+          workspace: .maestro/flows
+
+      - name: Verify server evidence
+        if: always() && (steps.maestro.outcome == 'success' || steps.maestro.outcome == 'failure')
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          sandbox copy --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" \
+            "$SANDBOX_ID:/tmp/server.log" server.log || true
+
+          cat server.log
+          SYNC="$(grep -c 'sync request' server.log || true)"
+          EVENTS="$(grep -c 'events stream connecting' server.log || true)"
+          echo "sync requests: $SYNC | event connections: $EVENTS"
+          test "$EVENTS" -gt 0
+
+      - name: Stop sandbox
+        if: always()
+        env:
+          VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
+          VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: |
+          if [ -z "${SANDBOX_ID:-}" ]; then exit 0; fi
+          SCOPE=()
+          if [ -n "${VERCEL_TEAM_ID:-}" ]; then SCOPE=(--scope "$VERCEL_TEAM_ID"); fi
+          sandbox stop --token "$VERCEL_SANDBOXES_TOKEN" --project "$VERCEL_SANDBOXES_PROJECT_ID" "${SCOPE[@]}" "$SANDBOX_ID" || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: expo-android-maestro-e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            server.log
+            vercel-sandbox.log
+          if-no-files-found: warn

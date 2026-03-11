@@ -1,7 +1,6 @@
 import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
-import type { DurabilityTier } from "./runtime/client.js";
 
 type UseAllStatePending<T> = {
   status: "pending";
@@ -123,14 +122,14 @@ export function makeDeferred<T>(snapshot?: {
 
 interface QueryDefinition<T extends { id: string }> {
   query: QueryBuilder<T>;
-  tier?: DurabilityTier;
+  options?: QueryOptions;
   snapshot?: T[];
 }
 
 interface InternalCacheEntry<T extends { id: string }> {
   key: string;
   query: QueryBuilder<T>;
-  tier?: DurabilityTier;
+  options?: QueryOptions;
   state: UseAllState<T>;
   promise: TrackedPromise<T[]>;
   resolvefulfilled: (data: T[]) => void;
@@ -176,13 +175,13 @@ export class SubscriptionsOrchestrator {
 
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
-    tier?: DurabilityTier,
+    options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const key = `${this.config.appId}:${tier ?? "none"}:${query._build()}`;
+    const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
-      tier,
+      options,
       snapshot: snapshot ? [...snapshot] : undefined,
     });
 
@@ -207,7 +206,7 @@ export class SubscriptionsOrchestrator {
 
     const queryDef = this.queryDefinitions.get(key);
     if (!queryDef) {
-      throw new Error(`Unknown query key "${key}". Call makeQueryKey(query, tier) first.`);
+      throw new Error(`Unknown query key "${key}". Call makeQueryKey(query, options) first.`);
     }
 
     const hasSnapshot = queryDef.snapshot !== undefined;
@@ -224,7 +223,7 @@ export class SubscriptionsOrchestrator {
     const entry = {
       key,
       query: queryDef.query,
-      tier: queryDef.tier,
+      options: queryDef.options,
       state: initialState,
       promise: deferred,
       resolvefulfilled: (data) => {
@@ -297,7 +296,7 @@ export class SubscriptionsOrchestrator {
             this.scheduleCleanup(entry);
           }
         },
-        entry.tier ? { tier: entry.tier } : undefined,
+        entry.options,
         this.session ?? undefined,
       );
     } catch (error) {
@@ -340,4 +339,12 @@ export class SubscriptionsOrchestrator {
     this.entries.delete(entry.key);
     this.queryDefinitions.delete(entry.key);
   }
+}
+
+function serializeQueryOptions(options?: QueryOptions): string {
+  if (!options) {
+    return "{}";
+  }
+
+  return JSON.stringify(options);
 }

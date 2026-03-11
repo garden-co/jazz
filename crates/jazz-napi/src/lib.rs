@@ -1,11 +1,11 @@
 //! jazz-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<SurrealKvStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<FjallStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `SurrealKvStorage` provides persistent on-disk storage
+//! - `FjallStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
@@ -14,28 +14,33 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::thread;
+use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
+use jazz_tools::binding_support::{
+    align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
+    generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
+    parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
+    parse_session_input, query_rows_can_be_schema_aligned, serialize_outbox_entry,
+    subscription_delta_to_json,
+};
 use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::encoding::decode_row;
-use jazz_tools::query_manager::manager::LocalUpdates;
-use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{RowDescriptor, Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::{MemoryStorage, Storage, SurrealKvStorage};
+use jazz_tools::storage::{FjallStorage, MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-    SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 fn convert_values(values: Vec<Value>) -> Vec<Value> {
@@ -46,144 +51,12 @@ fn convert_updates(partial: HashMap<String, Value>) -> Vec<(String, Value)> {
     partial.into_iter().collect()
 }
 
-fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
-    query.joins.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.recursive.is_none()
-        && query.select_columns.is_none()
-        && query.result_element_index.is_none()
-}
-
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
-fn align_values_to_declared_schema(
-    declared_schema: &Schema,
-    table: &TableName,
-    source_descriptor: &RowDescriptor,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(source_descriptor, &declared_table.columns, &values)
-        .unwrap_or(values)
-}
-
-fn align_row_values_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    align_values_to_declared_schema(declared_schema, table, &runtime_table.columns, values)
-}
-
-fn align_query_rows_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    query: &Query,
-    rows: Vec<(ObjectId, Vec<Value>)>,
-) -> Vec<(ObjectId, Vec<Value>)> {
-    if !query_rows_can_be_schema_aligned(query) {
-        return rows;
-    }
-
-    let Some(declared_table) = declared_schema.get(&query.table) else {
-        return rows;
-    };
-    let Some(runtime_table) = runtime_schema.get(&query.table) else {
-        return rows;
-    };
-
-    rows.into_iter()
-        .map(|(id, values)| {
-            let values = reorder_values_by_column_name(
-                &runtime_table.columns,
-                &declared_table.columns,
-                &values,
-            )
-            .unwrap_or(values);
-            (id, values)
-        })
-        .collect()
-}
-
-#[derive(Debug, Clone, serde::Deserialize, Default)]
-struct QueryExecutionOptionsWire {
-    propagation: Option<String>,
-    local_updates: Option<String>,
-}
-
 fn parse_read_durability_options(
     tier: Option<String>,
     options_json: Option<String>,
 ) -> napi::Result<(ReadDurabilityOptions, QueryPropagation)> {
-    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
-    let Some(raw) = options_json else {
-        return Ok((
-            ReadDurabilityOptions {
-                tier: parsed_tier,
-                local_updates: LocalUpdates::Immediate,
-            },
-            QueryPropagation::Full,
-        ));
-    };
-
-    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid query options JSON: {}", e)))?;
-
-    let propagation = match options.propagation.as_deref() {
-        None | Some("full") => Ok(QueryPropagation::Full),
-        Some("local-only") => Ok(QueryPropagation::LocalOnly),
-        Some(other) => Err(napi::Error::from_reason(format!(
-            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
-            other
-        ))),
-    }?;
-
-    let local_updates = match options.local_updates.as_deref() {
-        None | Some("immediate") => Ok(LocalUpdates::Immediate),
-        Some("deferred") => Ok(LocalUpdates::Deferred),
-        Some(other) => Err(napi::Error::from_reason(format!(
-            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
-            other
-        ))),
-    }?;
-
-    Ok((
-        ReadDurabilityOptions {
-            tier: parsed_tier,
-            local_updates,
-        },
-        propagation,
-    ))
+    parse_binding_read_durability_options(tier.as_deref(), options_json.as_deref())
+        .map_err(napi::Error::from_reason)
 }
 
 fn parse_node_durability_tiers(tier: Option<&str>) -> napi::Result<Vec<DurabilityTier>> {
@@ -197,31 +70,54 @@ fn parse_node_durability_tier(tier: Option<String>) -> napi::Result<Vec<Durabili
     parse_node_durability_tiers(tier.as_deref())
 }
 
+fn open_fjall_storage_with_retry(data_path: &str, cache_size: usize) -> napi::Result<FjallStorage> {
+    const MAX_ATTEMPTS: usize = 100;
+    const RETRY_DELAY_MS: u64 = 25;
+
+    let mut last_error = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match FjallStorage::open(data_path, cache_size) {
+            Ok(storage) => return Ok(storage),
+            Err(error) => {
+                let is_lock_error = matches!(
+                    &error,
+                    jazz_tools::storage::StorageError::IoError(message)
+                        if message.to_ascii_lowercase().contains("lock")
+                            || message.to_ascii_lowercase().contains("busy")
+                );
+                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
+                    last_error = Some(error);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+            }
+        }
+    }
+
+    let error = last_error.unwrap_or_else(|| {
+        jazz_tools::storage::StorageError::IoError(
+            "fjall open failed without error details".to_string(),
+        )
+    });
+    Err(napi::Error::from_reason(format!(
+        "Failed to open storage: {:?}",
+        error
+    )))
+}
+
 // ============================================================================
 fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
-    match tier {
-        "worker" => Ok(DurabilityTier::Worker),
-        "edge" => Ok(DurabilityTier::EdgeServer),
-        "global" => Ok(DurabilityTier::GlobalServer),
-        _ => Err(napi::Error::from_reason(format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
-            tier
-        ))),
-    }
+    parse_binding_tier(tier).map_err(napi::Error::from_reason)
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
-    parse_query_json(json).map_err(napi::Error::from_reason)
+    parse_query_input(json).map_err(napi::Error::from_reason)
 }
 
 fn parse_session_json(session_json: Option<String>) -> napi::Result<Option<Session>> {
-    if let Some(json) = session_json {
-        Ok(Some(serde_json::from_str::<Session>(&json).map_err(
-            |e| napi::Error::from_reason(format!("Invalid session JSON: {}", e)),
-        )?))
-    } else {
-        Ok(None)
-    }
+    parse_session_input(session_json.as_deref())
+        .map_err(|err| napi::Error::from_reason(format!("Invalid session JSON: {}", err)))
 }
 
 fn parse_subscription_inputs(
@@ -239,62 +135,6 @@ fn parse_subscription_inputs(
     let session = parse_session_json(session_json)?;
     let (durability, propagation) = parse_read_durability_options(tier, options_json)?;
     Ok((query, session, durability, propagation))
-}
-
-fn subscription_delta_to_json(
-    delta: &SubscriptionDelta,
-    declared_schema: Option<&Schema>,
-    table: Option<&TableName>,
-) -> serde_json::Value {
-    let row_to_json = |row: &jazz_tools::query_manager::types::Row,
-                       descriptor: &jazz_tools::query_manager::types::RowDescriptor|
-     -> serde_json::Value {
-        let values = decode_row(descriptor, &row.data)
-            .map(|vals| vals.into_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let values = match (declared_schema, table) {
-            (Some(schema), Some(table)) => {
-                align_values_to_declared_schema(schema, table, descriptor, values)
-            }
-            _ => values,
-        };
-        serde_json::json!({
-            "id": row.id.uuid().to_string(),
-            "values": values
-        })
-    };
-
-    let descriptor = &delta.descriptor;
-    let delta_obj = delta
-        .ordered_delta
-        .removed
-        .iter()
-        .map(|change| {
-            serde_json::json!({
-                "kind": 1,
-                "id": change.id.uuid().to_string(),
-                "index": change.index
-            })
-        })
-        .chain(delta.ordered_delta.updated.iter().map(|change| {
-            serde_json::json!({
-                "kind": 2,
-                "id": change.id.uuid().to_string(),
-                "index": change.new_index,
-                "row": change.row.as_ref().map(|row| row_to_json(row, descriptor))
-            })
-        }))
-        .chain(delta.ordered_delta.added.iter().map(|change| {
-            serde_json::json!({
-                "kind": 0,
-                "id": change.id.uuid().to_string(),
-                "index": change.index,
-                "row": row_to_json(&change.row, descriptor)
-            })
-        }))
-        .collect::<Vec<_>>();
-
-    serde_json::Value::Array(delta_obj)
 }
 
 fn make_subscription_callback(
@@ -400,18 +240,18 @@ impl SyncSender for NapiSyncSender {
             Some(tsfn) => tsfn,
             None => return,
         };
-        let payload_json = match serde_json::to_string(&message.payload) {
-            Ok(json) => json,
+        let serialized = match serialize_outbox_entry(&message) {
+            Ok(serialized) => serialized,
             Err(_) => return,
-        };
-        let is_catalogue = message.payload.is_catalogue();
-        let (destination_kind, destination_id) = match message.destination {
-            Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
-            Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
         };
 
         tsfn.call(
-            Ok((destination_kind, destination_id, payload_json, is_catalogue)),
+            Ok((
+                serialized.destination_kind,
+                serialized.destination_id,
+                serialized.payload_json,
+                serialized.is_catalogue,
+            )),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
     }
@@ -517,7 +357,7 @@ pub struct NapiRuntime {
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with SurrealKV-backed persistent storage.
+    /// Create a new NapiRuntime with Fjall-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -528,10 +368,9 @@ impl NapiRuntime {
         data_path: String,
         tier: Option<String>,
     ) -> napi::Result<Self> {
-        // Create SurrealKvStorage
+        // Create FjallStorage
         let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = SurrealKvStorage::open(&data_path, cache_size)
-            .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))?;
+        let storage = open_fjall_storage_with_retry(&data_path, cache_size)?;
 
         build_napi_runtime(
             env,
@@ -1107,16 +946,12 @@ impl NapiRuntime {
 
 #[napi(js_name = "generateId")]
 pub fn generate_id() -> String {
-    ObjectId::new().uuid().to_string()
+    generate_binding_id()
 }
 
 #[napi(js_name = "currentTimestamp")]
 pub fn current_timestamp() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    current_timestamp_ms()
 }
 
 #[napi(js_name = "parseSchema", ts_return_type = "any")]
@@ -1129,7 +964,7 @@ pub fn parse_schema_fn(json: String) -> napi::Result<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
+    use jazz_tools::binding_support::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
         query_rows_can_be_schema_aligned,
     };

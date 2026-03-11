@@ -1,11 +1,12 @@
+use std::env;
 use std::fs;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -19,16 +20,16 @@ use jazz_tools::query_manager::types::{
 };
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+use jazz_tools::storage::FjallStorage;
 use jazz_tools::storage::MemoryStorage;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use jazz_tools::storage::Storage;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-use jazz_tools::storage::SurrealKvStorage;
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
 use serde::Deserialize;
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
@@ -71,7 +72,7 @@ struct R2ScenarioConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct R3ScenarioConfig {
     id: String,
     seed: u64,
@@ -144,7 +145,7 @@ struct R2Scenario {
 }
 
 #[derive(Debug, Clone)]
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct R3Scenario {
     id: String,
     seed: u64,
@@ -286,13 +287,13 @@ struct PermissionR5State {
     timestamp: u64,
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct SeededProjectBoard {
     projects: Vec<ObjectId>,
     active_tasks: Vec<ObjectId>,
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct ColdLoadSeededDb {
     _tempdir: TempDir,
     db_path: PathBuf,
@@ -329,7 +330,7 @@ impl R1State {
 
     fn seed_dataset(&mut self, profile: &ProfileConfig) {
         for user_idx in 0..profile.users {
-            let user_id = self
+            let (user_id, _row_values) = self
                 .runtime
                 .insert(
                     "users",
@@ -345,7 +346,7 @@ impl R1State {
 
         for org_idx in 0..profile.organizations {
             let created_at = self.bump_timestamp();
-            let org_id = self
+            let (org_id, _row_values) = self
                 .runtime
                 .insert(
                     "organizations",
@@ -383,7 +384,7 @@ impl R1State {
         for project_idx in 0..profile.projects {
             let org_id = self.organizations[project_idx % self.organizations.len()];
             let updated_at = self.bump_timestamp();
-            let project_id = self
+            let (project_id, _row_values) = self
                 .runtime
                 .insert(
                     "projects",
@@ -410,7 +411,7 @@ impl R1State {
             };
             let priority = ((task_idx % 5) + 1) as i32;
             let updated_at = self.bump_timestamp();
-            let task_id = self
+            let (task_id, _row_values) = self
                 .runtime
                 .insert(
                     "tasks",
@@ -592,7 +593,7 @@ impl R1State {
             }
         };
 
-        let rows = block_on(self.runtime.query(query, None, None)).expect("read query");
+        let rows = block_on(self.runtime.query(query, None)).expect("read query");
         rows.len()
     }
 
@@ -607,7 +608,7 @@ impl R1State {
         };
         let updated_at = self.bump_timestamp();
 
-        let task_id = self
+        let (task_id, _row_values) = self
             .runtime
             .insert(
                 "tasks",
@@ -681,7 +682,7 @@ impl R1State {
     }
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn seed_project_board_dataset<S: Storage>(
     runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
     profile: &ProfileConfig,
@@ -700,7 +701,7 @@ fn seed_project_board_dataset<S: Storage>(
     };
 
     for user_idx in 0..profile.users {
-        let user_id = runtime
+        let (user_id, _row_values) = runtime
             .insert(
                 "users",
                 vec![
@@ -714,7 +715,7 @@ fn seed_project_board_dataset<S: Storage>(
     }
 
     for org_idx in 0..profile.organizations {
-        let org_id = runtime
+        let (org_id, _row_values) = runtime
             .insert(
                 "organizations",
                 vec![
@@ -749,7 +750,7 @@ fn seed_project_board_dataset<S: Storage>(
 
     for project_idx in 0..profile.projects {
         let org_id = organizations[project_idx % organizations.len()];
-        let project_id = runtime
+        let (project_id, _row_values) = runtime
             .insert(
                 "projects",
                 vec![
@@ -774,7 +775,7 @@ fn seed_project_board_dataset<S: Storage>(
             _ => "done",
         };
         let priority = ((task_idx % 5) + 1) as i32;
-        let task_id = runtime
+        let (task_id, _row_values) = runtime
             .insert(
                 "tasks",
                 vec![
@@ -849,22 +850,19 @@ fn seed_project_board_dataset<S: Storage>(
     }
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 impl ColdLoadSeededDb {
     fn new(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
         let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
-        let db_path = tempdir.path().join("r3_cold_load.surrealkv");
+        let db_path = tempdir.path().join("r3_cold_load.fjall");
 
         let seeded = {
-            let mut runtime = create_surrealkv_runtime(
-                project_board_schema(),
-                &db_path,
-                scenario.cache_size_bytes,
-            );
+            let mut runtime =
+                create_fjall_runtime(project_board_schema(), &db_path, scenario.cache_size_bytes);
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
             runtime.flush_storage();
-            runtime.storage().close().expect("close seeded surrealkv");
+            runtime.storage().close().expect("close seeded fjall");
             seeded
         };
 
@@ -1067,7 +1065,7 @@ impl FanoutR4State {
             .filter_eq("project_id", Value::Uuid(project_id))
             .limit(10_000)
             .build();
-        let rows = block_on(self.writer.runtime.query(query, None, None)).expect("load hot tasks");
+        let rows = block_on(self.writer.runtime.query(query, None)).expect("load hot tasks");
         rows.into_iter().map(|(object_id, _)| object_id).collect()
     }
 
@@ -1158,7 +1156,7 @@ impl PermissionR5State {
             timestamp: 1_770_000_000_000_000,
         };
 
-        let alice_root = state
+        let (alice_root, _row_values) = state
             .runtime
             .insert(
                 "folders",
@@ -1173,7 +1171,7 @@ impl PermissionR5State {
         let mut shared_folders = vec![alice_root];
         let mut parent = alice_root;
         for idx in 0..scenario.shared_chain_depth {
-            let folder_id = state
+            let (folder_id, _row_values) = state
                 .runtime
                 .insert(
                     "folders",
@@ -1193,7 +1191,7 @@ impl PermissionR5State {
             for doc_idx in 0..scenario.docs_per_folder {
                 let updated_at = state.next_timestamp();
                 let owner_id = if doc_idx % 8 == 0 { "alice" } else { "bob" };
-                let doc_id = state
+                let (doc_id, _row_values) = state
                     .runtime
                     .insert(
                         "documents",
@@ -1214,7 +1212,7 @@ impl PermissionR5State {
             }
         }
 
-        let private_root = state
+        let (private_root, _row_values) = state
             .runtime
             .insert(
                 "folders",
@@ -1228,7 +1226,7 @@ impl PermissionR5State {
             .expect("seed private root folder");
         for doc_idx in 0..scenario.denied_docs {
             let updated_at = state.next_timestamp();
-            let doc_id = state
+            let (doc_id, _row_values) = state
                 .runtime
                 .insert(
                     "documents",
@@ -1291,11 +1289,8 @@ impl PermissionR5State {
             .order_by_desc("updated_at")
             .limit(200)
             .build();
-        let rows = block_on(
-            self.runtime
-                .query(query, Some(self.session_alice.clone()), None),
-        )
-        .expect("permission query");
+        let rows = block_on(self.runtime.query(query, Some(self.session_alice.clone())))
+            .expect("permission query");
         rows.len()
     }
 
@@ -1344,8 +1339,7 @@ fn realistic_r1_crud(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/crud_sustained");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1373,8 +1367,7 @@ fn realistic_r1_crud_single_hop(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1403,8 +1396,7 @@ fn realistic_r2_reads(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/reads_sustained");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1433,8 +1425,7 @@ fn realistic_r2_reads_single_hop(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1464,8 +1455,7 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1483,20 +1473,19 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_surrealkv.json");
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
     let seeded = ColdLoadSeededDb::new(&profile, &scenario);
     let benchmark_name = format!(
-        "{}_{}_surrealkv",
+        "{}_{}_fjall",
         scenario.id.to_lowercase(),
         profile.id.to_lowercase()
     );
 
-    let mut group = c.benchmark_group("realistic_phase1/cold_load_surrealkv");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    let mut group = c.benchmark_group("realistic_phase1/cold_load_fjall");
+    configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(1));
 
     group.bench_with_input(
@@ -1505,7 +1494,7 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
         |b, _scenario| {
             b.iter(|| {
                 let open_start = Instant::now();
-                let mut runtime = create_surrealkv_runtime(
+                let mut runtime = create_fjall_runtime(
                     project_board_schema(),
                     &seeded.db_path,
                     seeded.cache_size_bytes,
@@ -1520,14 +1509,11 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
                     .build();
 
                 let query_start = Instant::now();
-                let rows = block_on(runtime.query(query, None, None)).expect("cold-load query");
+                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
                 let query_elapsed = query_start.elapsed();
 
                 runtime.flush_storage();
-                runtime
-                    .storage()
-                    .close()
-                    .expect("close cold-load surrealkv");
+                runtime.storage().close().expect("close cold-load fjall");
 
                 black_box(open_elapsed);
                 black_box(query_elapsed);
@@ -1539,16 +1525,18 @@ fn realistic_r3_cold_load_surrealkv(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(all(feature = "surrealkv", not(target_arch = "wasm32"))))]
-fn realistic_r3_cold_load_surrealkv(_c: &mut Criterion) {}
+#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
+fn realistic_r3_cold_load_fjall(_c: &mut Criterion) {}
 
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r4_scenario("benchmarks/realistic/scenarios/r4_fanout_updates.json");
+    let scenario = load_r4_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+    ));
 
     let mut group = c.benchmark_group("realistic_phase1/fanout_updates");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     for fanout_clients in scenario.fanout_clients.iter().copied() {
@@ -1587,8 +1575,7 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
 fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &str) {
     let scenario = load_r5_scenario(scenario_path);
     let mut group = c.benchmark_group(group_name);
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 10, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     for recursive_depth in scenario.recursive_depths.iter().copied() {
@@ -1623,7 +1610,10 @@ fn realistic_r6_permission_write_heavy(c: &mut Criterion) {
     run_permission_scenario(
         c,
         "realistic_phase1/permission_write_heavy",
-        "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+        select_ci_path(
+            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+        ),
     );
 }
 
@@ -1638,8 +1628,7 @@ fn realistic_r7_hotspot_history(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("realistic_phase1/hotspot_history");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
 
     group.bench_with_input(
@@ -1710,7 +1699,7 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
     }
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn load_r3_scenario(path: &str) -> R3Scenario {
     let raw: R3ScenarioConfig = load_json(path);
     R3Scenario {
@@ -1771,6 +1760,57 @@ fn load_r7_scenario(path: &str) -> R7Scenario {
     }
 }
 
+fn ci_variant_enabled() -> bool {
+    matches!(
+        env::var("JAZZ_REALISTIC_VARIANT"),
+        Ok(value) if value.eq_ignore_ascii_case("ci")
+    )
+}
+
+fn select_ci_path<'a>(default_path: &'a str, ci_path: &'a str) -> &'a str {
+    if ci_variant_enabled() {
+        ci_path
+    } else {
+        default_path
+    }
+}
+
+fn configured_sample_size(default_size: usize) -> usize {
+    if ci_variant_enabled() {
+        10
+    } else {
+        default_size
+    }
+}
+
+fn configured_measurement_time(default_seconds: u64) -> Duration {
+    if ci_variant_enabled() {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(default_seconds)
+    }
+}
+
+fn configured_warm_up_time() -> Duration {
+    if ci_variant_enabled() {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(3)
+    }
+}
+
+fn configure_group<M>(
+    group: &mut criterion::BenchmarkGroup<'_, M>,
+    sample_size: usize,
+    measurement_seconds: u64,
+) where
+    M: criterion::measurement::Measurement,
+{
+    group.sample_size(configured_sample_size(sample_size));
+    group.measurement_time(configured_measurement_time(measurement_seconds));
+    group.warm_up_time(configured_warm_up_time());
+}
+
 fn load_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
     let file = workspace_path(path);
     let bytes =
@@ -1804,12 +1844,12 @@ fn create_runtime(schema: Schema) -> BenchRuntime {
     )
 }
 
-#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
-fn create_surrealkv_runtime(
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn create_fjall_runtime(
     schema: Schema,
     db_path: &Path,
     cache_size_bytes: usize,
-) -> RuntimeCore<SurrealKvStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<FjallStorage, NoopScheduler, VecSyncSender> {
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(
         sync_manager,
@@ -1822,7 +1862,7 @@ fn create_surrealkv_runtime(
 
     RuntimeCore::new(
         schema_manager,
-        SurrealKvStorage::open(db_path, cache_size_bytes).expect("open surrealkv for benchmark"),
+        FjallStorage::open(db_path, cache_size_bytes).expect("open fjall for benchmark"),
         NoopScheduler,
         VecSyncSender::new(),
     )
@@ -1942,7 +1982,7 @@ criterion_group!(
     realistic_r2_reads,
     realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn,
-    realistic_r3_cold_load_surrealkv,
+    realistic_r3_cold_load_fjall,
     realistic_r4_fanout_updates,
     realistic_r5_permission_recursive,
     realistic_r6_permission_write_heavy,

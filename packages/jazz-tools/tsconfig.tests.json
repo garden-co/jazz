@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "rootDir": ".",
+    "sourceMap": false,
+    "paths": {
+      "jazz-tools": ["./src/index.ts"],
+      "jazz-tools/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*", "tests/ts-dsl/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

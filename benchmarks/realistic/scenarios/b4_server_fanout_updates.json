@@ -2,7 +2,7 @@
   "id": "B4",
   "name": "server_fanout_updates",
   "seed": 20260225,
-  "subscriber_counts": [8, 24],
-  "rounds": 4,
+  "subscriber_counts": [24, 64, 128],
+  "rounds": 12,
   "timeout_seconds": 20
 }

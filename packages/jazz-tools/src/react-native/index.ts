@@ -26,6 +26,7 @@ export {
 export type {
   DurabilityTier,
   QueryBuilder,
+  QueryOptions,
   RowDelta,
   SubscriptionDelta,
   TableProxy,

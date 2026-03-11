@@ -4,14 +4,21 @@ import { MemoryRouter } from "react-router";
 import { InspectorLayout } from "./index";
 
 const mockUseStandaloneContext = vi.fn();
+const mockUseDevtoolsContext = vi.fn();
 
 vi.mock("../../contexts/standalone-context.js", () => ({
   useStandaloneContext: () => mockUseStandaloneContext(),
 }));
 
+vi.mock("../../contexts/devtools-context.js", () => ({
+  useDevtoolsContext: () => mockUseDevtoolsContext(),
+}));
+
 describe("InspectorLayout", () => {
   beforeEach(() => {
     mockUseStandaloneContext.mockReset();
+    mockUseDevtoolsContext.mockReset();
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "extension" });
   });
 
   afterEach(() => {
@@ -40,6 +47,7 @@ describe("InspectorLayout", () => {
     expect(screen.getByRole("combobox")).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-a" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-b" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Live Query" })).not.toBeNull();
   });
 
   it("calls schema selection handler when dropdown value changes", () => {

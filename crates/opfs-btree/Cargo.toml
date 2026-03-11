@@ -10,7 +10,7 @@ repository = "https://github.com/garden-co/jazz2"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-compare-native = ["dep:bf-tree", "dep:rocksdb", "dep:fjall", "dep:surrealkv", "dep:tokio"]
+compare-native = ["dep:bf-tree", "dep:rocksdb", "dep:fjall"]
 
 [dependencies]
 crc32fast = "1"
@@ -23,8 +23,6 @@ serde = { version = "1", features = ["derive"] }
 bf-tree = { version = "0.4.8", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4"], optional = true }
 fjall = { version = "3.0.2", optional = true }
-surrealkv = { version = "0.20.1", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

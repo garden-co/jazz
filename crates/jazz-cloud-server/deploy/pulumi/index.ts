@@ -48,8 +48,25 @@ if (publicSubnetCidrs.length < 2) {
   );
 }
 
-const internalApiSecret = cfg.requireSecret("internalApiSecret");
-const secretHashKey = cfg.requireSecret("secretHashKey");
+function requireSecretConfigOrEnv(configKey: string, envVarName: string): pulumi.Output<string> {
+  const configValue = cfg.getSecret(configKey);
+  if (configValue !== undefined) {
+    return configValue;
+  }
+
+  const envValue = process.env[envVarName];
+  if (envValue) {
+    return pulumi.secret(envValue);
+  }
+
+  throw new Error(`configure secret \`${configKey}\` or set deployment env var \`${envVarName}\``);
+}
+
+const internalApiSecret = requireSecretConfigOrEnv(
+  "internalApiSecret",
+  "JAZZ_CLOUD2_INTERNAL_API_SECRET",
+);
+const secretHashKey = requireSecretConfigOrEnv("secretHashKey", "JAZZ_CLOUD2_SECRET_HASH_KEY");
 
 const tags = {
   Project: "jazz",

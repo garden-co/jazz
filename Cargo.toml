@@ -12,3 +12,7 @@ members = [
   "examples/docs/todo-server-rs",
   "crates/opfs-btree",
 ]
+exclude = ["patched-crates/fjall-android-lock-workaround"]
+
+[patch.crates-io]
+fjall = { path = "patched-crates/fjall-android-lock-workaround" }

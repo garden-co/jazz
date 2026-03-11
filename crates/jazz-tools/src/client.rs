@@ -13,7 +13,7 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::SchemaManager;
-use crate::storage::{Storage, StorageError, SurrealKvStorage};
+use crate::storage::{FjallStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -31,7 +31,7 @@ pub struct JazzClient {
     /// Schema as declared by the client/app code.
     declared_schema: Schema,
     /// Handle to the local runtime.
-    runtime: TokioRuntime<SurrealKvStorage>,
+    runtime: TokioRuntime<FjallStorage>,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
     /// Active subscriptions (metadata).
@@ -51,7 +51,7 @@ impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
-    /// 1. Open local SurrealKV storage
+    /// 1. Open local Fjall storage
     /// 2. Initialize the runtime
     /// 3. Connect to the server (if URL provided)
     /// 4. Start syncing
@@ -108,9 +108,9 @@ impl JazzClient {
 
         // Create persistent storage.
         //
-        // SurrealKV lock release can lag slightly after a close() in the same process.
+        // Fjall lock release can lag slightly after a close() in the same process.
         // Retry briefly on lock errors so immediate reopen flows remain reliable.
-        let db_path = context.data_dir.join("jazz.surrealkv");
+        let db_path = context.data_dir.join("jazz.fjall");
         let storage = {
             const MAX_ATTEMPTS: usize = 100;
             const RETRY_DELAY_MS: u64 = 25;
@@ -119,7 +119,7 @@ impl JazzClient {
             let mut last_err = None;
 
             for attempt in 0..MAX_ATTEMPTS {
-                match SurrealKvStorage::open(&db_path, 64 * 1024 * 1024) {
+                match FjallStorage::open(&db_path, 64 * 1024 * 1024) {
                     Ok(storage) => {
                         opened = Some(storage);
                         break;
@@ -127,7 +127,10 @@ impl JazzClient {
                     Err(err) => {
                         let is_lock_error = matches!(
                             &err,
-                            StorageError::IoError(msg) if msg.contains("already locked")
+                            StorageError::IoError(msg)
+                                if msg.contains("lock")
+                                    || msg.contains("Lock")
+                                    || msg.contains("busy")
                         );
                         if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
                             last_err = Some(err);
@@ -142,7 +145,7 @@ impl JazzClient {
                 storage
             } else {
                 let err = last_err.unwrap_or_else(|| {
-                    StorageError::IoError("surrealkv open failed without error details".to_string())
+                    StorageError::IoError("fjall open failed without error details".to_string())
                 });
                 return Err(JazzError::Storage(format!("{:?}", err)));
             }
@@ -754,7 +757,7 @@ fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration>
 /// Handle incoming server events.
 fn handle_server_event(
     event: ServerEvent,
-    runtime: &TokioRuntime<SurrealKvStorage>,
+    runtime: &TokioRuntime<FjallStorage>,
     server_id: ServerId,
 ) -> Result<()> {
     match event {

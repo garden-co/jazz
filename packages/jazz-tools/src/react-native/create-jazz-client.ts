@@ -18,7 +18,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     createDb(resolvedConfig),
     resolveClientSession(resolvedConfig),
   ]);
-  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db);
+  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db, session);
 
   await manager.init();
 

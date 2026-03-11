@@ -10,19 +10,24 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 
+use jazz_tools::binding_support::{
+    align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
+    current_timestamp_ms as binding_current_timestamp_ms,
+    default_read_durability_options as default_binding_read_durability_options,
+    generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
+    parse_query_input, parse_session_input, query_rows_can_be_schema_aligned,
+    serialize_outbox_entry, subscription_delta_to_json,
+};
 use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::encoding::decode_row;
-use jazz_tools::query_manager::manager::LocalUpdates;
-use jazz_tools::query_manager::parse_query_json;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{RowDescriptor, Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::SurrealKvStorage;
+use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
     SyncManager, SyncPayload,
@@ -100,77 +105,21 @@ fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, JazzRnErro
     Ok(partial.into_iter().collect())
 }
 
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
-fn align_row_values_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
-        .unwrap_or(values)
-}
-
 fn parse_query(query_json: &str) -> Result<Query, JazzRnError> {
-    parse_query_json(query_json).map_err(|message| JazzRnError::InvalidJson { message })
+    parse_query_input(query_json).map_err(|message| JazzRnError::InvalidJson { message })
 }
 
 fn parse_session(session_json: Option<String>) -> Result<Option<Session>, JazzRnError> {
-    match session_json {
-        Some(json) => Ok(Some(serde_json::from_str(&json).map_err(json_err)?)),
-        None => Ok(None),
-    }
+    parse_session_input(session_json.as_deref())
+        .map_err(|message| JazzRnError::InvalidJson { message })
 }
 
 fn parse_tier(tier: &str) -> Result<DurabilityTier, JazzRnError> {
-    match tier {
-        "worker" => Ok(DurabilityTier::Worker),
-        "edge" => Ok(DurabilityTier::EdgeServer),
-        "global" => Ok(DurabilityTier::GlobalServer),
-        _ => Err(JazzRnError::InvalidTier {
-            message: format!(
-                "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
-                tier
-            ),
-        }),
-    }
+    parse_binding_tier(tier).map_err(|message| JazzRnError::InvalidTier { message })
 }
 
 fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
-    ReadDurabilityOptions {
-        tier,
-        local_updates: LocalUpdates::Immediate,
-    }
+    default_binding_read_durability_options(tier)
 }
 
 fn parse_subscription_inputs(
@@ -184,80 +133,13 @@ fn parse_subscription_inputs(
     Ok((query, session, default_read_durability_options(tier)))
 }
 
-fn build_rn_delta_json<F>(delta: &SubscriptionDelta, mut row_to_json: F) -> serde_json::Value
-where
-    F: FnMut(&jazz_tools::query_manager::types::Row) -> serde_json::Value,
-{
-    let removed = delta
-        .ordered_delta
-        .removed
-        .iter()
-        .map(|change| {
-            serde_json::json!({
-                "kind": 1,
-                "id": change.id.uuid().to_string(),
-                "index": change.index
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let updated = delta
-        .ordered_delta
-        .updated
-        .iter()
-        .map(|change| {
-            serde_json::json!({
-                "kind": 2,
-                "id": change.id.uuid().to_string(),
-                "index": change.new_index,
-                "row": change.row.as_ref().map(&mut row_to_json)
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let added = delta
-        .ordered_delta
-        .added
-        .iter()
-        .map(|change| {
-            let row_json = row_to_json(&change.row);
-            serde_json::json!({
-                "kind": 0,
-                "id": change.id.uuid().to_string(),
-                "index": change.index,
-                "row": row_json
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let changes = removed
-        .into_iter()
-        .chain(updated)
-        .chain(added)
-        .collect::<Vec<_>>();
-
-    serde_json::Value::Array(changes)
-}
-
-fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
-    let descriptor = &delta.descriptor;
-    let row_to_json = |row: &jazz_tools::query_manager::types::Row| -> serde_json::Value {
-        let values = decode_row(descriptor, &row.data)
-            .map(|vals| vals.into_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        serde_json::json!({
-            "id": row.id.uuid().to_string(),
-            "values": values,
-        })
-    };
-    build_rn_delta_json(delta, row_to_json)
-}
-
 fn make_subscription_callback(
     callback: Box<dyn SubscriptionCallback>,
+    declared_schema: Option<Schema>,
+    table: Option<TableName>,
 ) -> impl Fn(SubscriptionDelta) + Send + 'static {
     move |delta: SubscriptionDelta| {
-        let payload = subscription_delta_to_json(&delta);
+        let payload = subscription_delta_to_json(&delta, declared_schema.as_ref(), table.as_ref());
         if let Ok(json) = serde_json::to_string(&payload) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 callback.on_update(json);
@@ -279,7 +161,13 @@ pub trait BatchedTickCallback: Send + Sync {
 #[uniffi::export(callback_interface)]
 pub trait SyncMessageCallback: Send + Sync {
     /// Called by Rust when it has an outbox message to send.
-    fn on_sync_message(&self, message_json: String);
+    fn on_sync_message(
+        &self,
+        destination_kind: String,
+        destination_id: String,
+        payload_json: String,
+        is_catalogue: bool,
+    );
 }
 
 #[uniffi::export(callback_interface)]
@@ -350,14 +238,19 @@ impl RnSyncSender {
 
 impl SyncSender for RnSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
-        let Ok(json) = serde_json::to_string(&message) else {
+        let Ok(serialized) = serialize_outbox_entry(&message) else {
             return;
         };
 
         if let Ok(guard) = self.callback.lock() {
             if let Some(cb) = guard.as_ref() {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cb.on_sync_message(json);
+                    cb.on_sync_message(
+                        serialized.destination_kind,
+                        serialized.destination_id,
+                        serialized.payload_json,
+                        serialized.is_catalogue,
+                    );
                 }));
             }
         }
@@ -368,13 +261,14 @@ impl SyncSender for RnSyncSender {
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<SurrealKvStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<FjallStorage, RnScheduler, RnSyncSender>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Mutex<RnCoreType>,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
+    subscription_queries: Mutex<HashMap<u64, Query>>,
 }
 
 #[uniffi::export]
@@ -420,14 +314,14 @@ impl RnRuntime {
                     })
                     .collect();
                 let mut default_path = std::env::temp_dir();
-                default_path.push(format!("{sanitized_app_id}.surrealkv"));
+                default_path.push(format!("{sanitized_app_id}.fjall"));
                 default_path.to_string_lossy().into_owned()
             });
             let storage =
-                SurrealKvStorage::open(&resolved_data_path, cache_size_bytes).map_err(|e| {
+                FjallStorage::open(&resolved_data_path, cache_size_bytes).map_err(|e| {
                     JazzRnError::Runtime {
                         message: format!(
-                            "Failed to open SurrealKV storage at '{}': {:?}",
+                            "Failed to open Fjall storage at '{}': {:?}",
                             resolved_data_path, e
                         ),
                     }
@@ -442,6 +336,7 @@ impl RnRuntime {
                 core: Mutex::new(core),
                 upstream_server_id: Mutex::new(None),
                 declared_schema,
+                subscription_queries: Mutex::new(HashMap::new()),
             }))
         })
     }
@@ -557,24 +452,33 @@ impl RnRuntime {
     ) -> Result<String, JazzRnError> {
         with_panic_boundary("query", || {
             let query = parse_query(&query_json)?;
+            let query_for_alignment = query.clone();
             let session = parse_session(session_json)?;
             let tier = tier.as_deref().map(parse_tier).transpose()?;
 
             // NOTE: query() triggers immediate_tick() internally.
             // We then block for the first callback result to be delivered.
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            let fut = core.query_with_propagation(
-                query,
-                session,
-                ReadDurabilityOptions {
-                    tier,
-                    local_updates: LocalUpdates::Immediate,
-                },
-                QueryPropagation::Full,
-            );
+            let (fut, runtime_schema) = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                (
+                    core.query_with_propagation(
+                        query,
+                        session,
+                        default_read_durability_options(tier),
+                        QueryPropagation::Full,
+                    ),
+                    core.current_schema().clone(),
+                )
+            };
             let results = block_on(fut).map_err(runtime_err)?;
+            let results = align_query_rows_to_declared_schema(
+                &self.declared_schema,
+                &runtime_schema,
+                &query_for_alignment,
+                results,
+            );
 
             let rows_json: Vec<serde_json::Value> = results
                 .into_iter()
@@ -604,7 +508,18 @@ impl RnRuntime {
         with_panic_boundary("subscribe", || {
             let (query, session, durability) =
                 parse_subscription_inputs(&query_json, session_json, tier)?;
-            let callback = make_subscription_callback(callback);
+            let alignment_table = if query_rows_can_be_schema_aligned(&query) {
+                Some(query.table)
+            } else {
+                None
+            };
+            let callback = make_subscription_callback(
+                callback,
+                alignment_table
+                    .as_ref()
+                    .map(|_| self.declared_schema.clone()),
+                alignment_table,
+            );
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
@@ -626,6 +541,12 @@ impl RnRuntime {
 
     pub fn unsubscribe(&self, handle: u64) -> Result<(), JazzRnError> {
         with_panic_boundary("unsubscribe", || {
+            self.subscription_queries
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .remove(&handle);
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
@@ -644,6 +565,7 @@ impl RnRuntime {
         with_panic_boundary("create_subscription", || {
             let (query, session, durability) =
                 parse_subscription_inputs(&query_json, session_json, tier)?;
+            let query_for_alignment = query.clone();
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
@@ -651,6 +573,16 @@ impl RnRuntime {
 
             let handle =
                 core.create_subscription(query, session, durability, QueryPropagation::Full);
+            drop(core);
+
+            if query_rows_can_be_schema_aligned(&query_for_alignment) {
+                self.subscription_queries
+                    .lock()
+                    .map_err(|_| JazzRnError::Internal {
+                        message: "lock poisoned".into(),
+                    })?
+                    .insert(handle.0, query_for_alignment);
+            }
 
             Ok(handle.0)
         })
@@ -663,10 +595,24 @@ impl RnRuntime {
         callback: Box<dyn SubscriptionCallback>,
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("execute_subscription", || {
+            let alignment_table = self
+                .subscription_queries
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .get(&handle)
+                .map(|query| query.table);
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let callback = make_subscription_callback(callback);
+            let callback = make_subscription_callback(
+                callback,
+                alignment_table
+                    .as_ref()
+                    .map(|_| self.declared_schema.clone()),
+                alignment_table,
+            );
 
             core.execute_subscription(SubscriptionHandle(handle), callback)
                 .map_err(runtime_err)?;
@@ -846,20 +792,115 @@ impl RnRuntime {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use jazz_tools::binding_support::{
+        align_query_rows_to_declared_schema, align_values_to_declared_schema,
+        query_rows_can_be_schema_aligned,
+    };
+    use jazz_tools::object::ObjectId;
+    use jazz_tools::query_manager::query::Query;
+    use jazz_tools::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
+        Value,
+    };
+
+    fn declared_todo_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .column("description", ColumnType::Text),
+            )
+            .build()
+    }
+
+    fn runtime_todo_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("description", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .column("title", ColumnType::Text),
+            )
+            .build()
+    }
+
+    #[test]
+    fn query_rows_are_reordered_back_to_declared_schema() {
+        let rows = vec![(
+            ObjectId::new(),
+            vec![
+                Value::Text("note".to_string()),
+                Value::Boolean(false),
+                Value::Text("buy milk".to_string()),
+            ],
+        )];
+        let query = Query::new("todos");
+
+        let aligned = align_query_rows_to_declared_schema(
+            &declared_todo_schema(),
+            &runtime_todo_schema(),
+            &query,
+            rows,
+        );
+
+        assert_eq!(
+            aligned[0].1,
+            vec![
+                Value::Text("buy milk".to_string()),
+                Value::Boolean(false),
+                Value::Text("note".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn descriptor_values_are_reordered_back_to_declared_schema() {
+        let runtime_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("description", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ]);
+
+        let aligned = align_values_to_declared_schema(
+            &declared_todo_schema(),
+            &TableName::new("todos"),
+            &runtime_descriptor,
+            vec![
+                Value::Text("note".to_string()),
+                Value::Boolean(true),
+                Value::Text("ship fix".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            aligned,
+            vec![
+                Value::Text("ship fix".to_string()),
+                Value::Boolean(true),
+                Value::Text("note".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn simple_queries_are_schema_alignable() {
+        assert!(query_rows_can_be_schema_aligned(&Query::new("todos")));
+    }
+}
+
 // ============================================================================
 // Module-level utilities
 // ============================================================================
 
 #[uniffi::export]
 pub fn generate_id() -> String {
-    ObjectId::new().uuid().to_string()
+    generate_binding_id()
 }
 
 #[uniffi::export]
 pub fn current_timestamp_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    binding_current_timestamp_ms()
 }

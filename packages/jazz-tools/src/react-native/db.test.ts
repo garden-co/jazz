@@ -87,7 +87,7 @@ describe("react-native Db", () => {
       localAuthToken: config.localAuthToken,
       adminSecret: config.adminSecret,
       tier: config.tier,
-      defaultDurabilityTier: "worker",
+      defaultDurabilityTier: config.tier,
     });
   });
 
