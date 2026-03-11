@@ -804,29 +804,30 @@ describe("generateTypes with relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
+    expect(output).toContain("export type TodoIncludedRelations<I extends TodoInclude = {}> = {");
     expect(output).toContain(
-      "export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, keyof TodoInclude> & {",
+      "export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I>;",
     );
     expect(output).toContain(
-      "export type UserWithIncludes<I extends UserInclude = {}> = Omit<User, keyof UserInclude> & {",
+      "export type UserWithIncludes<I extends UserInclude = {}> = Omit<User, Extract<keyof I, keyof User>> & UserIncludedRelations<I>;",
     );
-    expect(output).toContain('owner?: NonNullable<I["owner"]> extends infer RelationInclude');
+    expect(output).toContain("[K in keyof I]-?:");
+    expect(output).toContain('K extends "owner"');
+    expect(output).toContain('NonNullable<I["owner"]> extends infer RelationInclude');
     expect(output).toContain("? RelationInclude extends true");
     expect(output).toContain("? User");
     expect(output).toContain(
       ': RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude, infer QuerySelect extends keyof User | "*">',
     );
-    expect(output).toContain("? UserSelectedWithIncludes<QueryInclude, QuerySelect>");
+    expect(output).toContain("? QueryRow");
     expect(output).toContain(": RelationInclude extends UserInclude");
     expect(output).toContain("? UserWithIncludes<RelationInclude>");
-    expect(output).toContain(
-      'todosViaOwner?: NonNullable<I["todosViaOwner"]> extends infer RelationInclude',
-    );
+    expect(output).toContain('K extends "todosViaOwner"');
     expect(output).toContain("? Todo[]");
     expect(output).toContain(
       ': RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude, infer QuerySelect extends keyof Todo | "*">',
     );
-    expect(output).toContain("? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]");
+    expect(output).toContain("? QueryRow[]");
     expect(output).toContain(": RelationInclude extends TodoInclude");
     expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
     expect(output).not.toContain("WithIncludesFor<");
@@ -846,7 +847,7 @@ describe("generateTypes with relations", () => {
       'export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends keyof Todo | "*" = keyof Todo>',
     );
     expect(output).toContain(
-      "Omit<TodoSelected<S>, keyof TodoInclude> & Omit<TodoWithIncludes<I>, keyof Omit<Todo, keyof TodoInclude>>",
+      "Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>",
     );
   });
 
@@ -866,9 +867,7 @@ describe("generateTypes with relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain(
-      'resource_access_edgesViaResource?: NonNullable<I["resource_access_edgesViaResource"]> extends infer RelationInclude',
-    );
+    expect(output).toContain('K extends "resource_access_edgesViaResource"');
     expect(output).toContain("? ResourceAccessEdgeWithIncludes<RelationInclude>[]");
     expect(output).not.toContain(
       'resource_access_edgesViaResource?: I["resource_access_edgesViaResource"] extends true',

@@ -75,6 +75,58 @@ export interface TodoInclude {
   owner?: true | UserInclude | UserQueryBuilder<any, any>;
 }
 
+export type UserIncludedRelations<I extends UserInclude = {}> = {
+  [K in keyof I]-?: K extends "todosViaOwner"
+    ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo[]
+        : RelationInclude extends { readonly _table: "todos" } & QueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude>[]
+            : never
+      : never
+    : never;
+};
+
+export type ProjectIncludedRelations<I extends ProjectInclude = {}> = {
+  [K in keyof I]-?: K extends "todosViaProject"
+    ? NonNullable<I["todosViaProject"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo[]
+        : RelationInclude extends { readonly _table: "todos" } & QueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude>[]
+            : never
+      : never
+    : never;
+};
+
+export type TodoIncludedRelations<I extends TodoInclude = {}> = {
+  [K in keyof I]-?: K extends "project"
+    ? NonNullable<I["project"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Project
+        : RelationInclude extends { readonly _table: "projects" } & QueryBuilder<infer QueryRow>
+          ? QueryRow
+          : RelationInclude extends ProjectInclude
+            ? ProjectWithIncludes<RelationInclude>
+            : never
+      : never
+    : K extends "owner"
+      ? NonNullable<I["owner"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? User
+          : RelationInclude extends { readonly _table: "users" } & QueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends UserInclude
+              ? UserWithIncludes<RelationInclude>
+              : never
+        : never
+      : never;
+};
+
 export interface UserRelations {
   todosViaOwner: Todo[];
 }
@@ -88,65 +140,23 @@ export interface TodoRelations {
   owner: User;
 }
 
-export type UserWithIncludes<I extends UserInclude = {}> = Omit<User, keyof UserInclude> & {
-  todosViaOwner?: NonNullable<I["todosViaOwner"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Todo[]
-      : RelationInclude extends TodoQueryBuilder<
-            infer QueryInclude extends TodoInclude,
-            infer QuerySelect extends keyof Todo | "*"
-          >
-        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends TodoInclude
-          ? TodoWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+export type UserWithIncludes<I extends UserInclude = {}> = Omit<
+  User,
+  Extract<keyof I, keyof User>
+> &
+  UserIncludedRelations<I>;
 
 export type ProjectWithIncludes<I extends ProjectInclude = {}> = Omit<
   Project,
-  keyof ProjectInclude
-> & {
-  todosViaProject?: NonNullable<I["todosViaProject"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Todo[]
-      : RelationInclude extends TodoQueryBuilder<
-            infer QueryInclude extends TodoInclude,
-            infer QuerySelect extends keyof Todo | "*"
-          >
-        ? TodoSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends TodoInclude
-          ? TodoWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+  Extract<keyof I, keyof Project>
+> &
+  ProjectIncludedRelations<I>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, keyof TodoInclude> & {
-  project?: NonNullable<I["project"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Project
-      : RelationInclude extends ProjectQueryBuilder<
-            infer QueryInclude extends ProjectInclude,
-            infer QuerySelect extends keyof Project | "*"
-          >
-        ? ProjectSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends ProjectInclude
-          ? ProjectWithIncludes<RelationInclude>
-          : never
-    : never;
-  owner?: NonNullable<I["owner"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? User
-      : RelationInclude extends UserQueryBuilder<
-            infer QueryInclude extends UserInclude,
-            infer QuerySelect extends keyof User | "*"
-          >
-        ? UserSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends UserInclude
-          ? UserWithIncludes<RelationInclude>
-          : never
-    : never;
-};
+export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<
+  Todo,
+  Extract<keyof I, keyof Todo>
+> &
+  TodoIncludedRelations<I>;
 
 export type UserSelected<S extends keyof User | "*" = keyof User> = "*" extends S
   ? User
@@ -155,8 +165,7 @@ export type UserSelected<S extends keyof User | "*" = keyof User> = "*" extends 
 export type UserSelectedWithIncludes<
   I extends UserInclude = {},
   S extends keyof User | "*" = keyof User,
-> = Omit<UserSelected<S>, keyof UserInclude> &
-  Omit<UserWithIncludes<I>, keyof Omit<User, keyof UserInclude>>;
+> = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I>;
 
 export type ProjectSelected<S extends keyof Project | "*" = keyof Project> = "*" extends S
   ? Project
@@ -165,8 +174,8 @@ export type ProjectSelected<S extends keyof Project | "*" = keyof Project> = "*"
 export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
   S extends keyof Project | "*" = keyof Project,
-> = Omit<ProjectSelected<S>, keyof ProjectInclude> &
-  Omit<ProjectWithIncludes<I>, keyof Omit<Project, keyof ProjectInclude>>;
+> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
+  ProjectIncludedRelations<I>;
 
 export type TodoSelected<S extends keyof Todo | "*" = keyof Todo> = "*" extends S
   ? Todo
@@ -175,8 +184,7 @@ export type TodoSelected<S extends keyof Todo | "*" = keyof Todo> = "*" extends 
 export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
   S extends keyof Todo | "*" = keyof Todo,
-> = Omit<TodoSelected<S>, keyof TodoInclude> &
-  Omit<TodoWithIncludes<I>, keyof Omit<Todo, keyof TodoInclude>>;
+> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
   users: {

@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
-import { afterEach, describe, it, expect } from "vitest";
-import { app } from "./fixtures/basic/app";
+import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
+import { app, Project } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -147,6 +147,38 @@ describe("TS Query API", () => {
     ]);
     expect("done" in results[0]).toBe(false);
     expect("tags" in results[0]).toBe(false);
+  });
+
+  it("included columns are returned even if they are not part of the top-level select", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-root-columns") },
+      }),
+    );
+
+    const { id: projectId } = insertProject(db, "Announcements");
+    const { id: ownerId } = insertOwner(db);
+    const { id: todoId } = db.insert(app.todos, {
+      title: "Write tests",
+      done: false,
+      tags: ["dev"],
+      project: projectId,
+      owner: ownerId,
+    });
+
+    const result = await db.one(
+      app.todos
+        .select("owner")
+        .where({ id: { eq: todoId } })
+        .include({ project: true }),
+    );
+
+    assert(result, "Result is not defined");
+    expectTypeOf(result.owner).toEqualTypeOf<string>();
+    expect(result.owner).toBe(ownerId);
+    expectTypeOf(result.project).toEqualTypeOf<Project>();
+    expect(result.project.name).toBe("Announcements");
   });
 
   it('select("*") resets to all root columns', async () => {
