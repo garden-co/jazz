@@ -1,10 +1,11 @@
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.93.1-bookworm AS builder
 
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY examples ./examples
+COPY patched-crates ./patched-crates
 
 RUN cargo build --release -p jazz-cloud-server
 

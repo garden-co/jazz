@@ -228,25 +228,13 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     "${REPO_ROOT}/Cargo.toml" \
     "${REPO_ROOT}/Cargo.lock" \
     "${REPO_ROOT}/crates" \
-    "${REPO_ROOT}/examples/todo-server-rs" \
+    "${REPO_ROOT}/examples" \
+    "${REPO_ROOT}/patched-crates" \
     "${TMP_CONTEXT}/"
-
-  cat > "${TMP_CONTEXT}/Dockerfile" <<'EOF'
-FROM rust:1.88-bookworm AS builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release -p jazz-cloud-server
-
-FROM debian:bookworm-slim
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/jazz-cloud-server /usr/local/bin/jazz-cloud-server
-ENTRYPOINT ["/usr/local/bin/jazz-cloud-server"]
-EOF
 
   docker buildx build \
     --platform linux/amd64 \
+    --file "${SCRIPT_DIR}/Dockerfile" \
     -t "${IMAGE_URI}" \
     --push \
     "${TMP_CONTEXT}"
