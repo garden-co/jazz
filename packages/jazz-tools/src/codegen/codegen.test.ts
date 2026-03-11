@@ -770,9 +770,12 @@ describe("generateTypes with relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
+    expect(output).toContain(
+      'type AnyUserQueryBuilder<T = any> = { readonly _table: "users" } & QueryBuilder<T>;',
+    );
     expect(output).toContain("export interface TodoInclude {");
     // Include types now include QueryBuilder union and only allow `true` for flags
-    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder<any, any>;");
+    expect(output).toContain("owner?: true | UserInclude | AnyUserQueryBuilder<any>;");
   });
 
   it("generates Relations types", () => {
@@ -816,18 +819,14 @@ describe("generateTypes with relations", () => {
     expect(output).toContain('NonNullable<I["owner"]> extends infer RelationInclude');
     expect(output).toContain("? RelationInclude extends true");
     expect(output).toContain("? User");
-    expect(output).toContain(
-      ': RelationInclude extends UserQueryBuilder<infer QueryInclude extends UserInclude, infer QuerySelect extends keyof User | "*">',
-    );
+    expect(output).toContain(": RelationInclude extends AnyUserQueryBuilder<infer QueryRow>");
     expect(output).toContain("? QueryRow");
     expect(output).toContain(": RelationInclude extends UserInclude");
     expect(output).toContain("? UserWithIncludes<RelationInclude>");
     expect(output).toContain('K extends "todosViaOwner"');
     expect(output).toContain("? Todo[]");
-    expect(output).toContain(
-      ': RelationInclude extends TodoQueryBuilder<infer QueryInclude extends TodoInclude, infer QuerySelect extends keyof Todo | "*">',
-    );
-    expect(output).toContain("? QueryRow[]");
+    expect(output).toContain(": RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>");
+    expect(output).toContain('? Omit<QueryRow, "id">[]');
     expect(output).toContain(": RelationInclude extends TodoInclude");
     expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
     expect(output).not.toContain("WithIncludesFor<");
@@ -885,8 +884,8 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("export interface TodoInclude {");
     // Include types now include QueryBuilder union and only allow `true` for flags
-    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
-    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
+    expect(output).toContain("parent?: true | TodoInclude | AnyTodoQueryBuilder<any>;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | AnyTodoQueryBuilder<any>;");
   });
 
   it("does not generate relation types for tables without relations", () => {
@@ -1069,7 +1068,7 @@ describe("generateQueryBuilderClasses", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("owner?: true | UserInclude | UserQueryBuilder<any, any>;");
+    expect(output).toContain("owner?: true | UserInclude | AnyUserQueryBuilder<any>;");
   });
 
   it("QueryBuilder._build() returns valid JSON structure", () => {
@@ -1173,7 +1172,7 @@ describe("QueryBuilder self-referential relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("parent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
-    expect(output).toContain("todosViaParent?: true | TodoInclude | TodoQueryBuilder<any, any>;");
+    expect(output).toContain("parent?: true | TodoInclude | AnyTodoQueryBuilder<any>;");
+    expect(output).toContain("todosViaParent?: true | TodoInclude | AnyTodoQueryBuilder<any>;");
   });
 });

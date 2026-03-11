@@ -62,17 +62,21 @@ export interface TodoWhereInput {
   owner?: string | { eq?: string; ne?: string };
 }
 
+type AnyUserQueryBuilder<T = any> = { readonly _table: "users" } & QueryBuilder<T>;
+type AnyProjectQueryBuilder<T = any> = { readonly _table: "projects" } & QueryBuilder<T>;
+type AnyTodoQueryBuilder<T = any> = { readonly _table: "todos" } & QueryBuilder<T>;
+
 export interface UserInclude {
-  todosViaOwner?: true | TodoInclude | TodoQueryBuilder<any, any>;
+  todosViaOwner?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
 
 export interface ProjectInclude {
-  todosViaProject?: true | TodoInclude | TodoQueryBuilder<any, any>;
+  todosViaProject?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
 
 export interface TodoInclude {
-  project?: true | ProjectInclude | ProjectQueryBuilder<any, any>;
-  owner?: true | UserInclude | UserQueryBuilder<any, any>;
+  project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
+  owner?: true | UserInclude | AnyUserQueryBuilder<any>;
 }
 
 export type UserIncludedRelations<I extends UserInclude = {}> = {
@@ -80,7 +84,7 @@ export type UserIncludedRelations<I extends UserInclude = {}> = {
     ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
       ? RelationInclude extends true
         ? Todo[]
-        : RelationInclude extends { readonly _table: "todos" } & QueryBuilder<infer QueryRow>
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
           ? QueryRow[]
           : RelationInclude extends TodoInclude
             ? TodoWithIncludes<RelationInclude>[]
@@ -94,7 +98,7 @@ export type ProjectIncludedRelations<I extends ProjectInclude = {}> = {
     ? NonNullable<I["todosViaProject"]> extends infer RelationInclude
       ? RelationInclude extends true
         ? Todo[]
-        : RelationInclude extends { readonly _table: "todos" } & QueryBuilder<infer QueryRow>
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
           ? QueryRow[]
           : RelationInclude extends TodoInclude
             ? TodoWithIncludes<RelationInclude>[]
@@ -108,7 +112,7 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
     ? NonNullable<I["project"]> extends infer RelationInclude
       ? RelationInclude extends true
         ? Project
-        : RelationInclude extends { readonly _table: "projects" } & QueryBuilder<infer QueryRow>
+        : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
           ? QueryRow
           : RelationInclude extends ProjectInclude
             ? ProjectWithIncludes<RelationInclude>
@@ -118,7 +122,7 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
       ? NonNullable<I["owner"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? User
-          : RelationInclude extends { readonly _table: "users" } & QueryBuilder<infer QueryRow>
+          : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
             ? QueryRow
             : RelationInclude extends UserInclude
               ? UserWithIncludes<RelationInclude>
