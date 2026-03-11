@@ -330,6 +330,35 @@ describe("transformRows", () => {
     expect(result).toEqual([{ id: "uuid-1", title: "Buy milk" }]);
   });
 
+  it("applies magic column projections while preserving id", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "uuid-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: true },
+          { type: "Null" },
+        ],
+      },
+    ];
+
+    const result = transformRows<{
+      id: string;
+      title: string;
+      $canEdit: boolean;
+      $canDelete?: boolean;
+    }>(rows, schema, "todos", {}, ["title", "$canEdit", "$canDelete"]);
+
+    expect(result).toEqual([
+      {
+        id: "uuid-1",
+        title: "Buy milk",
+        $canEdit: true,
+        $canDelete: undefined,
+      },
+    ]);
+  });
+
   it("maps forward include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {

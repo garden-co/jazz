@@ -8,6 +8,13 @@ export type JsonValue =
   | { [key: string]: JsonValue }
   | JsonValue[];
 
+export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
+export interface PermissionIntrospectionColumns {
+  $canRead: boolean | null;
+  $canEdit: boolean | null;
+  $canDelete: boolean | null;
+}
+
 export interface User {
   id: string;
   name: string;
@@ -46,11 +53,17 @@ export interface TodoInit {
 export interface UserWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface ProjectWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface TodoWhereInput {
@@ -60,6 +73,9 @@ export interface TodoWhereInput {
   tags?: string[] | { eq?: string[]; contains?: string };
   project?: string | { eq?: string; ne?: string };
   owner?: string | { eq?: string; ne?: string; isNull?: boolean };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 type AnyUserQueryBuilder<T = any> = { readonly _table: "users" } & QueryBuilder<T>;
@@ -162,32 +178,44 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<
 > &
   TodoIncludedRelations<I>;
 
-export type UserSelected<S extends keyof User | "*" = keyof User> = "*" extends S
+export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
+export type UserOrderableColumn = keyof User | PermissionIntrospectionColumn;
+
+export type UserSelected<S extends UserSelectableColumn = keyof User> = "*" extends S
   ? User
-  : Pick<User, Extract<S | "id", keyof User>>;
+  : Pick<User, Extract<S | "id", keyof User>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type UserSelectedWithIncludes<
   I extends UserInclude = {},
-  S extends keyof User | "*" = keyof User,
+  S extends UserSelectableColumn = keyof User,
 > = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I>;
 
-export type ProjectSelected<S extends keyof Project | "*" = keyof Project> = "*" extends S
+export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
+export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
+
+export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S
   ? Project
-  : Pick<Project, Extract<S | "id", keyof Project>>;
+  : Pick<Project, Extract<S | "id", keyof Project>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
-  S extends keyof Project | "*" = keyof Project,
+  S extends ProjectSelectableColumn = keyof Project,
 > = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
   ProjectIncludedRelations<I>;
 
-export type TodoSelected<S extends keyof Todo | "*" = keyof Todo> = "*" extends S
+export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
+export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
+
+export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S
   ? Todo
-  : Pick<Todo, Extract<S | "id", keyof Todo>>;
+  : Pick<Todo, Extract<S | "id", keyof Todo>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
-  S extends keyof Todo | "*" = keyof Todo,
+  S extends TodoSelectableColumn = keyof Todo,
 > = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
@@ -256,12 +284,55 @@ export const wasmSchema: WasmSchema = {
         references: "users",
       },
     ],
+    policies: {
+      select: {
+        using: {
+          type: "True",
+        },
+      },
+      insert: {
+        with_check: {
+          type: "True",
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: {
+              type: "Boolean",
+              value: false,
+            },
+          },
+        },
+        with_check: {
+          type: "True",
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: {
+              type: "Boolean",
+              value: false,
+            },
+          },
+        },
+      },
+    },
   },
 };
 
 export class UserQueryBuilder<
   I extends UserInclude = {},
-  S extends keyof User | "*" = keyof User,
+  S extends UserSelectableColumn = keyof User,
 > implements QueryBuilder<UserSelectedWithIncludes<I, S>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
@@ -299,7 +370,9 @@ export class UserQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof User | "*">(...columns: [NewS, ...NewS[]]): UserQueryBuilder<I, NewS> {
+  select<NewS extends UserSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): UserQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -311,7 +384,7 @@ export class UserQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof User, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I, S> {
+  orderBy(column: UserOrderableColumn, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -436,7 +509,7 @@ export class UserQueryBuilder<
 
   private _clone<
     CloneI extends UserInclude = I,
-    CloneS extends keyof User | "*" = S,
+    CloneS extends UserSelectableColumn = S,
   >(): UserQueryBuilder<CloneI, CloneS> {
     const clone = new UserQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
@@ -459,7 +532,7 @@ export class UserQueryBuilder<
 
 export class ProjectQueryBuilder<
   I extends ProjectInclude = {},
-  S extends keyof Project | "*" = keyof Project,
+  S extends ProjectSelectableColumn = keyof Project,
 > implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
@@ -497,7 +570,7 @@ export class ProjectQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Project | "*">(
+  select<NewS extends ProjectSelectableColumn>(
     ...columns: [NewS, ...NewS[]]
   ): ProjectQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
@@ -511,7 +584,10 @@ export class ProjectQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Project, direction: "asc" | "desc" = "asc"): ProjectQueryBuilder<I, S> {
+  orderBy(
+    column: ProjectOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): ProjectQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -636,7 +712,7 @@ export class ProjectQueryBuilder<
 
   private _clone<
     CloneI extends ProjectInclude = I,
-    CloneS extends keyof Project | "*" = S,
+    CloneS extends ProjectSelectableColumn = S,
   >(): ProjectQueryBuilder<CloneI, CloneS> {
     const clone = new ProjectQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
@@ -659,7 +735,7 @@ export class ProjectQueryBuilder<
 
 export class TodoQueryBuilder<
   I extends TodoInclude = {},
-  S extends keyof Todo | "*" = keyof Todo,
+  S extends TodoSelectableColumn = keyof Todo,
 > implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
@@ -697,7 +773,9 @@ export class TodoQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Todo | "*">(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS> {
+  select<NewS extends TodoSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): TodoQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -709,7 +787,7 @@ export class TodoQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Todo, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I, S> {
+  orderBy(column: TodoOrderableColumn, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -834,7 +912,7 @@ export class TodoQueryBuilder<
 
   private _clone<
     CloneI extends TodoInclude = I,
-    CloneS extends keyof Todo | "*" = S,
+    CloneS extends TodoSelectableColumn = S,
   >(): TodoQueryBuilder<CloneI, CloneS> {
     const clone = new TodoQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];

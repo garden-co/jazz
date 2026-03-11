@@ -20,6 +20,7 @@ import type {
   ScalarSqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
+import { assertUserColumnNameAllowed } from "./magic-columns.js";
 
 function normalizeEnumVariants(variants: readonly string[]): string[] {
   if (variants.length === 0) {
@@ -396,6 +397,7 @@ export function table(name: string, columns: Record<string, ColumnBuilder>): voi
 
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns)) {
+    assertUserColumnNameAllowed(colName);
     cols.push(builder._build(colName));
   }
   collectedTables.push({
@@ -405,7 +407,12 @@ export function table(name: string, columns: Record<string, ColumnBuilder>): voi
 }
 
 export function migrate(tableName: string, ops: Record<string, MigrationOp>): void {
-  const operations = Object.entries(ops).map(([column, op]) => ({ column, op }));
+  const operations = Object.entries(ops).map(([column, op]) => {
+    if (op._type !== "drop") {
+      assertUserColumnNameAllowed(column);
+    }
+    return { column, op };
+  });
   collectedMigrations.push({ table: tableName, operations });
 }
 

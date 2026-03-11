@@ -70,6 +70,22 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 }
 // #endregion reading-select-ts
 
+// #region reading-magic-columns-ts
+export async function readTodoPermissionIntrospection(db: Db) {
+  return db.all(
+    app.todos.select("title", "$canRead", "$canEdit", "$canDelete").orderBy("title", "asc"),
+  );
+}
+
+export async function readEditableTodos(db: Db) {
+  return db.all(app.todos.where({ $canEdit: true }).select("title", "$canEdit"));
+}
+
+export async function readDeletableTodos(db: Db) {
+  return db.all(app.todos.where({ $canDelete: true }).select("title", "$canDelete"));
+}
+// #endregion reading-magic-columns-ts
+
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
   return app.todos.gather({

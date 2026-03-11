@@ -3,6 +3,7 @@ pub mod graph;
 pub mod graph_nodes;
 pub mod index;
 pub mod indices;
+pub mod magic_columns;
 pub mod manager;
 pub mod policy;
 pub mod policy_graph;

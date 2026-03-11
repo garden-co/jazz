@@ -3322,6 +3322,34 @@ fn join_schema_with_implicit_base_id() -> Schema {
     schema
 }
 
+fn join_schema_with_magic_permissions() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])
+        .into(),
+    );
+
+    let posts_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("author_id", ColumnType::Integer),
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+    ]);
+    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let posts_policies = TablePolicies::new()
+        .with_update(Some(owner_policy.clone()), PolicyExpr::True)
+        .with_delete(owner_policy);
+    schema.insert(
+        TableName::new("posts"),
+        TableSchema::with_policies(posts_descriptor, posts_policies),
+    );
+
+    schema
+}
+
 #[test]
 fn join_compiles_but_not_executed_yet() {
     // This test validates that join queries compile and don't panic,
@@ -4061,6 +4089,121 @@ fn join_subscription_precise_relation_ir_full_joined_element_preserves_implicit_
     assert_eq!(
         values,
         vec![Value::Text("Hello World".into()), Value::Uuid(alice.row_id)]
+    );
+}
+
+#[test]
+fn join_subscription_can_filter_and_project_magic_columns() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, ProjectColumn,
+        ProjectExpr, RelExpr, ValueRef,
+    };
+
+    let sync_manager = SyncManager::new();
+    let schema = join_schema_with_magic_permissions();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("Alice Post".into()),
+            Value::Integer(1),
+            Value::Text("alice".into()),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("Bob Post".into()),
+            Value::Integer(2),
+            Value::Text("bob".into()),
+        ],
+    )
+    .unwrap();
+
+    let mut query = qm
+        .query("users")
+        .join("posts")
+        .on("users.id", "posts.author_id")
+        .build();
+    query.relation_ir = RelExpr::Project {
+        input: Box::new(RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("users"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("posts"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("users", "id"),
+                    right: ColumnRef::scoped("posts", "author_id"),
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::scoped("posts", "$canDelete"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Boolean(true)),
+            },
+        }),
+        columns: vec![
+            ProjectColumn {
+                alias: "user_name".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("users", "name")),
+            },
+            ProjectColumn {
+                alias: "post_title".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "title")),
+            },
+            ProjectColumn {
+                alias: "can_edit".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "$canEdit")),
+            },
+            ProjectColumn {
+                alias: "can_delete".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "$canDelete")),
+            },
+        ],
+    };
+    query.select_columns = None;
+
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+    qm.process(&mut storage);
+    let update = qm
+        .take_updates()
+        .into_iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("joined magic projection update");
+
+    assert_eq!(update.delta.added.len(), 1);
+    assert_eq!(update.descriptor.columns.len(), 4);
+    let values = decode_row(&update.descriptor, &update.delta.added[0].data).unwrap();
+    assert_eq!(
+        values,
+        vec![
+            Value::Text("Alice".into()),
+            Value::Text("Alice Post".into()),
+            Value::Boolean(true),
+            Value::Boolean(true),
+        ]
     );
 }
 

@@ -13,6 +13,17 @@ describe("generated TS DSL fixture", () => {
     });
   });
 
+  it("serializes magic select metadata on generated query builders", () => {
+    expect(JSON.parse(app.todos.select("title", "$canRead", "$canEdit")._build())).toEqual({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      select: ["title", "$canRead", "$canEdit"],
+      orderBy: [],
+      hops: [],
+    });
+  });
+
   it('serializes select("*") metadata on generated query builders', () => {
     expect(JSON.parse(app.todos.select("*")._build())).toEqual({
       table: "todos",
