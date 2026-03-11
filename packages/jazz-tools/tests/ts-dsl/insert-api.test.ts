@@ -6,6 +6,10 @@ function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function insertOwner(db: Db, name = "Test User") {
+  return db.insert(app.users, { name });
+}
+
 describe("TS Write API", () => {
   let db: Db;
 
@@ -22,6 +26,7 @@ describe("TS Write API", () => {
 
   it("returns the inserted row", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
+    const owner = insertOwner(db);
 
     expect(project).toEqual({
       id: expect.any(String),
@@ -33,6 +38,7 @@ describe("TS Write API", () => {
       done: true,
       tags: ["tag1", "tag2"],
       project: project.id,
+      owner: owner.id,
     });
 
     expect(todo).toEqual({
@@ -41,6 +47,7 @@ describe("TS Write API", () => {
       done: true,
       tags: ["tag1", "tag2"],
       project: project.id,
+      owner: owner.id,
     });
   });
 
@@ -55,6 +62,7 @@ describe("TS Write API", () => {
       id: expect.any(String),
       name: "Test Project",
     });
+    const owner = insertOwner(db);
 
     const todo = await db.insertDurable(
       app.todos,
@@ -63,6 +71,7 @@ describe("TS Write API", () => {
         done: true,
         tags: ["tag1", "tag2"],
         project: project.id,
+        owner: owner.id,
       },
       { tier: "worker" },
     );
@@ -73,16 +82,19 @@ describe("TS Write API", () => {
       done: true,
       tags: ["tag1", "tag2"],
       project: project.id,
+      owner: owner.id,
     });
   });
 
   it("updates rows synchronously without returning a promise", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
+    const owner = insertOwner(db);
     const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
       project: project.id,
+      owner: owner.id,
     });
 
     const result = db.update(app.todos, todo.id, { done: true });
@@ -94,11 +106,13 @@ describe("TS Write API", () => {
 
   it("can wait for updates to be persisted up to a specific durability tier", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
+    const owner = insertOwner(db);
     const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
       project: project.id,
+      owner: owner.id,
     });
 
     const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
@@ -112,11 +126,13 @@ describe("TS Write API", () => {
 
   it("deletes rows synchronously without returning a promise", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
+    const owner = insertOwner(db);
     const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
       project: project.id,
+      owner: owner.id,
     });
 
     const result = db.delete(app.todos, todo.id);
@@ -132,6 +148,7 @@ describe("TS Write API", () => {
       { name: "Test Project" },
       { tier: "worker" },
     );
+    const owner = insertOwner(db);
     const todo = await db.insertDurable(
       app.todos,
       {
@@ -139,6 +156,7 @@ describe("TS Write API", () => {
         done: false,
         tags: ["tag1", "tag2"],
         project: project.id,
+        owner: owner.id,
       },
       { tier: "worker" },
     );
