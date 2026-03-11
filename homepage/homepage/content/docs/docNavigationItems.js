@@ -445,6 +445,11 @@ export const docNavigationItems = [
 						href: "/docs/tooling-and-resources/ai-tools",
 						done: 100,
 					},
+					{
+						name: "MCP server",
+						href: "/docs/tooling-and-resources/mcp-server",
+						done: 100,
+					},
 				],
 			},
 			{

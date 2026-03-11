@@ -1,5 +1,6 @@
 <script lang="ts">
   import { JazzSvelteProvider } from "jazz-tools/svelte";
+  // @ts-ignore $app/navigation is a SvelteKit virtual module
   import { beforeNavigate, goto } from "$app/navigation"; // [!code ++]
   import { apiKey } from "$lib/apiKey";
   import { SyncConfig } from "jazz-tools";

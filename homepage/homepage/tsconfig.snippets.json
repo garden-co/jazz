@@ -27,6 +27,7 @@
       ],
       "$lib/components/*": [
         "./content/docs/code-snippets/key-features/authentication/clerk/*",
+        "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
         "./content/docs/code-snippets/quickstart/*"
       ],

@@ -1,0 +1,71 @@
+import { Alert, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+
+export const metadata = {
+  description: "Give your AI assistant direct access to Jazz documentation.",
+};
+
+# MCP server
+
+In ored for your AI assistant to be able to search, browse, and read the Jazz docs, we expose an [MCP](https://modelcontextprotocol.io) from our `jazz-run` package. After it's installed, your AI assistant will be able to answer questions about Jazz more intelligently, and discover relevant knowledge on its own while helping you build your apps.
+
+<Alert variant="info" title="Node version">
+  Although the MCP server will work with earlier versions of Node, we recommend 22.13 or later for the best search results.
+</Alert>
+
+## Installation
+
+<TabbedCodeGroup default="Claude Code" id="mcp-install">
+  <TabbedCodeGroupItem label="Claude Code" value="Claude Code">
+    ```bash
+    claude mcp add jazz-docs -- npx jazz-run@latest mcp
+    ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="Gemini CLI" value="Gemini CLI">
+    ```bash
+    gemini mcp add jazz-docs npx jazz-run@latest mcp
+    ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="Codex" value="Codex">
+    ```bash
+    codex mcp add jazz-docs -- npx jazz-run@latest mcp
+    ```
+  </TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+Restart your assistant after running the command.
+
+<Alert variant="info" title="Tip">
+  To ensure your assistant reaches for the Jazz docs proactively, we recommend adding a line to your project context file (e.g. `AGENTS.md`) or prompting your assistant:
+
+  > Jazz docs are available via the `jazz-docs` MCP server. Use `search_docs` and `get_doc` to look up APIs before answering Jazz questions.
+</Alert>
+
+## Tools
+
+### `list_pages`
+
+Returns a list of all documentation pages with their title, slug, and description. Helps your assistant to discover what's covered in the docs.
+
+### `search_docs`
+
+Allows your agent to do a full-text search across all documentation pages, and get back results in match-ranked order, with a snippet and section heading to verify the result and find the full doc as a follow-up.
+
+```
+search_docs(query: string, limit?: number)
+```
+
+Returns ranked results with a title, slug, section heading, and a short snippet for each match.
+
+### `get_doc`
+
+Retrieves the full content of a single page by slug.
+
+```
+get_doc(slug: string)
+```
+
+Slugs match the URL path under `/docs/` — for example `core-concepts/covalues/overview` or `quickstart`. Use `list_pages` or `search_docs` to discover available slugs.
+
+## See also
+
+- [AI tools (llms.txt)](/docs/tooling-and-resources/ai-tools)&hairsp;—&hairsp;add the Jazz docs to your LLM's context window as a plain text file

@@ -192,6 +192,16 @@
       "@jazz-tools/source": "./src/worker/napi-crypto.ts",
       "types": "./dist/worker/napi-crypto.d.ts",
       "default": "./dist/worker/napi-crypto.js"
+    },
+    "./mcp": {
+      "@jazz-tools/source": "./src/mcp/server.ts",
+      "types": "./dist/mcp/server.d.ts",
+      "default": "./dist/mcp/server.js"
+    },
+    "./mcp/build-index": {
+      "@jazz-tools/source": "./src/mcp/build-index.ts",
+      "types": "./dist/mcp/build-index.d.ts",
+      "default": "./dist/mcp/build-index.js"
     }
   },
   "type": "module",
