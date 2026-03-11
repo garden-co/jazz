@@ -196,7 +196,9 @@ export function callTool(
         throw rpcError(-32602, "search_docs: query (string) is required");
       }
       const limit =
-        typeof args.limit === "number" ? Math.floor(args.limit) : 10;
+        typeof args.limit === "number"
+          ? Math.max(0, Math.floor(args.limit))
+          : 10;
       return formatSearchResults(backend.search(query, limit));
     }
 
