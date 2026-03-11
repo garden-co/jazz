@@ -58,7 +58,7 @@ describe("TableDataGrid", () => {
     render(<TableDataGrid />);
 
     expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
-    expect(screen.getByText("4 columns · 2 rows on page")).not.toBeNull();
+    expect(screen.getByText("4 columns · 2 rows on page · 0 filters")).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
@@ -100,5 +100,23 @@ describe("TableDataGrid", () => {
         visibility: "hidden_from_live_query_list",
       }),
     );
+  });
+
+  it("adds a where clause and compiles it into query conditions", () => {
+    render(<TableDataGrid />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "title" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "contains" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "alpha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    const filteredQuery = mockSubscribeAll.mock.calls.at(-1)?.[0] as { _build: () => string };
+    expect(JSON.parse(filteredQuery._build())).toMatchObject({
+      conditions: [{ column: "title", op: "contains", value: "alpha" }],
+      orderBy: [["id", "asc"]],
+      limit: 11,
+      offset: 0,
+    });
   });
 });

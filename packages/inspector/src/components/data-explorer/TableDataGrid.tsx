@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
+import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -52,20 +53,28 @@ export function TableDataGrid() {
   const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
+  const [filters, setFilters] = useState<TableFilterClause[]>([]);
   const schemaColumns = schema[table]?.columns ?? [];
   const activeSort = sorting[0] ?? { id: "id", desc: false };
   const sortColumn = activeSort.id;
   const sortDirection = activeSort.desc ? "desc" : "asc";
   const queryOffset = pageIndex * pageSize;
   const queryLimit = pageSize + 1;
-  const queryBuilder = useMemo(
-    () =>
-      new GenericQueryBuilder(table, schema)
-        .orderBy(sortColumn, sortDirection)
-        .limit(queryLimit)
-        .offset(queryOffset),
-    [table, schema, sortColumn, sortDirection, queryLimit, queryOffset],
-  );
+  const queryBuilder = useMemo(() => {
+    let builder = new GenericQueryBuilder(table, schema);
+    for (const filter of filters) {
+      if (filter.operator === "eq") {
+        builder = builder.where({ [filter.column]: filter.value });
+      } else {
+        builder = builder.where({
+          [filter.column]: {
+            [filter.operator]: filter.value,
+          },
+        });
+      }
+    }
+    return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
+  }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
 
   useEffect(() => {
     const unsubscribe = db.subscribeAll(
@@ -125,10 +134,19 @@ export function TableDataGrid() {
           <h2 className={styles.title}>{table}</h2>
           <p className={styles.stats}>
             {columnDefs.length} column{columnDefs.length === 1 ? "" : "s"} · {visibleRows.length}{" "}
-            row{visibleRows.length === 1 ? "" : "s"} on page
+            row{visibleRows.length === 1 ? "" : "s"} on page · {filters.length} filter
+            {filters.length === 1 ? "" : "s"}
           </p>
         </div>
       </header>
+      <TableFilterBuilder
+        schemaColumns={schemaColumns}
+        clauses={filters}
+        onClausesChange={(nextFilters) => {
+          setFilters(nextFilters);
+          setPageIndex(0);
+        }}
+      />
       <div className={styles.gridFrame}>
         <table className={styles.table}>
           <thead>
