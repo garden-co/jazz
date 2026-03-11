@@ -14,6 +14,7 @@ import { LinkedList } from "./LinkedList.js";
 export class IncomingMessagesQueue {
   private pullCounter: Counter;
   private pushCounter: Counter;
+  private pushByTypeCounter: Counter;
 
   queues: [LinkedList<SyncMessage>, PeerState][];
   peerToQueue: WeakMap<PeerState, LinkedList<SyncMessage>>;
@@ -31,6 +32,13 @@ export class IncomingMessagesQueue {
       .getMeter("cojson")
       .createCounter(`jazz.messagequeue.incoming.pushed`, {
         description: "Number of messages pushed to the queue",
+        valueType: ValueType.INT,
+        unit: "1",
+      });
+    this.pushByTypeCounter = metrics
+      .getMeter("cojson")
+      .createCounter(`jazz.messagequeue.incoming.pushed.by_type`, {
+        description: "Number of messages pushed to the queue by message type",
         valueType: ValueType.INT,
         unit: "1",
       });
@@ -71,6 +79,10 @@ export class IncomingMessagesQueue {
 
     this.pushCounter.add(1, {
       peerRole: peer.role,
+    });
+    this.pushByTypeCounter.add(1, {
+      peerRole: peer.role,
+      messageType: msg.action,
     });
 
     this.processQueues();
