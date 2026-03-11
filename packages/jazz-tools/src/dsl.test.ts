@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
+import {
+  col,
+  getCollectedMigration,
+  getCollectedSchema,
+  migrate,
+  resetCollectedState,
+  table,
+} from "./dsl.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -59,6 +66,47 @@ describe("ref DSL", () => {
     expect(schema.tables[0]?.columns[0]).toMatchObject({
       name: "parts",
       references: "file_parts",
+    });
+  });
+});
+
+describe("reserved magic-column namespace", () => {
+  it("rejects schema columns starting with $", () => {
+    resetCollectedState();
+    expect(() =>
+      table("todos", {
+        $canRead: col.boolean(),
+      }),
+    ).toThrow(/reserved for magic columns/i);
+  });
+
+  it("rejects introduced migration columns starting with $", () => {
+    resetCollectedState();
+    expect(() =>
+      migrate("todos", {
+        $canRead: col.add().boolean({ default: false }),
+      }),
+    ).toThrow(/reserved for magic columns/i);
+  });
+
+  it("allows dropping legacy $-prefixed columns", () => {
+    resetCollectedState();
+    expect(() =>
+      migrate("todos", {
+        $legacy: col.drop().boolean({ backwardsDefault: false }),
+      }),
+    ).not.toThrow();
+
+    expect(getCollectedMigration()).toEqual({
+      table: "todos",
+      operations: [
+        {
+          type: "drop",
+          column: "$legacy",
+          sqlType: "BOOLEAN",
+          value: false,
+        },
+      ],
     });
   });
 });

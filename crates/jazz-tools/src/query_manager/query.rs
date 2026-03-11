@@ -4,6 +4,7 @@ use std::fmt;
 use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
+use crate::query_manager::magic_columns::is_magic_column_name;
 use crate::query_manager::types::{RowDescriptor, TableName, TupleDescriptor, Value};
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
@@ -145,15 +146,16 @@ impl Condition {
 
     /// Check if this condition can be used for an index scan.
     pub fn is_index_scannable(&self) -> bool {
-        matches!(
-            self,
-            Condition::Eq { .. }
-                | Condition::Lt { .. }
-                | Condition::Le { .. }
-                | Condition::Gt { .. }
-                | Condition::Ge { .. }
-                | Condition::Between { .. }
-        )
+        !is_magic_column_name(self.column())
+            && matches!(
+                self,
+                Condition::Eq { .. }
+                    | Condition::Lt { .. }
+                    | Condition::Le { .. }
+                    | Condition::Gt { .. }
+                    | Condition::Ge { .. }
+                    | Condition::Between { .. }
+            )
     }
 
     /// Convert to a Predicate for filter evaluation.
@@ -278,7 +280,7 @@ impl Conjunction {
         if let Some(cond) = self
             .conditions
             .iter()
-            .find(|c| matches!(c, Condition::Eq { .. }))
+            .find(|c| matches!(c, Condition::Eq { .. }) && c.is_index_scannable())
         {
             return Some(cond);
         }

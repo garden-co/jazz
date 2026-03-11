@@ -4,6 +4,10 @@
 
 import pluralize from "pluralize-esm";
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
+import {
+  PERMISSION_INTROSPECTION_COLUMNS,
+  PERMISSION_INTROSPECTION_TS_TYPE,
+} from "../magic-columns.js";
 import { analyzeRelations, type Relation } from "./relation-analyzer.js";
 import {
   generateWhereInputTypesWithMapper,
@@ -272,6 +276,23 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
   return lines;
 }
 
+function generateMagicColumnTypes(): string[] {
+  const lines: string[] = [];
+  const magicColumnUnion = PERMISSION_INTROSPECTION_COLUMNS.map((column) =>
+    JSON.stringify(column),
+  ).join(" | ");
+
+  lines.push(`export type PermissionIntrospectionColumn = ${magicColumnUnion};`);
+  lines.push(`export interface PermissionIntrospectionColumns {`);
+  for (const column of PERMISSION_INTROSPECTION_COLUMNS) {
+    lines.push(`  ${column}: ${PERMISSION_INTROSPECTION_TS_TYPE};`);
+  }
+  lines.push(`}`);
+  lines.push("");
+
+  return lines;
+}
+
 /**
  * Generate WithIncludes types for type-safe include results.
  */
@@ -300,17 +321,27 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
   for (const tableName of Object.keys(schema)) {
     const baseInterface = tableNameToInterface(tableName);
     const includeInterface = baseInterface + "Include";
+    const selectableColumnType = baseInterface + "SelectableColumn";
+    const orderableColumnType = baseInterface + "OrderableColumn";
     const includedRelationsType = baseInterface + "IncludedRelations";
     const hasRelations = (relations.get(tableName) ?? []).length > 0;
 
     lines.push(
-      `export type ${baseInterface}Selected<S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>;`,
+      `export type ${selectableColumnType} = keyof ${baseInterface} | PermissionIntrospectionColumn | "*";`,
+    );
+    lines.push(
+      `export type ${orderableColumnType} = keyof ${baseInterface} | PermissionIntrospectionColumn;`,
+    );
+    lines.push("");
+
+    lines.push(
+      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
     );
     lines.push("");
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends keyof ${baseInterface} | "*" = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
       );
       lines.push("");
     }
@@ -361,6 +392,8 @@ export function generateTypes(schema: WasmSchema): string {
       lines.push("");
     }
   }
+
+  lines.push(...generateMagicColumnTypes());
 
   // Base types (with id)
   for (const [tableName, table] of Object.entries(schema)) {

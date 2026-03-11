@@ -11,6 +11,7 @@
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import { magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltCondition,
@@ -54,6 +55,8 @@ function relationColumnsForTable(
 function getColumnType(schema: WasmSchema, table: string, column: string): ColumnType | undefined {
   // All tables have an implicit UUID primary key `id`.
   if (column === "id") return { type: "Uuid" };
+  const magicType = magicColumnType(column);
+  if (magicType) return magicType;
   const tableSchema = schema[table];
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);

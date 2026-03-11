@@ -15,7 +15,7 @@ use crate::sync_manager::{
     SyncPayload,
 };
 
-use crate::query_manager::encoding::encode_row;
+use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
@@ -74,6 +74,46 @@ fn rebac_test_schema() -> Schema {
     schema.insert(
         TableName::new("documents"),
         TableSchema::with_policies(docs_descriptor, docs_policies),
+    );
+
+    schema
+}
+
+fn magic_introspection_schema() -> Schema {
+    let mut schema = Schema::new();
+
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor),
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new()
+        .with_update(
+            Some(PolicyExpr::Exists {
+                table: "admins".into(),
+                condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
+            }),
+            PolicyExpr::True,
+        )
+        .with_delete(PolicyExpr::ExistsRel {
+            rel: RelExpr::Filter {
+                input: Box::new(RelExpr::TableScan {
+                    table: TableName::new("admins"),
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+            },
+        });
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor, protected_policies),
     );
 
     schema
@@ -1805,6 +1845,151 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
     qm.delete_with_session(&mut storage, protected.row_id, Some(&Session::new("alice")))
         .expect("admin delete should be allowed");
     assert!(qm.row_is_deleted(&storage, "protected", protected.row_id));
+}
+
+#[test]
+fn magic_columns_reactively_track_update_and_delete_permissions() {
+    let schema = magic_introspection_schema();
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+
+    let query = qm
+        .query("protected")
+        .select(&["data", "$canRead", "$canEdit", "$canDelete"])
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(Session::new("alice")), None)
+        .expect("subscribe with session");
+
+    qm.process(&mut storage);
+    let initial_update = qm
+        .take_updates()
+        .into_iter()
+        .find(|update| update.subscription_id == sub_id)
+        .expect("initial magic column update");
+    let initial_row = initial_update
+        .delta
+        .added
+        .first()
+        .expect("initial protected row");
+    let initial_values = decode_row(&initial_update.descriptor, &initial_row.data).unwrap();
+    assert_eq!(
+        initial_values,
+        vec![
+            Value::Text("initial".into()),
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Boolean(false),
+        ]
+    );
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("grant alice admin");
+
+    qm.process(&mut storage);
+    let dependency_update = qm
+        .take_updates()
+        .into_iter()
+        .find(|update| update.subscription_id == sub_id)
+        .expect("magic column dependency update");
+    let (_old_row, new_row) = dependency_update
+        .delta
+        .updated
+        .first()
+        .expect("magic columns should re-evaluate existing row");
+    let updated_values = decode_row(&dependency_update.descriptor, &new_row.data).unwrap();
+    assert_eq!(
+        updated_values,
+        vec![
+            Value::Text("initial".into()),
+            Value::Boolean(true),
+            Value::Boolean(true),
+            Value::Boolean(true),
+        ]
+    );
+
+    qm.update_with_session(
+        &mut storage,
+        protected.row_id,
+        &[Value::Text("updated".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("magic $canEdit should match actual update permission");
+    qm.delete_with_session(&mut storage, protected.row_id, Some(&Session::new("alice")))
+        .expect("magic $canDelete should match actual delete permission");
+}
+
+#[test]
+fn magic_columns_return_null_without_session_and_do_not_change_default_output_shape() {
+    let schema = magic_introspection_schema();
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("grant alice admin");
+
+    let projected_query = qm
+        .query("protected")
+        .select(&["data", "$canRead", "$canEdit", "$canDelete"])
+        .build();
+    let projected_sub = qm
+        .subscribe_with_session(projected_query, None, None)
+        .expect("subscribe without session");
+
+    qm.process(&mut storage);
+    let projected_update = qm
+        .take_updates()
+        .into_iter()
+        .find(|update| update.subscription_id == projected_sub)
+        .expect("initial projected update");
+    let projected_row = projected_update
+        .delta
+        .added
+        .first()
+        .expect("projected protected row");
+    let projected_values = decode_row(&projected_update.descriptor, &projected_row.data).unwrap();
+    assert_eq!(
+        projected_values,
+        vec![
+            Value::Text("initial".into()),
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]
+    );
+
+    let filtered_query = qm
+        .query("protected")
+        .filter_eq("$canDelete", Value::Boolean(true))
+        .build();
+    let filtered_sub = qm
+        .subscribe_with_session(filtered_query, Some(Session::new("alice")), None)
+        .expect("subscribe filtered query");
+
+    qm.process(&mut storage);
+    let filtered_update = qm
+        .take_updates()
+        .into_iter()
+        .find(|update| update.subscription_id == filtered_sub)
+        .expect("filtered update");
+    assert_eq!(filtered_update.descriptor.columns.len(), 1);
+    assert_eq!(filtered_update.descriptor.columns[0].name.as_str(), "data");
+
+    let filtered_row = filtered_update
+        .delta
+        .added
+        .first()
+        .expect("filtered protected row");
+    let filtered_values = decode_row(&filtered_update.descriptor, &filtered_row.data).unwrap();
+    assert_eq!(filtered_values, vec![Value::Text("initial".into())]);
 }
 
 // ============================================================================

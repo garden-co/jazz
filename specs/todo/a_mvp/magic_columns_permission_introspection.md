@@ -4,8 +4,8 @@ Permission introspection columns expose whether the current session could act on
 
 ## Initial Columns
 
-- `_canEdit`
-- `_canDelete`
+- `$canEdit`
+- `$canDelete`
 
 These are virtual/magic columns, not user-declared schema columns.
 
@@ -17,19 +17,19 @@ The columns are evaluated in the context of the current session, exactly like se
 
 If no session is present, the value should be `NULL` rather than `true` or `false`.
 
-### `_canEdit`
+### `$canEdit`
 
-`_canEdit` answers:
+`$canEdit` answers:
 
 > Does this session pass the row's `UPDATE USING` policy for the current row?
 
 This is intentionally narrower than "could some update succeed?" and does **not** attempt to predict `WITH CHECK` because no candidate new row exists at read time.
 
-If the table has no `UPDATE USING` policy, `_canEdit` is `true`.
+If the table has no `UPDATE USING` policy, `$canEdit` is `true`.
 
-### `_canDelete`
+### `$canDelete`
 
-`_canDelete` answers:
+`$canDelete` answers:
 
 > Does this session pass the row's effective delete policy?
 
@@ -38,7 +38,7 @@ This should use the same policy resolution as real deletes:
 - explicit `DELETE USING`, if present
 - otherwise the existing fallback to `UPDATE USING`
 
-If the table has no delete/update-using policy, `_canDelete` is `true`.
+If the table has no delete/update-using policy, `$canDelete` is `true`.
 
 ## Query Surface
 
@@ -49,8 +49,8 @@ These columns are excluded from `SELECT *`.
 Examples:
 
 - `SELECT * FROM todos` returns only normal columns
-- `SELECT *, _canEdit, _canDelete FROM todos` opts into the magic columns
-- `SELECT t._canEdit FROM todos AS t` is allowed
+- `SELECT *, $canEdit, $canDelete FROM todos` opts into the magic columns
+- `SELECT t.$canEdit FROM todos AS t` is allowed
 
 This follows the "hidden/system column" model used by several SQL systems and keeps default reads cheap.
 
@@ -60,7 +60,7 @@ Magic columns must work in joined queries.
 
 They should bind to a specific row source, for example:
 
-- `SELECT u.name, p.title, u._canEdit, p._canDelete ...`
+- `SELECT u.name, p.title, u.$canEdit, p.$canDelete ...`
 
 This requires projection metadata to preserve source scope/table identity rather than flattening everything down to unqualified column strings too early.
 
@@ -70,8 +70,8 @@ Magic columns should be usable in `WHERE`, but only as non-indexed filters.
 
 Examples:
 
-- `WHERE _canDelete = true`
-- `WHERE p._canEdit = true`
+- `WHERE $canDelete = true`
+- `WHERE p.$canEdit = true`
 
 If a query references a magic column in filtering, the planner should compute the relevant magic columns before the filter stage. If a magic column is only projected, it can be computed later.
 
@@ -82,8 +82,8 @@ The implementation should reuse the same permission evaluation path as real muta
 At a high level:
 
 1. Resolve the relevant operation and policy:
-   - `_canEdit` -> `Operation::Update`, using only `UPDATE USING`
-   - `_canDelete` -> `Operation::Delete`, using the effective delete policy
+   - `$canEdit` -> `Operation::Update`, using only `UPDATE USING`
+   - `$canDelete` -> `Operation::Delete`, using the effective delete policy
 2. Evaluate the simple predicate parts directly from row bytes
 3. Reuse the existing complex-clause handling for:
    - `INHERITS`
@@ -120,4 +120,4 @@ Two planner refactors are the intended first implementation steps:
    - resolve filters against joined tuple descriptors correctly
    - allow future non-indexed filters over computed/magic columns
 
-These refactors should land before the actual `_canEdit` / `_canDelete` computation node.
+These refactors should land before the actual `$canEdit` / `$canDelete` computation node.

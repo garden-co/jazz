@@ -13,6 +13,7 @@ import type {
   TablePolicies,
 } from "./schema.js";
 import { sqlTypeToString } from "./schema.js";
+import { assertUserColumnNameAllowed } from "./magic-columns.js";
 
 const BARE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const RESERVED_KEYWORDS = new Set([
@@ -82,6 +83,11 @@ function tableToSql(table: Table): string {
 }
 
 export function schemaToSql(schema: Schema): string {
+  for (const table of schema.tables) {
+    for (const column of table.columns) {
+      assertUserColumnNameAllowed(column.name);
+    }
+  }
   return schema.tables.map(tableToSql).join("\n\n") + "\n";
 }
 
@@ -240,6 +246,11 @@ function lensOpToBackwardSql(table: string, op: LensOp): string {
 }
 
 export function lensToSql(lens: Lens, direction: "fwd" | "bwd"): string {
+  for (const op of lens.operations) {
+    if (op.type !== "drop") {
+      assertUserColumnNameAllowed(op.column);
+    }
+  }
   const converter = direction === "fwd" ? lensOpToForwardSql : lensOpToBackwardSql;
   return lens.operations.map((op) => converter(lens.table, op)).join("\n") + "\n";
 }
