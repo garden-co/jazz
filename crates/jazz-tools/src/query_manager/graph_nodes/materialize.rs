@@ -182,11 +182,7 @@ impl MaterializeNode {
         F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
         let mut materialized_elements = Vec::with_capacity(tuple.len());
-        let mut materialized_provenance = if tuple.len() == 1 {
-            AHashSet::new()
-        } else {
-            tuple.provenance().clone()
-        };
+        let mut materialized_provenance = tuple.provenance().clone();
 
         for (elem_idx, elem) in tuple.iter().enumerate() {
             // Only materialize if this element is in our list
@@ -201,11 +197,7 @@ impl MaterializeNode {
                     if let Some(loaded) = loader(*id) {
                         let row = Row::new(*id, loaded.data.clone(), loaded.commit_id);
                         self.rows.insert(*id, row);
-                        if tuple.len() == 1 {
-                            materialized_provenance = loaded.provenance.clone();
-                        } else {
-                            materialized_provenance.extend(loaded.provenance.iter().copied());
-                        }
+                        merge_loaded_provenance(&mut materialized_provenance, &loaded);
                         materialized_elements.push(TupleElement::Row {
                             id: *id,
                             content: loaded.data,
@@ -299,11 +291,8 @@ impl MaterializeNode {
     where
         F: FnMut(ObjectId) -> Option<LoadedRow>,
     {
-        let mut rematerialized_provenance = if tuple.len() == 1 {
-            AHashSet::new()
-        } else {
-            tuple.provenance().clone()
-        };
+        // Preserve any upstream sync-scope provenance already attached to the tuple.
+        let mut rematerialized_provenance = tuple.provenance().clone();
         let elements: Vec<TupleElement> = tuple
             .iter()
             .enumerate()
@@ -317,11 +306,7 @@ impl MaterializeNode {
                 if let Some(loaded) = loader(id) {
                     let row = Row::new(id, loaded.data.clone(), loaded.commit_id);
                     self.rows.insert(id, row);
-                    if tuple.len() == 1 {
-                        rematerialized_provenance = loaded.provenance.clone();
-                    } else {
-                        rematerialized_provenance.extend(loaded.provenance.iter().copied());
-                    }
+                    merge_loaded_provenance(&mut rematerialized_provenance, &loaded);
                     TupleElement::Row {
                         id,
                         content: loaded.data,
@@ -341,6 +326,15 @@ impl MaterializeNode {
     pub fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
+}
+
+// Ordered pagination widens tuple provenance to cover the ordered prefix. Keep
+// that upstream scope when rows are first materialized and when they are reloaded.
+fn merge_loaded_provenance(
+    tuple_provenance: &mut crate::query_manager::types::TupleProvenance,
+    loaded: &LoadedRow,
+) {
+    tuple_provenance.extend(loaded.provenance.iter().copied());
 }
 
 /// Check if any element's content changed between two tuples with same IDs.
@@ -368,6 +362,7 @@ fn has_content_changed(old: &Tuple, new: &Tuple) -> bool {
 mod tests {
     use super::*;
     use crate::commit::CommitId;
+    use crate::object::BranchName;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
@@ -383,6 +378,14 @@ mod tests {
 
     fn make_loaded_row(data: Vec<u8>, commit_id: CommitId) -> LoadedRow {
         LoadedRow::new(data, commit_id, Default::default())
+    }
+
+    fn make_loaded_row_with_provenance(
+        data: Vec<u8>,
+        commit_id: CommitId,
+        provenance: crate::query_manager::types::TupleProvenance,
+    ) -> LoadedRow {
+        LoadedRow::new(data, commit_id, provenance)
     }
 
     fn make_tuple_delta_add(ids: &[ObjectId]) -> TupleDelta {
@@ -508,6 +511,62 @@ mod tests {
             node.check_updated_tuples(|_| Some(make_loaded_row(data1.clone(), commit1)));
 
         assert!(update_delta.updated.is_empty());
+    }
+
+    #[test]
+    fn rematerialize_preserves_single_row_upstream_provenance() {
+        let mut node = make_materialize_node();
+
+        let id1 = ObjectId::new();
+        let sync_scope_id = ObjectId::new();
+        let main_branch = BranchName::new("main");
+        let sync_branch = BranchName::new("sync");
+        let data1 = vec![1, 2, 3];
+        let data2 = vec![4, 5, 6];
+        let commit1 = make_commit_id(1);
+        let commit2 = make_commit_id(2);
+
+        let row_provenance: crate::query_manager::types::TupleProvenance =
+            [(id1, main_branch)].into_iter().collect();
+        let upstream_provenance: crate::query_manager::types::TupleProvenance =
+            [(id1, main_branch), (sync_scope_id, sync_branch)]
+                .into_iter()
+                .collect();
+        let tuple = Tuple::from_id(id1).with_provenance(upstream_provenance.clone());
+
+        let added = node.materialize_tuples(
+            TupleDelta {
+                added: vec![tuple],
+                removed: vec![],
+                moved: vec![],
+                updated: vec![],
+            },
+            |_| {
+                Some(make_loaded_row_with_provenance(
+                    data1.clone(),
+                    commit1,
+                    row_provenance.clone(),
+                ))
+            },
+        );
+
+        assert_eq!(added.added.len(), 1);
+        assert_eq!(added.added[0].provenance(), &upstream_provenance);
+
+        node.mark_updated(id1);
+
+        let update_delta = node.check_updated_tuples(|_| {
+            Some(make_loaded_row_with_provenance(
+                data2.clone(),
+                commit2,
+                row_provenance.clone(),
+            ))
+        });
+
+        assert_eq!(update_delta.updated.len(), 1);
+        let (old_tuple, new_tuple) = &update_delta.updated[0];
+        assert_eq!(old_tuple.provenance(), &upstream_provenance);
+        assert_eq!(new_tuple.provenance(), &upstream_provenance);
     }
 
     #[test]

@@ -208,6 +208,15 @@ impl PolicyFilterNode {
         result
     }
 
+    pub fn row_passes_with_context(
+        &self,
+        row: &Row,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+    ) -> bool {
+        self.evaluate_with_context(row, io, row_loader)
+    }
+
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
