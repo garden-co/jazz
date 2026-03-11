@@ -73,9 +73,17 @@
 .sidebarOverlay {
   position: absolute;
   top: 0;
+  left: 0;
   right: 0;
   bottom: 0;
   z-index: 7;
+  background: rgba(7, 12, 20, 0.22);
+}
+
+.sidebarPanel {
+  margin-left: auto;
+  width: fit-content;
+  height: 100%;
   box-shadow: -18px 0 28px rgba(6, 12, 20, 0.5);
 }
 

@@ -13,6 +13,7 @@ import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
 import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
+import type { MutationFormMode } from "./row-mutation-form.js";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -24,6 +25,11 @@ function formatCellValue(value: unknown): string {
 }
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+
+interface MutationState {
+  mode: MutationFormMode;
+  rowId: string | null;
+}
 
 function isColumnSortable(columnType: ColumnType): boolean {
   switch (columnType.type) {
@@ -55,7 +61,7 @@ export function TableDataGrid() {
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
   const [filters, setFilters] = useState<TableFilterClause[]>([]);
-  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [mutationState, setMutationState] = useState<MutationState | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
   const activeSort = sorting[0] ?? { id: "id", desc: false };
   const sortColumn = activeSort.id;
@@ -129,7 +135,17 @@ export function TableDataGrid() {
   const rowById = useMemo(() => {
     return new Map(visibleRows.map((row) => [row.id, row]));
   }, [visibleRows]);
-  const editingRow = editingRowId ? (rowById.get(editingRowId) ?? null) : null;
+  const editingRow =
+    mutationState?.mode === "edit" && mutationState.rowId
+      ? (rowById.get(mutationState.rowId) ?? null)
+      : null;
+  const insertRowValues = useMemo(() => {
+    const values: Record<string, unknown> = {};
+    for (const column of schemaColumns) {
+      values[column.name] = undefined;
+    }
+    return values;
+  }, [schemaColumns]);
   const tableProxy = useMemo(
     () =>
       ({
@@ -154,6 +170,15 @@ export function TableDataGrid() {
             {filters.length === 1 ? "" : "s"}
           </p>
         </div>
+        <button
+          type="button"
+          className={styles.secondaryButton}
+          onClick={() => {
+            setMutationState({ mode: "insert", rowId: null });
+          }}
+        >
+          Insert
+        </button>
       </header>
       <TableFilterBuilder
         schemaColumns={schemaColumns}
@@ -216,7 +241,7 @@ export function TableDataGrid() {
                         type="button"
                         className={styles.actionButton}
                         onClick={() => {
-                          setEditingRowId(String(row.original.id));
+                          setMutationState({ mode: "edit", rowId: String(row.original.id) });
                         }}
                       >
                         Edit
@@ -269,21 +294,40 @@ export function TableDataGrid() {
           </button>
         </div>
       </footer>
-      {editingRow ? (
-        <div className={styles.sidebarOverlay}>
-          <RowMutationSidebar
-            mode="edit"
-            tableName={table}
-            schemaColumns={schemaColumns}
-            targetRow={editingRow}
-            onCancel={() => {
-              setEditingRowId(null);
+      {mutationState ? (
+        <div
+          className={styles.sidebarOverlay}
+          data-testid="row-mutation-overlay"
+          onClick={() => {
+            setMutationState(null);
+          }}
+        >
+          <div
+            className={styles.sidebarPanel}
+            onClick={(event) => {
+              event.stopPropagation();
             }}
-            onSave={async (updates) => {
-              db.update(tableProxy, editingRow.id, updates);
-              setEditingRowId(null);
-            }}
-          />
+          >
+            <RowMutationSidebar
+              mode={mutationState.mode}
+              tableName={table}
+              schemaColumns={schemaColumns}
+              targetRowId={mutationState.mode === "edit" ? (editingRow?.id ?? null) : null}
+              rowValues={mutationState.mode === "edit" ? editingRow : insertRowValues}
+              onCancel={() => {
+                setMutationState(null);
+              }}
+              onSave={async (updates) => {
+                if (mutationState.mode === "edit") {
+                  if (!editingRow) return;
+                  db.update(tableProxy, editingRow.id, updates);
+                } else {
+                  db.insert(tableProxy, updates);
+                }
+                setMutationState(null);
+              }}
+            />
+          </div>
         </div>
       ) : null}
     </section>
