@@ -1,10 +1,19 @@
-import * as React from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  attachDevTools,
+  createJazzClient,
+  getActiveSyntheticAuth,
+  JazzProvider,
+  useAll,
+  useDb,
+  useSession,
+} from "jazz-tools/react";
+import { app, UploadWithIncludes, type File as JazzFile } from "../schema/app.js";
 
-type LocalFileRecord = {
-  file: File;
-  objectUrl: string;
-  localId: string;
-};
+type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
+
+const BYTEA_MAX_BYTES = 1_048_576;
+const PART_SIZE_BYTES = 256 * 1024;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -18,88 +27,166 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-function formatDate(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(timestamp);
+function canPreviewInline(mime: string): boolean {
+  return mime.startsWith("image/") || mime.startsWith("video/") || mime === "application/pdf";
 }
 
-async function computeSha256(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const digest = await crypto.subtle.digest("SHA-256", buffer);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function canPreviewInline(file: File): boolean {
-  return (
-    file.type.startsWith("image/") ||
-    file.type.startsWith("video/") ||
-    file.type === "application/pdf"
-  );
-}
-
-function Preview({ record }: { record: LocalFileRecord }) {
-  if (record.file.type.startsWith("image/")) {
-    return <img className="preview-media" src={record.objectUrl} alt={record.file.name} />;
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
   }
-  if (record.file.type.startsWith("video/")) {
-    return <video className="preview-media" src={record.objectUrl} controls />;
+  return combined;
+}
+
+function splitIntoParts(bytes: Uint8Array, partSize: number): Uint8Array[] {
+  const parts: Uint8Array[] = [];
+  for (let offset = 0; offset < bytes.length; offset += partSize) {
+    parts.push(bytes.slice(offset, Math.min(offset + partSize, bytes.length)));
   }
-  if (record.file.type === "application/pdf") {
-    return <iframe className="preview-frame" src={record.objectUrl} title={record.file.name} />;
+  return parts;
+}
+
+function toBlobBytes(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+// TODO make row+includes a subtype of row by separating the fk field from the resolved reference
+function Preview({ file, objectUrl }: { file: Omit<JazzFile, "parts">; objectUrl: string }) {
+  if (file.mimeType.startsWith("image/")) {
+    return <img className="preview-media" src={objectUrl} alt={file.name} />;
+  }
+  if (file.mimeType.startsWith("video/")) {
+    return <video className="preview-media" src={objectUrl} controls />;
+  }
+  if (file.mimeType === "application/pdf") {
+    return <iframe className="preview-frame" src={objectUrl} title={file.name} />;
   }
   return null;
 }
 
-export function App() {
-  const [record, setRecord] = React.useState<LocalFileRecord | null>(null);
-  const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
-  const [pending, setPending] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [isDragging, setIsDragging] = React.useState(false);
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+function readEnvAppId(): string | undefined {
+  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+    ?.JAZZ_APP_ID;
+}
 
-  React.useEffect(() => {
-    return () => {
-      if (record) URL.revokeObjectURL(record.objectUrl);
-    };
-  }, [record]);
+function defaultConfig(
+  overrides: Partial<JazzProviderClientConfig> = {},
+): JazzProviderClientConfig {
+  const appId = overrides.appId ?? readEnvAppId() ?? "14fef0b4-4f6f-41f9-8884-8e6a8e52bb49";
+  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
-  const loadFile = React.useCallback(async (file: File | null) => {
-    if (!file) return;
+  return {
+    appId,
+    env: "dev",
+    userBranch: "main",
+    localAuthMode: active.localAuthMode,
+    localAuthToken: active.localAuthToken,
+    ...overrides,
+  };
+}
 
-    setPending(true);
+function FileUploadScreen() {
+  const [error, setError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const db = useDb();
+  const session = useSession();
+  const uploads =
+    useAll(
+      app.uploads
+        .include({
+          file: {
+            parts: true,
+          },
+        })
+        .orderBy("last_modified", "desc")
+        .limit(1),
+    ) ?? [];
+  const latestUpload = uploads[0];
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!latestUpload) {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        setObjectUrl(null);
+      }
+      return;
+    }
+    if (objectUrl) {
+      return;
+    }
+    const fileRecord = latestUpload.file;
+    const combined = concatChunks(fileRecord.parts.map((part) => part.data));
+    const blob = new Blob([toBlobBytes(combined)], {
+      type: fileRecord.mimeType || "application/octet-stream",
+    });
+    setObjectUrl(URL.createObjectURL(blob));
+  }, [latestUpload, objectUrl]);
+
+  async function uploadFile(file: File) {
+    if (!session?.user_id) {
+      setError("Missing Jazz session user. Refresh and try again.");
+      return;
+    }
+
     setError(null);
 
     try {
-      const [sha256, objectUrl] = await Promise.all([
-        computeSha256(file),
-        Promise.resolve(URL.createObjectURL(file)),
-      ]);
+      const buffer = new Uint8Array(await file.arrayBuffer());
+      const chunks = splitIntoParts(buffer, PART_SIZE_BYTES);
+      const oversizePart = chunks.find((chunk) => chunk.length > BYTEA_MAX_BYTES);
+      if (oversizePart) {
+        setError("A generated file part exceeded the Jazz BYTEA cell limit.");
+        return;
+      }
 
-      setRecord((previous) => {
-        if (previous) URL.revokeObjectURL(previous.objectUrl);
-        return { file, objectUrl, localId: sha256 };
+      const insertedParts = chunks.map((chunk) =>
+        db.insert(app.file_parts, {
+          data: chunk,
+        }),
+      );
+
+      const insertedFile = db.insert(app.files, {
+        name: file.name,
+        mimeType: file.type || "application/octet-stream",
+        parts: insertedParts.map((part) => part.id),
+        partSizes: chunks.map((chunk) => chunk.length),
       });
-      setSelectedFile(file);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Failed to process file.");
-    } finally {
-      setPending(false);
-    }
-  }, []);
 
-  const clearRecord = React.useCallback(() => {
-    setRecord((previous) => {
-      if (previous) URL.revokeObjectURL(previous.objectUrl);
-      return null;
-    });
-    setSelectedFile(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
+      db.insert(app.uploads, {
+        size: file.size,
+        last_modified: new Date(file.lastModified),
+        file_id: insertedFile.id,
+        owner_id: session.user_id,
+      });
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to upload file.");
     }
-  }, []);
+  }
+
+  function deleteUpload(upload: UploadWithIncludes<{ file: { parts: true } }>) {
+    const fileRecord = upload.file;
+    db.delete(app.uploads, upload.id);
+    if (fileRecord?.parts) {
+      for (const part of fileRecord.parts) {
+        db.delete(app.file_parts, part.id);
+      }
+    }
+    if (fileRecord) {
+      db.delete(app.files, fileRecord.id);
+    }
+  }
 
   return (
     <main className="page-shell">
@@ -110,7 +197,7 @@ export function App() {
         <span className="brand-name">jazz</span>
       </header>
 
-      {!record ? (
+      {!latestUpload ? (
         <section className="uploader-layout">
           <div
             className={`drop-zone${isDragging ? " is-dragging" : ""}`}
@@ -124,8 +211,8 @@ export function App() {
             onDrop={(event) => {
               event.preventDefault();
               setIsDragging(false);
-              const file = event.dataTransfer.files?.[0] ?? null;
-              setSelectedFile(file);
+              const file = event.dataTransfer.files[0];
+              uploadFile(file);
             }}
           >
             Drag &amp; drop your file here
@@ -137,19 +224,12 @@ export function App() {
               className="file-input"
               type="file"
               onChange={(event) => {
-                setSelectedFile(event.currentTarget.files?.[0] ?? null);
+                const file = event.currentTarget.files?.[0];
+                if (file) {
+                  uploadFile(file);
+                }
               }}
             />
-            <button
-              className="action-button"
-              type="button"
-              disabled={!selectedFile || pending}
-              onClick={() => {
-                void loadFile(selectedFile);
-              }}
-            >
-              {pending ? "Uploading..." : "Upload file"}
-            </button>
           </div>
 
           {error ? <p className="error-banner">{error}</p> : null}
@@ -161,38 +241,101 @@ export function App() {
               <p>File name</p>
               <p>Type</p>
               <p>Size</p>
-              <p>CoValue ID</p>
+              <p>ID</p>
             </div>
 
             <div className="details-values">
-              <p>{record.file.name}</p>
-              <p>{record.file.type || "unknown"}</p>
-              <p>{formatBytes(record.file.size)}</p>
-              <p className="hash-value">{record.localId}</p>
+              <p>{latestUpload.file.name}</p>
+              <p>{latestUpload.file.mimeType || "unknown"}</p>
+              <p>{formatBytes(latestUpload.size)}</p>
+              <p className="hash-value">{latestUpload.file.id}</p>
             </div>
           </div>
 
           <div className="detail-actions">
-            <button className="secondary-button" type="button" onClick={clearRecord}>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => deleteUpload(latestUpload)}
+            >
               Delete file
             </button>
-            <a className="secondary-button" href={record.objectUrl} download={record.file.name}>
-              Download file
-            </a>
+            {objectUrl ? (
+              <a className="secondary-button" href={objectUrl} download={latestUpload.file.name}>
+                Download file
+              </a>
+            ) : null}
           </div>
 
           <div className="preview-wrap">
-            {canPreviewInline(record.file) ? (
-              <Preview record={record} />
+            {canPreviewInline(latestUpload.file.mimeType) && objectUrl ? (
+              <Preview file={latestUpload.file} objectUrl={objectUrl} />
             ) : (
               <div className="fallback-preview">
                 <p>No inline preview for this file type.</p>
-                <p>Last modified: {formatDate(record.file.lastModified)}</p>
+                <p>Stored inside the local Jazz database.</p>
               </div>
             )}
           </div>
         </section>
       )}
     </main>
+  );
+}
+
+type AppProps = {
+  config?: Partial<JazzProviderClientConfig>;
+  fallback?: React.ReactNode;
+};
+
+export function App({ config, fallback }: AppProps = {}) {
+  const resolvedConfig = defaultConfig(config);
+  const configKey = JSON.stringify(resolvedConfig);
+  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    let active = true;
+    const pendingClient = createJazzClient(resolvedConfig);
+
+    void pendingClient.then(
+      (resolved) => {
+        if (!active) {
+          void resolved.shutdown();
+          return;
+        }
+        setClient(resolved);
+        attachDevTools(resolved, app.wasmSchema);
+        if (location.origin.includes("localhost")) {
+          Object.defineProperty(window, "jazzClient", {
+            value: resolved,
+            writable: true,
+          });
+        }
+      },
+      (reason) => {
+        if (!active) return;
+        setError(reason);
+      },
+    );
+
+    return () => {
+      active = false;
+      void pendingClient.then((resolved) => resolved.shutdown()).catch(() => {});
+    };
+  }, [configKey]);
+
+  if (error) {
+    throw error;
+  }
+
+  if (!client) {
+    return <>{fallback ?? <p>Loading...</p>}</>;
+  }
+
+  return (
+    <JazzProvider client={client}>
+      <FileUploadScreen />
+    </JazzProvider>
   );
 }
