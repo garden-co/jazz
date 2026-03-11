@@ -6,6 +6,8 @@
  * catalogue payload detection.
  */
 
+import { fetchWithTimeout } from "./utils.js";
+
 /** Auth and identity context for sync operations. */
 export interface SyncAuth {
   jwtToken?: string;
@@ -419,27 +421,6 @@ export function generateClientId(): string {
 const fallbackClientId = generateClientId();
 const SYNC_FETCH_TIMEOUT_MS = 10_000;
 
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  if (typeof AbortController !== "function") {
-    return fetch(url, init);
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
-
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
@@ -505,6 +486,37 @@ export function applySyncAuthHeaders(headers: Record<string, string>, auth: Sync
   applyUserAuthHeaders(headers, auth);
 }
 
+async function postSyncBatch(
+  url: string,
+  headers: Record<string, string>,
+  body: string,
+  logPrefix: string,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      url,
+      { method: "POST", headers, body },
+      SYNC_FETCH_TIMEOUT_MS,
+    );
+  } catch (e) {
+    if ((e as { name?: string })?.name === "AbortError") {
+      console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+      throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
+    }
+    if (isExpectedFetchAbortError(e)) {
+      throw new Error(`${logPrefix}Sync POST failed: ${errorMessage(e)}`);
+    }
+    console.error(`${logPrefix}Sync POST fetch error:`, e);
+    throw new Error(`${logPrefix}Sync POST failed: ${errorMessage(e)}`);
+  }
+
+  if (!response.ok) {
+    const statusText = response.statusText ? ` ${response.statusText}` : "";
+    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
+  }
+}
+
 /**
  * POST a sync payload to the server.
  *
@@ -522,49 +534,48 @@ export async function sendSyncPayload(
     return;
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (isCatalogue) {
-    if (auth.adminSecret) {
-      headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
-    }
+    headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);
   }
 
-  const body = `{"payload":${payloadJson},"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  const body = `{"payloads":[${payloadJson}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  await postSyncBatch(
+    buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
+    headers,
+    body,
+    logPrefix,
+  );
+}
 
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(
-      buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
-      {
-        method: "POST",
-        headers,
-        body,
-      },
-      SYNC_FETCH_TIMEOUT_MS,
-    );
-  } catch (e) {
-    if ((e as { name?: string })?.name === "AbortError") {
-      console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-      throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-    }
-    if (isExpectedFetchAbortError(e)) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
-    }
-    console.error(`${logPrefix}Sync POST fetch error:`, e);
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
-  }
+/**
+ * POST an ordered batch of sync payloads to the server in a single request.
+ *
+ * Wire format: {"payloads":[<payload1>,<payload2>,…],"client_id":"…"}
+ *
+ * Each payload JSON string is embedded raw (no double-serialisation).
+ * Non-catalogue payloads only — catalogue payloads are sent via sendSyncPayload.
+ */
+export async function sendSyncPayloadBatch(
+  serverUrl: string,
+  payloads: string[],
+  auth: SyncAuth,
+  logPrefix = "",
+): Promise<void> {
+  if (payloads.length === 0) return;
 
-  if (!response.ok) {
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
-    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
-  }
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  applySyncAuthHeaders(headers, auth);
+
+  const body = `{"payloads":[${payloads.join(",")}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  await postSyncBatch(
+    buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
+    headers,
+    body,
+    logPrefix,
+  );
 }
 
 /**

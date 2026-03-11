@@ -1,6 +1,6 @@
 //! HTTP/SSE transport for server communication.
 
-use crate::jazz_transport::SyncPayloadRequest;
+use crate::jazz_transport::SyncBatchRequest;
 use crate::query_manager::session::Session;
 use crate::sync_manager::{ClientId, SyncPayload};
 use base64::Engine;
@@ -134,7 +134,10 @@ impl ServerConnection {
             self.build_headers(None)
         };
 
-        let request = SyncPayloadRequest { payload, client_id };
+        let request = SyncBatchRequest {
+            payloads: vec![payload],
+            client_id,
+        };
 
         self.client
             .post(&url)

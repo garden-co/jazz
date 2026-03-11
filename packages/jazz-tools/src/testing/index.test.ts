@@ -163,17 +163,19 @@ describe("startLocalJazzServer", () => {
     try {
       const syncBody = {
         client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payload: {
-          ObjectUpdated: {
-            object_id: "01234567-89ab-cdef-0123-456789abcdef",
-            metadata: {
-              id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: { type: "catalogue_schema" },
+        payloads: [
+          {
+            ObjectUpdated: {
+              object_id: "01234567-89ab-cdef-0123-456789abcdef",
+              metadata: {
+                id: "01234567-89ab-cdef-0123-456789abcdef",
+                metadata: { type: "catalogue_schema" },
+              },
+              branch_name: "main",
+              commits: [],
             },
-            branch_name: "main",
-            commits: [],
           },
-        },
+        ],
       };
 
       const response = await fetch(`${server.url}/sync`, {
@@ -204,17 +206,19 @@ describe("startLocalJazzServer", () => {
     try {
       const syncBody = {
         client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payload: {
-          ObjectUpdated: {
-            object_id: "01234567-89ab-cdef-0123-456789abcdef",
-            metadata: {
-              id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: { type: "catalogue_schema" },
+        payloads: [
+          {
+            ObjectUpdated: {
+              object_id: "01234567-89ab-cdef-0123-456789abcdef",
+              metadata: {
+                id: "01234567-89ab-cdef-0123-456789abcdef",
+                metadata: { type: "catalogue_schema" },
+              },
+              branch_name: "main",
+              commits: [],
             },
-            branch_name: "main",
-            commits: [],
           },
-        },
+        ],
       };
 
       const response = await fetch(`${server.url}/sync`, {

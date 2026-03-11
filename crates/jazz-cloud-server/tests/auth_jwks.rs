@@ -305,14 +305,14 @@ fn get_free_port() -> u16 {
 fn sync_body() -> Value {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payload": {
+        "payloads": [{
             "ObjectUpdated": {
                 "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                 "metadata": null,
                 "branch_name": "main",
                 "commits": []
             }
-        }
+        }]
     })
 }
 
