@@ -41,10 +41,10 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
   // Subscribe directly to the sender's profile so the name/avatar appears as
   // soon as the profile row syncs, even if the include in the parent query
   // fired before the profile was in the local store.
-  const senderProfiles = useAll(app.profiles.where({ userId: message.senderId }));
+  const senderProfiles = useAll(app.profiles.where({ userId: message.senderId })) ?? [];
   const resolvedSender = (senderProfiles[0] as unknown as Profile) ?? sender;
 
-  const attachments = useAll(app.attachments.where({ message: message.id }));
+  const attachments = useAll(app.attachments.where({ message: message.id })) ?? [];
 
   const canvasMatch = message.text?.match(/^\[Canvas: ([^\]]+)\]$/);
   const canvasId = canvasMatch?.[1] ?? null;
@@ -93,7 +93,7 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
           </DropdownMenuTrigger>
           <DropdownMenuContent align={isMe ? "end" : "start"}>
             <ReactionPicker
-              onPick={(emoji) => {
+              onPick={(_emoji) => {
                 setIsMenuOpen(false);
               }}
               messageId={message.id}

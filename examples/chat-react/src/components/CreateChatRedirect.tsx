@@ -17,22 +17,22 @@ export const CreateChatRedirect = () => {
     if (initialized.current || !userId || !myProfile) return;
     initialized.current = true;
 
-    const chatId = db.insert(app.chats, {
+    const chat = db.insert(app.chats, {
       isPublic: true,
       createdBy: userId,
     });
 
-    db.insert(app.chatMembers, { chat: chatId, userId });
+    db.insert(app.chatMembers, { chat: chat.id, userId });
 
     db.insert(app.messages, {
-      chat: chatId,
+      chat: chat.id,
       text: "Hello world",
       sender: myProfile.id,
       senderId: userId,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: new Date(),
     });
 
-    navigate(`/#/chat/${chatId}`);
+    navigate(`/#/chat/${chat.id}`);
   }, [db, userId, myProfile, navigate]);
 
   return (

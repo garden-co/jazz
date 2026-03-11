@@ -5,7 +5,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { app } from "../../../schema/app.js";
 
 function ReactorName({ userId, currentUserId }: { userId: string; currentUserId?: string }) {
-  const profiles = useAll(app.profiles.where({ userId }));
+  const profiles = useAll(app.profiles.where({ userId })) ?? [];
   const profile = profiles[0];
 
   if (userId === currentUserId) return <li>You</li>;
@@ -92,7 +92,7 @@ export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => 
   const session = useSession();
   const userId = session?.user_id;
 
-  const reactions = useAll(app.reactions.where({ message: messageId }));
+  const reactions = useAll(app.reactions.where({ message: messageId })) ?? [];
 
   if (reactions.length === 0) return null;
 
@@ -107,7 +107,7 @@ export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => 
     if (!userId) return;
     const myReaction = reactions.find((r) => r.emoji === emoji && r.userId === userId);
     if (myReaction) {
-      db.deleteFrom(app.reactions, myReaction.id);
+      db.delete(app.reactions, myReaction.id);
     } else {
       db.insert(app.reactions, {
         message: messageId,

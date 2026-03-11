@@ -26,28 +26,27 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [uploadMode, setUploadMode] = useState<"image" | "file" | null>(null);
 
-  const chats = useAll(app.chats.where({ id: chatId }));
+  const chats = useAll(app.chats.where({ id: chatId })) ?? [];
   const chat = chats[0];
 
-  const myMemberships = useAll(
-    app.chatMembers.where({ chat: chatId, userId: userId ?? "__none__" }),
-  );
+  const myMemberships =
+    useAll(app.chatMembers.where({ chat: chatId, userId: userId ?? "__none__" })) ?? [];
   const myJoinCode = myMemberships[0]?.joinCode ?? undefined;
 
   const myProfile = useMyProfile();
 
   const handleCreateCanvas = () => {
-    if (!userId || !chat || !myProfile) return;
-    const canvasId = db.insert(app.canvases, {
+    if (!userId || !myProfile) return;
+    const canvas = db.insert(app.canvases, {
       chat: chatId,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: new Date(),
     });
     db.insert(app.messages, {
       chat: chatId,
-      text: `[Canvas: ${canvasId}]`,
+      text: `[Canvas: ${canvas.id}]`,
       sender: myProfile.id,
       senderId: userId,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: new Date(),
     });
   };
 

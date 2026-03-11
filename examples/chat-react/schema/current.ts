@@ -22,7 +22,7 @@ table("messages", {
   text: col.string(),
   sender: col.ref("profiles"),
   senderId: col.string(),
-  createdAt: col.int(),
+  createdAt: col.timestamp(),
 });
 
 table("reactions", {
@@ -33,7 +33,7 @@ table("reactions", {
 
 table("canvases", {
   chat: col.ref("chats"),
-  createdAt: col.int(),
+  createdAt: col.timestamp(),
 });
 
 table("strokes", {
@@ -42,7 +42,7 @@ table("strokes", {
   color: col.string(),
   width: col.int(),
   pointsJson: col.string(),
-  createdAt: col.int(),
+  createdAt: col.timestamp(),
 });
 
 table("attachments", {
