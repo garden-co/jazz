@@ -250,10 +250,57 @@ impl QueryManager {
         values: &[Value],
         branch: &str,
     ) -> Result<(), QueryError> {
+        self.validate_foreign_keys_for_values_inner(
+            storage, table_name, descriptor, values, branch, None,
+        )
+    }
+
+    /// Validate FK constraints, optionally limited to only the specified columns.
+    ///
+    /// When `changed_columns` is `Some`, only FK columns whose name is in the
+    /// set are validated. This is used by partial updates (RuntimeCore::update)
+    /// so that unchanged FK columns are not re-checked
+    fn validate_foreign_keys_for_changed_columns(
+        &self,
+        storage: &dyn Storage,
+        table_name: &TableName,
+        descriptor: &RowDescriptor,
+        values: &[Value],
+        branch: &str,
+        changed_columns: &[String],
+    ) -> Result<(), QueryError> {
+        self.validate_foreign_keys_for_values_inner(
+            storage,
+            table_name,
+            descriptor,
+            values,
+            branch,
+            Some(changed_columns),
+        )
+    }
+
+    fn validate_foreign_keys_for_values_inner(
+        &self,
+        storage: &dyn Storage,
+        table_name: &TableName,
+        descriptor: &RowDescriptor,
+        values: &[Value],
+        branch: &str,
+        changed_columns: Option<&[String]>,
+    ) -> Result<(), QueryError> {
         for (column, value) in descriptor.columns.iter().zip(values.iter()) {
             let Some(referenced_table) = column.references else {
                 continue;
             };
+
+            // When doing a partial update, skip FK validation for columns
+            // that were not changed — the old value was already validated
+            // at insert time.
+            if let Some(changed) = changed_columns
+                && !changed.iter().any(|c| c == column.name.as_str())
+            {
+                continue;
+            }
 
             match (&column.column_type, value) {
                 (ColumnType::Uuid, Value::Uuid(target_id)) => {
@@ -808,6 +855,32 @@ impl QueryManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
+        self.update_with_session_inner(storage, id, values, session, None)
+    }
+
+    /// Update a row, validating FK constraints only for the specified columns.
+    ///
+    /// Used by `RuntimeCore::update` for partial updates: when only `done` is
+    /// changed, there is no need to re-validate the `project` FK
+    pub fn update_with_session_partial<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        id: ObjectId,
+        values: &[Value],
+        session: Option<&Session>,
+        changed_columns: &[String],
+    ) -> Result<CommitId, QueryError> {
+        self.update_with_session_inner(storage, id, values, session, Some(changed_columns))
+    }
+
+    fn update_with_session_inner<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        id: ObjectId,
+        values: &[Value],
+        session: Option<&Session>,
+        changed_columns: Option<&[String]>,
+    ) -> Result<CommitId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
         // Ensure object is loaded from storage (cold-start: may only exist on disk)
         let branch = self.current_branch();
@@ -849,13 +922,29 @@ impl QueryManager {
             });
         }
 
-        self.validate_foreign_keys_for_values(
-            storage,
-            &table_name,
-            &descriptor,
-            values,
-            &self.current_branch(),
-        )?;
+        // For partial updates, only validate FK constraints on columns that
+        // were actually changed. Unchanged FK values were already validated
+        // at insert time and don't need re-checking — this avoids false
+        // violations after cold start when referenced rows may not yet be
+        // indexed.
+        if let Some(changed) = changed_columns {
+            self.validate_foreign_keys_for_changed_columns(
+                storage,
+                &table_name,
+                &descriptor,
+                values,
+                &self.current_branch(),
+                changed,
+            )?;
+        } else {
+            self.validate_foreign_keys_for_values(
+                storage,
+                &table_name,
+                &descriptor,
+                values,
+                &self.current_branch(),
+            )?;
+        }
         self.validate_json_for_values(&descriptor, values)?;
 
         // Encode new data (used by WITH CHECK and commit write).

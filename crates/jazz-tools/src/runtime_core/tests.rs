@@ -1321,3 +1321,173 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             .join(", ")
     );
 }
+
+// =========================================================================
+// Foreign Key + Partial Update Tests
+// =========================================================================
+
+/// Schema that mirrors the stress-test app: projects + todos with FK.
+fn fk_stress_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .column("owner_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .nullable_column("description", ColumnType::Text)
+                .column("owner_id", ColumnType::Text)
+                .nullable_fk_column("project", "projects"),
+        )
+        .build()
+}
+
+fn create_fk_runtime() -> TestCore {
+    let schema = fk_stress_schema();
+    let app_id = AppId::from_name("fk-test");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+    core.immediate_tick();
+    core
+}
+
+/// Reproduce the stress-test bug: after page reload, sync is query-scoped —
+/// only objects matching active queries arrive in MemoryStorage. If the app
+/// subscribes to `todos.limit(50)` but not all projects, a todo's `project`
+/// FK can reference a project that's never loaded.
+///
+/// We simulate this by inserting both rows, then removing the project from
+/// the `_id` index (as if query-scoped sync never brought it in).
+///
+/// ```text
+///   MemoryStorage (after query-scoped sync)
+///   ┌────────────────────────────────────────┐
+///   │ projects._id index:  []     ← empty!   │
+///   │ todos._id index:     [todo_1]           │
+///   │                                         │
+///   │ todo_1.project = project_42  → not in   │
+///   │                               index     │
+///   └────────────────────────────────────────┘
+///
+///   User toggles todo_1.done → partial update
+///   → FK re-check on `project` → NOT FOUND → 💥
+/// ```
+#[test]
+fn rc_partial_update_with_unloaded_fk_reference() {
+    let mut core = create_fk_runtime();
+
+    // Insert a project (FK validation passes at insert time)
+    let (project_id, _) = core
+        .insert(
+            "projects",
+            vec![Value::Text("Acme".into()), Value::Text("alice".into())],
+            None,
+        )
+        .unwrap();
+
+    // Insert a todo referencing that project
+    let (todo_id, _) = core
+        .insert(
+            "todos",
+            vec![
+                Value::Text("Buy milk".into()),
+                Value::Boolean(true),        // done
+                Value::Null,                 // description (nullable)
+                Value::Text("alice".into()), // owner_id
+                Value::Uuid(project_id),     // project FK
+            ],
+            None,
+        )
+        .unwrap();
+
+    core.immediate_tick();
+
+    // Simulate query-scoped sync: remove the project from the _id index.
+    // This is what happens after page reload when the app only subscribes
+    // to `todos` but not `projects` — the project never arrives.
+    //
+    // The branch name is a composed name (e.g. "dev-<hash>-main"), not just "main".
+    let branch = core.schema_manager().branch_name();
+    core.storage
+        .index_remove(
+            "projects",
+            "_id",
+            branch.as_str(),
+            &Value::Uuid(project_id),
+            project_id,
+        )
+        .unwrap();
+
+    // Partial update: only change `done`.
+    // Without the fix, this fails with UuidForeignKeyViolation on `project`
+    // because the project is not in the _id index.
+    core.update(
+        todo_id,
+        vec![("done".to_string(), Value::Boolean(false))],
+        None,
+    )
+    .expect(
+        "partial update of non-FK column must succeed even when referenced project is not loaded",
+    );
+}
+
+/// Verify that when a FK column is explicitly changed in a partial update,
+/// it IS still validated (only unchanged FK columns are skipped).
+#[test]
+fn rc_partial_update_validates_changed_fk_column() {
+    let mut core = create_fk_runtime();
+
+    // Insert a project
+    let (project_id, _) = core
+        .insert(
+            "projects",
+            vec![Value::Text("Acme".into()), Value::Text("alice".into())],
+            None,
+        )
+        .unwrap();
+
+    // Insert a todo referencing that project
+    let (todo_id, _) = core
+        .insert(
+            "todos",
+            vec![
+                Value::Text("Buy milk".into()),
+                Value::Boolean(true),
+                Value::Null,
+                Value::Text("alice".into()),
+                Value::Uuid(project_id),
+            ],
+            None,
+        )
+        .unwrap();
+
+    core.immediate_tick();
+
+    // Partial update: change the `project` FK to a non-existent project.
+    // This MUST fail because we're changing the FK column.
+    let bogus_project = ObjectId::new();
+    let result = core.update(
+        todo_id,
+        vec![("project".to_string(), Value::Uuid(bogus_project))],
+        None,
+    );
+
+    assert!(
+        result.is_err(),
+        "changing FK to non-existent project must fail"
+    );
+    let err_msg = format!("{:?}", result.err().unwrap());
+    assert!(
+        err_msg.contains("UuidForeignKeyViolation"),
+        "error should be UuidForeignKeyViolation, got: {err_msg}"
+    );
+}
