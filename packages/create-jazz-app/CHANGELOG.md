@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.2.2
+
+### Patch Changes
+
+- f4a4197: Scaffold AGENTS.md and .skills/ directory in new projects, providing an AI agent-ready docs index and Jazz skill files out of the box.
+
 ## 0.2.1
 
 ### Patch Changes

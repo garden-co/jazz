@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.13
+
+### Patch Changes
+
+- 9877c61: Add a new incoming queue metric that tracks pushed sync messages by type (`messageType`).
+  - cojson-core-wasm@0.20.13
+  - cojson-core-rn@0.20.13
+  - cojson-core-napi@0.20.13
+
 ## 0.20.12
 
 ### Patch Changes
