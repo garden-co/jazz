@@ -21,6 +21,7 @@ use crate::middleware::AuthConfig;
 use crate::routes;
 
 const EXTERNAL_IDENTITIES_TABLE: &str = "external_identities";
+const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
 
 #[derive(Debug, Clone)]
 pub struct ExternalIdentityRow {
@@ -290,6 +291,11 @@ pub async fn run(
     for row in external_identity_rows {
         external_identities.insert((row.issuer, row.subject), row.principal_id);
     }
+    let inspector_link = build_inspector_link(
+        port,
+        &app_id.to_string(),
+        auth_config.admin_secret.as_deref(),
+    );
 
     // Build server state
     let state = Arc::new(ServerState {
@@ -309,6 +315,7 @@ pub async fn run(
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Listening on http://{}", addr);
+    info!("Open the inspector: {}", inspector_link);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -321,4 +328,30 @@ fn now_timestamp_us() -> u64 {
         Ok(duration) => duration.as_micros().min(u128::from(u64::MAX)) as u64,
         Err(_) => 0,
     }
+}
+
+fn build_inspector_link(port: u16, app_id: &str, admin_secret: Option<&str>) -> String {
+    let server_url = format!("http://localhost:{port}");
+    let admin_secret_value = admin_secret.unwrap_or("");
+    format!(
+        "{STANDALONE_INSPECTOR_URL}#url={}&appId={}&adminSecret={}",
+        percent_encode_fragment_value(&server_url),
+        percent_encode_fragment_value(app_id),
+        percent_encode_fragment_value(admin_secret_value),
+    )
+}
+
+fn percent_encode_fragment_value(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        let is_unreserved =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~');
+        if is_unreserved {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
 }
