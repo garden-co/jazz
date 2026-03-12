@@ -4,6 +4,8 @@
  * Pure type definitions — no runtime code.
  */
 
+import type { RuntimeObjectOutcomeEvent } from "../runtime/object-outcomes.js";
+
 // ============================================================================
 // Main Thread → Worker Messages
 // ============================================================================
@@ -80,6 +82,12 @@ export interface UpdateAuthMessage {
   localAuthToken?: string;
 }
 
+/** Acknowledge a surfaced mutation outcome in the worker-owned journal. */
+export interface AcknowledgeMutationOutcomeMessage {
+  type: "acknowledge-mutation-outcome";
+  mutationId: string;
+}
+
 /** Request graceful shutdown. */
 export interface ShutdownMessage {
   type: "shutdown";
@@ -113,6 +121,7 @@ export type MainToWorkerMessage =
   | PeerSyncToWorkerMessage
   | PeerCloseMessage
   | UpdateAuthMessage
+  | AcknowledgeMutationOutcomeMessage
   | ShutdownMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage
@@ -131,6 +140,7 @@ export interface ReadyMessage {
 export interface InitOkMessage {
   type: "init-ok";
   clientId: string;
+  objectOutcomes: RuntimeObjectOutcomeEvent[];
 }
 
 /** Forward a sync payload from worker to main thread. */
@@ -147,6 +157,12 @@ export interface PeerSyncToMainMessage {
   payload: Uint8Array[];
 }
 
+/** Worker-owned object outcome changes mirrored to the main thread. */
+export interface ObjectOutcomeEventsMessage {
+  type: "object-outcome-events";
+  events: RuntimeObjectOutcomeEvent[];
+}
+
 /** Worker encountered an error. */
 export interface ErrorMessage {
   type: "error";
@@ -156,6 +172,12 @@ export interface ErrorMessage {
 /** Worker has completed shutdown (OPFS handles released). */
 export interface ShutdownOkMessage {
   type: "shutdown-ok";
+}
+
+/** Worker confirmed a mutation outcome acknowledgement. */
+export interface AcknowledgeMutationOutcomeOkMessage {
+  type: "acknowledge-mutation-outcome-ok";
+  mutationId: string;
 }
 
 export interface DebugLensEdgeState {
@@ -187,7 +209,9 @@ export type WorkerToMainMessage =
   | InitOkMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
+  | ObjectOutcomeEventsMessage
   | ErrorMessage
+  | AcknowledgeMutationOutcomeOkMessage
   | ShutdownOkMessage
   | DebugSchemaStateOkMessage
   | DebugSeedLiveSchemaOkMessage;

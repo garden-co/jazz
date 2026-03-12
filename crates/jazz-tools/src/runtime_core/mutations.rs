@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::object::BranchName;
@@ -179,6 +179,76 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
 
         Ok(record)
+    }
+
+    pub(crate) fn list_object_outcomes_inner(
+        &self,
+    ) -> Result<Vec<ObjectOutcomeEvent>, RuntimeError> {
+        let mut by_object: HashMap<ObjectId, (u8, u64, ObjectOutcomeState)> = HashMap::new();
+
+        for record in self
+            .storage
+            .list_mutation_records_by_outcome(MutationOutcomeFilter::Accepted)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        {
+            let candidate = (
+                0,
+                record.recorded_at_micros,
+                ObjectOutcomeState::Accepted {
+                    mutation_id: record.id,
+                },
+            );
+            upsert_object_outcome_candidate(&mut by_object, record.object_id, candidate);
+        }
+
+        for record in self
+            .storage
+            .list_mutation_records_by_outcome(MutationOutcomeFilter::Pending)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        {
+            let candidate = (
+                1,
+                record.recorded_at_micros,
+                ObjectOutcomeState::Pending {
+                    mutation_id: record.id,
+                },
+            );
+            upsert_object_outcome_candidate(&mut by_object, record.object_id, candidate);
+        }
+
+        for record in self
+            .storage
+            .list_mutation_records_by_outcome(MutationOutcomeFilter::Rejected)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        {
+            let Some(rejection) = (match &record.outcome {
+                MutationOutcomeState::Rejected(rejection) => Some(rejection),
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let candidate = (
+                2,
+                rejection.rejected_at_micros,
+                ObjectOutcomeState::Errored {
+                    mutation_id: record.id,
+                    code: rejection.code,
+                    reason: rejection.reason.clone(),
+                },
+            );
+            upsert_object_outcome_candidate(&mut by_object, record.object_id, candidate);
+        }
+
+        let mut outcomes = by_object
+            .into_iter()
+            .map(|(object_id, (_, _, outcome))| ObjectOutcomeEvent {
+                object_id,
+                outcome: Some(outcome),
+            })
+            .collect::<Vec<_>>();
+        outcomes.sort_by_key(|event| *event.object_id.uuid());
+        Ok(outcomes)
     }
 
     fn load_mutation_records_for_object(
@@ -479,4 +549,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
 fn matches_rejection(outcome: &MutationOutcomeState, rejection: &MutationRejection) -> bool {
     matches!(outcome, MutationOutcomeState::Rejected(existing) if existing == rejection)
+}
+
+fn upsert_object_outcome_candidate(
+    by_object: &mut HashMap<ObjectId, (u8, u64, ObjectOutcomeState)>,
+    object_id: ObjectId,
+    candidate: (u8, u64, ObjectOutcomeState),
+) {
+    match by_object.get(&object_id) {
+        Some((existing_priority, existing_timestamp, _))
+            if *existing_priority > candidate.0
+                || (*existing_priority == candidate.0 && *existing_timestamp >= candidate.1) => {}
+        _ => {
+            by_object.insert(object_id, candidate);
+        }
+    }
 }

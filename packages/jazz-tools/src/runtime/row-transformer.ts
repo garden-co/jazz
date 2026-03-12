@@ -6,6 +6,7 @@ import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.j
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import { magicColumnType } from "../magic-columns.js";
+import type { ObjectOutcomeState } from "./object-outcomes.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 
 export type { WasmValue };
@@ -13,6 +14,10 @@ export type { WasmValue };
 export interface IncludeSpec {
   [relationName: string]: unknown;
 }
+
+type OutcomeAwareWasmRow = WasmRow & {
+  $outcome?: ObjectOutcomeState;
+};
 
 type IncludePlan = {
   relation: Relation;
@@ -215,7 +220,7 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType): unknown {
  * @returns Array of typed objects with named properties
  */
 export function transformRows<T>(
-  rows: WasmRow[],
+  rows: OutcomeAwareWasmRow[],
   schema: WasmSchema,
   tableName: string,
   includes: IncludeSpec = {},
@@ -231,19 +236,23 @@ export function transformRows<T>(
       : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
 
   return rows.map((row) => {
-    return transformRowValues(
+    const transformed = transformRowValues(
       row.values as WasmValue[],
       schema,
       tableName,
       includePlans,
       row.id,
       projection,
-    ) as T;
+    ) as T & { $outcome?: ObjectOutcomeState };
+    if (row.$outcome !== undefined) {
+      transformed.$outcome = row.$outcome;
+    }
+    return transformed as T;
   });
 }
 
 export function transformRow<T>(
-  row: WasmRow,
+  row: OutcomeAwareWasmRow,
   schema: WasmSchema,
   tableName: string,
   includes: IncludeSpec = {},

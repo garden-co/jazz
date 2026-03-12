@@ -24,6 +24,7 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
+import type { RuntimeObjectOutcomeEvent } from "./object-outcomes.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -356,6 +357,10 @@ export class Db {
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
+  private readonly objectOutcomeListeners = new Set<
+    (events: RuntimeObjectOutcomeEvent[]) => void
+  >();
+  private readonly clientObjectOutcomeUnsubscribes = new Map<string, () => void>();
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -510,6 +515,7 @@ export class Db {
       }
 
       this.clients.set(key, client);
+      this.attachClientObjectOutcomeForwarder(key, client);
     }
 
     return this.clients.get(key)!;
@@ -532,6 +538,7 @@ export class Db {
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
+    client.setObjectOutcomeSource(bridge);
     this.leaderPeerIds.clear();
     bridge.onPeerSync((batch) => {
       this.handleWorkerPeerSync(batch);
@@ -539,6 +546,19 @@ export class Db {
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
     this.workerBridge = bridge;
     this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+  }
+
+  private attachClientObjectOutcomeForwarder(key: string, client: JazzClient): void {
+    if (this.clientObjectOutcomeUnsubscribes.has(key)) {
+      return;
+    }
+
+    const unsubscribe = client.onObjectOutcomeEvents((events) => {
+      for (const listener of this.objectOutcomeListeners) {
+        listener(events);
+      }
+    });
+    this.clientObjectOutcomeUnsubscribes.set(key, unsubscribe);
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -971,6 +991,13 @@ export class Db {
     };
   }
 
+  onObjectOutcomeEvents(listener: (events: RuntimeObjectOutcomeEvent[]) => void): () => void {
+    this.objectOutcomeListeners.add(listener);
+    return () => {
+      this.objectOutcomeListeners.delete(listener);
+    };
+  }
+
   /**
    * Insert a new row into a table without waiting for durability.
    *
@@ -1242,6 +1269,11 @@ export class Db {
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
     this.clearActiveQuerySubscriptionTraces();
+    for (const unsubscribe of this.clientObjectOutcomeUnsubscribes.values()) {
+      unsubscribe();
+    }
+    this.clientObjectOutcomeUnsubscribes.clear();
+    this.objectOutcomeListeners.clear();
     this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
     this.activeRemoteLeaderTabId = null;

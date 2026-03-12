@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
+import type { RuntimeObjectOutcomeEvent } from "./object-outcomes.js";
 import { OutboxDestinationKind } from "./sync-transport.js";
 
 class MockWorker {
@@ -51,11 +52,13 @@ function createRuntimeMock(): {
   receivedFromWorker: Uint8Array[];
   addServerCalls: { count: number };
   removeServerCalls: { count: number };
+  mutationJournalEnabledCalls: boolean[];
 } {
   let onSyncToSend: SendSyncPayloadCallback | null = null;
   const receivedFromWorker: Uint8Array[] = [];
   const addServerCalls = { count: 0 };
   const removeServerCalls = { count: 0 };
+  const mutationJournalEnabledCalls: boolean[] = [];
 
   const runtime: Runtime = {
     insert: () => ({ id: "id", values: [] }),
@@ -83,6 +86,9 @@ function createRuntimeMock(): {
     removeServer: () => {
       removeServerCalls.count += 1;
     },
+    setMutationJournalEnabled: (enabled: boolean) => {
+      mutationJournalEnabledCalls.push(enabled);
+    },
     addClient: () => "client-id",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
@@ -104,6 +110,7 @@ function createRuntimeMock(): {
     receivedFromWorker,
     addServerCalls,
     removeServerCalls,
+    mutationJournalEnabledCalls,
   };
 }
 
@@ -117,6 +124,7 @@ describe("WorkerBridge", () => {
     new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
 
     expect(runtimeMock.addServerCalls.count).toBe(1);
+    expect(runtimeMock.mutationJournalEnabledCalls).toEqual([false]);
 
     worker.emitFromWorker({
       type: "sync",
@@ -149,7 +157,11 @@ describe("WorkerBridge", () => {
       userBranch: "main",
       dbName: "db-1",
     });
-    worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+    worker.emitFromWorker({
+      type: "init-ok",
+      clientId: "worker-client-123",
+      objectOutcomes: [],
+    });
     await initPromise;
     await Promise.resolve();
 
@@ -188,10 +200,91 @@ describe("WorkerBridge", () => {
     worker.emitFromWorker({
       type: "init-ok",
       clientId: "worker-client-123",
+      objectOutcomes: [],
     });
 
     await expect(initPromise).resolves.toBe("worker-client-123");
     expect(bridge.getWorkerClientId()).toBe("worker-client-123");
+  });
+
+  it("mirrors worker-owned object outcomes and acknowledges through the worker", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+    const observed: RuntimeObjectOutcomeEvent[][] = [];
+
+    bridge.subscribeObjectOutcomeEvents((events) => {
+      observed.push(events);
+    });
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+    });
+    worker.emitFromWorker({
+      type: "init-ok",
+      clientId: "worker-client-123",
+      objectOutcomes: [
+        {
+          objectId: "row-1",
+          outcome: {
+            type: "pending",
+            mutationId: "mutation-1",
+          },
+        },
+      ],
+    });
+    await initPromise;
+
+    expect(bridge.getObjectOutcome("row-1")).toMatchObject({
+      type: "pending",
+      mutationId: "mutation-1",
+    });
+
+    worker.emitFromWorker({
+      type: "object-outcome-events",
+      events: [
+        {
+          objectId: "row-1",
+          outcome: {
+            type: "errored",
+            mutationId: "mutation-1",
+            code: "permission_denied",
+            reason: "blocked",
+          },
+        },
+      ],
+    });
+
+    const current = bridge.getObjectOutcome("row-1");
+    expect(current).toMatchObject({
+      type: "errored",
+      mutationId: "mutation-1",
+      code: "permission_denied",
+      reason: "blocked",
+    });
+    expect(current?.type).toBe("errored");
+    expect(observed).toHaveLength(2);
+
+    if (!current || current.type !== "errored") {
+      throw new Error("expected errored object outcome");
+    }
+
+    expect(typeof current.acknowledge).toBe("function");
+    const acknowledgePromise = current.acknowledge();
+    expect(worker.posted).toContainEqual({
+      type: "acknowledge-mutation-outcome",
+      mutationId: "mutation-1",
+    });
+
+    worker.emitFromWorker({
+      type: "acknowledge-mutation-outcome-ok",
+      mutationId: "mutation-1",
+    });
+    await acknowledgePromise;
   });
 
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {

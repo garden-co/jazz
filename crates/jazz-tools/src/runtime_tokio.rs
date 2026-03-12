@@ -416,6 +416,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         core.get_object_outcome(object_id).map_err(Into::into)
     }
 
+    /// List the current object-level outcome overlays for all tracked objects.
+    pub fn list_object_outcomes(&self) -> Result<Vec<ObjectOutcomeEvent>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.list_object_outcomes().map_err(Into::into)
+    }
+
     /// Acknowledge a surfaced mutation outcome and prune any retained dead commit chain.
     pub fn acknowledge_mutation_outcome(
         &self,

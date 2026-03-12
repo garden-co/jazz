@@ -7,6 +7,7 @@
  */
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
+import type { RuntimeObjectOutcomeEvent } from "../runtime/object-outcomes.js";
 import {
   sendSyncPayload,
   readBinaryFrames,
@@ -112,6 +113,28 @@ function post(msg: WorkerToMainMessage): void {
       ? collectPayloadTransferables(msg.payload)
       : undefined;
   self.postMessage(msg, transfer);
+}
+
+function listObjectOutcomes(): RuntimeObjectOutcomeEvent[] {
+  if (!runtime?.listObjectOutcomes) {
+    return [];
+  }
+  return runtime.listObjectOutcomes() as RuntimeObjectOutcomeEvent[];
+}
+
+function takeObjectOutcomeEvents(): RuntimeObjectOutcomeEvent[] {
+  if (!runtime?.takeObjectOutcomeEvents) {
+    return [];
+  }
+  return runtime.takeObjectOutcomeEvents() as RuntimeObjectOutcomeEvent[];
+}
+
+function flushObjectOutcomeEvents(): void {
+  const events = takeObjectOutcomeEvents();
+  if (events.length === 0) {
+    return;
+  }
+  post({ type: "object-outcome-events", events });
 }
 
 function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
@@ -282,7 +305,11 @@ async function handleInit(msg: InitMessage): Promise<void> {
       bootstrapCatalogueForwarding = false;
     }
 
-    post({ type: "init-ok", clientId: mainClientId! });
+    post({
+      type: "init-ok",
+      clientId: mainClientId!,
+      objectOutcomes: listObjectOutcomes(),
+    });
 
     // Connect upstream in background (do not block init).
     if (activeServerUrl) {
@@ -406,7 +433,10 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
+        onSyncMessage: (payload) => {
+          runtime?.onSyncMessageReceived(payload);
+          flushObjectOutcomeEvents();
+        },
         onConnected: (clientId) => {
           console.log("[worker] Stream connected", { clientId });
           serverClientId = clientId;
@@ -501,6 +531,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         for (const payload of payloads) {
           runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
         }
+        flushObjectOutcomeEvents();
       } else {
         pendingSyncMessages.push(...payloads);
       }
@@ -529,6 +560,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       for (const payload of msg.payload) {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
+      flushObjectOutcomeEvents();
       break;
     }
 
@@ -556,6 +588,26 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       detachServer();
       if (activeServerUrl && !isShuttingDown) {
         scheduleReconnect();
+      }
+      break;
+
+    case "acknowledge-mutation-outcome":
+      if (!runtime || !initComplete) {
+        post({
+          type: "error",
+          message: "acknowledge-mutation-outcome requested before worker init complete",
+        });
+        break;
+      }
+      try {
+        runtime.acknowledgeMutationOutcome(msg.mutationId);
+        flushObjectOutcomeEvents();
+        post({ type: "acknowledge-mutation-outcome-ok", mutationId: msg.mutationId });
+      } catch (error: any) {
+        post({
+          type: "error",
+          message: `acknowledge-mutation-outcome failed: ${error?.message ?? error}`,
+        });
       }
       break;
 

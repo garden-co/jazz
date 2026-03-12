@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { unwrapValue, transformRows, type WasmValue } from "./row-transformer.js";
 import type { WasmSchema, WasmRow } from "../drivers/types.js";
+import type { ObjectOutcomeState } from "./object-outcomes.js";
 
 describe("unwrapValue", () => {
   it("unwraps Text to string", () => {
@@ -235,6 +236,41 @@ describe("transformRows", () => {
   it("handles empty rows array", () => {
     const result = transformRows([], schema, "todos");
     expect(result).toEqual([]);
+  });
+
+  it("preserves object outcomes on transformed rows", () => {
+    const rows: Array<WasmRow & { $outcome?: ObjectOutcomeState }> = [
+      {
+        id: "uuid-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+          { type: "Integer", value: 5 },
+        ],
+        $outcome: {
+          type: "errored",
+          mutationId: "mutation-1",
+          code: "permission_denied",
+          reason: "blocked",
+          acknowledge: async () => {},
+        },
+      },
+    ];
+
+    const result = transformRows(rows, schema, "todos") as Array<{
+      id: string;
+      title: string;
+      done: boolean;
+      priority: number;
+      $outcome?: ObjectOutcomeState;
+    }>;
+
+    expect(result[0]?.$outcome).toMatchObject({
+      type: "errored",
+      mutationId: "mutation-1",
+      code: "permission_denied",
+      reason: "blocked",
+    });
   });
 
   it("transforms timestamp values to Date objects", () => {

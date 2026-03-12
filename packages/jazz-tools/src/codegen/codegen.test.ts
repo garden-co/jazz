@@ -337,9 +337,12 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export interface Todo {");
+    expect(output).toContain("export type MutationOutcomeState = ObjectOutcomeState;");
+    expect(output).toContain("export interface MutationOutcomeColumns {");
+    expect(output).toContain("export interface Todo extends MutationOutcomeColumns {");
     expect(output).toContain("  id: string;");
     expect(output).toContain("  title: string;");
+    expect(output).toContain("  $outcome?: MutationOutcomeState;");
   });
 
   it("generates init interface without id field", () => {
@@ -375,7 +378,7 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export interface UserProfile {");
+    expect(output).toContain("export interface UserProfile extends MutationOutcomeColumns {");
     expect(output).toContain("export interface UserProfileInit {");
   });
 
@@ -385,7 +388,7 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export interface Category {");
+    expect(output).toContain("export interface Category extends MutationOutcomeColumns {");
     expect(output).toContain("export interface CategoryInit {");
   });
 
@@ -405,7 +408,7 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain(`export interface ${expected} {`);
+    expect(output).toContain(`export interface ${expected} extends MutationOutcomeColumns {`);
     expect(output).toContain(`export interface ${expected}Init {`);
   });
 
@@ -492,7 +495,7 @@ describe("generateTypes", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      'import type { WasmSchema, QueryBuilder, JsonSchemaToTs } from "jazz-tools";',
+      'import type { WasmSchema, QueryBuilder, ObjectOutcomeState, JsonSchemaToTs } from "jazz-tools";',
     );
     expect(output).toContain("const __jsonSchema1 =");
     expect(output).toContain("type __JsonType1 = JsonSchemaToTs<typeof __jsonSchema1>;");
@@ -517,7 +520,9 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain('import type { WasmSchema, QueryBuilder } from "jazz-tools";');
+    expect(output).toContain(
+      'import type { WasmSchema, QueryBuilder, ObjectOutcomeState } from "jazz-tools";',
+    );
   });
 
   it("includes auto-generated header comment", () => {
@@ -546,10 +551,12 @@ describe("generateClient", () => {
 
     // Header
     expect(output).toContain("// AUTO-GENERATED FILE - DO NOT EDIT");
-    expect(output).toContain('import type { WasmSchema, QueryBuilder } from "jazz-tools";');
+    expect(output).toContain(
+      'import type { WasmSchema, QueryBuilder, ObjectOutcomeState } from "jazz-tools";',
+    );
 
     // Base interface
-    expect(output).toContain("export interface Todo {");
+    expect(output).toContain("export interface Todo extends MutationOutcomeColumns {");
     expect(output).toContain("  id: string;");
     expect(output).toContain("  title: string;");
     expect(output).toContain("  done: boolean;");
@@ -865,23 +872,23 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      'export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*"',
+      'export type TodoSelectableColumn = VisibleRowColumns<Todo> | PermissionIntrospectionColumn | "*"',
     );
     expect(output).toContain(
-      "export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn",
+      "export type TodoOrderableColumn = VisibleRowColumns<Todo> | PermissionIntrospectionColumn",
     );
     expect(output).toContain("export interface PermissionIntrospectionColumns {");
     expect(output).toContain("  $canRead: boolean | null;");
     expect(output).toContain("  $canEdit: boolean | null;");
     expect(output).toContain("  $canDelete: boolean | null;");
     expect(output).toContain(
-      "export type TodoSelected<S extends TodoSelectableColumn = keyof Todo>",
+      "export type TodoSelected<S extends TodoSelectableColumn = VisibleRowColumns<Todo>>",
     );
     expect(output).toContain(
-      '"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>',
+      '"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>> & MutationOutcomeColumns',
     );
     expect(output).toContain(
-      "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo>",
+      "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = VisibleRowColumns<Todo>>",
     );
     expect(output).toContain(
       "Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>",
@@ -933,7 +940,7 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     // Should still have base and init types
-    expect(output).toContain("export interface Item {");
+    expect(output).toContain("export interface Item extends MutationOutcomeColumns {");
     expect(output).toContain("export interface ItemInit {");
 
     // Should NOT have Include/Relations/WithIncludes since no relations
@@ -1035,7 +1042,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelected<S>> {",
+      "export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends TodoSelectableColumn = VisibleRowColumns<Todo>> implements QueryBuilder<TodoSelected<S>> {",
     );
     expect(output).toContain("declare readonly _rowType: TodoSelected<S>;");
     expect(output).toContain("declare readonly _initType: TodoInit;");
@@ -1058,7 +1065,7 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {",
+      "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = VisibleRowColumns<Todo>> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {",
     );
     expect(output).toContain("declare readonly _rowType: TodoSelectedWithIncludes<I, S>;");
   });

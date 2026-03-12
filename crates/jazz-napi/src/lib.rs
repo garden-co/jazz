@@ -40,7 +40,8 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{FjallStorage, MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, MutationId, ObjectOutcomeEvent, ObjectOutcomeState,
+    OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 fn convert_values(values: Vec<Value>) -> Vec<Value> {
@@ -109,6 +110,42 @@ fn open_fjall_storage_with_retry(data_path: &str, cache_size: usize) -> napi::Re
 // ============================================================================
 fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
     parse_binding_tier(tier).map_err(napi::Error::from_reason)
+}
+
+fn parse_mutation_id(mutation_id: &str) -> napi::Result<MutationId> {
+    uuid::Uuid::parse_str(mutation_id)
+        .map(MutationId)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid MutationId: {}", e)))
+}
+
+fn object_outcome_state_to_json(outcome: ObjectOutcomeState) -> serde_json::Value {
+    match outcome {
+        ObjectOutcomeState::Pending { mutation_id } => serde_json::json!({
+            "type": "pending",
+            "mutationId": mutation_id.to_string(),
+        }),
+        ObjectOutcomeState::Accepted { mutation_id } => serde_json::json!({
+            "type": "accepted",
+            "mutationId": mutation_id.to_string(),
+        }),
+        ObjectOutcomeState::Errored {
+            mutation_id,
+            code,
+            reason,
+        } => serde_json::json!({
+            "type": "errored",
+            "mutationId": mutation_id.to_string(),
+            "code": code,
+            "reason": reason,
+        }),
+    }
+}
+
+fn object_outcome_event_to_json(event: ObjectOutcomeEvent) -> serde_json::Value {
+    serde_json::json!({
+        "objectId": event.object_id.uuid().to_string(),
+        "outcome": event.outcome.map(object_outcome_state_to_json),
+    })
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
@@ -817,6 +854,59 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.sync_sender().set_callback(callback);
+        Ok(())
+    }
+
+    #[napi(js_name = "setMutationJournalEnabled")]
+    pub fn set_mutation_journal_enabled(&self, enabled: bool) -> napi::Result<()> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.set_mutation_journal_enabled(enabled);
+        Ok(())
+    }
+
+    #[napi(js_name = "listObjectOutcomes", ts_return_type = "any")]
+    pub fn list_object_outcomes(&self) -> napi::Result<serde_json::Value> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let outcomes = core
+            .list_object_outcomes()
+            .map_err(|e| napi::Error::from_reason(format!("List object outcomes failed: {:?}", e)))?
+            .into_iter()
+            .map(object_outcome_event_to_json)
+            .collect::<Vec<_>>();
+        Ok(serde_json::Value::Array(outcomes))
+    }
+
+    #[napi(js_name = "takeObjectOutcomeEvents", ts_return_type = "any")]
+    pub fn take_object_outcome_events(&self) -> napi::Result<serde_json::Value> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let events = core
+            .take_object_outcome_events()
+            .into_iter()
+            .map(object_outcome_event_to_json)
+            .collect::<Vec<_>>();
+        Ok(serde_json::Value::Array(events))
+    }
+
+    #[napi(js_name = "acknowledgeMutationOutcome")]
+    pub fn acknowledge_mutation_outcome(&self, mutation_id: String) -> napi::Result<()> {
+        let mutation_id = parse_mutation_id(&mutation_id)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.acknowledge_mutation_outcome(mutation_id)
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Acknowledge mutation outcome failed: {:?}", e))
+            })?;
         Ok(())
     }
 

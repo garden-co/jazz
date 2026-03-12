@@ -1,4 +1,18 @@
 declare module "jazz-wasm" {
+  type WasmMutationRejectCode = "permission_denied" | "session_required" | "catalogue_write_denied";
+  type WasmObjectOutcomeState =
+    | { type: "pending"; mutationId: string }
+    | { type: "accepted"; mutationId: string }
+    | {
+        type: "errored";
+        mutationId: string;
+        code: WasmMutationRejectCode;
+        reason: string;
+      };
+  type WasmObjectOutcomeEvent = {
+    objectId: string;
+    outcome: WasmObjectOutcomeState | null;
+  };
   type SyncOutboxCallbackArgs =
     | [
         destinationKind: "server" | "client",
@@ -62,6 +76,10 @@ declare module "jazz-wasm" {
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string): void;
     onSyncMessageToSend(callback: SyncOutboxCallback): void;
+    setMutationJournalEnabled(enabled: boolean): void;
+    listObjectOutcomes(): WasmObjectOutcomeEvent[];
+    takeObjectOutcomeEvents(): WasmObjectOutcomeEvent[];
+    acknowledgeMutationOutcome(mutationId: string): void;
     addServer(): void;
     removeServer(): void;
     addClient(): string;

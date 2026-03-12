@@ -25,6 +25,13 @@ import {
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
+import {
+  type ObjectOutcomeSource,
+  type ObjectOutcomeState,
+  type RuntimeObjectOutcomeBindings,
+  type RuntimeObjectOutcomeEvent,
+  RuntimeObjectOutcomeSource,
+} from "./object-outcomes.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -43,7 +50,7 @@ export interface RequestLike {
  * Both `WasmRuntime` (from jazz-wasm) and `NapiRuntime` (from jazz-napi)
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
-export interface Runtime {
+export interface Runtime extends RuntimeObjectOutcomeBindings {
   insert(table: string, values: any): Row;
   insertDurable(table: string, values: any, tier: string): Promise<Row>;
   update(object_id: string, values: any): void;
@@ -118,12 +125,19 @@ export interface WriteDurabilityOptions {
 export interface Row {
   id: string;
   values: Value[];
+  $outcome?: ObjectOutcomeState;
 }
 
 /**
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
+
+type OutcomeAwareSubscriptionState = {
+  callback: SubscriptionCallback;
+  rowsById: Map<string, Row>;
+  orderedIds: string[];
+};
 
 export interface LinkExternalIdentityOptions {
   jwtToken?: string;
@@ -572,6 +586,10 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
+  private objectOutcomeSource: ObjectOutcomeSource | null = null;
+  private runtimeObjectOutcomeSource: RuntimeObjectOutcomeSource | null = null;
+  private objectOutcomeUnsubscribe: (() => void) | null = null;
+  private readonly outcomeSubscriptions = new Map<number, OutcomeAwareSubscriptionState>();
 
   private constructor(
     runtime: Runtime,
@@ -595,7 +613,11 @@ export class JazzClient {
       setClientId: (clientId) => {
         this.serverClientId = clientId;
       },
+      onSyncMessageReceived: () => {
+        this.drainRuntimeObjectOutcomeSource();
+      },
     });
+    this.installRuntimeObjectOutcomeSource(runtime);
   }
 
   /**
@@ -698,6 +720,45 @@ export class JazzClient {
   }
 
   /**
+   * Install an object-outcome source for row enrichment and late-rejection invalidation.
+   * @internal
+   */
+  setObjectOutcomeSource(source: ObjectOutcomeSource | null): void {
+    this.objectOutcomeUnsubscribe?.();
+    this.objectOutcomeUnsubscribe = null;
+    this.objectOutcomeSource = source;
+
+    if (!source) {
+      return;
+    }
+
+    this.objectOutcomeUnsubscribe = source.subscribeObjectOutcomeEvents((events) => {
+      this.handleObjectOutcomeEvents(events);
+    });
+  }
+
+  /**
+   * Read the current object outcome for one row id.
+   */
+  getObjectOutcome(objectId: string): ObjectOutcomeState | null {
+    return this.objectOutcomeSource?.getObjectOutcome(objectId) ?? null;
+  }
+
+  /**
+   * Subscribe to object outcome changes for invisible-data notifications.
+   */
+  onObjectOutcomeEvents(listener: (events: RuntimeObjectOutcomeEvent[]) => void): () => void {
+    return this.objectOutcomeSource?.subscribeObjectOutcomeEvents(listener) ?? (() => {});
+  }
+
+  /**
+   * Acknowledge a surfaced mutation outcome.
+   */
+  acknowledgeMutationOutcome(mutationId: string): Promise<void> {
+    return this.objectOutcomeSource?.acknowledgeMutationOutcome(mutationId) ?? Promise.resolve();
+  }
+
+  /**
    * Create a session-scoped client for backend operations.
    *
    * This allows backend applications to perform operations as a specific user.
@@ -754,6 +815,24 @@ export class JazzClient {
     this.useBackendSyncAuth = true;
     this.streamController.updateAuth();
     return this;
+  }
+
+  private installRuntimeObjectOutcomeSource(runtime: Runtime): void {
+    if (
+      !runtime.listObjectOutcomes &&
+      !runtime.takeObjectOutcomeEvents &&
+      !runtime.acknowledgeMutationOutcome
+    ) {
+      this.setObjectOutcomeSource(null);
+      return;
+    }
+
+    this.runtimeObjectOutcomeSource = new RuntimeObjectOutcomeSource(runtime);
+    this.setObjectOutcomeSource(this.runtimeObjectOutcomeSource);
+  }
+
+  private drainRuntimeObjectOutcomeSource(): void {
+    this.runtimeObjectOutcomeSource?.drain();
   }
 
   private getSyncAuth(): SyncAuth {
@@ -950,13 +1029,115 @@ export class JazzClient {
     });
   }
 
+  private withObjectOutcome(row: Row): Row {
+    const outcome = this.objectOutcomeSource?.getObjectOutcome(row.id) ?? null;
+    if (!outcome) {
+      if (!("$outcome" in row)) {
+        return row;
+      }
+      const { $outcome: _ignored, ...rest } = row;
+      return rest;
+    }
+
+    if (objectOutcomeEquals(row.$outcome ?? null, outcome)) {
+      return row;
+    }
+
+    return {
+      ...row,
+      $outcome: outcome,
+    };
+  }
+
+  private enrichRows(rows: Row[]): Row[] {
+    return rows.map((row) => this.withObjectOutcome(row));
+  }
+
+  private enrichRowDelta(delta: RowDelta): RowDelta {
+    return delta.map((change) => {
+      if ((change.kind === 0 || change.kind === 2) && change.row) {
+        return {
+          ...change,
+          row: this.withObjectOutcome(change.row),
+        };
+      }
+
+      return change;
+    });
+  }
+
+  private applyOutcomeAwareDelta(state: OutcomeAwareSubscriptionState, delta: RowDelta): void {
+    const sortedDelta = [...delta].sort((left, right) => left.index - right.index);
+
+    for (const change of sortedDelta) {
+      switch (change.kind) {
+        case 0:
+          state.rowsById.set(change.id, change.row);
+          insertIdAt(state.orderedIds, change.id, change.index);
+          break;
+        case 1:
+          state.rowsById.delete(change.id);
+          removeId(state.orderedIds, change.id);
+          break;
+        case 2:
+          removeId(state.orderedIds, change.id);
+          insertIdAt(state.orderedIds, change.id, change.index);
+          if (change.row) {
+            state.rowsById.set(change.id, change.row);
+          }
+          break;
+      }
+    }
+  }
+
+  private handleObjectOutcomeEvents(events: RuntimeObjectOutcomeEvent[]): void {
+    if (events.length === 0 || this.outcomeSubscriptions.size === 0) {
+      return;
+    }
+
+    const changedIds = new Set(events.map((event) => event.objectId));
+    for (const state of this.outcomeSubscriptions.values()) {
+      const delta: RowDelta = [];
+
+      for (const objectId of changedIds) {
+        const currentRow = state.rowsById.get(objectId);
+        if (!currentRow) {
+          continue;
+        }
+
+        const index = state.orderedIds.indexOf(objectId);
+        if (index === -1) {
+          continue;
+        }
+
+        const nextRow = this.withObjectOutcome(currentRow);
+        if (rowsHaveSameOutcome(currentRow, nextRow)) {
+          continue;
+        }
+
+        state.rowsById.set(objectId, nextRow);
+        delta.push({
+          kind: 2,
+          id: objectId,
+          index,
+          row: nextRow,
+        });
+      }
+
+      if (delta.length > 0) {
+        state.callback(delta);
+      }
+    }
+  }
+
   /**
    * Insert a new row into a table without waiting for durability.
    */
   create(table: string, values: Value[]): Row {
     const row = this.runtime.insert(table, values);
+    this.drainRuntimeObjectOutcomeSource();
     return {
-      ...row,
+      ...this.withObjectOutcome(row),
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
   }
@@ -971,8 +1152,9 @@ export class JazzClient {
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
     const row = await this.runtime.insertDurable(table, values, tier);
+    this.drainRuntimeObjectOutcomeSource();
     return {
-      ...row,
+      ...this.withObjectOutcome(row),
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
   }
@@ -1008,7 +1190,9 @@ export class JazzClient {
       normalizedOptions.tier,
       optionsJson,
     );
-    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
+    return this.enrichRows(
+      this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema),
+    );
   }
 
   /**
@@ -1016,6 +1200,7 @@ export class JazzClient {
    */
   update(objectId: string, updates: Record<string, Value>): void {
     this.runtime.update(objectId, updates);
+    this.drainRuntimeObjectOutcomeSource();
   }
 
   /**
@@ -1028,6 +1213,7 @@ export class JazzClient {
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     await this.runtime.updateDurable(objectId, updates, tier);
+    this.drainRuntimeObjectOutcomeSource();
   }
 
   /**
@@ -1035,6 +1221,7 @@ export class JazzClient {
    */
   delete(objectId: string): void {
     this.runtime.delete(objectId);
+    this.drainRuntimeObjectOutcomeSource();
   }
 
   /**
@@ -1043,6 +1230,7 @@ export class JazzClient {
   async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
     const tier = this.resolveWriteTier(options);
     await this.runtime.deleteDurable(objectId, tier);
+    this.drainRuntimeObjectOutcomeSource();
   }
 
   /**
@@ -1082,6 +1270,11 @@ export class JazzClient {
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const runtimeSchema = this.getSchema();
+    const outcomeState: OutcomeAwareSubscriptionState = {
+      callback,
+      rowsById: new Map(),
+      orderedIds: [],
+    };
 
     const handle = this.runtime.createSubscription(
       queryJson,
@@ -1089,6 +1282,7 @@ export class JazzClient {
       normalizedOptions.tier,
       optionsJson,
     );
+    this.outcomeSubscriptions.set(handle, outcomeState);
 
     this.scheduler(() => {
       this.runtime.executeSubscription(handle, (...args: unknown[]) => {
@@ -1099,7 +1293,14 @@ export class JazzClient {
 
         const delta: RowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+        const alignedDelta = this.alignSubscriptionDeltaToDeclaredSchema(
+          queryJson,
+          delta,
+          runtimeSchema,
+        );
+        const enrichedDelta = this.enrichRowDelta(alignedDelta);
+        this.applyOutcomeAwareDelta(outcomeState, enrichedDelta);
+        callback(enrichedDelta);
       });
     });
 
@@ -1112,6 +1313,7 @@ export class JazzClient {
    * @param subscriptionId ID returned from subscribe()
    */
   unsubscribe(subscriptionId: number): void {
+    this.outcomeSubscriptions.delete(subscriptionId);
     this.runtime.unsubscribe(subscriptionId);
   }
 
@@ -1248,6 +1450,12 @@ export class JazzClient {
    */
   async shutdown(): Promise<void> {
     this.streamController.stop();
+    this.objectOutcomeUnsubscribe?.();
+    this.objectOutcomeUnsubscribe = null;
+    this.outcomeSubscriptions.clear();
+    this.runtimeObjectOutcomeSource?.dispose();
+    this.runtimeObjectOutcomeSource = null;
+    this.objectOutcomeSource = null;
 
     // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
     if (this.runtime.close) {
@@ -1292,6 +1500,41 @@ export class JazzClient {
       "[client] ",
     );
   }
+}
+
+function removeId(ids: string[], id: string): void {
+  const index = ids.indexOf(id);
+  if (index !== -1) {
+    ids.splice(index, 1);
+  }
+}
+
+function insertIdAt(ids: string[], id: string, index: number): void {
+  const clamped = Math.max(0, Math.min(index, ids.length));
+  ids.splice(clamped, 0, id);
+}
+
+function rowsHaveSameOutcome(left: Row, right: Row): boolean {
+  return objectOutcomeEquals(left.$outcome ?? null, right.$outcome ?? null);
+}
+
+function objectOutcomeEquals(
+  left: ObjectOutcomeState | null,
+  right: ObjectOutcomeState | null,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  if (left.type !== right.type || left.mutationId !== right.mutationId) {
+    return false;
+  }
+  if (left.type !== "errored" || right.type !== "errored") {
+    return true;
+  }
+  return left.code === right.code && left.reason === right.reason;
 }
 
 /**

@@ -63,6 +63,7 @@ export interface RuntimeSyncStreamControllerOptions {
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
+  onSyncMessageReceived?(): void;
 }
 
 function errorMessage(error: unknown): string {
@@ -279,7 +280,11 @@ export function createRuntimeSyncStreamController(
     setClientId: options.setClientId,
     onConnected: () => options.getRuntime()?.addServer(),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
+    onSyncMessage: (payload) => {
+      const runtime = options.getRuntime();
+      runtime?.onSyncMessageReceived(payload);
+      options.onSyncMessageReceived?.();
+    },
   });
 }
 

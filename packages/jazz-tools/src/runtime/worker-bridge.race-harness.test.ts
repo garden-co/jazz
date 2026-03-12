@@ -46,6 +46,7 @@ class FakeWorkerScript {
         this.shutdownMessageCount += 1;
         this.handleShutdown();
         return;
+      case "acknowledge-mutation-outcome":
       case "update-auth":
       case "simulate-crash":
         return;
@@ -94,7 +95,7 @@ class FakeWorkerScript {
     if (this.initialized) return;
     this.initialized = true;
 
-    this.worker.emitToMain({ type: "init-ok", clientId });
+    this.worker.emitToMain({ type: "init-ok", clientId, objectOutcomes: [] });
 
     const pending = this.pendingSyncPayloads;
     this.pendingSyncPayloads = [];

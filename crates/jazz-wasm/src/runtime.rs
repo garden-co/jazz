@@ -76,8 +76,8 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-    SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, MutationId, ObjectOutcomeEvent,
+    ObjectOutcomeState, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 use crate::query::parse_query;
@@ -87,6 +87,7 @@ use crate::types::{
     SubscriptionRowAdded, SubscriptionRowChange, SubscriptionRowDelta, SubscriptionRowRemoved,
     SubscriptionRowUpdated,
 };
+use crate::types::{WasmObjectOutcomeEvent, WasmObjectOutcomeState};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +116,39 @@ fn parse_tier(tier: &str) -> Result<DurabilityTier, JsError> {
             "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
             tier
         ))),
+    }
+}
+
+fn parse_mutation_id(mutation_id: &str) -> Result<MutationId, JsError> {
+    uuid::Uuid::parse_str(mutation_id)
+        .map(MutationId)
+        .map_err(|e| JsError::new(&format!("Invalid MutationId: {}", e)))
+}
+
+fn object_outcome_state_to_wasm(outcome: ObjectOutcomeState) -> WasmObjectOutcomeState {
+    match outcome {
+        ObjectOutcomeState::Pending { mutation_id } => WasmObjectOutcomeState::Pending {
+            mutation_id: mutation_id.to_string(),
+        },
+        ObjectOutcomeState::Accepted { mutation_id } => WasmObjectOutcomeState::Accepted {
+            mutation_id: mutation_id.to_string(),
+        },
+        ObjectOutcomeState::Errored {
+            mutation_id,
+            code,
+            reason,
+        } => WasmObjectOutcomeState::Errored {
+            mutation_id: mutation_id.to_string(),
+            code,
+            reason,
+        },
+    }
+}
+
+fn object_outcome_event_to_wasm(event: ObjectOutcomeEvent) -> WasmObjectOutcomeEvent {
+    WasmObjectOutcomeEvent {
+        object_id: event.object_id.uuid().to_string(),
+        outcome: event.outcome.map(object_outcome_state_to_wasm),
     }
 }
 
@@ -583,6 +617,49 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = setMutationJournalEnabled)]
     pub fn set_mutation_journal_enabled(&self, enabled: bool) {
         self.core.borrow_mut().set_mutation_journal_enabled(enabled);
+    }
+
+    /// List the current object-outcome overlays for all tracked objects.
+    #[wasm_bindgen(js_name = listObjectOutcomes)]
+    pub fn list_object_outcomes(&self) -> Result<JsValue, JsError> {
+        let outcomes = self
+            .core
+            .borrow()
+            .list_object_outcomes()
+            .map_err(|e| JsError::new(&format!("List object outcomes failed: {:?}", e)))?
+            .into_iter()
+            .map(object_outcome_event_to_wasm)
+            .collect::<Vec<_>>();
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        outcomes
+            .serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
+    /// Take object-outcome change events received since the last call.
+    #[wasm_bindgen(js_name = takeObjectOutcomeEvents)]
+    pub fn take_object_outcome_events(&self) -> Result<JsValue, JsError> {
+        let events = self
+            .core
+            .borrow_mut()
+            .take_object_outcome_events()
+            .into_iter()
+            .map(object_outcome_event_to_wasm)
+            .collect::<Vec<_>>();
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        events
+            .serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
+    /// Acknowledge a surfaced mutation outcome and prune the retained dead commits.
+    #[wasm_bindgen(js_name = acknowledgeMutationOutcome)]
+    pub fn acknowledge_mutation_outcome(&self, mutation_id: &str) -> Result<(), JsError> {
+        let mutation_id = parse_mutation_id(mutation_id)?;
+        self.core
+            .borrow_mut()
+            .acknowledge_mutation_outcome(mutation_id)
+            .map_err(|e| JsError::new(&format!("Acknowledge mutation outcome failed: {:?}", e)))
     }
 
     // =========================================================================

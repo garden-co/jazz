@@ -51,4 +51,9 @@ export {
   type RowDelta,
   type SubscriptionDelta,
 } from "./subscription-manager.js";
+export type {
+  MutationRejectCode,
+  ObjectOutcomeState,
+  RuntimeObjectOutcomeEvent,
+} from "./object-outcomes.js";
 export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";

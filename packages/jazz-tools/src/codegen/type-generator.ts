@@ -293,6 +293,17 @@ function generateMagicColumnTypes(): string[] {
   return lines;
 }
 
+function generateMutationOutcomeTypes(): string[] {
+  return [
+    "export type MutationOutcomeState = ObjectOutcomeState;",
+    "export interface MutationOutcomeColumns {",
+    "  $outcome?: MutationOutcomeState;",
+    "}",
+    "export type VisibleRowColumns<T> = Exclude<keyof T, keyof MutationOutcomeColumns>;",
+    "",
+  ];
+}
+
 /**
  * Generate WithIncludes types for type-safe include results.
  */
@@ -327,21 +338,21 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
     const hasRelations = (relations.get(tableName) ?? []).length > 0;
 
     lines.push(
-      `export type ${selectableColumnType} = keyof ${baseInterface} | PermissionIntrospectionColumn | "*";`,
+      `export type ${selectableColumnType} = VisibleRowColumns<${baseInterface}> | PermissionIntrospectionColumn | "*";`,
     );
     lines.push(
-      `export type ${orderableColumnType} = keyof ${baseInterface} | PermissionIntrospectionColumn;`,
+      `export type ${orderableColumnType} = VisibleRowColumns<${baseInterface}> | PermissionIntrospectionColumn;`,
     );
     lines.push("");
 
     lines.push(
-      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
+      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = VisibleRowColumns<${baseInterface}>> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>> & MutationOutcomeColumns;`,
     );
     lines.push("");
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = VisibleRowColumns<${baseInterface}>> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
       );
       lines.push("");
     }
@@ -371,7 +382,7 @@ export function generateTypes(schema: WasmSchema): string {
     jsonSchemaBindings.map((binding) => [binding.key, binding.typeName]),
   );
 
-  const importNames = ["WasmSchema", "QueryBuilder"];
+  const importNames = ["WasmSchema", "QueryBuilder", "ObjectOutcomeState"];
   if (jsonSchemaBindings.length > 0) {
     importNames.push("JsonSchemaToTs");
   }
@@ -394,11 +405,12 @@ export function generateTypes(schema: WasmSchema): string {
   }
 
   lines.push(...generateMagicColumnTypes());
+  lines.push(...generateMutationOutcomeTypes());
 
   // Base types (with id)
   for (const [tableName, table] of Object.entries(schema)) {
     const interfaceName = tableNameToInterface(tableName);
-    lines.push(`export interface ${interfaceName} {`);
+    lines.push(`export interface ${interfaceName} extends MutationOutcomeColumns {`);
     lines.push("  id: string;");
     for (const col of table.columns) {
       const opt = col.nullable ? "?" : "";

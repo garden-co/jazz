@@ -7,6 +7,11 @@
  */
 
 import type { Runtime } from "./client.js";
+import {
+  ObjectOutcomeMirror,
+  type ObjectOutcomeSource,
+  type RuntimeObjectOutcomeEvent,
+} from "./object-outcomes.js";
 import type {
   InitMessage,
   WorkerLifecycleEvent,
@@ -58,6 +63,7 @@ interface WorkerBridgeState {
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS = 5_000;
+const ACK_RESPONSE_TIMEOUT_MS = 5_000;
 
 /**
  * Bridge between main-thread runtime and dedicated worker.
@@ -67,10 +73,13 @@ const SHUTDOWN_ACK_TIMEOUT_MS = 5_000;
  * - Forwards incoming sync messages from the worker to the main runtime
  * - The worker is treated as the main thread's "server" for sync purposes
  */
-export class WorkerBridge {
+export class WorkerBridge implements ObjectOutcomeSource {
   private worker: Worker;
   private runtime: Runtime;
   private state: WorkerBridgeState;
+  private readonly objectOutcomes = new ObjectOutcomeMirror((mutationId) =>
+    this.requestMutationOutcomeAcknowledgement(mutationId),
+  );
 
   constructor(worker: Worker, runtime: Runtime) {
     this.worker = worker;
@@ -84,6 +93,7 @@ export class WorkerBridge {
       peerSyncListener: null,
       serverPayloadForwarder: null,
     };
+    this.runtime.setMutationJournalEnabled?.(false);
 
     // Wire worker → main: incoming sync messages from worker
     this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
@@ -98,6 +108,10 @@ export class WorkerBridge {
           term: msg.term,
           payload: msg.payload,
         });
+      } else if (msg.type === "init-ok") {
+        this.objectOutcomes.replaceSnapshot(msg.objectOutcomes);
+      } else if (msg.type === "object-outcome-events") {
+        this.objectOutcomes.applyEvents(msg.events);
       }
     };
 
@@ -180,6 +194,7 @@ export class WorkerBridge {
             // Ignore late init-ok after a terminal transition.
             throw new Error("Worker init response arrived after bridge left initializing state");
           }
+          this.objectOutcomes.replaceSnapshot(response.objectOutcomes);
           this.transition({ type: "INIT_OK", clientId: response.clientId });
           this.flushPendingSyncToWorker();
           return response.clientId;
@@ -252,6 +267,20 @@ export class WorkerBridge {
     return this.state.workerClientId;
   }
 
+  getObjectOutcome(objectId: string) {
+    return this.objectOutcomes.getObjectOutcome(objectId);
+  }
+
+  subscribeObjectOutcomeEvents(
+    listener: (events: RuntimeObjectOutcomeEvent[]) => void,
+  ): () => void {
+    return this.objectOutcomes.subscribeObjectOutcomeEvents(listener);
+  }
+
+  acknowledgeMutationOutcome(mutationId: string): Promise<void> {
+    return this.objectOutcomes.acknowledgeMutationOutcome(mutationId);
+  }
+
   setServerPayloadForwarder(forwarder: ((payload: Uint8Array) => void) | null): void {
     if (this.isDisposedLike()) return;
     this.state.serverPayloadForwarder = forwarder;
@@ -266,6 +295,31 @@ export class WorkerBridge {
     if (this.isDisposedLike()) return;
     this.runtime.removeServer();
     this.runtime.addServer();
+  }
+
+  private async requestMutationOutcomeAcknowledgement(mutationId: string): Promise<void> {
+    if (this.isDisposedLike()) {
+      throw new Error("WorkerBridge has been disposed");
+    }
+
+    const responsePromise = waitForMessage<WorkerToMainMessage>(
+      this.worker,
+      (msg) =>
+        (msg.type === "acknowledge-mutation-outcome-ok" && msg.mutationId === mutationId) ||
+        msg.type === "error",
+      ACK_RESPONSE_TIMEOUT_MS,
+      "Mutation outcome acknowledgement timeout",
+    );
+
+    this.worker.postMessage({
+      type: "acknowledge-mutation-outcome",
+      mutationId,
+    });
+
+    const response = await responsePromise;
+    if (response.type === "error") {
+      throw new Error(`Mutation outcome acknowledgement failed: ${response.message}`);
+    }
   }
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {

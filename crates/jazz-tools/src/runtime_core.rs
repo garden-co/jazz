@@ -518,6 +518,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }))
     }
 
+    /// List the current object-level outcome overlays for all tracked objects.
+    pub fn list_object_outcomes(&self) -> Result<Vec<ObjectOutcomeEvent>, RuntimeError> {
+        self.list_object_outcomes_inner()
+    }
+
     /// Acknowledge a surfaced mutation outcome and prune any retained dead commit chain.
     pub fn acknowledge_mutation_outcome(
         &mut self,

@@ -154,9 +154,10 @@ function generateQueryBuilderClass(
   const rowType = hasRelations
     ? `${interfaceName}SelectedWithIncludes<I, S>`
     : `${interfaceName}Selected<S>`;
+  const defaultSelectableColumns = `VisibleRowColumns<${interfaceName}>`;
 
   lines.push(
-    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends ${selectableColumnType} = keyof ${interfaceName}> implements QueryBuilder<${rowType}> {`,
+    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}, S extends ${selectableColumnType} = ${defaultSelectableColumns}> implements QueryBuilder<${rowType}> {`,
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
