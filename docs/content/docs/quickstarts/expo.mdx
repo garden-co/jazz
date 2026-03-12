@@ -19,6 +19,32 @@ Install dependencies in your Expo app:
 
 For full environment and server setup options, see [Setup](/docs/setup).
 
+## Project configuration
+
+### Polyfills
+
+Jazz requires a few global polyfills for networking and streams on React Native. Import them as the very first line in your entry point (`index.js`), before any other code:
+
+<include cwd lang="js" title="index.js">
+  ../examples/docs/todo-client-localfirst-expo/index.js
+</include>
+
+### Babel
+
+Create a `babel.config.cjs` with the Expo preset and `import.meta` transform enabled:
+
+<include cwd lang="js" title="babel.config.cjs">
+  ../examples/docs/todo-client-localfirst-expo/babel.config.cjs
+</include>
+
+### Metro
+
+Create a `metro.config.js` that extends Expo's defaults. If you use **pnpm**, enable symlink support:
+
+<include cwd lang="js" title="metro.config.js">
+  ../examples/docs/todo-client-localfirst-expo/metro.config.js
+</include>
+
 ## Define your schema
 
 Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
