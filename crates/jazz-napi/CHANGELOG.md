@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.17
+
+### Patch Changes
+
+- 94ef47c: Restore scoped `@garden-co/*` native binding package resolution in the published N-API loader after the recent generated loader regression.
+
 ## 2.0.0-alpha.16
 
 ### Patch Changes
