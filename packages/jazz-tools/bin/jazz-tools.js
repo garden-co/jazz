@@ -32,13 +32,13 @@ function ensureExecutable(binaryPath, name) {
     chmodSync(binaryPath, 0o755);
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
-    fail(`Bundled binary ${name} is not executable and chmod failed: ${details}`);
+    fail(`Binary ${name} is not executable and chmod failed: ${details}`);
   }
 
   try {
     accessSync(binaryPath, constants.X_OK);
   } catch {
-    fail(`Bundled binary ${name} is not executable after chmod.`);
+    fail(`Binary ${name} is not executable after chmod.`);
   }
 }
 
@@ -61,6 +61,39 @@ function parseSchemaDir(args) {
   return schemaDir;
 }
 
+function parseWrapperArgs(rawArgs) {
+  let rustBinOverride;
+  const args = [];
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i];
+
+    if (arg === "--rust-bin") {
+      const value = rawArgs[i + 1];
+      if (!value) {
+        fail("Missing value for --rust-bin.");
+      }
+      rustBinOverride = value;
+      i += 1;
+      continue;
+    }
+
+    const prefix = "--rust-bin=";
+    if (arg.startsWith(prefix)) {
+      const value = arg.slice(prefix.length);
+      if (!value) {
+        fail("Missing value for --rust-bin.");
+      }
+      rustBinOverride = value;
+      continue;
+    }
+
+    args.push(arg);
+  }
+
+  return { args, rustBinOverride };
+}
+
 function exitWithSpawnResult(result, name) {
   if (result.error) {
     fail(`Failed to execute ${name}: ${result.error.message}`);
@@ -79,7 +112,7 @@ function exitWithSpawnResult(result, name) {
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-const args = process.argv.slice(2);
+const { args, rustBinOverride } = parseWrapperArgs(process.argv.slice(2));
 const command = args[0];
 
 // Handle the MCP server before any Rust binary resolution.
@@ -98,9 +131,14 @@ if (command === "mcp") {
   ];
 
   const bundledBinaryPath = binaryName ? join(here, "native", binaryName) : undefined;
+  if (rustBinOverride && !existsSync(rustBinOverride)) {
+    fail(`Configured Rust binary missing: ${rustBinOverride}`);
+  }
   const binaryPath =
-    (bundledBinaryPath && existsSync(bundledBinaryPath) ? bundledBinaryPath : undefined) ??
-    fallbackCandidates.find((candidate) => existsSync(candidate));
+    rustBinOverride ??
+    (bundledBinaryPath && existsSync(bundledBinaryPath)
+      ? bundledBinaryPath
+      : fallbackCandidates.find((candidate) => existsSync(candidate)));
 
   if (!binaryPath) {
     const lines = [];
@@ -117,7 +155,7 @@ if (command === "mcp") {
     fail(lines.join("\n"));
   }
 
-  ensureExecutable(binaryPath, binaryName ?? localBinaryName);
+  ensureExecutable(binaryPath, rustBinOverride ?? binaryName ?? localBinaryName);
 
   if (command === "build") {
     const schemaDirArg = parseSchemaDir(args.slice(1));
