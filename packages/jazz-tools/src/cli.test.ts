@@ -1,8 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { build } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
@@ -109,6 +110,25 @@ export default {
 `;
 }
 
+function currentSchemaWithComments(): string {
+  return `
+import { table, col } from ${JSON.stringify(dslPath)};
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  owner_id: col.string(),
+});
+
+table("comments", {
+  body: col.string(),
+});
+`;
+}
+
 function schemaWithMessagesAndCanvases(): string {
   return `
 import { table, col } from ${JSON.stringify(dslPath)};
@@ -138,6 +158,18 @@ migrate("canvases", {
 });
 `;
 }
+
+describe("cli build basic output", () => {
+  it("generates app.ts even when current.sql already exists", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.sql"), "-- stale");
+
+    await build({ schemaDir, jazzBin });
+
+    await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+});
 
 describe("cli build migration SQL generation", () => {
   it("generates DROP COLUMN for every table when migrate() is called on multiple tables", async () => {
@@ -245,5 +277,113 @@ describe("cli build permissions generation", () => {
     await writeFile(join(schemaDir, "permissions.ts"), permissionsSchemaInvalidShape());
 
     await expect(build({ schemaDir, jazzBin })).rejects.toThrow(/invalid permissions export/i);
+  });
+});
+
+// Integration test: exercises the bin/jazz-tools.js entry point, which applies extra
+// logic on top of build() to decide whether to invoke the TS CLI at all.
+const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
+const fakeRustBinPath = fileURLToPath(new URL("../../../target/debug/jazz-tools", import.meta.url));
+
+describe("bin integration", () => {
+  beforeAll(async () => {
+    await mkdir(dirname(fakeRustBinPath), { recursive: true });
+    await writeFile(fakeRustBinPath, "#!/bin/sh\nexit 0\n");
+    await chmod(fakeRustBinPath, 0o755);
+  });
+
+  afterAll(async () => {
+    await rm(fakeRustBinPath, { force: true });
+  });
+
+  it("generates current.sql on first build (no current.sql)", async () => {
+    const { schemaDir } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    await readFile(join(schemaDir, "current.sql"), "utf8");
+  });
+
+  it("generates app.ts on first build (no current.sql)", async () => {
+    const { schemaDir } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+
+  it("regenerates current.sql and app.ts when current.sql already exists", async () => {
+    // Regression: bin skips the TS CLI step when current.sql is present,
+    // so neither file is updated on subsequent builds.
+    const { schemaDir } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.sql"), "-- stale");
+
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE");
+    await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+
+  // bootstrap → change current.ts → rebuild
+
+  it("updates current.sql when current.ts changes after initial build", async () => {
+    const { schemaDir } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithComments());
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE comments");
+  });
+
+  it("updates app.ts when current.ts changes after initial build", async () => {
+    const { schemaDir } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithComments());
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    const appTs = await readFile(join(schemaDir, "app.ts"), "utf8");
+    expect(appTs).toContain("comments");
+  });
+
+  it("generates migration SQL from stub on rebuild when current.sql already exists", async () => {
+    const { schemaDir } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), schemaWithMessagesAndCanvases());
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    await writeFile(
+      join(schemaDir, "migration_v1_v2_aaaaaaaaaaaa_bbbbbbbbbbbb.ts"),
+      migrationDropIsPublicFromBothTables(),
+    );
+    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
+      stdio: "inherit",
+    });
+
+    await readFile(join(schemaDir, "migration_v1_v2_fwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
+    await readFile(join(schemaDir, "migration_v1_v2_bwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
   });
 });
