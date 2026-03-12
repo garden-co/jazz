@@ -7,7 +7,7 @@ description: Side-by-side reference for React, Vue, and Svelte Jazz APIs —�
 
 | Concept         | React / Expo                     | Vue                               | Svelte                          |
 | --------------- | -------------------------------- | --------------------------------- | ------------------------------- |
-| Provider        | `<JazzProvider client={client}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>` |
+| Provider        | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>` |
 | Live query      | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  |
 | DB access       | `useDb()`                        | `useDb()`                         | `getDb()`                       |
 | Session         | `useSession()`                   | `useSession()`                    | `getSession()`                  |
@@ -21,32 +21,15 @@ component in the tree — no prop drilling required.
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte"]} persist>
   <Tab value="React">
 ```tsx
-// React requires manual async lifecycle management for the client.
-// Vue and Svelte handle this in the provider component.
-import { createJazzClient, JazzProvider } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 
 export function App({ config }) {
-  const [client, setClient] = useState(null);
-  useEffect(() => {
-    let active = true;
-    createJazzClient(config).then((c) => {
-      if (active) setClient(c);
-      else c.shutdown();
-    });
-    return () => {
-      active = false;
-      client?.shutdown();
-    };
-  }, [config.appId, config.serverUrl]);
-
-return (
-
-<JazzProvider client={client}>
-<YourApp />
-</JazzProvider>
-);
+  return (
+    <JazzProvider config={config} fallback={<p>Loading...</p>}>
+      <YourApp />
+    </JazzProvider>
+  );
 }
-
 ````
   </Tab>
   <Tab value="Vue">
@@ -55,6 +38,7 @@ return (
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
 const client = createJazzClient(config);
+
 </script>
 
 <template>
