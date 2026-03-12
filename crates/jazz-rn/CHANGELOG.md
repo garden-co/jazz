@@ -1,5 +1,7 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.16
+
 ## 2.0.0-alpha.15
 
 ### Patch Changes

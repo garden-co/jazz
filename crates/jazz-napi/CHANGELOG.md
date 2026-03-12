@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.16
+
+### Patch Changes
+
+- b2899b1: Fix the published N-API loader so packaged Jazz backend builds resolve scoped `@garden-co/*` native binding packages on every platform fallback path.
+
 ## 2.0.0-alpha.15
 
 ### Patch Changes

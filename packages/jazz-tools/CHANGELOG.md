@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 2.0.0-alpha.16
+
+### Patch Changes
+
+- f81ecab: Fix backend N-API timestamp writes when `Timestamp` values arrive from TypeScript as JS numbers.
+
+  `createJazzContext(...)` and other backend N-API mutation paths now accept integral epoch-millisecond timestamp payloads produced by the TS value converter, instead of rejecting modern dates as floating-point values during Rust deserialization.
+
+- 30d2f08: Batch server-bound `/sync` payloads created in the same microtask into a single ordered request.
+  - jazz-wasm@2.0.0-alpha.16
+
 ## 2.0.0-alpha.15
 
 ### Patch Changes
