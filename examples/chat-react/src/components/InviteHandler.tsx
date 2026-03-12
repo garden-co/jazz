@@ -18,8 +18,6 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
 
-  // Subscribe to the chat with claims.join_code so the server returns the
-  // private chat row before Bob has a chatMember row.
   useEffect(() => {
     if (!userId) return;
     const unsubscribe = db.subscribeAll(

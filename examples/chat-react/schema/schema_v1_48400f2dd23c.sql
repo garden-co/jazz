@@ -26,9 +26,10 @@ CREATE POLICY chatMembers_insert_policy ON chatMembers FOR INSERT WITH CHECK (us
 
 CREATE TABLE chats (
     isPublic BOOLEAN NOT NULL,
-    createdBy TEXT NOT NULL
+    createdBy TEXT NOT NULL,
+    joinCode TEXT
 );
-CREATE POLICY chats_select_policy ON chats FOR SELECT USING ((isPublic = TRUE) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.id) AND (userId = @session.user_id))) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.id) AND (joinCode = @session.claims.join_code))));
+CREATE POLICY chats_select_policy ON chats FOR SELECT USING ((isPublic = TRUE) OR (EXISTS (SELECT FROM chatMembers WHERE (chat = @session.__jazz_outer_row.id) AND (userId = @session.user_id))) OR (joinCode = @session.claims.join_code));
 CREATE POLICY chats_insert_policy ON chats FOR INSERT WITH CHECK (createdBy = @session.user_id);
 
 CREATE TABLE messages (
