@@ -1,7 +1,11 @@
 import * as React from "react";
 import { afterEach, beforeEach, describe, it } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { JazzProvider, useDb, useSession } from "../../src/react-core/provider.js";
+import {
+  JazzClientProvider as JazzProvider,
+  useDb,
+  useSession,
+} from "../../src/react-core/provider.js";
 import { useAll, useAllSuspense } from "../../src/react-core/use-all.js";
 import {
   makeDeferred,
@@ -51,8 +55,6 @@ class ControlledManager {
     return entry as CacheEntryHandle<T>;
   }
 }
-
-type TestClient = Awaited<React.ComponentProps<typeof JazzProvider>["client"]>;
 
 type TestClientOptions = {
   db?: unknown;
@@ -106,64 +108,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("db-name", "resolved-db");
   });
 
-  it("RCB-B02: provider accepts promised client and suspends until resolution", async () => {
-    const deferredClient = defer<TestClient>();
-
-    render(
-      <CaptureErrorBoundary>
-        <React.Suspense fallback={<div data-testid="provider-fallback">loading-client</div>}>
-          <JazzProvider client={deferredClient.promise}>
-            <DbNameView />
-          </JazzProvider>
-        </React.Suspense>
-      </CaptureErrorBoundary>,
-    );
-
-    await expectText("provider-fallback", "loading-client");
-
-    deferredClient.resolve(makeClient({ db: { name: "promised-db" } }));
-    await expectText("db-name", "promised-db");
-  });
-
-  it("RCB-B03: suspense fallback is shown while promised client is pending", async () => {
-    const deferredClient = defer<TestClient>();
-
-    render(
-      <CaptureErrorBoundary>
-        <React.Suspense fallback={<div data-testid="provider-fallback">loading-client</div>}>
-          <JazzProvider client={deferredClient.promise}>
-            <DbNameView />
-          </JazzProvider>
-        </React.Suspense>
-      </CaptureErrorBoundary>,
-    );
-
-    await expectText("provider-fallback", "loading-client");
-
-    deferredClient.resolve(makeClient({ db: { name: "ready" } }));
-    await expectText("db-name", "ready");
-  });
-
-  it("covers promised client rejection through suspense/error boundary path", async () => {
-    const deferredClient = defer<TestClient>();
-
-    render(
-      <CaptureErrorBoundary>
-        <React.Suspense fallback={<div data-testid="provider-fallback">loading-client</div>}>
-          <JazzProvider client={deferredClient.promise}>
-            <DbNameView />
-          </JazzProvider>
-        </React.Suspense>
-      </CaptureErrorBoundary>,
-    );
-
-    await expectText("provider-fallback", "loading-client");
-
-    deferredClient.reject(new Error("client-init-failed"));
-    await expectText("error", "client-init-failed");
-  });
-
-  it("RCB-B04: useDb returns the client db instance", async () => {
+  it("RCB-B02: useDb returns the client db instance", async () => {
     const dbRef = { name: "identity-db" };
     const client = makeClient({ db: dbRef });
 
@@ -176,7 +121,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("db-identity", "same");
   });
 
-  it("RCB-B05: useSession returns null when session is absent", async () => {
+  it("RCB-B03: useSession returns null when session is absent", async () => {
     const client = makeClient({ session: undefined });
 
     render(
@@ -188,7 +133,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("session", "null");
   });
 
-  it("RCB-B06: useSession returns session when present", async () => {
+  it("RCB-B04: useSession returns session when present", async () => {
     const session: Session = { user_id: "user-123", claims: { role: "writer" } };
     const client = makeClient({ session });
 
@@ -201,7 +146,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("session", "user-123");
   });
 
-  it("RCB-B07: useAll returns undefined during pending phase", async () => {
+  it("RCB-B05: useAll returns undefined during pending phase", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
     manager.register(BASE_QUERY, entry);
@@ -216,7 +161,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "undefined");
   });
 
-  it("RCB-B08: useAll transitions to data after first fulfillment", async () => {
+  it("RCB-B06: useAll transitions to data after first fulfillment", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
     manager.register(BASE_QUERY, entry);
@@ -238,7 +183,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Alpha|Beta");
   });
 
-  it("RCB-B09: useAll forwards QueryOptions to the matching cache entry", async () => {
+  it("RCB-B07: useAll forwards QueryOptions to the matching cache entry", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>({
       status: "fulfilled",
@@ -257,7 +202,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Edge");
   });
 
-  it("RCB-B10: useAllSuspense suspends then renders resolved data", async () => {
+  it("RCB-B08: useAllSuspense suspends then renders resolved data", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
     manager.register(BASE_QUERY, entry);
@@ -283,7 +228,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Alpha|Beta");
   });
 
-  it("RCB-B11: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
+  it("RCB-B09: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
     manager.register(BASE_QUERY, entry, { localUpdates: "deferred" });
@@ -306,7 +251,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Deferred");
   });
 
-  it("RCB-B12: changing QueryOptions switches to the matching cache entry", async () => {
+  it("RCB-B10: changing QueryOptions switches to the matching cache entry", async () => {
     const manager = new ControlledManager();
     manager.register(
       BASE_QUERY,
@@ -344,7 +289,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Deferred");
   });
 
-  it("RCB-B13: delta change stream is reflected in rendered list", async () => {
+  it("RCB-B11: delta change stream is reflected in rendered list", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>({
       status: "fulfilled",
@@ -387,7 +332,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("rows", "Beta*");
   });
 
-  it("RCB-B14: rejected entry state throws through suspense/error boundary path", async () => {
+  it("RCB-B12: rejected entry state throws through suspense/error boundary path", async () => {
     const manager = new ControlledManager();
     const rejection = new Error("boom");
     const entry = createEntry<Todo>({
@@ -411,7 +356,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("error", "boom");
   });
 
-  it("RCB-B15: hook usage outside provider throws expected invariant error", async () => {
+  it("RCB-B13: hook usage outside provider throws expected invariant error", async () => {
     const cases: Array<{ key: string; element: React.ReactNode }> = [
       { key: "useDb", element: <OutsideProviderDbView /> },
       { key: "useSession", element: <OutsideProviderSessionView /> },
@@ -507,7 +452,7 @@ function OutsideProviderUseAllSuspenseView() {
   return <div data-testid="outside-use-all-suspense">ok</div>;
 }
 
-function makeClient(opts?: TestClientOptions): TestClient {
+function makeClient(opts?: TestClientOptions) {
   return {
     db: opts?.db ?? { name: "default-db" },
     manager: (opts?.manager ?? new ControlledManager()) as unknown as SubscriptionsOrchestrator,
@@ -626,14 +571,4 @@ async function waitForCondition(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timeout: ${message}`);
-}
-
-function defer<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
 }
