@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import type { SessionID } from "cojson";
 import { CoJsonIDBTransaction } from "../CoJsonIDBTransaction";
+import { IDBClient } from "../idbClient";
 
 const TEST_DB_NAME = "test-cojson-idb-transaction";
 
@@ -40,6 +42,9 @@ describe("CoJsonIDBTransaction", () => {
             unique: true,
           },
         );
+        db.createObjectStore("storageReconciliationLocks", {
+          keyPath: "key",
+        });
       };
 
       request.onsuccess = () => {
@@ -259,5 +264,72 @@ describe("CoJsonIDBTransaction", () => {
     ).rejects.toThrow(
       "Failed to execute 'objectStore' on 'IDBTransaction': The specified object store was not found.",
     );
+  });
+
+  test("rollback ignores finished transactions", async () => {
+    const tx = new CoJsonIDBTransaction(db);
+
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("coValues").put({
+        id: "test1",
+        value: "hello",
+      }),
+    );
+
+    const completed = new Promise<void>((resolve) => {
+      tx.tx.addEventListener("complete", () => resolve(), { once: true });
+    });
+
+    tx.commit();
+    await completed;
+
+    expect(() => tx.rollback()).not.toThrow();
+  });
+
+  test("returns safe fallbacks once the database starts closing", async () => {
+    const seedTx = db.transaction("unsyncedCoValues", "readwrite");
+    seedTx.objectStore("unsyncedCoValues").put({
+      rowID: 1,
+      coValueId: "co_zseed",
+      peerId: "peer",
+    });
+    await new Promise<void>((resolve) => {
+      seedTx.addEventListener("complete", () => resolve(), { once: true });
+    });
+
+    const client = new IDBClient(db);
+    const versionChange = new Promise<void>((resolve) => {
+      db.addEventListener("versionchange", () => resolve(), { once: true });
+    });
+    const deleteRequest = new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(TEST_DB_NAME);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+
+    await versionChange;
+
+    expect(client.isClosed()).toBe(true);
+    await expect(client.getUnsyncedCoValueIDs()).resolves.toEqual([]);
+    await expect(
+      client.tryAcquireStorageReconciliationLock(
+        "session" as SessionID,
+        "peer",
+      ),
+    ).resolves.toEqual({
+      acquired: false,
+      reason: "not_due",
+    });
+    await expect(
+      client.trackCoValuesSyncState([
+        {
+          id: "co_zseed",
+          peerId: "peer",
+          synced: false,
+        },
+      ]),
+    ).resolves.toBeUndefined();
+
+    await deleteRequest;
   });
 });

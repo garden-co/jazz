@@ -18,6 +18,7 @@ import type {
 import { cojsonInternals } from "cojson";
 import {
   CoJsonIDBTransaction,
+  isStorageConnectionClosingError,
   putIndexedDbStore,
   queryIndexedDbStore,
   StoreName,
@@ -239,17 +240,77 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
 
 export class IDBClient implements DBClientInterfaceAsync {
   private db;
+  private closed = false;
 
   activeTransaction: CoJsonIDBTransaction | undefined;
   autoBatchingTransaction: CoJsonIDBTransaction | undefined;
 
   constructor(db: IDBDatabase) {
     this.db = db;
+
+    this.db.onversionchange = () => {
+      this.close();
+    };
+
+    this.db.onclose = () => {
+      this.closed = true;
+    };
+  }
+
+  close() {
+    if (this.closed) {
+      return;
+    }
+
+    this.closed = true;
+
+    try {
+      this.db.close();
+    } catch (error) {
+      if (!isStorageConnectionClosingError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  isClosed() {
+    return this.closed;
+  }
+
+  private handleConnectionClosingError(error: unknown): boolean {
+    if (!isStorageConnectionClosingError(error)) {
+      return false;
+    }
+
+    this.close();
+
+    return true;
+  }
+
+  private async runWithFallback<T>(
+    fallback: T,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.closed) {
+      return fallback;
+    }
+
+    try {
+      return await operation();
+    } catch (error) {
+      if (this.handleConnectionClosingError(error)) {
+        return fallback;
+      }
+
+      throw error;
+    }
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
-    return queryIndexedDbStore(this.db, "coValues", (store) =>
-      store.index("coValuesById").get(coValueId),
+    return this.runWithFallback(undefined, () =>
+      queryIndexedDbStore(this.db, "coValues", (store) =>
+        store.index("coValuesById").get(coValueId),
+      ),
     );
   }
 
@@ -258,8 +319,10 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
-    return queryIndexedDbStore(this.db, "sessions", (store) =>
-      store.index("sessionsByCoValue").getAll(coValueRowId),
+    return this.runWithFallback([], () =>
+      queryIndexedDbStore(this.db, "sessions", (store) =>
+        store.index("sessionsByCoValue").getAll(coValueRowId),
+      ),
     );
   }
 
@@ -268,9 +331,11 @@ export class IDBClient implements DBClientInterfaceAsync {
     fromIdx: number,
     toIdx: number,
   ): Promise<TransactionRow[]> {
-    return queryIndexedDbStore(this.db, "transactions", (store) =>
-      store.getAll(
-        IDBKeyRange.bound([sessionRowId, fromIdx], [sessionRowId, toIdx]),
+    return this.runWithFallback([], () =>
+      queryIndexedDbStore(this.db, "transactions", (store) =>
+        store.getAll(
+          IDBKeyRange.bound([sessionRowId, fromIdx], [sessionRowId, toIdx]),
+        ),
       ),
     );
   }
@@ -279,11 +344,13 @@ export class IDBClient implements DBClientInterfaceAsync {
     sessionRowId: number,
     firstNewTxIdx: number,
   ): Promise<SignatureAfterRow[]> {
-    return queryIndexedDbStore(this.db, "signatureAfter", (store) =>
-      store.getAll(
-        IDBKeyRange.bound(
-          [sessionRowId, firstNewTxIdx],
-          [sessionRowId, Number.POSITIVE_INFINITY],
+    return this.runWithFallback([], () =>
+      queryIndexedDbStore(this.db, "signatureAfter", (store) =>
+        store.getAll(
+          IDBKeyRange.bound(
+            [sessionRowId, firstNewTxIdx],
+            [sessionRowId, Number.POSITIVE_INFINITY],
+          ),
         ),
       ),
     );
@@ -297,20 +364,32 @@ export class IDBClient implements DBClientInterfaceAsync {
       return this.getCoValueRowID(id);
     }
 
-    return putIndexedDbStore<CoValueRow, number>(this.db, "coValues", {
-      id,
-      header,
-    }).catch(() => this.getCoValueRowID(id));
+    try {
+      return await putIndexedDbStore<CoValueRow, number>(this.db, "coValues", {
+        id,
+        header,
+      });
+    } catch (error) {
+      if (this.handleConnectionClosingError(error)) {
+        return undefined;
+      }
+
+      return this.getCoValueRowID(id);
+    }
   }
 
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
-    const entries = await queryIndexedDbStore<DeletedCoValueQueueEntry[]>(
-      this.db,
-      "deletedCoValues",
-      (store) =>
-        store.index("deletedCoValuesByStatus").getAll("pending") as IDBRequest<
-          DeletedCoValueQueueEntry[]
-        >,
+    const entries = await this.runWithFallback(
+      [] as DeletedCoValueQueueEntry[],
+      () =>
+        queryIndexedDbStore<DeletedCoValueQueueEntry[]>(
+          this.db,
+          "deletedCoValues",
+          (store) =>
+            store
+              .index("deletedCoValuesByStatus")
+              .getAll("pending") as IDBRequest<DeletedCoValueQueueEntry[]>,
+        ),
     );
     return entries.map((e) => e.coValueID);
   }
@@ -319,14 +398,18 @@ export class IDBClient implements DBClientInterfaceAsync {
     operationsCallback: (tx: IDBTransaction) => Promise<unknown>,
     storeNames?: StoreName[],
   ) {
-    const tx = new CoJsonIDBTransaction(this.db, storeNames);
+    await this.runWithFallback(undefined, async () => {
+      const tx = new CoJsonIDBTransaction(this.db, storeNames, () =>
+        this.close(),
+      );
 
-    try {
-      await operationsCallback(new IDBTransaction(tx));
-      tx.commit(); // Tells the browser to not wait for another possible request and commit the transaction immediately
-    } catch (error) {
-      tx.rollback();
-    }
+      try {
+        await operationsCallback(new IDBTransaction(tx));
+        tx.commit(); // Tells the browser to not wait for another possible request and commit the transaction immediately
+      } catch (error) {
+        tx.rollback();
+      }
+    });
   }
 
   async trackCoValuesSyncState(
@@ -375,6 +458,10 @@ export class IDBClient implements DBClientInterfaceAsync {
     const coValue = await this.getCoValue(coValueID);
 
     if (!coValue) {
+      if (this.closed) {
+        return;
+      }
+
       console.warn(`CoValue ${coValueID} not found, skipping deletion`);
       return;
     }
@@ -386,24 +473,29 @@ export class IDBClient implements DBClientInterfaceAsync {
     limit: number,
     offset: number,
   ): Promise<{ id: RawCoID }[]> {
-    const rows = await queryIndexedDbStore<StoredCoValueRow[]>(
-      this.db,
-      "coValues",
-      (store) =>
+    const rows = await this.runWithFallback([] as StoredCoValueRow[], () =>
+      queryIndexedDbStore<StoredCoValueRow[]>(this.db, "coValues", (store) =>
         // Include upper bound but not lower bound (offset starts at 0)
         store.getAll(IDBKeyRange.bound(offset, offset + limit, true, false)),
+      ),
     );
     return rows.map((row) => ({ id: row.id }));
   }
 
   async getCoValueCount(): Promise<number> {
-    return queryIndexedDbStore(this.db, "coValues", (store) => store.count());
+    return this.runWithFallback(0, () =>
+      queryIndexedDbStore(this.db, "coValues", (store) => store.count()),
+    );
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
-    const records = await queryIndexedDbStore<
-      { rowID: number; coValueId: RawCoID; peerId: string }[]
-    >(this.db, "unsyncedCoValues", (store) => store.getAll());
+    const records = await this.runWithFallback(
+      [] as { rowID: number; coValueId: RawCoID; peerId: string }[],
+      () =>
+        queryIndexedDbStore<
+          { rowID: number; coValueId: RawCoID; peerId: string }[]
+        >(this.db, "unsyncedCoValues", (store) => store.getAll()),
+    );
     const uniqueIds = new Set<RawCoID>();
     for (const record of records) {
       uniqueIds.add(record.coValueId);
@@ -435,7 +527,10 @@ export class IDBClient implements DBClientInterfaceAsync {
     const { LOCK_TTL_MS, RECONCILIATION_INTERVAL_MS } =
       cojsonInternals.STORAGE_RECONCILIATION_CONFIG;
 
-    let result: StorageReconciliationAcquireResult;
+    let result: StorageReconciliationAcquireResult = {
+      acquired: false,
+      reason: "not_due",
+    };
     await this.transaction(
       async (tx) => {
         const lock = await tx.getStorageReconciliationLock(lockKey);
@@ -469,7 +564,7 @@ export class IDBClient implements DBClientInterfaceAsync {
       },
       ["storageReconciliationLocks"],
     );
-    return result!;
+    return result;
   }
 
   async renewStorageReconciliationLock(
@@ -526,6 +621,10 @@ export class IDBClient implements DBClientInterfaceAsync {
 
     // Get all session counters without loading transactions
     const sessions = await this.getCoValueSessions(coValueRow.rowID);
+
+    if (this.closed) {
+      return undefined;
+    }
 
     const knownState: CojsonInternalTypes.CoValueKnownState = {
       id: coValueId as RawCoID,

@@ -319,6 +319,10 @@ export interface DBClientInterfaceAsync {
     sessionId: SessionID,
     peerId: PeerID,
   ): Promise<void>;
+
+  close?(): Promise<unknown> | unknown;
+
+  isClosed?(): boolean;
 }
 
 export interface DBTransactionInterfaceSync {

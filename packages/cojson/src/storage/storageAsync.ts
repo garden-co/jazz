@@ -36,6 +36,7 @@ import { isDeleteSessionID } from "../ids.js";
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
+  private closePromise: Promise<unknown> | undefined;
 
   private deletedCoValuesEraserScheduler:
     | DeletedCoValuesEraserScheduler
@@ -96,7 +97,9 @@ export class StorageApiAsync implements StorageAPI {
         // Error handling contract:
         // - Log warning
         // - Behave like "not found" so callers can fall back (full load / load from peers)
-        logger.warn("Failed to load knownState from storage", { id, err });
+        if (!this.dbClient.isClosed?.()) {
+          logger.warn("Failed to load knownState from storage", { id, err });
+        }
         return undefined;
       })
       .finally(() => {
@@ -124,6 +127,11 @@ export class StorageApiAsync implements StorageAPI {
     this.interruptEraser("load");
     const coValueRow = await this.dbClient.getCoValue(id);
 
+    if (this.dbClient.isClosed?.()) {
+      done?.(false);
+      return;
+    }
+
     if (!coValueRow) {
       done?.(false);
       return;
@@ -132,6 +140,11 @@ export class StorageApiAsync implements StorageAPI {
     const allCoValueSessions = await this.dbClient.getCoValueSessions(
       coValueRow.rowID,
     );
+
+    if (this.dbClient.isClosed?.()) {
+      done?.(false);
+      return;
+    }
 
     const signaturesBySession = new Map<
       SessionID,
@@ -153,6 +166,11 @@ export class StorageApiAsync implements StorageAPI {
         }
       }),
     );
+
+    if (this.dbClient.isClosed?.()) {
+      done?.(false);
+      return;
+    }
 
     const knownState = this.knownStates.getKnownState(coValueRow.id);
     knownState.header = true;
@@ -193,6 +211,11 @@ export class StorageApiAsync implements StorageAPI {
           idx,
           signature.idx,
         );
+
+        if (this.dbClient.isClosed?.()) {
+          done?.(false);
+          return;
+        }
 
         collectNewTxs({
           newTxsInSession,
@@ -241,6 +264,10 @@ export class StorageApiAsync implements StorageAPI {
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
   ) {
+    if (this.dbClient.isClosed?.()) {
+      return;
+    }
+
     const dependedOnCoValuesList = getDependedOnCoValues(
       coValueRow.header,
       contentMessage,
@@ -358,6 +385,10 @@ export class StorageApiAsync implements StorageAPI {
     );
 
     if (!storedCoValueRowID) {
+      if (this.dbClient.isClosed?.()) {
+        return false;
+      }
+
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
 
@@ -404,6 +435,10 @@ export class StorageApiAsync implements StorageAPI {
           setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
       });
+    }
+
+    if (this.dbClient.isClosed?.()) {
+      return false;
     }
 
     this.inMemoryCoValues.add(id);
@@ -511,11 +546,30 @@ export class StorageApiAsync implements StorageAPI {
     return this.knownStates.waitForSync(id, coValue);
   }
 
+  private handleAsyncStorageError(error: unknown, message: string): void {
+    if (this.dbClient.isClosed?.()) {
+      return;
+    }
+
+    logger.warn(message, {
+      err: error,
+    });
+  }
+
   trackCoValuesSyncState(
     updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
     done?: () => void,
   ): void {
-    this.dbClient.trackCoValuesSyncState(updates).then(() => done?.());
+    this.dbClient
+      .trackCoValuesSyncState(updates)
+      .then(() => done?.())
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to persist CoValue sync state to storage",
+        );
+        done?.();
+      });
   }
 
   getCoValueIDs(
@@ -523,11 +577,29 @@ export class StorageApiAsync implements StorageAPI {
     offset: number,
     callback: (batch: { id: RawCoID }[]) => void,
   ): void {
-    this.dbClient.getCoValueIDs(limit, offset).then(callback);
+    this.dbClient
+      .getCoValueIDs(limit, offset)
+      .then(callback)
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to load CoValue IDs from storage",
+        );
+        callback([]);
+      });
   }
 
   getCoValueCount(callback: (count: number) => void): void {
-    this.dbClient.getCoValueCount().then(callback);
+    this.dbClient
+      .getCoValueCount()
+      .then(callback)
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to load CoValue count from storage",
+        );
+        callback(0);
+      });
   }
 
   tryAcquireStorageReconciliationLock(
@@ -537,7 +609,14 @@ export class StorageApiAsync implements StorageAPI {
   ): void {
     this.dbClient
       .tryAcquireStorageReconciliationLock(sessionId, peerId)
-      .then(callback);
+      .then(callback)
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to acquire storage reconciliation lock",
+        );
+        callback({ acquired: false, reason: "not_due" });
+      });
   }
 
   renewStorageReconciliationLock(
@@ -545,21 +624,49 @@ export class StorageApiAsync implements StorageAPI {
     peerId: PeerID,
     offset: number,
   ): void {
-    this.dbClient.renewStorageReconciliationLock(sessionId, peerId, offset);
+    this.dbClient
+      .renewStorageReconciliationLock(sessionId, peerId, offset)
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to renew storage reconciliation lock",
+        );
+      });
   }
 
   releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
-    this.dbClient.releaseStorageReconciliationLock(sessionId, peerId);
+    this.dbClient
+      .releaseStorageReconciliationLock(sessionId, peerId)
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to release storage reconciliation lock",
+        );
+      });
   }
 
   getUnsyncedCoValueIDs(
     callback: (unsyncedCoValueIDs: RawCoID[]) => void,
   ): void {
-    this.dbClient.getUnsyncedCoValueIDs().then(callback);
+    this.dbClient
+      .getUnsyncedCoValueIDs()
+      .then(callback)
+      .catch((error) => {
+        this.handleAsyncStorageError(
+          error,
+          "Failed to load unsynced CoValue IDs from storage",
+        );
+        callback([]);
+      });
   }
 
   stopTrackingSyncState(id: RawCoID): void {
-    this.dbClient.stopTrackingSyncState(id);
+    this.dbClient.stopTrackingSyncState(id).catch((error) => {
+      this.handleAsyncStorageError(
+        error,
+        "Failed to stop tracking CoValue sync state in storage",
+      );
+    });
   }
 
   onCoValueUnmounted(id: RawCoID): void {
@@ -568,9 +675,30 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   close() {
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+
+    this.interruptEraser("close");
     this.deletedCoValuesEraserScheduler?.dispose();
     this.inMemoryCoValues.clear();
     this.knownStates.clear();
-    return this.storeQueue.close();
+    this.pendingKnownStateLoads.clear();
+
+    const pendingStore = this.storeQueue.close();
+
+    this.closePromise = (async () => {
+      await pendingStore;
+
+      try {
+        return await this.dbClient.close?.();
+      } catch (error) {
+        if (!this.dbClient.isClosed?.()) {
+          throw error;
+        }
+      }
+    })();
+
+    return this.closePromise;
   }
 }

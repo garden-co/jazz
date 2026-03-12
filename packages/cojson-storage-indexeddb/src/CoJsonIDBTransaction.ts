@@ -15,6 +15,27 @@ const DEFAULT_TX_STORES: StoreName[] = [
   "deletedCoValues",
 ];
 
+export function isStorageConnectionClosingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+
+  return (
+    message.includes("database connection is closing") ||
+    message.includes("database connection is closed") ||
+    message.includes("connection is closing") ||
+    message.includes("connection is closed")
+  );
+}
+
+export function isStorageTransactionFinishedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+
+  return (
+    message.includes("transaction has finished") ||
+    message.includes("transaction is inactive") ||
+    message.includes("transaction is already committing or done")
+  );
+}
+
 /**
  * An access unit for the IndexedDB Jazz database.
  * It's a wrapper around the IDBTransaction object that helps on batching multiple operations
@@ -36,12 +57,22 @@ export class CoJsonIDBTransaction {
     public db: IDBDatabase,
     // The object stores this transaction will operate on
     private storeNames: StoreName[] = DEFAULT_TX_STORES,
+    private onDatabaseClosing?: () => void,
   ) {
     this.refresh();
   }
 
   refresh() {
-    this.tx = this.db.transaction(this.storeNames, "readwrite");
+    try {
+      this.tx = this.db.transaction(this.storeNames, "readwrite");
+    } catch (error) {
+      if (isStorageConnectionClosingError(error)) {
+        this.failed = true;
+        this.done = true;
+        this.onDatabaseClosing?.();
+      }
+      throw error;
+    }
 
     this.tx.oncomplete = () => {
       this.done = true;
@@ -52,13 +83,41 @@ export class CoJsonIDBTransaction {
   }
 
   rollback() {
-    this.tx.abort();
+    this.abortIfActive();
+  }
+
+  private abortIfActive() {
+    if (this.done) {
+      return;
+    }
+
+    try {
+      this.tx.abort();
+    } catch (error) {
+      if (isStorageConnectionClosingError(error)) {
+        this.failed = true;
+        this.done = true;
+        this.onDatabaseClosing?.();
+        return;
+      }
+
+      if (!isStorageTransactionFinishedError(error)) {
+        throw error;
+      }
+    }
   }
 
   getObjectStore(name: StoreName) {
     try {
       return this.tx.objectStore(name);
     } catch (error) {
+      if (isStorageConnectionClosingError(error)) {
+        this.failed = true;
+        this.done = true;
+        this.onDatabaseClosing?.();
+        throw error;
+      }
+
       this.refresh();
       return this.tx.objectStore(name);
     }
@@ -103,8 +162,14 @@ export class CoJsonIDBTransaction {
 
         request.onerror = () => {
           this.failed = true;
-          this.tx.abort();
-          console.error(request.error);
+          this.abortIfActive();
+
+          if (isStorageConnectionClosingError(request.error)) {
+            this.onDatabaseClosing?.();
+          } else {
+            console.error(request.error);
+          }
+
           reject(request.error);
 
           // Don't leave any pending promise
@@ -123,7 +188,33 @@ export class CoJsonIDBTransaction {
 
   commit() {
     if (!this.done) {
-      this.tx.commit();
+      try {
+        this.tx.commit();
+      } catch (error) {
+        if (isStorageConnectionClosingError(error)) {
+          this.failed = true;
+          this.done = true;
+          this.onDatabaseClosing?.();
+          return;
+        }
+
+        if (!isStorageTransactionFinishedError(error)) {
+          throw error;
+        }
+      }
+    }
+  }
+}
+
+function commitTransaction(tx: IDBTransaction) {
+  try {
+    tx.commit();
+  } catch (error) {
+    if (
+      !isStorageConnectionClosingError(error) &&
+      !isStorageTransactionFinishedError(error)
+    ) {
+      throw error;
     }
   }
 }
@@ -134,7 +225,15 @@ export function queryIndexedDbStore<T>(
   callback: (store: IDBObjectStore) => IDBRequest<T>,
 ) {
   return new Promise<T>((resolve, reject) => {
-    const tx = db.transaction(storeName, "readonly");
+    let tx: IDBTransaction;
+
+    try {
+      tx = db.transaction(storeName, "readonly");
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
     const request = callback(tx.objectStore(storeName));
 
     request.onerror = () => {
@@ -142,8 +241,12 @@ export function queryIndexedDbStore<T>(
     };
 
     request.onsuccess = () => {
-      resolve(request.result as T);
-      tx.commit();
+      try {
+        commitTransaction(tx);
+        resolve(request.result as T);
+      } catch (error) {
+        reject(error);
+      }
     };
   });
 }
@@ -154,7 +257,15 @@ export function putIndexedDbStore<T, O extends IDBValidKey>(
   value: T,
 ) {
   return new Promise<O>((resolve, reject) => {
-    const tx = db.transaction(storeName, "readwrite");
+    let tx: IDBTransaction;
+
+    try {
+      tx = db.transaction(storeName, "readwrite");
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
     const request = tx.objectStore(storeName).put(value);
 
     request.onerror = () => {
@@ -162,8 +273,12 @@ export function putIndexedDbStore<T, O extends IDBValidKey>(
     };
 
     request.onsuccess = () => {
-      resolve(request.result as O);
-      tx.commit();
+      try {
+        commitTransaction(tx);
+        resolve(request.result as O);
+      } catch (error) {
+        reject(error);
+      }
     };
   });
 }
