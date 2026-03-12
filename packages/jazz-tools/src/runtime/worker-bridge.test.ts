@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
-import type { RuntimeObjectOutcomeEvent } from "./object-outcomes.js";
+import type { ObjectOutcomeEvent } from "./object-outcomes.js";
 import { OutboxDestinationKind } from "./sync-transport.js";
 
 class MockWorker {
@@ -211,7 +211,7 @@ describe("WorkerBridge", () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
-    const observed: RuntimeObjectOutcomeEvent[][] = [];
+    const observed: ObjectOutcomeEvent[][] = [];
 
     bridge.subscribeObjectOutcomeEvents((events) => {
       observed.push(events);
@@ -268,6 +268,20 @@ describe("WorkerBridge", () => {
     });
     expect(current?.type).toBe("errored");
     expect(observed).toHaveLength(2);
+    expect(observed[1]?.[0]).toMatchObject({
+      objectId: "row-1",
+      outcome: {
+        type: "errored",
+        mutationId: "mutation-1",
+        code: "permission_denied",
+        reason: "blocked",
+      },
+    });
+    const observedOutcome = observed[1]?.[0]?.outcome;
+    expect(observedOutcome?.type).toBe("errored");
+    if (observedOutcome?.type === "errored") {
+      expect(typeof observedOutcome.acknowledge).toBe("function");
+    }
 
     if (!current || current.type !== "errored") {
       throw new Error("expected errored object outcome");

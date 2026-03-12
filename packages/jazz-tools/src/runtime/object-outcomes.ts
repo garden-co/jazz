@@ -13,6 +13,20 @@ export interface RuntimeObjectOutcomeEvent {
   outcome: RuntimeObjectOutcomeState | null;
 }
 
+/**
+ * App-facing object outcome event enriched with acknowledge() for rejected outcomes.
+ */
+export interface ObjectOutcomeEvent {
+  objectId: string;
+  outcome: ObjectOutcomeState | null;
+}
+
+/**
+ * Current mutation outcome overlay for one visible object.
+ *
+ * This is attached to returned rows as `$outcome` and is also used by the
+ * global object-outcome event stream.
+ */
 export type ObjectOutcomeState =
   | { type: "pending"; mutationId: string }
   | { type: "accepted"; mutationId: string }
@@ -26,7 +40,7 @@ export type ObjectOutcomeState =
 
 export interface ObjectOutcomeSource {
   getObjectOutcome(objectId: string): ObjectOutcomeState | null;
-  subscribeObjectOutcomeEvents(listener: (events: RuntimeObjectOutcomeEvent[]) => void): () => void;
+  subscribeObjectOutcomeEvents(listener: (events: ObjectOutcomeEvent[]) => void): () => void;
   acknowledgeMutationOutcome(mutationId: string): Promise<void>;
 }
 
@@ -37,7 +51,7 @@ export interface RuntimeObjectOutcomeBindings {
   setMutationJournalEnabled?(enabled: boolean): void;
 }
 
-type OutcomeListener = (events: RuntimeObjectOutcomeEvent[]) => void;
+type OutcomeListener = (events: ObjectOutcomeEvent[]) => void;
 
 export class ObjectOutcomeMirror implements ObjectOutcomeSource {
   private readonly cache = new Map<string, RuntimeObjectOutcomeState>();
@@ -56,13 +70,13 @@ export class ObjectOutcomeMirror implements ObjectOutcomeSource {
     }
 
     const changedIds = new Set<string>([...this.cache.keys(), ...next.keys()]);
-    const changes: RuntimeObjectOutcomeEvent[] = [];
+    const changedObjectIds: string[] = [];
 
     for (const objectId of changedIds) {
       const previous = this.cache.get(objectId) ?? null;
       const current = next.get(objectId) ?? null;
       if (!runtimeObjectOutcomeEquals(previous, current)) {
-        changes.push({ objectId, outcome: current });
+        changedObjectIds.push(objectId);
       }
     }
 
@@ -71,11 +85,11 @@ export class ObjectOutcomeMirror implements ObjectOutcomeSource {
       this.cache.set(objectId, outcome);
     }
 
-    this.emit(changes);
+    this.emit(changedObjectIds);
   }
 
   applyEvents(events: RuntimeObjectOutcomeEvent[]): void {
-    const changes: RuntimeObjectOutcomeEvent[] = [];
+    const changedObjectIds: string[] = [];
 
     for (const event of events) {
       const previous = this.cache.get(event.objectId) ?? null;
@@ -89,10 +103,10 @@ export class ObjectOutcomeMirror implements ObjectOutcomeSource {
         this.cache.delete(event.objectId);
       }
 
-      changes.push(event);
+      changedObjectIds.push(event.objectId);
     }
 
-    this.emit(changes);
+    this.emit(changedObjectIds);
   }
 
   getObjectOutcome(objectId: string): ObjectOutcomeState | null {
@@ -127,10 +141,15 @@ export class ObjectOutcomeMirror implements ObjectOutcomeSource {
     this.cache.clear();
   }
 
-  private emit(events: RuntimeObjectOutcomeEvent[]): void {
-    if (events.length === 0) {
+  private emit(objectIds: string[]): void {
+    if (objectIds.length === 0) {
       return;
     }
+
+    const events = objectIds.map((objectId) => ({
+      objectId,
+      outcome: this.getObjectOutcome(objectId),
+    }));
 
     for (const listener of this.listeners) {
       listener(events);

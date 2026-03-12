@@ -13,6 +13,26 @@ That keeps UI latency low because local state updates do not wait for any networ
 `insertDurable`, `updateDurable`, and `deleteDurable` return promises that
 resolve when the requested durability tier is reached.
 
+## Delayed Mutation Rejections
+
+Because Jazz is local-first, a write can be rejected long after the original mutation was created.
+The common case is a permission rejection that arrives after offline work is replayed.
+
+`insertDurable`, `updateDurable`, and `deleteDurable` also reject their promise if the authority
+later rejects the mutation.
+
+Recommended app pattern:
+
+- For visible rows, render the row-level `$outcome` overlay documented in [Reading Data](/docs/reading-data#mutation-outcome-overlays).
+- For invisible rows, subscribe to the global object-outcome stream and surface toasts, inbox items, or badges.
+
+When an outcome is rejected, call `acknowledge()` after the user has seen or handled it. That clears
+the surfaced issue and lets the persistence-owning client prune the rejected local commit chain.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-outcome-events-ts
+</include>
+
 ## Mutating from Framework Context
 
 Use the framework context binding to access the shared `Db` instance and execute mutations.

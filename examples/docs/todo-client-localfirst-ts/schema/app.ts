@@ -1,5 +1,5 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
-import type { WasmSchema, QueryBuilder } from "jazz-tools";
+import type { WasmSchema, QueryBuilder, ObjectOutcomeState } from "jazz-tools";
 export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
@@ -9,12 +9,18 @@ export interface PermissionIntrospectionColumns {
   $canDelete: boolean | null;
 }
 
-export interface Project {
+export type MutationOutcomeState = ObjectOutcomeState;
+export interface MutationOutcomeColumns {
+  $outcome?: MutationOutcomeState;
+}
+export type VisibleRowColumns<T> = Exclude<keyof T, keyof MutationOutcomeColumns>;
+
+export interface Project extends MutationOutcomeColumns {
   id: string;
   name: string;
 }
 
-export interface Todo {
+export interface Todo extends MutationOutcomeColumns {
   id: string;
   title: string;
   done: boolean;
@@ -132,19 +138,19 @@ export type ProjectWithIncludes<I extends ProjectInclude = {}> = Omit<Project, E
 
 export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I>;
 
-export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
-export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
+export type ProjectSelectableColumn = VisibleRowColumns<Project> | PermissionIntrospectionColumn | "*";
+export type ProjectOrderableColumn = VisibleRowColumns<Project> | PermissionIntrospectionColumn;
 
-export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type ProjectSelected<S extends ProjectSelectableColumn = VisibleRowColumns<Project>> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>> & MutationOutcomeColumns;
 
-export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I>;
+export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = VisibleRowColumns<Project>> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I>;
 
-export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
-export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
+export type TodoSelectableColumn = VisibleRowColumns<Todo> | PermissionIntrospectionColumn | "*";
+export type TodoOrderableColumn = VisibleRowColumns<Todo> | PermissionIntrospectionColumn;
 
-export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type TodoSelected<S extends TodoSelectableColumn = VisibleRowColumns<Todo>> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>> & MutationOutcomeColumns;
 
-export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
+export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = VisibleRowColumns<Todo>> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
   "projects": {
@@ -226,7 +232,7 @@ export const wasmSchema: WasmSchema = {
   }
 };
 
-export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project> implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
+export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = VisibleRowColumns<Project>> implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ProjectSelectedWithIncludes<I, S>;
@@ -414,7 +420,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
   }
 }
 
-export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
+export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = VisibleRowColumns<Todo>> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: TodoSelectedWithIncludes<I, S>;

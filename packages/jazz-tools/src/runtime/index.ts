@@ -53,6 +53,7 @@ export {
 } from "./subscription-manager.js";
 export type {
   MutationRejectCode,
+  ObjectOutcomeEvent,
   ObjectOutcomeState,
   RuntimeObjectOutcomeEvent,
 } from "./object-outcomes.js";

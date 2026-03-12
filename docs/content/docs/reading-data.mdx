@@ -246,6 +246,22 @@ Permission introspection columns are computed for the current session and are om
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
 </include>
 
+### Mutation Outcome Overlays
+
+Visible rows may also carry a transient `$outcome` overlay when the local-first client is still
+tracking a mutation outcome for that object.
+
+- `pending`: the local mutation has been created but not yet accepted or rejected by the authority
+- `accepted`: the authority accepted the mutation and the client has not compacted the transient outcome yet
+- `errored`: the authority rejected the mutation; includes rejection details plus `acknowledge()`
+
+`$outcome` is attached automatically to returned rows. It is not queryable through
+`where(...)`, `orderBy(...)`, or `select(...)`.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-outcome-overlays-ts
+</include>
+
 ## Advanced: Recursive Queries
 
 Recursive queries compute bounded transitive closures from a seed row set.

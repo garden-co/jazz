@@ -2,7 +2,6 @@ import type { Db } from "jazz-tools";
 import { app } from "../schema/app.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
-const EXAMPLE_OWNER_ID = "local:example-owner";
 
 // #region reading-oneshot-ts
 export async function readTodosOneshot(db: Db) {
@@ -86,6 +85,47 @@ export async function readDeletableTodos(db: Db) {
 }
 // #endregion reading-magic-columns-ts
 
+// #region reading-outcome-overlays-ts
+type VisibleTodo = Awaited<ReturnType<typeof readTodosOneshot>>[number];
+
+export function subscribeTodosWithOutcomeStatus(
+  db: Db,
+  onRows: (
+    rows: Array<{
+      id: string;
+      title: string;
+      status: "idle" | "saving" | "synced" | "error";
+      message?: string;
+    }>,
+  ) => void,
+) {
+  return db.subscribeAll(app.todos.orderBy("title", "asc"), ({ all }) => {
+    onRows(
+      all.map((todo) => ({
+        id: todo.id,
+        title: todo.title,
+        status:
+          todo.$outcome?.type === "pending"
+            ? "saving"
+            : todo.$outcome?.type === "accepted"
+              ? "synced"
+              : todo.$outcome?.type === "errored"
+                ? "error"
+                : "idle",
+        message: todo.$outcome?.type === "errored" ? todo.$outcome.reason : undefined,
+      })),
+    );
+  });
+}
+
+export async function acknowledgeVisibleTodoOutcome(todo: VisibleTodo) {
+  if (todo.$outcome?.type !== "errored") {
+    return;
+  }
+  await todo.$outcome.acknowledge();
+}
+// #endregion reading-outcome-overlays-ts
+
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
   return app.todos.gather({
@@ -101,7 +141,6 @@ export async function writeTodoCrud(db: Db, todoId: string) {
   db.insert(app.todos, {
     title: "Write docs",
     done: false,
-    owner_id: EXAMPLE_OWNER_ID,
     project: EXAMPLE_PROJECT_ID,
   });
   db.update(app.todos, todoId, { done: true });
@@ -116,7 +155,6 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
     {
       title: "Write docs with durability tier",
       done: false,
-      owner_id: EXAMPLE_OWNER_ID,
       project: EXAMPLE_PROJECT_ID,
     },
     { tier: "edge" },
@@ -126,3 +164,29 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
   await db.deleteDurable(app.todos, id, { tier: "global" });
 }
 // #endregion writing-durability-tier-ts
+
+// #region writing-outcome-events-ts
+export function subscribeMutationOutcomeToasts(
+  db: Db,
+  showToast: (toast: {
+    objectId: string;
+    message: string;
+    acknowledge: () => Promise<void>;
+  }) => void,
+) {
+  return db.onObjectOutcomeEvents((events) => {
+    for (const event of events) {
+      const outcome = event.outcome;
+      if (!outcome || outcome.type !== "errored") {
+        continue;
+      }
+
+      showToast({
+        objectId: event.objectId,
+        message: outcome.reason,
+        acknowledge: () => outcome.acknowledge(),
+      });
+    }
+  });
+}
+// #endregion writing-outcome-events-ts

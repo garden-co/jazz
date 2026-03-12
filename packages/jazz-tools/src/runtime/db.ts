@@ -24,7 +24,7 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
-import type { RuntimeObjectOutcomeEvent } from "./object-outcomes.js";
+import type { ObjectOutcomeEvent } from "./object-outcomes.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -357,9 +357,7 @@ export class Db {
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
-  private readonly objectOutcomeListeners = new Set<
-    (events: RuntimeObjectOutcomeEvent[]) => void
-  >();
+  private readonly objectOutcomeListeners = new Set<(events: ObjectOutcomeEvent[]) => void>();
   private readonly clientObjectOutcomeUnsubscribes = new Map<string, () => void>();
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
@@ -991,7 +989,13 @@ export class Db {
     };
   }
 
-  onObjectOutcomeEvents(listener: (events: RuntimeObjectOutcomeEvent[]) => void): () => void {
+  /**
+   * Subscribe to global mutation outcome changes, including rows that are no longer visible in queries.
+   *
+   * Use this for toasts, issue inboxes, or badges. Rejected outcomes include `acknowledge()`, which clears
+   * the surfaced issue and lets the persistence owner prune the rejected local commits.
+   */
+  onObjectOutcomeEvents(listener: (events: ObjectOutcomeEvent[]) => void): () => void {
     this.objectOutcomeListeners.add(listener);
     return () => {
       this.objectOutcomeListeners.delete(listener);

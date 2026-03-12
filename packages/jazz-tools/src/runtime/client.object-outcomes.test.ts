@@ -92,6 +92,10 @@ describe("JazzClient object outcomes", () => {
     const { client, emitSubscriptionDelta } = makeClient();
     const mirror = new ObjectOutcomeMirror();
     client.setObjectOutcomeSource(mirror);
+    const observedEvents: unknown[] = [];
+    client.onObjectOutcomeEvents((events) => {
+      observedEvents.push(...events);
+    });
 
     const seen: Row[][] = [];
     client.subscribeInternal('{"table":"todos"}', (delta) => {
@@ -147,5 +151,19 @@ describe("JazzClient object outcomes", () => {
     if (seen[1][0]?.$outcome?.type === "errored") {
       expect(typeof seen[1][0].$outcome.acknowledge).toBe("function");
     }
+
+    expect(observedEvents).toHaveLength(1);
+    expect(observedEvents[0]).toMatchObject({
+      objectId: "row-1",
+      outcome: {
+        type: "errored",
+        mutationId: "mutation-1",
+        code: "permission_denied",
+        reason: "blocked",
+      },
+    });
+    const firstEvent = observedEvents[0] as { outcome?: { type?: string; acknowledge?: unknown } };
+    expect(firstEvent.outcome?.type).toBe("errored");
+    expect(typeof firstEvent.outcome?.acknowledge).toBe("function");
   });
 });

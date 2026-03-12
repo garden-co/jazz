@@ -9,8 +9,8 @@
 import type { Runtime } from "./client.js";
 import {
   ObjectOutcomeMirror,
+  type ObjectOutcomeEvent,
   type ObjectOutcomeSource,
-  type RuntimeObjectOutcomeEvent,
 } from "./object-outcomes.js";
 import type {
   InitMessage,
@@ -271,9 +271,7 @@ export class WorkerBridge implements ObjectOutcomeSource {
     return this.objectOutcomes.getObjectOutcome(objectId);
   }
 
-  subscribeObjectOutcomeEvents(
-    listener: (events: RuntimeObjectOutcomeEvent[]) => void,
-  ): () => void {
+  subscribeObjectOutcomeEvents(listener: (events: ObjectOutcomeEvent[]) => void): () => void {
     return this.objectOutcomes.subscribeObjectOutcomeEvents(listener);
   }
 

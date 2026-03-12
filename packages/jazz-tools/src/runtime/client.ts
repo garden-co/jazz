@@ -26,10 +26,10 @@ import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
 import {
+  type ObjectOutcomeEvent,
   type ObjectOutcomeSource,
   type ObjectOutcomeState,
   type RuntimeObjectOutcomeBindings,
-  type RuntimeObjectOutcomeEvent,
   RuntimeObjectOutcomeSource,
 } from "./object-outcomes.js";
 
@@ -125,6 +125,12 @@ export interface WriteDurabilityOptions {
 export interface Row {
   id: string;
   values: Value[];
+  /**
+   * Mutation outcome overlay for this row, if there is still unacknowledged local state to surface.
+   *
+   * `$outcome` is attached automatically to visible rows. It is not selected, filtered, or ordered
+   * through the query builder.
+   */
   $outcome?: ObjectOutcomeState;
 }
 
@@ -739,6 +745,8 @@ export class JazzClient {
 
   /**
    * Read the current object outcome for one row id.
+   *
+   * Rejected outcomes include `acknowledge()` so apps can clear surfaced errors after handling them.
    */
   getObjectOutcome(objectId: string): ObjectOutcomeState | null {
     return this.objectOutcomeSource?.getObjectOutcome(objectId) ?? null;
@@ -746,8 +754,10 @@ export class JazzClient {
 
   /**
    * Subscribe to object outcome changes for invisible-data notifications.
+   *
+   * This is the app-facing stream for delayed rejections that no longer have a visible row in a query.
    */
-  onObjectOutcomeEvents(listener: (events: RuntimeObjectOutcomeEvent[]) => void): () => void {
+  onObjectOutcomeEvents(listener: (events: ObjectOutcomeEvent[]) => void): () => void {
     return this.objectOutcomeSource?.subscribeObjectOutcomeEvents(listener) ?? (() => {});
   }
 
@@ -1090,7 +1100,7 @@ export class JazzClient {
     }
   }
 
-  private handleObjectOutcomeEvents(events: RuntimeObjectOutcomeEvent[]): void {
+  private handleObjectOutcomeEvents(events: ObjectOutcomeEvent[]): void {
     if (events.length === 0 || this.outcomeSubscriptions.size === 0) {
       return;
     }
