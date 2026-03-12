@@ -187,7 +187,7 @@ impl ProjectNode {
     }
 
     /// Project a single tuple to the output row shape.
-    fn project_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
+    pub(in crate::query_manager) fn project_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
         let values: Option<Vec<_>> = self
             .projection_fields
             .iter()
@@ -208,10 +208,6 @@ impl ProjectNode {
             }])
             .with_provenance(tuple.provenance().clone()),
         )
-    }
-
-    pub fn project_tuple_for_output(&self, tuple: &Tuple) -> Option<Tuple> {
-        self.project_tuple(tuple)
     }
 }
 

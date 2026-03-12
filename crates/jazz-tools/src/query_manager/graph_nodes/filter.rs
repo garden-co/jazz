@@ -144,12 +144,8 @@ impl FilterNode {
 
     /// Evaluate predicate against a tuple.
     /// Supports multi-element tuples by resolving column indices to correct elements.
-    fn evaluate_tuple(&self, tuple: &Tuple) -> bool {
+    pub(in crate::query_manager) fn evaluate_tuple(&self, tuple: &Tuple) -> bool {
         self.evaluate_predicate_on_tuple(&self.predicate, tuple)
-    }
-
-    pub fn matches_tuple(&self, tuple: &Tuple) -> bool {
-        self.evaluate_tuple(tuple)
     }
 
     /// Recursively evaluate a predicate on a tuple.

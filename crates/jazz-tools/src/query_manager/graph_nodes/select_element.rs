@@ -43,13 +43,9 @@ impl SelectElementNode {
         })
     }
 
-    fn select_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
+    pub(in crate::query_manager) fn select_tuple(&self, tuple: &Tuple) -> Option<Tuple> {
         let element = tuple.get(self.element_index)?.clone();
         Some(Tuple::new(vec![element]).with_provenance(tuple.provenance().clone()))
-    }
-
-    pub fn select_tuple_for_output(&self, tuple: &Tuple) -> Option<Tuple> {
-        self.select_tuple(tuple)
     }
 
     fn tuple_content_changed(old_tuple: &Tuple, new_tuple: &Tuple) -> bool {

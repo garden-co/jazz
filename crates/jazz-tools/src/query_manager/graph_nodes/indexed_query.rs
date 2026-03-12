@@ -592,7 +592,7 @@ impl IndexedQueryNode {
         let Some(evaluator) = policy.evaluators_by_branch.get(&scoped_row.branch) else {
             return true;
         };
-        evaluator.row_passes_with_context(&scoped_row.row, storage, row_loader)
+        evaluator.evaluate_with_context(&scoped_row.row, storage, row_loader)
     }
 
     fn compare_candidates(&self, left: &DriverCandidate, right: &DriverCandidate) -> Ordering {
@@ -636,7 +636,7 @@ impl IndexedQueryNode {
             self.config
                 .residual_filter
                 .as_ref()
-                .is_none_or(|filter| filter.matches_tuple(tuple))
+                .is_none_or(|filter| filter.evaluate_tuple(tuple))
         })
         .collect()
     }

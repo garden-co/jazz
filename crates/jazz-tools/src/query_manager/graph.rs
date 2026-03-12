@@ -2446,7 +2446,7 @@ impl QueryGraph {
                 let mut seen = AHashSet::new();
                 let mut result = Vec::new();
                 for tuple in ordered_input {
-                    let projected = node.project_tuple_for_output(&tuple)?;
+                    let projected = node.project_tuple(&tuple)?;
                     let current = node.current_tuples().get(&projected)?.clone();
                     if seen.insert(current.clone()) {
                         result.push(current);
@@ -2460,7 +2460,7 @@ impl QueryGraph {
                 let mut seen = AHashSet::new();
                 let mut result = Vec::new();
                 for tuple in ordered_input {
-                    let selected = node.select_tuple_for_output(&tuple)?;
+                    let selected = node.select_tuple(&tuple)?;
                     let current = node.current_tuples().get(&selected)?.clone();
                     if seen.insert(current.clone()) {
                         result.push(current);
