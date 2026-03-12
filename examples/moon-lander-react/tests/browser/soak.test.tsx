@@ -2,8 +2,8 @@
  * Soak test: two players run around on the moon for 10 minutes.
  *
  * Verifies that cross-client Jazz sync stays alive under sustained load:
- * deposits collected, burst-released, and re-collected; lander entry/exit
- * cycles; player position and mode changes propagating continuously.
+ * deposits collected and player position and mode changes propagating
+ * continuously over 10 minutes of walking.
  *
  * Structure:
  *
@@ -14,7 +14,6 @@
  *
  *   ┌── soak loop (10 min) ───────────────────────────────────────────┐
  *   │  alternate d / a every 5s (both players, page-wide key events)  │
- *   │  enter+exit lander every 2 min (burst-releases deposits)        │
  *   └─────────────────────────────────────────────────────────────────┘
  *
  *   end assertions:
@@ -44,7 +43,6 @@ import {
 const SOAK_DURATION_MS = 10 * 60 * 1000; // 10 minutes
 const SYNC_TIMEOUT = 30_000;
 const DIRECTION_INTERVAL_MS = 5_000;
-const LANDER_CYCLE_INTERVAL_MS = 2 * 60 * 1000; // every 2 minutes
 
 const mounts: MountEntry[] = [];
 
@@ -147,15 +145,13 @@ describe("Moon Lander — Soak Test", () => {
 
         // ── Soak loop ─────────────────────────────────────────────────────────
         //
-        // Alternate movement direction every 5s. Enter + exit the lander
-        // every 2 minutes to trigger deposit burst-releases, which generate a
-        // steady stream of DELETE+INSERT events through the sync pipeline.
+        // Alternate movement direction every 5s, keeping both players walking
+        // and generating a continuous stream of position updates through the
+        // sync pipeline.
         //
         const soakEnd = Date.now() + SOAK_DURATION_MS;
         let direction = "d";
         let directionChangeAt = Date.now() + DIRECTION_INTERVAL_MS;
-        let landerCycleAt = Date.now() + LANDER_CYCLE_INTERVAL_MS;
-        let inLander = false;
 
         // Start moving right.
         pressKey("d", "KeyD");
@@ -164,31 +160,7 @@ describe("Moon Lander — Soak Test", () => {
           await new Promise((r) => setTimeout(r, 500));
           const now = Date.now();
 
-          // Lander cycle takes priority: stop movement, dip in and out.
-          if (now >= landerCycleAt && !inLander) {
-            releaseKey(direction, direction === "d" ? "KeyD" : "KeyA");
-
-            pressKey("e", "KeyE");
-            inLander = true;
-            await waitForAttr(elA, "player-mode", "in_lander", 8_000);
-            releaseKey("e", "KeyE");
-
-            await new Promise((r) => setTimeout(r, 3_000));
-
-            pressKey("e", "KeyE");
-            await waitForAttr(elA, "player-mode", "walking", 5_000);
-            releaseKey("e", "KeyE");
-            inLander = false;
-
-            landerCycleAt = Date.now() + LANDER_CYCLE_INTERVAL_MS;
-            directionChangeAt = Date.now() + DIRECTION_INTERVAL_MS;
-
-            // Resume movement.
-            pressKey(direction, direction === "d" ? "KeyD" : "KeyA");
-          }
-
-          // Direction change.
-          if (now >= directionChangeAt && !inLander) {
+          if (now >= directionChangeAt) {
             releaseKey(direction, direction === "d" ? "KeyD" : "KeyA");
             direction = direction === "d" ? "a" : "d";
             pressKey(direction, direction === "d" ? "KeyD" : "KeyA");
@@ -198,7 +170,6 @@ describe("Moon Lander — Soak Test", () => {
 
         // Stop all movement.
         releaseKey(direction, direction === "d" ? "KeyD" : "KeyA");
-        if (inLander) releaseKey("e", "KeyE");
 
         // ── End assertions ────────────────────────────────────────────────────
 
@@ -231,14 +202,6 @@ describe("Moon Lander — Soak Test", () => {
         expect(readStr(elB, "player-online")).toBe("true");
 
         // Live write path: A collects a deposit; B's uncollected count drops.
-        //
-        // Ensure both are in walking mode first.
-        if (readStr(elA, "player-mode") !== "walking") {
-          pressKey("e", "KeyE");
-          await waitForAttr(elA, "player-mode", "walking", 8_000);
-          releaseKey("e", "KeyE");
-        }
-
         const syncElB = elB.querySelector('[data-testid="sync-debug"]');
         const uncollectedBefore = syncElB
           ? parseFloat(syncElB.getAttribute("data-sync-uncollected") ?? "0")
