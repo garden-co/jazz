@@ -20,32 +20,37 @@ interface AppProps {
 
 export function App({ config, playerId, physicsSpeed, initialMode, spawnX }: AppProps) {
   const [client, setClient] = useState<JazzClient | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
   useEffect(() => {
     if (!config) return;
 
     let active = true;
-    let jazzClient: JazzClient | null = null;
+    const client = createJazzClient(config);
 
-    createJazzClient(config).then(
+    client.then(
       (resolved) => {
         if (!active) {
           resolved.shutdown();
           return;
         }
-        jazzClient = resolved;
         setClient(resolved);
       },
-      (err) => {
+      (reason) => {
         if (!active) return;
-        console.error("[moon-lander] Failed to create Jazz client:", err);
+        setError(reason);
       },
     );
 
     return () => {
       active = false;
-      jazzClient?.shutdown();
+      client.then((resolved) => resolved.shutdown()).catch(() => {});
     };
   }, [config?.appId, config?.serverUrl, config?.dbName]);
+
+  if (error) {
+    throw error;
+  }
 
   if (!config) {
     return <Game physicsSpeed={physicsSpeed} initialMode={initialMode} spawnX={spawnX} />;
