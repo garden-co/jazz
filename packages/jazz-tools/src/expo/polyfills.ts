@@ -1,3 +1,5 @@
+/// <reference path="./vendor.d.ts" />
+
 import { polyfillGlobal } from "react-native/Libraries/Utilities/PolyfillFunctions";
 import {
   Headers as ReactNativeHeaders,
