@@ -32,18 +32,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
-        let changed_columns: Vec<String> = values.iter().map(|(name, _)| name.clone()).collect();
         let current_values = self.merge_row_update_values(object_id, values)?;
 
         self.schema_manager
             .query_manager_mut()
-            .update_with_session_partial(
-                &mut self.storage,
-                object_id,
-                &current_values,
-                session,
-                &changed_columns,
-            )
+            .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         self.immediate_tick();
@@ -115,19 +108,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
-        let changed_columns: Vec<String> = values.iter().map(|(name, _)| name.clone()).collect();
         let current_values = self.merge_row_update_values(object_id, values)?;
 
         let commit_id = self
             .schema_manager
             .query_manager_mut()
-            .update_with_session_partial(
-                &mut self.storage,
-                object_id,
-                &current_values,
-                session,
-                &changed_columns,
-            )
+            .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
