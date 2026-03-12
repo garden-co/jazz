@@ -581,6 +581,18 @@ describe("SessionMap", () => {
     expect(knownStateWithStreaming!.id).toBe(coId);
   });
 
+  test("isStreaming reports whether streaming state is pending", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+
+    expect(sessionMap.isStreaming()).toBe(false);
+
+    sessionMap.setStreamingKnownState(JSON.stringify({ session1: 5 }));
+
+    expect(sessionMap.isStreaming()).toBe(true);
+  });
+
   test("header serialization is stable (alphabetically sorted keys)", () => {
     const coId = "co_zTestCoValue123";
     const createdAt = "2023-11-14T22:13:20.000Z";

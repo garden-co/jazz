@@ -608,7 +608,7 @@ export class VerifiedState {
   }
 
   isStreaming(): boolean {
-    return Boolean(this.impl.getKnownStateWithStreaming());
+    return this.impl.isStreaming();
   }
 
   decryptTransaction(

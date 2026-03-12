@@ -369,6 +369,7 @@ export interface SessionMapImpl {
   getKnownStateWithStreaming():
     | { id: string; header: boolean; sessions: Record<string, number> }
     | undefined;
+  isStreaming(): boolean;
   setStreamingKnownState(streamingJson: string): void;
 
   // === Deletion ===

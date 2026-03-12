@@ -716,6 +716,11 @@ impl SessionMapImpl {
         self.known_state_with_streaming.as_ref()
     }
 
+    /// Check whether the CoValue still has pending streaming content.
+    pub fn is_streaming(&self) -> bool {
+        self.known_state_with_streaming.is_some()
+    }
+
     /// Set streaming known state
     pub fn set_streaming_known_state(
         &mut self,

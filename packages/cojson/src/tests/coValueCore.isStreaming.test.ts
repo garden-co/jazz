@@ -1,4 +1,4 @@
-import { assert, beforeEach, describe, expect, test } from "vitest";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -112,6 +112,75 @@ describe("isStreaming", () => {
     newSession.node.syncManager.handleNewContent(lastChunk, "import");
 
     expect(mapInNewSession.core.isStreaming()).toBe(false);
+  });
+
+  test("isStreaming uses the native streaming flag", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    const group = client.node.createGroup();
+
+    await group.core.waitForSync();
+    client.disconnect();
+
+    const map = fillCoMapWithLargeData(group.createMap());
+
+    const newSession = client.spawnNewSession();
+
+    await loadCoValueOrFail(client.node, group.id);
+
+    const content = map.core.verified.newContentSince(undefined);
+    assert(content);
+    const lastChunk = content.pop();
+    assert(lastChunk);
+
+    for (const chunk of content) {
+      newSession.node.syncManager.handleNewContent(chunk, "import");
+    }
+
+    const mapInNewSession = await loadCoValueOrFail(newSession.node, map.id);
+    const impl = (mapInNewSession.core.verified as any).impl;
+    const isStreamingSpy = vi.spyOn(impl, "isStreaming");
+    const getKnownStateWithStreamingSpy = vi.spyOn(
+      impl,
+      "getKnownStateWithStreaming",
+    );
+
+    expect(mapInNewSession.core.isStreaming()).toBe(true);
+    expect(isStreamingSpy).toHaveBeenCalledTimes(1);
+    expect(getKnownStateWithStreamingSpy).not.toHaveBeenCalled();
+
+    expect(
+      mapInNewSession.core.knownStateWithStreaming().sessions,
+    ).toBeDefined();
+    expect(getKnownStateWithStreamingSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("newContentSince checks streaming once and loads the target once", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    const sessionId = Object.keys(map.core.knownState().sessions)[0];
+    assert(sessionId);
+
+    map.core.verified.setStreamingKnownState({ [sessionId]: 2 });
+
+    const impl = (map.core.verified as any).impl;
+    const isStreamingSpy = vi.spyOn(impl, "isStreaming");
+    const getKnownStateWithStreamingSpy = vi.spyOn(
+      impl,
+      "getKnownStateWithStreaming",
+    );
+
+    expect(() => map.core.verified.newContentSince(undefined)).not.toThrow();
+    expect(isStreamingSpy).toHaveBeenCalledTimes(1);
+    expect(getKnownStateWithStreamingSpy).toHaveBeenCalledTimes(1);
   });
 
   // TODO: We can't handle client-to-client streaming until we

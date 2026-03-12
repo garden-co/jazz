@@ -404,6 +404,10 @@ class SessionMapAdapter implements SessionMapImpl {
     };
   }
 
+  isStreaming(): boolean {
+    return this.sessionMap.isStreaming();
+  }
+
   setStreamingKnownState(streamingJson: string): void {
     this.sessionMap.setStreamingKnownState(streamingJson);
   }
