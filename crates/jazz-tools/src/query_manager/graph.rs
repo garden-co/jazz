@@ -2,6 +2,7 @@ use ahash::{AHashMap, AHashSet};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Bound;
+use std::sync::Arc;
 
 use bitvec::prelude::*;
 use smallvec::SmallVec;
@@ -9,16 +10,21 @@ use smallvec::SmallVec;
 use crate::object::{BranchName, ObjectId};
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
-use crate::storage::{IndexScanDirection, Storage};
+use crate::storage::Storage;
 
+use super::execution::{
+    ExecutionContext, ExecutionInput, ExecutionOperator, ExecutionOutput, ExecutionStats,
+    StreamDistinctness, StreamInvalidation, StreamMaterialization, StreamOrdering, StreamResumeKey,
+    StreamSpec, mapped_ordered_distinct, passthrough_ordered,
+};
 use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::array_subquery::{ArraySubqueryNode, Correlate};
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::IndexScanNode;
-use super::graph_nodes::indexed_query::{
-    DriverPlan, IndexedQueryNode, IndexedQueryNodeConfig, JoinEdgePlan, ResolvedRowKey,
-    ResolvedSortKey, ResolvedSortTarget, TablePolicySpec,
+use super::graph_nodes::indexed_topk::{
+    MergeOrderedNode, OrderedDriverSourceNode, ProbeJoinNode, TieSortNode,
+    compile_indexed_topk_graph_plan,
 };
 use super::graph_nodes::join::{JoinColumnRef, JoinNode};
 use super::graph_nodes::limit_offset::LimitOffsetNode;
@@ -28,16 +34,15 @@ use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::graph_nodes::project::ProjectNode;
 use super::graph_nodes::recursive_relation::{
-    CorrelationSource, RecursiveHop, RecursiveRelationNode,
+    CorrelationSource, RecursiveFixpointPlan, RecursiveHop, RecursiveRelationNode,
 };
 use super::graph_nodes::select_element::SelectElementNode;
 use super::graph_nodes::sort::{SortDirection, SortKey, SortNode, SortTarget};
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
-use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
+use super::graph_nodes::{NodeId, SourceContext};
 use super::index::ScanCondition;
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
-use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
@@ -74,7 +79,10 @@ pub enum GraphNode {
     Alias(AliasNode),
     Join(JoinNode),
     Materialize(MaterializeNode),
-    IndexedQuery(IndexedQueryNode),
+    OrderedDriverSource(OrderedDriverSourceNode),
+    MergeOrdered(MergeOrderedNode),
+    ProbeJoin(ProbeJoinNode),
+    TieSort(TieSortNode),
     MagicColumns(MagicColumnsNode),
     Project(ProjectNode),
     SelectElement(SelectElementNode),
@@ -88,6 +96,574 @@ pub enum GraphNode {
     ExistsOutput(ExistsOutputNode),
 }
 
+fn inherit_stream_spec(
+    input: Option<&ExecutionInput<'_>>,
+    materialization: Option<StreamMaterialization>,
+    distinctness: Option<StreamDistinctness>,
+) -> StreamSpec {
+    let mut spec = input.map(|input| input.spec.clone()).unwrap_or_default();
+    if let Some(materialization) = materialization {
+        spec.materialization = materialization;
+    }
+    if let Some(distinctness) = distinctness {
+        spec.distinctness = distinctness;
+    }
+    if !matches!(spec.ordering, StreamOrdering::Unordered)
+        && matches!(spec.resume_key, StreamResumeKey::None)
+    {
+        spec.resume_key = StreamResumeKey::InputDerived;
+    }
+    spec
+}
+
+impl ExecutionOperator for GraphNode {
+    fn operator_name(&self) -> &'static str {
+        match self {
+            GraphNode::IndexScan(_) => "IndexScanSource",
+            GraphNode::Union(_) => "Union",
+            GraphNode::Alias(_) => "Alias",
+            GraphNode::Join(_) => "Join",
+            GraphNode::Materialize(_) => "Materialize",
+            GraphNode::OrderedDriverSource(_) => "OrderedIndexScanSource",
+            GraphNode::MergeOrdered(_) => "MergeOrdered",
+            GraphNode::ProbeJoin(_) => "ProbeJoin",
+            GraphNode::TieSort(_) => "TieSort",
+            GraphNode::MagicColumns(_) => "MagicColumns",
+            GraphNode::Project(_) => "Project",
+            GraphNode::SelectElement(_) => "SelectElement",
+            GraphNode::RecursiveRelation(_) => "RecursiveFixpoint",
+            GraphNode::Filter(_) => "Filter",
+            GraphNode::PolicyFilter(_) => "PolicyFilter",
+            GraphNode::Sort(_) => "SortAll",
+            GraphNode::LimitOffset(_) => "Window",
+            GraphNode::ArraySubquery(_) => "ArraySubquery",
+            GraphNode::Output(_) => "Output",
+            GraphNode::ExistsOutput(_) => "ExistsOutput",
+        }
+    }
+
+    fn stream_spec(&self, inputs: &[ExecutionInput<'_>]) -> StreamSpec {
+        match self {
+            GraphNode::IndexScan(_) => StreamSpec {
+                ordering: StreamOrdering::Unordered,
+                resume_key: StreamResumeKey::RowId,
+                materialization: StreamMaterialization::Unmaterialized,
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::Union(_) => StreamSpec {
+                ordering: StreamOrdering::Unordered,
+                resume_key: StreamResumeKey::None,
+                materialization: inputs
+                    .first()
+                    .map(|input| input.spec.materialization)
+                    .unwrap_or(StreamMaterialization::Unknown),
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::Alias(_) => inherit_stream_spec(inputs.first(), None, None),
+            GraphNode::Join(_) => StreamSpec {
+                ordering: StreamOrdering::Unordered,
+                resume_key: StreamResumeKey::None,
+                materialization: StreamMaterialization::Full,
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::Materialize(_) => {
+                inherit_stream_spec(inputs.first(), Some(StreamMaterialization::Full), None)
+            }
+            GraphNode::OrderedDriverSource(_) => StreamSpec {
+                ordering: StreamOrdering::Ordered,
+                resume_key: StreamResumeKey::OrderedValueThenRowId,
+                materialization: StreamMaterialization::Full,
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::MergeOrdered(_) => StreamSpec {
+                ordering: StreamOrdering::Ordered,
+                resume_key: StreamResumeKey::OrderedValueThenRowId,
+                materialization: inputs
+                    .first()
+                    .map(|input| input.spec.materialization)
+                    .unwrap_or(StreamMaterialization::Full),
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::ProbeJoin(_) => StreamSpec {
+                ordering: StreamOrdering::Ordered,
+                resume_key: StreamResumeKey::OrderedValueThenRowId,
+                materialization: StreamMaterialization::Full,
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::TieSort(_) => StreamSpec {
+                ordering: StreamOrdering::Ordered,
+                resume_key: StreamResumeKey::OrderedValueThenRowId,
+                materialization: StreamMaterialization::Full,
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::MagicColumns(_) => {
+                inherit_stream_spec(inputs.first(), Some(StreamMaterialization::Full), None)
+            }
+            GraphNode::Project(_) => inherit_stream_spec(
+                inputs.first(),
+                Some(StreamMaterialization::Full),
+                Some(StreamDistinctness::Distinct),
+            ),
+            GraphNode::SelectElement(_) => inherit_stream_spec(
+                inputs.first(),
+                Some(StreamMaterialization::Full),
+                Some(StreamDistinctness::Distinct),
+            ),
+            GraphNode::RecursiveRelation(_) => StreamSpec {
+                ordering: StreamOrdering::Unordered,
+                resume_key: StreamResumeKey::None,
+                materialization: StreamMaterialization::Full,
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::Filter(_) | GraphNode::PolicyFilter(_) => {
+                inherit_stream_spec(inputs.first(), None, None)
+            }
+            GraphNode::Sort(_) => StreamSpec {
+                ordering: StreamOrdering::Ordered,
+                resume_key: StreamResumeKey::OrderedValueThenRowId,
+                materialization: inputs
+                    .first()
+                    .map(|input| input.spec.materialization)
+                    .unwrap_or(StreamMaterialization::Unknown),
+                distinctness: StreamDistinctness::Distinct,
+            },
+            GraphNode::LimitOffset(_) => {
+                inherit_stream_spec(inputs.first(), None, Some(StreamDistinctness::Distinct))
+            }
+            GraphNode::ArraySubquery(_) => {
+                inherit_stream_spec(inputs.first(), Some(StreamMaterialization::Full), None)
+            }
+            GraphNode::Output(_) => inherit_stream_spec(
+                inputs.first(),
+                Some(StreamMaterialization::Full),
+                Some(StreamDistinctness::Distinct),
+            ),
+            GraphNode::ExistsOutput(_) => StreamSpec {
+                ordering: StreamOrdering::Unordered,
+                resume_key: StreamResumeKey::None,
+                materialization: StreamMaterialization::Full,
+                distinctness: StreamDistinctness::Distinct,
+            },
+        }
+    }
+
+    fn execute(
+        &mut self,
+        inputs: &[ExecutionInput<'_>],
+        ctx: &ExecutionContext<'_>,
+        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+    ) -> ExecutionOutput {
+        let spec = self.stream_spec(inputs);
+        match self {
+            GraphNode::IndexScan(node) => {
+                let delta = node.scan(&SourceContext {
+                    storage: ctx.storage,
+                });
+                ExecutionOutput {
+                    delta,
+                    ordered: None,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::OrderedDriverSource(node) => {
+                let delta = node.process_with_context(ctx.storage, &mut |id| row_loader(id));
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.ordered_tuples().to_vec()),
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::MergeOrdered(node) => {
+                let ordered_inputs: Vec<_> =
+                    inputs.iter().filter_map(|input| input.ordered).collect();
+                let delta = node.process_ordered_inputs(&ordered_inputs);
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.ordered_tuples().to_vec()),
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::ProbeJoin(node) => {
+                let ordered_input = inputs
+                    .first()
+                    .and_then(|input| input.ordered)
+                    .unwrap_or(&[]);
+                let delta =
+                    node.process_with_context(ordered_input, ctx.storage, &mut |id| row_loader(id));
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.ordered_tuples().to_vec()),
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::TieSort(node) => {
+                let ordered_input = inputs
+                    .first()
+                    .and_then(|input| input.ordered)
+                    .unwrap_or(&[]);
+                let delta = node.process_ordered_input(ordered_input);
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.ordered_tuples().to_vec()),
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Union(node) => {
+                let input_refs: Vec<_> = inputs.iter().map(|input| &input.current_tuples).collect();
+                let delta = node.process(&input_refs);
+                ExecutionOutput {
+                    delta,
+                    ordered: None,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Alias(node) => {
+                let delta = node.process(
+                    inputs
+                        .first()
+                        .map(|input| input.delta.clone())
+                        .unwrap_or_default(),
+                );
+                let ordered = passthrough_ordered(inputs.first(), node.current_tuples());
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Join(node) => {
+                let left_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let right_delta = inputs
+                    .get(1)
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let left_result = node.process_left(left_delta);
+                let right_result = node.process_right(right_delta);
+                let mut delta = TupleDelta::new();
+                delta.added.extend(left_result.added);
+                delta.added.extend(right_result.added);
+                delta.removed.extend(left_result.removed);
+                delta.removed.extend(right_result.removed);
+                delta.updated.extend(left_result.updated);
+                delta.updated.extend(right_result.updated);
+                ExecutionOutput {
+                    delta,
+                    ordered: None,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Materialize(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let deleted_delta = node.check_deleted_tuples();
+                let new_delta = node.materialize_tuples(input_delta, &mut |id| row_loader(id));
+                let update_delta = node.check_updated_tuples(&mut |id| row_loader(id));
+
+                let mut delta = TupleDelta::new();
+                delta.added.extend(new_delta.added);
+                delta.removed.extend(deleted_delta.removed);
+                delta.removed.extend(new_delta.removed);
+                delta.updated.extend(new_delta.updated);
+                delta.updated.extend(update_delta.updated);
+                let ordered = passthrough_ordered(inputs.first(), node.current_tuples());
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::MagicColumns(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta =
+                    node.process_with_context(input_delta, ctx.storage, &mut |id| row_loader(id));
+                let ordered = passthrough_ordered(inputs.first(), node.current_tuples());
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Project(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta = node.process(input_delta);
+                let ordered =
+                    mapped_ordered_distinct(inputs.first(), node.current_tuples(), |tuple| {
+                        node.project_tuple(tuple)
+                    });
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::SelectElement(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta = node.process(input_delta);
+                let ordered =
+                    mapped_ordered_distinct(inputs.first(), node.current_tuples(), |tuple| {
+                        node.select_tuple(tuple)
+                    });
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::RecursiveRelation(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta =
+                    node.process_with_context(input_delta, ctx.storage, &mut |id| row_loader(id));
+                ExecutionOutput {
+                    delta,
+                    ordered: None,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Filter(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta = node.process(input_delta);
+                let ordered = passthrough_ordered(inputs.first(), node.current_tuples());
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::PolicyFilter(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta = if node.has_inherits() {
+                    node.process_with_context(input_delta, ctx.storage, &mut |id| row_loader(id))
+                } else {
+                    node.process(input_delta)
+                };
+                let ordered = passthrough_ordered(inputs.first(), node.current_tuples());
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Sort(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let delta = node.process(input_delta);
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.sorted_tuples().to_vec()),
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::LimitOffset(node) => {
+                let delta = if let Some(ordered) = inputs.first().and_then(|input| input.ordered) {
+                    node.process_with_ordered_input(ordered)
+                } else {
+                    node.process(
+                        inputs
+                            .first()
+                            .map(|input| input.delta.clone())
+                            .unwrap_or_default(),
+                    )
+                };
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.windowed_tuples().to_vec()),
+                    sync_input: Some(node.sync_input_tuples().to_vec()),
+                    spec,
+                }
+            }
+            GraphNode::ArraySubquery(node) => {
+                let input_delta = inputs
+                    .first()
+                    .map(|input| input.delta.clone())
+                    .unwrap_or_default();
+                let mut delta = if node.is_inner_dirty() {
+                    node.reevaluate_all(ctx.storage, &mut |id| row_loader(id))
+                } else {
+                    TupleDelta::new()
+                };
+                delta.merge(
+                    node.process_with_context(input_delta, ctx.storage, &mut |id| row_loader(id)),
+                );
+                let ordered = passthrough_ordered(inputs.first(), node.current_tuples());
+                ExecutionOutput {
+                    delta,
+                    ordered,
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::Output(node) => {
+                let delta = if let Some(ordered) = inputs.first().and_then(|input| input.ordered) {
+                    node.process_with_ordered_input(ordered)
+                } else {
+                    node.process(
+                        inputs
+                            .first()
+                            .map(|input| input.delta.clone())
+                            .unwrap_or_default(),
+                    )
+                };
+                ExecutionOutput {
+                    delta,
+                    ordered: Some(node.ordered_tuples().to_vec()),
+                    sync_input: None,
+                    spec,
+                }
+            }
+            GraphNode::ExistsOutput(node) => {
+                let delta = node.process(
+                    inputs
+                        .first()
+                        .map(|input| input.delta.clone())
+                        .unwrap_or_default(),
+                );
+                ExecutionOutput {
+                    delta,
+                    ordered: None,
+                    sync_input: None,
+                    spec,
+                }
+            }
+        }
+    }
+
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
+        match self {
+            GraphNode::IndexScan(node) => node.current_tuples(),
+            GraphNode::Union(node) => node.current_tuples(),
+            GraphNode::Alias(node) => node.current_tuples(),
+            GraphNode::Join(node) => node.current_tuples(),
+            GraphNode::Materialize(node) => node.current_tuples(),
+            GraphNode::OrderedDriverSource(node) => node.current_tuples(),
+            GraphNode::MergeOrdered(node) => node.current_tuples(),
+            GraphNode::ProbeJoin(node) => node.current_tuples(),
+            GraphNode::TieSort(node) => node.current_tuples(),
+            GraphNode::MagicColumns(node) => node.current_tuples(),
+            GraphNode::Project(node) => node.current_tuples(),
+            GraphNode::SelectElement(node) => node.current_tuples(),
+            GraphNode::RecursiveRelation(node) => node.current_tuples(),
+            GraphNode::Filter(node) => node.current_tuples(),
+            GraphNode::PolicyFilter(node) => node.current_tuples(),
+            GraphNode::Sort(node) => node.current_tuples(),
+            GraphNode::LimitOffset(node) => node.current_tuples(),
+            GraphNode::ArraySubquery(node) => node.current_tuples(),
+            GraphNode::Output(node) => node.current_tuples(),
+            GraphNode::ExistsOutput(node) => node.current_tuples(),
+        }
+    }
+
+    fn ordered_tuples(&self) -> Option<&[Tuple]> {
+        match self {
+            GraphNode::OrderedDriverSource(node) => Some(node.ordered_tuples()),
+            GraphNode::MergeOrdered(node) => Some(node.ordered_tuples()),
+            GraphNode::ProbeJoin(node) => Some(node.ordered_tuples()),
+            GraphNode::TieSort(node) => Some(node.ordered_tuples()),
+            GraphNode::Sort(node) => Some(node.sorted_tuples()),
+            GraphNode::LimitOffset(node) => Some(node.windowed_tuples()),
+            GraphNode::Output(node) => Some(node.ordered_tuples()),
+            _ => None,
+        }
+    }
+
+    fn sync_input_tuples(&self) -> Option<&[Tuple]> {
+        match self {
+            GraphNode::LimitOffset(node) => Some(node.sync_input_tuples()),
+            _ => None,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        match self {
+            GraphNode::IndexScan(node) => node.mark_dirty(),
+            GraphNode::Union(node) => node.mark_dirty(),
+            GraphNode::Alias(node) => node.mark_dirty(),
+            GraphNode::Join(node) => node.mark_dirty(),
+            GraphNode::Materialize(node) => node.mark_dirty(),
+            GraphNode::OrderedDriverSource(node) => node.mark_dirty(),
+            GraphNode::MergeOrdered(node) => node.mark_dirty(),
+            GraphNode::ProbeJoin(node) => node.mark_dirty(),
+            GraphNode::TieSort(node) => node.mark_dirty(),
+            GraphNode::MagicColumns(node) => node.mark_dirty(),
+            GraphNode::Project(node) => node.mark_dirty(),
+            GraphNode::SelectElement(node) => node.mark_dirty(),
+            GraphNode::RecursiveRelation(node) => node.mark_dirty(),
+            GraphNode::Filter(node) => node.mark_dirty(),
+            GraphNode::PolicyFilter(node) => node.mark_dirty(),
+            GraphNode::Sort(node) => node.mark_dirty(),
+            GraphNode::LimitOffset(node) => node.mark_dirty(),
+            GraphNode::ArraySubquery(node) => node.mark_dirty(),
+            GraphNode::Output(node) => node.mark_dirty(),
+            GraphNode::ExistsOutput(node) => node.mark_dirty(),
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        match self {
+            GraphNode::IndexScan(node) => node.is_dirty(),
+            GraphNode::Union(node) => node.is_dirty(),
+            GraphNode::Alias(node) => node.is_dirty(),
+            GraphNode::Join(node) => node.is_dirty(),
+            GraphNode::Materialize(node) => node.is_dirty(),
+            GraphNode::OrderedDriverSource(node) => node.is_dirty(),
+            GraphNode::MergeOrdered(node) => node.is_dirty(),
+            GraphNode::ProbeJoin(node) => node.is_dirty(),
+            GraphNode::TieSort(node) => node.is_dirty(),
+            GraphNode::MagicColumns(node) => node.is_dirty(),
+            GraphNode::Project(node) => node.is_dirty(),
+            GraphNode::SelectElement(node) => node.is_dirty(),
+            GraphNode::RecursiveRelation(node) => node.is_dirty(),
+            GraphNode::Filter(node) => node.is_dirty(),
+            GraphNode::PolicyFilter(node) => node.is_dirty(),
+            GraphNode::Sort(node) => node.is_dirty(),
+            GraphNode::LimitOffset(node) => node.is_dirty(),
+            GraphNode::ArraySubquery(node) => node.is_dirty(),
+            GraphNode::Output(node) => node.is_dirty(),
+            GraphNode::ExistsOutput(node) => node.is_dirty(),
+        }
+    }
+}
+
 /// Compact node with inline edge storage.
 /// Most nodes have 0-2 inputs/outputs, so inline storage avoids heap allocation.
 #[derive(Debug)]
@@ -97,6 +673,12 @@ pub struct CompactNode {
     pub inputs: SmallVec<[NodeId; 2]>,
     /// Output edges (parents/dependents). Most nodes have 0-2 outputs.
     pub outputs: SmallVec<[NodeId; 2]>,
+    /// Latest execution stream contract for this operator.
+    pub stream_spec: StreamSpec,
+    /// Pending invalidation, if any.
+    pub pending_invalidation: Option<StreamInvalidation>,
+    /// Lightweight execution counters.
+    pub stats: ExecutionStats,
 }
 
 /// Compiled query graph for a single query.
@@ -129,6 +711,8 @@ pub struct QueryGraph {
     /// Combined descriptor for output (all columns from all tables).
     pub combined_descriptor: RowDescriptor,
 }
+
+pub type ExecutionGraph = QueryGraph;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RelationCompileFeatures {
@@ -323,59 +907,85 @@ fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> V
         .collect()
 }
 
-fn resolve_row_key_in_scopes(
-    tuple_descriptor: &TupleDescriptor,
-    raw: &str,
-    candidate_scopes: &[usize],
-) -> Option<(usize, ResolvedRowKey)> {
-    if let Some((scope, column)) = raw.rsplit_once('.') {
-        let scope_index = candidate_scopes.iter().copied().find(|index| {
-            tuple_descriptor
-                .element(*index)
-                .is_some_and(|element| element.table == scope)
-        })?;
-        let descriptor = &tuple_descriptor.element(scope_index)?.descriptor;
-        let key = ResolvedRowKey::from_descriptor(descriptor, column.trim())?;
-        return Some((scope_index, key));
-    }
-
-    let mut matches = candidate_scopes
-        .iter()
-        .copied()
-        .filter_map(|index| {
-            let descriptor = &tuple_descriptor.element(index)?.descriptor;
-            let key = ResolvedRowKey::from_descriptor(descriptor, raw)?;
-            Some((index, key))
-        })
-        .collect::<Vec<_>>();
-
-    (matches.len() == 1).then(|| matches.remove(0))
+struct PlannerContext<'a> {
+    plan: &'a ExecutionQueryPlan,
+    schema: &'a Schema,
+    branches: &'a [String],
+    session: Option<Session>,
+    schema_context: &'a SchemaContext,
+    branch_schema_map: &'a HashMap<String, SchemaHash>,
 }
 
-fn resolve_sort_key(
-    tuple_descriptor: &TupleDescriptor,
-    column: &str,
-    direction: SortDirection,
-) -> Option<(usize, ResolvedRowKey, ResolvedSortKey)> {
-    let candidate_scopes = (0..tuple_descriptor.element_count()).collect::<Vec<_>>();
-    let (scope_index, key) =
-        resolve_row_key_in_scopes(tuple_descriptor, column, &candidate_scopes)?;
-    let target = if key.use_row_id {
-        ResolvedSortTarget::RowId {
-            element_index: scope_index,
-        }
-    } else {
-        ResolvedSortTarget::Column {
-            element_index: scope_index,
-            descriptor: tuple_descriptor.element(scope_index)?.descriptor.clone(),
-            local_col_index: key.local_col_index?,
-        }
-    };
+trait ExecutionPlanner {
+    fn name(&self) -> &'static str;
 
-    Some((scope_index, key, ResolvedSortKey { target, direction }))
+    fn try_plan(&self, ctx: &PlannerContext<'_>) -> Option<QueryGraph>;
+}
+
+struct IndexedTopKPlanner;
+struct JoinPlanner;
+struct GenericPlanner;
+
+static INDEXED_TOPK_PLANNER: IndexedTopKPlanner = IndexedTopKPlanner;
+static JOIN_PLANNER: JoinPlanner = JoinPlanner;
+static GENERIC_PLANNER: GenericPlanner = GenericPlanner;
+
+impl ExecutionPlanner for IndexedTopKPlanner {
+    fn name(&self) -> &'static str {
+        "indexed_topk"
+    }
+
+    fn try_plan(&self, ctx: &PlannerContext<'_>) -> Option<QueryGraph> {
+        QueryGraph::compile_indexed_query_plan(
+            ctx.plan,
+            ctx.schema,
+            ctx.branches,
+            ctx.session.clone(),
+            ctx.schema_context,
+            ctx.branch_schema_map,
+        )
+    }
+}
+
+impl ExecutionPlanner for JoinPlanner {
+    fn name(&self) -> &'static str {
+        "join"
+    }
+
+    fn try_plan(&self, ctx: &PlannerContext<'_>) -> Option<QueryGraph> {
+        (!ctx.plan.joins.is_empty()).then_some(())?;
+        QueryGraph::compile_join_plan(
+            ctx.plan,
+            ctx.schema,
+            ctx.branches,
+            ctx.session.clone(),
+            ctx.schema_context,
+        )
+    }
+}
+
+impl ExecutionPlanner for GenericPlanner {
+    fn name(&self) -> &'static str {
+        "generic"
+    }
+
+    fn try_plan(&self, ctx: &PlannerContext<'_>) -> Option<QueryGraph> {
+        QueryGraph::compile_generic_query_plan(
+            ctx.plan,
+            ctx.schema,
+            ctx.branches,
+            ctx.session.clone(),
+            ctx.schema_context,
+            ctx.branch_schema_map,
+        )
+    }
 }
 
 impl QueryGraph {
+    fn planner_registry() -> [&'static dyn ExecutionPlanner; 3] {
+        [&INDEXED_TOPK_PLANNER, &JOIN_PLANNER, &GENERIC_PLANNER]
+    }
+
     pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
             nodes: Vec::new(),
@@ -396,11 +1006,22 @@ impl QueryGraph {
 
     /// Mark a node as dirty using the bitmap.
     pub fn mark_dirty(&mut self, id: NodeId) {
+        self.mark_dirty_with_invalidation(id, StreamInvalidation::FullRestart);
+    }
+
+    fn mark_dirty_with_invalidation(&mut self, id: NodeId, invalidation: StreamInvalidation) {
         let idx = id.0 as usize;
+        if idx >= self.nodes.len() {
+            return;
+        }
         if idx >= self.dirty_bitmap.len() {
             self.dirty_bitmap.resize(idx + 1, false);
         }
         self.dirty_bitmap.set(idx, true);
+        if let Some(node) = self.nodes.get_mut(idx) {
+            node.pending_invalidation = Some(invalidation);
+            node.stats.invalidations += 1;
+        }
     }
 
     /// Check if a node is dirty.
@@ -419,9 +1040,16 @@ impl QueryGraph {
         self.dirty_bitmap.fill(false);
     }
 
+    pub fn operator_stats(&self, id: NodeId) -> Option<&ExecutionStats> {
+        self.nodes.get(id.0 as usize).map(|node| &node.stats)
+    }
+
     fn add_node(&mut self, node: GraphNode) -> NodeId {
         let id = NodeId(self.nodes.len() as u64);
         self.nodes.push(CompactNode {
+            stream_spec: node.stream_spec(&[]),
+            pending_invalidation: Some(StreamInvalidation::FullRestart),
+            stats: ExecutionStats::default(),
             node,
             inputs: SmallVec::new(),
             outputs: SmallVec::new(),
@@ -481,15 +1109,10 @@ impl QueryGraph {
         if let Some(node_id) = self.pagination_node
             && let Some(node) = self.get_node(node_id)
         {
-            let mut scope = match node {
-                GraphNode::LimitOffset(limit_offset) => {
-                    self.scope_from_tuples(limit_offset.sync_input_tuples())
-                }
-                GraphNode::IndexedQuery(indexed) => {
-                    self.scope_from_tuples(indexed.sync_input_tuples())
-                }
-                _ => HashSet::new(),
-            };
+            let mut scope = node
+                .sync_input_tuples()
+                .map(|tuples| self.scope_from_tuples(tuples))
+                .unwrap_or_default();
             scope.extend(self.contributing_object_ids());
             if !scope.is_empty() {
                 return scope;
@@ -651,25 +1274,35 @@ impl QueryGraph {
             plan.branches.clone()
         };
 
-        if let Some(graph) = Self::compile_indexed_query_plan(
+        let planner_ctx = PlannerContext {
             plan,
             schema,
-            &branches,
-            session.clone(),
+            branches: &branches,
+            session,
             schema_context,
-            &branch_schema_map,
-        ) {
-            return Some(graph);
+            branch_schema_map: &branch_schema_map,
+        };
+
+        for planner in Self::planner_registry() {
+            if let Some(graph) = planner.try_plan(&planner_ctx) {
+                tracing::trace!(planner = planner.name(), "compiled query execution graph");
+                return Some(graph);
+            }
         }
 
+        None
+    }
+
+    fn compile_generic_query_plan(
+        plan: &ExecutionQueryPlan,
+        schema: &Schema,
+        branches: &[String],
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Option<Self> {
         if !plan.joins.is_empty() {
-            return Self::compile_join_plan(
-                plan,
-                schema,
-                &branches,
-                session.clone(),
-                schema_context,
-            );
+            return None;
         }
 
         let table_schema = schema.get(&plan.table)?;
@@ -685,7 +1318,7 @@ impl QueryGraph {
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
         let mut index_columns: Vec<String> = Vec::new();
 
-        for branch in &branches {
+        for branch in branches {
             // Get schema hash for this branch to determine if column translation is needed
             let branch_schema_hash = branch_schema_map.get(branch).copied();
 
@@ -817,7 +1450,7 @@ impl QueryGraph {
                 subquery_spec,
                 &current_descriptor,
                 schema,
-                &branches,
+                branches,
                 schema_context,
             ) {
                 let node_id = graph.add_node(GraphNode::ArraySubquery(node));
@@ -981,14 +1614,17 @@ impl QueryGraph {
 
         // Recursive relation expansion (if configured).
         if let Some(recursive_spec) = &plan.recursive
-            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+            && let Some(recursive_plan) = graph.compile_recursive_relation(
                 recursive_spec,
                 &current_descriptor,
                 schema,
-                &branches,
+                branches,
                 schema_context,
             )
         {
+            let new_descriptor = recursive_plan.output_descriptor().clone();
+            let step_table = recursive_plan.step_table();
+            let node = RecursiveRelationNode::new(recursive_plan);
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
             graph.add_edge(node_id, phase2_input);
             graph.recursive_relation_tables.push((node_id, step_table));
@@ -1250,7 +1886,7 @@ impl QueryGraph {
         schema: &Schema,
         branches: &[String],
         schema_context: &SchemaContext,
-    ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
+    ) -> Option<RecursiveFixpointPlan> {
         let step_table_schema = schema.get(&spec.table)?;
         let step_table_descriptor = step_table_schema.columns.clone();
 
@@ -1352,17 +1988,16 @@ impl QueryGraph {
 
         let input_descriptor =
             TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
-        let node = RecursiveRelationNode::new(
+        Some(RecursiveFixpointPlan::new(
             input_descriptor,
             current_descriptor.clone(),
             step_template,
+            schema.clone(),
             correlation_source,
             hop,
             spec.max_depth,
-            schema.clone(),
-        );
-
-        Some((node, current_descriptor.clone(), spec.table))
+            spec.table,
+        ))
     }
 
     fn compile_indexed_query_plan(
@@ -1373,213 +2008,92 @@ impl QueryGraph {
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<Self> {
-        if plan.include_deleted || plan.recursive.is_some() {
-            return None;
-        }
-        if plan.limit.is_none() && plan.offset == 0 {
-            return None;
-        }
-        if !plan.joins.is_empty() && !plan.array_subqueries.is_empty() {
-            return None;
-        }
-
-        let base_table_schema = schema.get(&plan.table)?;
-        let base_descriptor = base_table_schema.columns.clone();
-
-        let mut scope_names = vec![plan.base_scope.clone()];
-        let mut table_names = vec![plan.table];
-        let mut table_descriptors = vec![base_descriptor.clone()];
-        let mut seen_tables = HashSet::new();
-        seen_tables.insert(plan.table.as_str().to_string());
-
-        for join_spec in &plan.joins {
-            let join_table_name = join_spec.table.as_str().to_string();
-            if seen_tables.contains(&join_table_name) {
-                return None;
-            }
-
-            let joined_schema = schema.get(&join_spec.table)?;
-            scope_names.push(join_spec.effective_name().to_string());
-            table_names.push(join_spec.table);
-            table_descriptors.push(joined_schema.columns.clone());
-            seen_tables.insert(join_table_name);
-        }
-
-        let tuple_descriptor = TupleDescriptor::from_tables(
-            &scope_names
-                .iter()
-                .cloned()
-                .zip(table_descriptors.iter().cloned())
-                .collect::<Vec<_>>(),
-        )
-        .with_all_materialized();
-        let combined_descriptor = RowDescriptor::combine(&table_descriptors);
-
-        let (driver_scope_index, driver_key, sort_keys) = if plan.order_by.is_empty() {
-            let driver_key = ResolvedRowKey::from_descriptor(&base_descriptor, "_id")?;
-            (
-                0,
-                driver_key,
-                vec![ResolvedSortKey {
-                    target: ResolvedSortTarget::RowId { element_index: 0 },
-                    direction: SortDirection::Ascending,
-                }],
-            )
-        } else {
-            let mut resolved_sort_keys = Vec::with_capacity(plan.order_by.len());
-            let mut driver_scope_index = None;
-            let mut driver_key = None;
-
-            for (column, direction) in &plan.order_by {
-                let (scope_index, key, sort_key) =
-                    resolve_sort_key(&tuple_descriptor, column, *direction)?;
-                if driver_scope_index.is_none() {
-                    driver_scope_index = Some(scope_index);
-                    driver_key = Some(key.clone());
-                }
-                resolved_sort_keys.push(sort_key);
-            }
-
-            (driver_scope_index?, driver_key?, resolved_sort_keys)
-        };
-
-        let driver = DriverPlan {
-            scope_index: driver_scope_index,
-            table: table_names[driver_scope_index],
-            key: driver_key.clone(),
-            direction: match sort_keys.first()?.direction {
-                SortDirection::Ascending => IndexScanDirection::Ascending,
-                SortDirection::Descending => IndexScanDirection::Descending,
-            },
-            sort_keys,
-        };
-
-        let mut join_edges = Vec::with_capacity(plan.joins.len());
-        for (join_index, join_spec) in plan.joins.iter().enumerate() {
-            let (left_col, right_col) = join_spec.on.as_ref()?;
-            let left_candidates = (0..=join_index).collect::<Vec<_>>();
-            let right_scope_index = join_index + 1;
-            let (left_scope_index, left_key) =
-                resolve_row_key_in_scopes(&tuple_descriptor, left_col, &left_candidates)?;
-            let (resolved_right_scope_index, right_key) =
-                resolve_row_key_in_scopes(&tuple_descriptor, right_col, &[right_scope_index])?;
-            if resolved_right_scope_index != right_scope_index {
-                return None;
-            }
-
-            join_edges.push(JoinEdgePlan {
-                left_scope_index,
-                right_scope_index,
-                left_table: table_names[left_scope_index],
-                right_table: table_names[right_scope_index],
-                left_key,
-                right_key,
-            });
-        }
-
-        let residual_filter = match disjuncts_to_predicate(&plan.disjuncts, &tuple_descriptor) {
-            Predicate::True => None,
-            predicate => Some(FilterNode::with_tuple_descriptor(
-                tuple_descriptor.clone(),
-                predicate,
-            )),
-        };
-
-        let policy_branch = branches
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "main".to_string());
-        let mut policies = Vec::new();
-        let mut policy_dependencies = Vec::new();
-        if let Some(session) = &session {
-            for (scope_index, table) in table_names.iter().enumerate() {
-                let table_schema = schema.get(table)?;
-                let Some(policy) = table_schema.policies.select.using.clone() else {
-                    continue;
-                };
-                if policy == PolicyExpr::True {
-                    continue;
-                }
-
-                let evaluator = PolicyFilterNode::new_with_branch(
-                    table_descriptors[scope_index].clone(),
-                    policy.clone(),
-                    session.clone(),
-                    schema.clone(),
-                    table.as_str(),
-                    &policy_branch,
-                );
-                policy_dependencies.extend(
-                    evaluator
-                        .inherits_tables()
-                        .iter()
-                        .map(|table| TableName::new(table.as_str())),
-                );
-                let mut evaluators_by_branch = HashMap::with_capacity(branches.len());
-                for branch in branches {
-                    evaluators_by_branch.insert(
-                        branch.clone(),
-                        PolicyFilterNode::new_with_branch(
-                            table_descriptors[scope_index].clone(),
-                            policy.clone(),
-                            session.clone(),
-                            schema.clone(),
-                            table.as_str(),
-                            branch,
-                        ),
-                    );
-                }
-                policies.push(TablePolicySpec {
-                    scope_index,
-                    evaluators_by_branch,
-                });
-            }
-        }
-
-        let source_node = IndexedQueryNode::new(IndexedQueryNodeConfig {
-            branches: branches.to_vec(),
-            branch_schema_map: branch_schema_map.clone(),
-            schema_context: schema_context.clone(),
-            tuple_descriptor: tuple_descriptor.clone(),
-            table_descriptors: table_descriptors.clone(),
-            disjuncts: plan.disjuncts.clone(),
-            driver: driver.clone(),
-            join_edges: join_edges.clone(),
-            residual_filter,
-            policies,
-            limit: plan.limit,
-            offset: plan.offset,
-        });
+        let indexed_plan = compile_indexed_topk_graph_plan(
+            plan,
+            schema,
+            branches,
+            session,
+            schema_context,
+            branch_schema_map,
+        )?;
+        let super::graph_nodes::indexed_topk::IndexedTopKGraphPlan {
+            base_descriptor,
+            combined_descriptor,
+            table_descriptors,
+            tuple_descriptor,
+            source_plans,
+            merge_spec,
+            probe_join_spec,
+            probe_join_lookup_columns,
+            probe_join_policy_dependencies,
+            tie_sort_spec,
+            limit,
+            offset,
+        } = indexed_plan;
 
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
         graph.table_descriptors = table_descriptors.clone();
 
-        let source_id = graph.add_node(GraphNode::IndexedQuery(source_node));
-        graph.ordered_scan_nodes.push((
-            source_id,
-            driver.table,
-            ColumnName::new(driver.key.index_column()),
-        ));
-        for edge in &join_edges {
-            graph.index_scan_nodes.push((
-                source_id,
-                edge.left_table,
-                ColumnName::new(edge.left_key.index_column()),
+        let mut source_ids = Vec::with_capacity(source_plans.len());
+        for source_plan in source_plans {
+            let source_id = graph.add_node(GraphNode::OrderedDriverSource(
+                OrderedDriverSourceNode::new(Arc::clone(&source_plan.spec)),
             ));
-            graph.index_scan_nodes.push((
+            graph.ordered_scan_nodes.push((
                 source_id,
-                edge.right_table,
-                ColumnName::new(edge.right_key.index_column()),
+                source_plan.spec.table,
+                ColumnName::new(&source_plan.ordered_scan_column),
             ));
-        }
-        for dependency in policy_dependencies {
-            graph.policy_filter_tables.push((source_id, dependency));
-        }
-        if plan.limit.is_some() || plan.offset > 0 {
-            graph.pagination_node = Some(source_id);
+            for column in source_plan.exact_match_probe_columns {
+                graph.index_scan_nodes.push((
+                    source_id,
+                    source_plan.spec.table,
+                    ColumnName::new(&column),
+                ));
+            }
+            for dependency in source_plan.policy_dependencies {
+                graph.policy_filter_tables.push((source_id, dependency));
+            }
+            source_ids.push(source_id);
         }
 
-        let mut phase2_input = source_id;
+        let driver_input = if source_ids.len() > 1 {
+            let merge_id = graph.add_node(GraphNode::MergeOrdered(MergeOrderedNode::new(
+                Arc::clone(&merge_spec),
+            )));
+            for source_id in &source_ids {
+                graph.add_edge(merge_id, *source_id);
+            }
+            merge_id
+        } else {
+            *source_ids.first()?
+        };
+
+        let probe_join_id = graph.add_node(GraphNode::ProbeJoin(ProbeJoinNode::new(Arc::clone(
+            &probe_join_spec,
+        ))));
+        graph.add_edge(probe_join_id, driver_input);
+        for (table, column) in probe_join_lookup_columns {
+            graph
+                .index_scan_nodes
+                .push((probe_join_id, table, ColumnName::new(&column)));
+        }
+        for dependency in probe_join_policy_dependencies {
+            graph.policy_filter_tables.push((probe_join_id, dependency));
+        }
+
+        let tie_sort_id = graph.add_node(GraphNode::TieSort(TieSortNode::new(Arc::clone(
+            &tie_sort_spec,
+        ))));
+        graph.add_edge(tie_sort_id, probe_join_id);
+
+        let limit_offset_node =
+            LimitOffsetNode::with_tuple_descriptor(tuple_descriptor.clone(), limit, offset);
+        let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+        graph.add_edge(limit_offset_id, tie_sort_id);
+        graph.pagination_node = Some(limit_offset_id);
+
+        let mut phase2_input = limit_offset_id;
         let mut output_descriptor = if table_descriptors.len() == 1 {
             base_descriptor.clone()
         } else {
@@ -1762,7 +2276,7 @@ impl QueryGraph {
         let mut left_descriptor = base_descriptor.clone();
 
         if let Some(recursive_spec) = &plan.recursive
-            && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
+            && let Some(recursive_plan) = graph.compile_recursive_relation(
                 recursive_spec,
                 &left_descriptor,
                 schema,
@@ -1770,6 +2284,9 @@ impl QueryGraph {
                 schema_context,
             )
         {
+            let new_descriptor = recursive_plan.output_descriptor().clone();
+            let step_table = recursive_plan.step_table();
+            let node = RecursiveRelationNode::new(recursive_plan);
             let node_id = graph.add_node(GraphNode::RecursiveRelation(node));
             graph.add_edge(node_id, left_id);
             graph.recursive_relation_tables.push((node_id, step_table));
@@ -2132,7 +2649,13 @@ impl QueryGraph {
             )
             .collect();
         for node_id in affected {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(
+                node_id,
+                StreamInvalidation::Column {
+                    table: table.to_string(),
+                    column: column.to_string(),
+                },
+            );
             self.mark_downstream_dirty(node_id);
         }
     }
@@ -2166,7 +2689,12 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_index_scans {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(
+                node_id,
+                StreamInvalidation::Table {
+                    table: table.to_string(),
+                },
+            );
             self.mark_downstream_dirty(node_id);
         }
         // Mark array subquery nodes whose inner table changed
@@ -2184,7 +2712,12 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_array_subqueries {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(
+                node_id,
+                StreamInvalidation::Table {
+                    table: table.to_string(),
+                },
+            );
             // Mark the node as needing inner re-evaluation
             if let Some(GraphNode::ArraySubquery(node)) = self.get_node_mut(node_id) {
                 node.mark_inner_dirty();
@@ -2207,7 +2740,12 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_policy_filters {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(
+                node_id,
+                StreamInvalidation::Table {
+                    table: table.to_string(),
+                },
+            );
             // Mark the node as needing policy re-evaluation
             if let Some(GraphNode::PolicyFilter(node)) = self.get_node_mut(node_id) {
                 node.mark_inherits_dirty();
@@ -2229,7 +2767,12 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_magic_columns {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(
+                node_id,
+                StreamInvalidation::Table {
+                    table: table.to_string(),
+                },
+            );
             if let Some(GraphNode::MagicColumns(node)) = self.get_node_mut(node_id) {
                 node.mark_dependency_dirty();
             }
@@ -2250,7 +2793,12 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_recursive_relations {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(
+                node_id,
+                StreamInvalidation::Table {
+                    table: table.to_string(),
+                },
+            );
             if let Some(GraphNode::RecursiveRelation(node)) = self.get_node_mut(node_id) {
                 node.mark_inner_dirty();
             }
@@ -2316,7 +2864,7 @@ impl QueryGraph {
 
         // Second pass: mark dirty and propagate downstream
         for node_id in materialize_node_ids {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(node_id, StreamInvalidation::FullRestart);
             self.mark_downstream_dirty(node_id);
         }
     }
@@ -2341,7 +2889,7 @@ impl QueryGraph {
 
         // Second pass: mark dirty and propagate downstream
         for node_id in materialize_node_ids {
-            self.mark_dirty(node_id);
+            self.mark_dirty_with_invalidation(node_id, StreamInvalidation::FullRestart);
             self.mark_downstream_dirty(node_id);
         }
     }
@@ -2353,7 +2901,7 @@ impl QueryGraph {
             for parent in parents {
                 // Only recurse if not already dirty (avoid infinite loops)
                 if !self.is_dirty(parent) {
-                    self.mark_dirty(parent);
+                    self.mark_dirty_with_invalidation(parent, StreamInvalidation::FullRestart);
                     // Recursively mark parents of parent
                     self.mark_downstream_dirty(parent);
                 }
@@ -2395,83 +2943,6 @@ impl QueryGraph {
         result
     }
 
-    fn ordered_tuples_for_node(&self, node_id: NodeId) -> Option<Vec<Tuple>> {
-        match self.get_node(node_id)? {
-            GraphNode::IndexedQuery(node) => Some(node.windowed_tuples().to_vec()),
-            GraphNode::LimitOffset(node) => Some(node.windowed_tuples().to_vec()),
-            GraphNode::Sort(node) => Some(node.sorted_tuples().to_vec()),
-            GraphNode::Materialize(node) => {
-                let input_id = self.get_inputs(node_id).first().copied()?;
-                let ordered_input = self.ordered_tuples_for_node(input_id)?;
-                Some(
-                    ordered_input
-                        .into_iter()
-                        .filter_map(|tuple| node.current_tuples().get(&tuple).cloned())
-                        .collect(),
-                )
-            }
-            GraphNode::Filter(node) => {
-                let input_id = self.get_inputs(node_id).first().copied()?;
-                let ordered_input = self.ordered_tuples_for_node(input_id)?;
-                Some(
-                    ordered_input
-                        .into_iter()
-                        .filter_map(|tuple| node.current_tuples().get(&tuple).cloned())
-                        .collect(),
-                )
-            }
-            GraphNode::PolicyFilter(node) => {
-                let input_id = self.get_inputs(node_id).first().copied()?;
-                let ordered_input = self.ordered_tuples_for_node(input_id)?;
-                Some(
-                    ordered_input
-                        .into_iter()
-                        .filter_map(|tuple| node.current_tuples().get(&tuple).cloned())
-                        .collect(),
-                )
-            }
-            GraphNode::ArraySubquery(node) => {
-                let input_id = self.get_inputs(node_id).first().copied()?;
-                let ordered_input = self.ordered_tuples_for_node(input_id)?;
-                Some(
-                    ordered_input
-                        .into_iter()
-                        .filter_map(|tuple| node.current_tuples().get(&tuple).cloned())
-                        .collect(),
-                )
-            }
-            GraphNode::Project(node) => {
-                let input_id = self.get_inputs(node_id).first().copied()?;
-                let ordered_input = self.ordered_tuples_for_node(input_id)?;
-                let mut seen = AHashSet::new();
-                let mut result = Vec::new();
-                for tuple in ordered_input {
-                    let projected = node.project_tuple(&tuple)?;
-                    let current = node.current_tuples().get(&projected)?.clone();
-                    if seen.insert(current.clone()) {
-                        result.push(current);
-                    }
-                }
-                Some(result)
-            }
-            GraphNode::SelectElement(node) => {
-                let input_id = self.get_inputs(node_id).first().copied()?;
-                let ordered_input = self.ordered_tuples_for_node(input_id)?;
-                let mut seen = AHashSet::new();
-                let mut result = Vec::new();
-                for tuple in ordered_input {
-                    let selected = node.select_tuple(&tuple)?;
-                    let current = node.current_tuples().get(&selected)?.clone();
-                    if seen.insert(current.clone()) {
-                        result.push(current);
-                    }
-                }
-                Some(result)
-            }
-            _ => None,
-        }
-    }
-
     /// Settle the graph - process all dirty nodes in topological order.
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
@@ -2482,410 +2953,79 @@ impl QueryGraph {
         if !order.is_empty() {
             tracing::trace!(dirty_nodes = order.len(), table = %self.table, "settling query graph");
         }
-        let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
-
-        let ctx = SourceContext { storage };
+        let mut execution_outputs: AHashMap<NodeId, ExecutionOutput> = AHashMap::new();
+        let empty_delta = TupleDelta::default();
 
         for node_id in order {
-            let node_type = match self.get_node(node_id) {
-                Some(GraphNode::IndexScan(_)) => "IndexScan",
-                Some(GraphNode::IndexedQuery(_)) => "IndexedQuery",
-                Some(GraphNode::Union(_)) => "Union",
-                Some(GraphNode::Alias(_)) => "Alias",
-                Some(GraphNode::Join(_)) => "Join",
-                Some(GraphNode::MagicColumns(_)) => "MagicColumns",
-                Some(GraphNode::Project(_)) => "Project",
-                Some(GraphNode::SelectElement(_)) => "SelectElement",
-                Some(GraphNode::RecursiveRelation(_)) => "RecursiveRelation",
-                Some(GraphNode::Materialize(_)) => "Materialize",
-                Some(GraphNode::Filter(_)) => "Filter",
-                Some(GraphNode::PolicyFilter(_)) => "PolicyFilter",
-                Some(GraphNode::Sort(_)) => "Sort",
-                Some(GraphNode::LimitOffset(_)) => "LimitOffset",
-                Some(GraphNode::ArraySubquery(_)) => "ArraySubquery",
-                Some(GraphNode::Output(_)) => "Output",
-                Some(GraphNode::ExistsOutput(_)) => "ExistsOutput",
-                None => "Unknown",
-            };
+            let input_ids = self.get_inputs(node_id).to_vec();
+            let needs_input_current_tuples =
+                matches!(self.get_node(node_id), Some(GraphNode::Union(_)));
+            let inputs: Vec<ExecutionInput<'_>> = input_ids
+                .iter()
+                .map(|dep| ExecutionInput {
+                    delta: execution_outputs
+                        .get(dep)
+                        .map(|output| &output.delta)
+                        .unwrap_or(&empty_delta),
+                    current_tuples: if needs_input_current_tuples {
+                        self.get_node(*dep)
+                            .map(|node| node.current_tuples().clone())
+                            .unwrap_or_default()
+                    } else {
+                        AHashSet::new()
+                    },
+                    ordered: execution_outputs
+                        .get(dep)
+                        .and_then(|output| output.ordered.as_deref()),
+                    sync_input: execution_outputs
+                        .get(dep)
+                        .and_then(|output| output.sync_input.as_deref()),
+                    spec: execution_outputs
+                        .get(dep)
+                        .map(|output| output.spec.clone())
+                        .or_else(|| {
+                            self.nodes
+                                .get(dep.0 as usize)
+                                .map(|compact| compact.stream_spec.clone())
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect();
 
-            match self.get_node(node_id) {
-                Some(GraphNode::IndexScan(_)) => {
-                    if let Some(GraphNode::IndexScan(scan_node)) = self.get_node_mut(node_id) {
-                        let delta = SourceNode::scan(scan_node, &ctx);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
+            let node_type = self
+                .get_node(node_id)
+                .map(ExecutionOperator::operator_name)
+                .unwrap_or("Unknown");
+            let pending_invalidation = self
+                .nodes
+                .get_mut(node_id.0 as usize)
+                .and_then(|compact| compact.pending_invalidation.take())
+                .unwrap_or(StreamInvalidation::FullRestart);
+            let exec_ctx = ExecutionContext { storage, node_id };
+
+            if let Some(node) = self.get_node_mut(node_id) {
+                let output = node.execute(&inputs, &exec_ctx, &mut row_loader);
+                let current_len = node.current_tuples().len();
+
+                tracing::debug!(
+                    node_id = node_id.0,
+                    node_type,
+                    added = output.delta.added.len(),
+                    removed = output.delta.removed.len(),
+                    "graph node evaluated"
+                );
+
+                if let Some(compact) = self.nodes.get_mut(node_id.0 as usize) {
+                    compact.stream_spec = output.spec.clone();
+                    compact.stats.polls += 1;
+                    compact.stats.rows_scanned += output.rows_scanned_hint(current_len);
+                    match pending_invalidation {
+                        StreamInvalidation::FullRestart => compact.stats.full_restarts += 1,
+                        _ => compact.stats.resume_count += 1,
                     }
                 }
-                Some(GraphNode::IndexedQuery(_)) => {
-                    if let Some(GraphNode::IndexedQuery(scan_node)) = self.get_node_mut(node_id) {
-                        let delta = scan_node.scan_with_context(&ctx, &mut row_loader);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Union(_)) => {
-                    let inputs = self.collect_tuple_inputs(node_id);
-                    if let Some(GraphNode::Union(union_node)) = self.get_node_mut(node_id) {
-                        let input_refs: Vec<_> = inputs.iter().collect();
-                        let delta = TransformNode::process(union_node, &input_refs);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Alias(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
 
-                    if let Some(GraphNode::Alias(alias_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(alias_node, input_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Join(_)) => {
-                    // JoinNode has two inputs: left (index 0) and right (index 1)
-                    let inputs = self.get_inputs(node_id);
-                    let left_delta = inputs
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-                    let right_delta = inputs
-                        .get(1)
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::Join(join_node)) = self.get_node_mut(node_id) {
-                        // Process left side first, then right side
-                        let left_result = join_node.process_left(left_delta);
-                        let right_result = join_node.process_right(right_delta);
-
-                        // Merge results
-                        let mut merged = TupleDelta::new();
-                        merged.added.extend(left_result.added);
-                        merged.added.extend(right_result.added);
-                        merged.removed.extend(left_result.removed);
-                        merged.removed.extend(right_result.removed);
-
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = merged.added.len(),
-                            removed = merged.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, merged);
-                    }
-                }
-                Some(GraphNode::Project(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::Project(project_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(project_node, input_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::SelectElement(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::SelectElement(select_node)) = self.get_node_mut(node_id)
-                    {
-                        let delta = RowNode::process(select_node, input_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::RecursiveRelation(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::RecursiveRelation(recursive_node)) =
-                        self.get_node_mut(node_id)
-                    {
-                        let delta = recursive_node.process_with_context(
-                            input_delta,
-                            storage,
-                            &mut row_loader,
-                        );
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Materialize(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::Materialize(mat_node)) = self.get_node_mut(node_id) {
-                        let deleted_delta = mat_node.check_deleted_tuples();
-                        let new_delta = mat_node.materialize_tuples(input_delta, &mut row_loader);
-                        let update_delta = mat_node.check_updated_tuples(&mut row_loader);
-
-                        let mut merged = TupleDelta::new();
-                        merged.added.extend(new_delta.added);
-                        merged.removed.extend(deleted_delta.removed);
-                        merged.removed.extend(new_delta.removed);
-                        merged.updated.extend(new_delta.updated);
-                        merged.updated.extend(update_delta.updated);
-
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = merged.added.len(),
-                            removed = merged.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, merged);
-                    }
-                }
-                Some(GraphNode::MagicColumns(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
-                        let delta =
-                            magic_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            });
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Filter(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::Filter(filter_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(filter_node, input_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::PolicyFilter(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
-                        // Use process_with_context if the policy has INHERITS clauses
-                        let delta = if policy_node.has_inherits() {
-                            policy_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            })
-                        } else {
-                            RowNode::process(policy_node, input_delta)
-                        };
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Sort(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::Sort(sort_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(sort_node, input_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::LimitOffset(_)) => {
-                    let input_node = self.get_inputs(node_id).first().copied();
-                    let ordered_input =
-                        input_node.and_then(|dep| self.ordered_tuples_for_node(dep));
-
-                    if let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id) {
-                        let delta = if let Some(ordered) = ordered_input {
-                            lo_node.process_with_ordered_input(&ordered)
-                        } else {
-                            let input_delta = input_node
-                                .and_then(|dep| tuple_deltas.get(&dep).cloned())
-                                .unwrap_or_default();
-                            RowNode::process(lo_node, input_delta)
-                        };
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::ArraySubquery(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::ArraySubquery(subquery_node)) =
-                        self.get_node_mut(node_id)
-                    {
-                        // Check if inner table changed - need to reevaluate all existing instances
-                        let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id))
-                        } else {
-                            TupleDelta::new()
-                        };
-
-                        // Process outer input changes
-                        let outer_delta = subquery_node.process_with_context(
-                            input_delta,
-                            storage,
-                            &mut row_loader,
-                        );
-
-                        // Merge outer delta into combined delta
-                        delta.merge(outer_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::Output(_)) => {
-                    let input_node = self.get_inputs(node_id).first().copied();
-                    let ordered_input =
-                        input_node.and_then(|dep| self.ordered_tuples_for_node(dep));
-
-                    if let Some(GraphNode::Output(output_node)) = self.get_node_mut(node_id) {
-                        let delta = if let Some(ordered) = ordered_input {
-                            output_node.process_with_ordered_input(&ordered)
-                        } else {
-                            let input_delta = input_node
-                                .and_then(|dep| tuple_deltas.get(&dep).cloned())
-                                .unwrap_or_default();
-                            RowNode::process(output_node, input_delta)
-                        };
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                Some(GraphNode::ExistsOutput(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
-                        .unwrap_or_default();
-
-                    if let Some(GraphNode::ExistsOutput(exists_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(exists_node, input_delta);
-                        tracing::debug!(
-                            node_id = node_id.0,
-                            node_type,
-                            added = delta.added.len(),
-                            removed = delta.removed.len(),
-                            "graph node evaluated"
-                        );
-                        tuple_deltas.insert(node_id, delta);
-                    }
-                }
-                None => {}
+                execution_outputs.insert(node_id, output);
             }
         }
 
@@ -2894,9 +3034,10 @@ impl QueryGraph {
         // Convert TupleDelta to RowDelta for output
         // For single-table queries: use simple conversion
         // For join queries: flatten multi-element tuples using table descriptors
-        tuple_deltas
+        execution_outputs
             .remove(&self.output_node)
-            .and_then(|td| {
+            .and_then(|output| {
+                let td = output.delta;
                 if self.table_descriptors.len() == 1 {
                     // Single-table query - direct conversion
                     td.to_row_delta()
@@ -2906,18 +3047,6 @@ impl QueryGraph {
                 }
             })
             .unwrap_or_default()
-    }
-
-    /// Collect tuple sets from input nodes for a transform node.
-    fn collect_tuple_inputs(&self, node_id: NodeId) -> Vec<AHashSet<Tuple>> {
-        self.get_inputs(node_id)
-            .iter()
-            .filter_map(|dep| match &self.nodes[dep.0 as usize].node {
-                GraphNode::IndexScan(n) => Some(n.current_tuples().clone()),
-                GraphNode::Union(n) => Some(n.current_tuples().clone()),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Get current result from output node.
@@ -2930,10 +3059,10 @@ impl QueryGraph {
 
     /// Get the current output tuples in output order.
     pub fn current_output_tuples(&self) -> Vec<Tuple> {
-        match self.get_node(self.output_node) {
-            Some(GraphNode::Output(node)) => node.ordered_tuples().to_vec(),
-            _ => vec![],
-        }
+        self.get_node(self.output_node)
+            .and_then(ExecutionOperator::ordered_tuples)
+            .map(|tuples| tuples.to_vec())
+            .unwrap_or_default()
     }
 
     pub(crate) fn current_output_rows_with_provenance(
@@ -3370,6 +3499,10 @@ fn condition_to_scan(cond: &Condition) -> ScanCondition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit::CommitId;
+    use crate::object::{BranchName, ObjectId};
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::relation_ir::{
         ColumnRef, JoinCondition, KeyRef, OrderByExpr, OrderDirection, PredicateCmpOp,
@@ -3377,8 +3510,10 @@ mod tests {
     };
     use crate::query_manager::session::Session;
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema, Value,
+        ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, TablePolicies, TableSchema, Value,
     };
+    use crate::storage::{MemoryStorage, Storage};
+    use std::collections::{HashMap, HashSet};
 
     fn test_schema() -> Schema {
         let mut schema = Schema::new();
@@ -3405,6 +3540,122 @@ mod tests {
             .into(),
         );
         schema
+    }
+
+    fn seed_user_storage(
+        rows: &[(ObjectId, &str, i32)],
+    ) -> (MemoryStorage, HashMap<ObjectId, Vec<u8>>) {
+        let mut storage = MemoryStorage::new();
+        let descriptor = test_schema()
+            .get(&TableName::new("users"))
+            .expect("users descriptor")
+            .columns
+            .clone();
+        let mut row_data = HashMap::new();
+
+        for (index, (id, name, score)) in rows.iter().enumerate() {
+            let data = encode_row(
+                &descriptor,
+                &[
+                    Value::Integer(index as i32 + 1),
+                    Value::Text((*name).to_string()),
+                    Value::Integer(*score),
+                ],
+            )
+            .expect("row encoding");
+            row_data.insert(*id, data);
+            storage
+                .index_insert("users", "score", "main", &Value::Integer(*score), *id)
+                .expect("score index insert");
+            storage
+                .index_insert("users", "_id", "main", &Value::Uuid(*id), *id)
+                .expect("id index insert");
+        }
+
+        (storage, row_data)
+    }
+
+    fn projects_todos_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("projects"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        );
+        schema.insert(
+            TableName::new("todos"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("project", ColumnType::Uuid)
+                    .nullable()
+                    .references("projects"),
+            ])
+            .into(),
+        );
+        schema
+    }
+
+    fn seed_project_todo_storage(
+        project_count: usize,
+    ) -> (MemoryStorage, HashMap<ObjectId, Vec<u8>>, HashSet<ObjectId>) {
+        let mut storage = MemoryStorage::new();
+        let schema = projects_todos_schema();
+        let project_descriptor = schema
+            .get(&TableName::new("projects"))
+            .expect("projects descriptor")
+            .columns
+            .clone();
+        let todo_descriptor = schema
+            .get(&TableName::new("todos"))
+            .expect("todos descriptor")
+            .columns
+            .clone();
+        let mut row_data = HashMap::new();
+        let mut project_ids = HashSet::new();
+
+        for index in 0..project_count {
+            let project_id = ObjectId::new();
+            project_ids.insert(project_id);
+            let project_data = encode_row(
+                &project_descriptor,
+                &[Value::Text(format!("Project {index}"))],
+            )
+            .expect("project row encoding");
+            row_data.insert(project_id, project_data);
+            storage
+                .index_insert(
+                    "projects",
+                    "_id",
+                    "main",
+                    &Value::Uuid(project_id),
+                    project_id,
+                )
+                .expect("project id index insert");
+
+            let todo_id = ObjectId::new();
+            let todo_data = encode_row(
+                &todo_descriptor,
+                &[
+                    Value::Text(format!("Todo {index}")),
+                    Value::Uuid(project_id),
+                ],
+            )
+            .expect("todo row encoding");
+            row_data.insert(todo_id, todo_data);
+            storage
+                .index_insert(
+                    "todos",
+                    "project",
+                    "main",
+                    &Value::Uuid(project_id),
+                    todo_id,
+                )
+                .expect("todo project index insert");
+            storage
+                .index_insert("todos", "_id", "main", &Value::Uuid(todo_id), todo_id)
+                .expect("todo id index insert");
+        }
+
+        (storage, row_data, project_ids)
     }
 
     #[test]
@@ -3448,12 +3699,166 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        assert_eq!(graph.nodes.len(), 2);
-        assert!(has_indexed_query_node(&graph));
+        assert_eq!(graph.nodes.len(), 5);
+        assert!(has_explicit_topk_path(&graph));
     }
 
     #[test]
-    fn compile_query_with_multi_column_sort_uses_indexed_query() {
+    fn settle_generic_sorted_query_preserves_order_and_tracks_stats() {
+        let schema = test_schema();
+        let row_a = ObjectId::new();
+        let row_b = ObjectId::new();
+        let row_c = ObjectId::new();
+        let (storage, row_data) = seed_user_storage(&[
+            (row_a, "Alice", 30),
+            (row_b, "Bob", 10),
+            (row_c, "Charlie", 20),
+        ]);
+        let query = QueryBuilder::new("users").order_by("score").build();
+        let mut graph = QueryGraph::compile(&query, &schema).expect("graph should compile");
+
+        let mut row_loader = |id: ObjectId| {
+            row_data.get(&id).cloned().map(|data| {
+                LoadedRow::new(
+                    data,
+                    CommitId([0; 32]),
+                    [(id, BranchName::new("main"))].into_iter().collect(),
+                )
+            })
+        };
+
+        let delta = graph.settle(&storage, &mut row_loader);
+        assert_eq!(delta.added.len(), 3);
+        assert_eq!(
+            graph
+                .current_result()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![row_b, row_c, row_a]
+        );
+
+        let sort_node_id = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| matches!(node.node, GraphNode::Sort(_)))
+            .map(|(index, _)| NodeId(index as u64))
+            .expect("sort node");
+        assert_eq!(
+            graph.nodes[sort_node_id.0 as usize].stream_spec.ordering,
+            StreamOrdering::Ordered
+        );
+        let output_stats = graph
+            .operator_stats(graph.output_node)
+            .expect("output node stats");
+        assert_eq!(output_stats.polls, 1);
+        assert_eq!(output_stats.full_restarts, 1);
+    }
+
+    #[test]
+    fn indexed_window_sync_scope_flows_through_operator_sync_input() {
+        let schema = test_schema();
+        let row_a = ObjectId::new();
+        let row_b = ObjectId::new();
+        let row_c = ObjectId::new();
+        let (storage, row_data) = seed_user_storage(&[
+            (row_a, "Alice", 30),
+            (row_b, "Bob", 10),
+            (row_c, "Charlie", 20),
+        ]);
+        let query = QueryBuilder::new("users")
+            .order_by("score")
+            .offset(1)
+            .limit(1)
+            .build();
+        let mut graph = QueryGraph::compile(&query, &schema).expect("graph should compile");
+        assert!(has_explicit_topk_path(&graph));
+
+        let mut row_loader = |id: ObjectId| {
+            row_data.get(&id).cloned().map(|data| {
+                LoadedRow::new(
+                    data,
+                    CommitId([0; 32]),
+                    [(id, BranchName::new("main"))].into_iter().collect(),
+                )
+            })
+        };
+
+        graph.settle(&storage, &mut row_loader);
+        assert_eq!(
+            graph
+                .current_result()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![row_c]
+        );
+
+        let sync_scope = graph.sync_scope_object_ids();
+        assert!(sync_scope.contains(&(row_b, BranchName::new("main"))));
+        assert!(sync_scope.contains(&(row_c, BranchName::new("main"))));
+        assert!(!sync_scope.contains(&(row_a, BranchName::new("main"))));
+
+        let tie_sort_node_id = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| matches!(node.node, GraphNode::TieSort(_)))
+            .map(|(index, _)| NodeId(index as u64))
+            .expect("tie sort node");
+        assert_eq!(
+            graph.nodes[tie_sort_node_id.0 as usize]
+                .stream_spec
+                .ordering,
+            StreamOrdering::Ordered
+        );
+        let tie_sort_stats = graph
+            .operator_stats(tie_sort_node_id)
+            .expect("tie sort operator stats");
+        assert_eq!(tie_sort_stats.polls, 1);
+        assert_eq!(tie_sort_stats.full_restarts, 1);
+    }
+
+    #[test]
+    fn paginated_array_subquery_short_circuits_outer_driver_scan() {
+        let schema = projects_todos_schema();
+        let query = QueryBuilder::new("projects")
+            .limit(5)
+            .with_array("todos", |sub| {
+                sub.from("todos").correlate("project", "projects.id")
+            })
+            .build();
+        let mut graph = QueryGraph::compile(&query, &schema).expect("graph should compile");
+        assert!(has_explicit_topk_path(&graph));
+        assert!(has_array_subquery_node(&graph));
+
+        let (storage, row_data, project_ids) = seed_project_todo_storage(200);
+        let mut project_loads = 0usize;
+        let mut row_loader = |id: ObjectId| {
+            if project_ids.contains(&id) {
+                project_loads += 1;
+            }
+            row_data.get(&id).cloned().map(|data| {
+                LoadedRow::new(
+                    data,
+                    CommitId([0; 32]),
+                    [(id, BranchName::new("main"))].into_iter().collect(),
+                )
+            })
+        };
+
+        let delta = graph.settle(&storage, &mut row_loader);
+        assert_eq!(delta.added.len(), 5);
+        assert_eq!(graph.current_result().len(), 5);
+        assert_eq!(
+            project_loads, 5,
+            "outer limit should stop the ordered driver scan before loading every project",
+        );
+    }
+
+    #[test]
+    fn compile_query_with_multi_column_sort_uses_explicit_topk_path() {
         let schema = test_schema();
         let query = QueryBuilder::new("users")
             .order_by("score")
@@ -3463,23 +3868,18 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        assert!(has_indexed_query_node(&graph));
+        assert!(has_explicit_topk_path(&graph));
         assert!(
             !graph
                 .nodes
                 .iter()
                 .any(|c| matches!(c.node, GraphNode::Sort(_)))
         );
-        assert!(
-            !graph
-                .nodes
-                .iter()
-                .any(|c| matches!(c.node, GraphNode::LimitOffset(_)))
-        );
+        assert!(has_window_node(&graph));
     }
 
     #[test]
-    fn compile_query_with_same_column_filter_and_sort_uses_indexed_query() {
+    fn compile_query_with_same_column_filter_and_sort_uses_explicit_topk_path() {
         let schema = test_schema();
         let query = QueryBuilder::new("users")
             .filter_ge("score", Value::Integer(50))
@@ -3489,11 +3889,11 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        assert!(has_indexed_query_node(&graph));
+        assert!(has_explicit_topk_path(&graph));
     }
 
     #[test]
-    fn compile_query_with_different_filter_and_sort_columns_uses_indexed_query() {
+    fn compile_query_with_different_filter_and_sort_columns_uses_explicit_topk_path() {
         let schema = test_schema();
         let query = QueryBuilder::new("users")
             .filter_eq("name", Value::Text("Alice".into()))
@@ -3503,23 +3903,18 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        assert!(has_indexed_query_node(&graph));
+        assert!(has_explicit_topk_path(&graph));
         assert!(
             !graph
                 .nodes
                 .iter()
                 .any(|c| matches!(c.node, GraphNode::Sort(_)))
         );
-        assert!(
-            !graph
-                .nodes
-                .iter()
-                .any(|c| matches!(c.node, GraphNode::LimitOffset(_)))
-        );
+        assert!(has_window_node(&graph));
     }
 
     #[test]
-    fn compile_query_with_true_select_policy_and_session_uses_indexed_query() {
+    fn compile_query_with_true_select_policy_and_session_uses_explicit_topk_path() {
         let mut schema = Schema::new();
         schema.insert(
             TableName::new("todos"),
@@ -3544,7 +3939,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(has_indexed_query_node(&graph));
+        assert!(has_explicit_topk_path(&graph));
         assert!(
             !graph
                 .nodes
@@ -3554,7 +3949,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_query_with_select_policy_and_session_uses_indexed_query() {
+    fn compile_query_with_select_policy_and_session_uses_explicit_topk_path() {
         let mut schema = Schema::new();
         schema.insert(
             TableName::new("documents"),
@@ -3583,7 +3978,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(has_indexed_query_node(&graph));
+        assert!(has_explicit_topk_path(&graph));
         assert!(
             !graph
                 .nodes
@@ -3835,11 +4230,39 @@ mod tests {
             .any(|c| matches!(c.node, GraphNode::Project(_)))
     }
 
-    fn has_indexed_query_node(graph: &QueryGraph) -> bool {
+    fn has_ordered_driver_source_node(graph: &QueryGraph) -> bool {
         graph
             .nodes
             .iter()
-            .any(|c| matches!(c.node, GraphNode::IndexedQuery(_)))
+            .any(|c| matches!(c.node, GraphNode::OrderedDriverSource(_)))
+    }
+
+    fn has_probe_join_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::ProbeJoin(_)))
+    }
+
+    fn has_tie_sort_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::TieSort(_)))
+    }
+
+    fn has_window_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::LimitOffset(_)))
+    }
+
+    fn has_explicit_topk_path(graph: &QueryGraph) -> bool {
+        has_ordered_driver_source_node(graph)
+            && has_probe_join_node(graph)
+            && has_tie_sort_node(graph)
+            && has_window_node(graph)
     }
 
     #[test]
@@ -3853,10 +4276,7 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         assert!(has_join_node(&graph), "Should have a JoinNode");
-        assert!(
-            !has_indexed_query_node(&graph),
-            "Non-paginated joins should keep the incremental JoinNode path"
-        );
+        assert!(!has_explicit_topk_path(&graph));
         assert_eq!(graph.index_scan_nodes.len(), 2);
     }
 
@@ -3872,15 +4292,12 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         assert!(has_join_node(&graph), "Should have a JoinNode");
-        assert!(
-            !has_indexed_query_node(&graph),
-            "Projection alone should not switch joins onto the indexed top-k path"
-        );
+        assert!(!has_explicit_topk_path(&graph));
         assert!(has_project_node(&graph), "Should have a ProjectNode");
     }
 
     #[test]
-    fn compile_join_with_limit_uses_indexed_query() {
+    fn compile_join_with_limit_uses_explicit_topk_path() {
         let schema = join_schema();
         let query = QueryBuilder::new("users")
             .join("posts")
@@ -3891,8 +4308,8 @@ mod tests {
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
         assert!(
-            has_indexed_query_node(&graph),
-            "Paginated joins should use IndexedQueryNode"
+            has_explicit_topk_path(&graph),
+            "Paginated joins should lower to the explicit top-k operator chain"
         );
         assert!(!has_join_node(&graph), "JoinNode should be elided");
     }
@@ -4443,8 +4860,8 @@ mod tests {
         let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
             .expect("Graph should compile");
         assert!(
-            has_indexed_query_node(&graph),
-            "relation IR join + limit shape should compile to IndexedQueryNode",
+            has_explicit_topk_path(&graph),
+            "relation IR join + limit shape should compile to the explicit top-k operators",
         );
         assert!(
             !graph
@@ -4454,11 +4871,11 @@ mod tests {
             "relation IR top-k path should not need SortNode",
         );
         assert!(
-            !graph
+            graph
                 .nodes
                 .iter()
                 .any(|ctx| matches!(ctx.node, GraphNode::LimitOffset(_))),
-            "relation IR top-k path should not need LimitOffsetNode",
+            "relation IR top-k path should use an explicit Window node",
         );
     }
 

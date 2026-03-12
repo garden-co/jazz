@@ -21,8 +21,6 @@ use crate::query_manager::types::{
 
 use crate::storage::Storage;
 
-use super::RowNode;
-
 /// Policy filter node that evaluates row-level security policies.
 ///
 /// For SELECT operations, rows that don't match the policy are silently filtered.
@@ -337,14 +335,8 @@ impl PolicyFilterNode {
         // that have INHERITS clauses.
         false
     }
-}
 
-impl RowNode for PolicyFilterNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         if !self.dirty
             && input.added.is_empty()
             && input.removed.is_empty()
@@ -413,15 +405,15 @@ impl RowNode for PolicyFilterNode {
         result
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

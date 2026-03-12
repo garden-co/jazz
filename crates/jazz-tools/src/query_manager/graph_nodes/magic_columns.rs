@@ -15,8 +15,6 @@ use crate::query_manager::types::{
 };
 use crate::storage::Storage;
 
-use super::RowNode;
-
 fn tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
     old.iter().zip(new.iter()).any(
         |(old_element, new_element)| match (old_element, new_element) {
@@ -362,30 +360,20 @@ impl MagicColumnsNode {
         );
         Value::Boolean(allowed)
     }
-}
 
-impl RowNode for MagicColumnsNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
+    pub(crate) fn output_descriptor(&self) -> &RowDescriptor {
         &self.output_descriptor
     }
 
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // The graph settlement loop should always use `process_with_context` so
-        // relation-backed clauses evaluate against real storage state.
-        self.input_tuples.extend(input.added.iter().cloned());
-        self.dirty = false;
-        TupleDelta::default()
-    }
-
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty || self.dependency_dirty
     }
 }

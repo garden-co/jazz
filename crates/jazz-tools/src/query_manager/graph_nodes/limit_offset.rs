@@ -2,15 +2,12 @@ use ahash::AHashSet;
 
 use crate::query_manager::{
     graph_nodes::tuple_delta::compute_tuple_delta,
-    types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor},
+    types::{Tuple, TupleDelta, TupleDescriptor},
 };
-
-use super::RowNode;
 
 /// Limit and offset node for pagination.
 #[derive(Debug)]
 pub struct LimitOffsetNode {
-    descriptor: RowDescriptor,
     /// Output tuple descriptor (same as input - pass-through).
     output_tuple_descriptor: TupleDescriptor,
     limit: Option<usize>,
@@ -31,9 +28,7 @@ impl LimitOffsetNode {
         limit: Option<usize>,
         offset: usize,
     ) -> Self {
-        let descriptor = tuple_descriptor.combined_descriptor();
         Self {
-            descriptor,
             output_tuple_descriptor: tuple_descriptor,
             limit,
             offset,
@@ -105,14 +100,8 @@ impl LimitOffsetNode {
             .flat_map(|tuple| tuple.provenance().iter().copied())
             .collect()
     }
-}
 
-impl RowNode for LimitOffsetNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let old_tuples = std::mem::take(&mut self.windowed_tuples);
 
         // Apply changes to all_tuples
@@ -148,15 +137,15 @@ impl RowNode for LimitOffsetNode {
         compute_tuple_delta(&old_tuples, &self.windowed_tuples)
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }
@@ -167,7 +156,9 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, TupleElement, Value,
+    };
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![

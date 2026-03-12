@@ -1,4 +1,5 @@
 pub mod encoding;
+pub mod execution;
 pub mod graph;
 pub mod graph_nodes;
 pub mod index;
@@ -19,6 +20,7 @@ pub mod subscriptions;
 pub mod types;
 pub mod writes;
 
+pub use graph::ExecutionGraph;
 pub use graph_nodes::output::QuerySubscriptionId;
 pub use query_wire::{parse_query_json, parse_query_value};
 

@@ -5,9 +5,7 @@ use std::collections::HashSet;
 use crate::query_manager::encoding::{
     column_bytes, column_is_null, compare_column_to_value, decode_column,
 };
-use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value};
-
-use super::RowNode;
+use crate::query_manager::types::{Tuple, TupleDelta, TupleDescriptor, Value};
 
 /// A single predicate condition for filtering.
 #[derive(Debug, Clone)]
@@ -73,8 +71,6 @@ pub struct FilterNode {
     tuple_descriptor: TupleDescriptor,
     /// Output tuple descriptor (same as input - pass-through).
     output_tuple_descriptor: TupleDescriptor,
-    /// Combined row descriptor (for output_descriptor trait method).
-    combined_descriptor: RowDescriptor,
     predicate: Predicate,
     /// Cached set of element indices required for predicate evaluation.
     required_elements: HashSet<usize>,
@@ -96,12 +92,10 @@ impl FilterNode {
         // Validate materialization
         tuple_descriptor.assert_materialized(&required_elements)?;
 
-        let combined_descriptor = tuple_descriptor.combined_descriptor();
         let output_tuple_descriptor = tuple_descriptor.clone();
         Ok(Self {
             tuple_descriptor,
             output_tuple_descriptor,
-            combined_descriptor,
             predicate,
             required_elements,
             current_tuples: AHashSet::new(),
@@ -114,12 +108,10 @@ impl FilterNode {
     pub fn with_tuple_descriptor(tuple_descriptor: TupleDescriptor, predicate: Predicate) -> Self {
         let required_cols = predicate.required_columns();
         let required_elements = tuple_descriptor.elements_for_columns(&required_cols);
-        let combined_descriptor = tuple_descriptor.combined_descriptor();
         let output_tuple_descriptor = tuple_descriptor.clone();
         Self {
             tuple_descriptor,
             output_tuple_descriptor,
-            combined_descriptor,
             predicate,
             required_elements,
             current_tuples: AHashSet::new(),
@@ -255,14 +247,8 @@ impl FilterNode {
         let descriptor = &self.tuple_descriptor.element(elem_idx)?.descriptor;
         column_is_null(descriptor, content, local_col_idx).ok()
     }
-}
 
-impl RowNode for FilterNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.combined_descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let input_size = input.added.len() + input.removed.len() + input.updated.len();
         let mut result = TupleDelta::new();
 
@@ -316,15 +302,15 @@ impl RowNode for FilterNode {
         result
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }
@@ -335,7 +321,9 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, TupleElement, Value,
+    };
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![

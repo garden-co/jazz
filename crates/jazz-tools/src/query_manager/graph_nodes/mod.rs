@@ -3,7 +3,7 @@ pub mod array_subquery;
 pub mod exists_output;
 pub mod filter;
 pub mod index_scan;
-pub mod indexed_query;
+pub mod indexed_topk;
 pub mod join;
 pub mod limit_offset;
 pub mod magic_columns;
@@ -19,9 +19,6 @@ pub mod subgraph;
 pub mod tuple_delta;
 pub mod union;
 
-use ahash::AHashSet;
-
-use super::types::{RowDescriptor, Tuple, TupleDelta};
 use crate::storage::Storage;
 
 /// Unique identifier for a node in the query graph.
@@ -33,68 +30,12 @@ pub struct SourceContext<'a> {
     pub storage: &'a dyn Storage,
 }
 
-// ============================================================================
-// Tuple-based Traits (unified model for single-table and JOIN queries)
-// ============================================================================
-
-/// Source nodes produce tuples from external state (no input nodes).
-/// Returns TupleDelta with length-1 tuples for single-table scans.
-pub trait SourceNode {
-    /// Scan external state and return the tuple delta.
-    fn scan(&mut self, ctx: &SourceContext) -> TupleDelta;
-
-    /// Get current set of tuples in this node's output.
-    fn current_tuples(&self) -> &AHashSet<Tuple>;
-
-    /// Mark this node as dirty (needs reprocessing).
-    fn mark_dirty(&mut self);
-
-    /// Check if this node needs reprocessing.
-    fn is_dirty(&self) -> bool;
-}
-
-/// Transform nodes that operate on tuple sets (before full materialization).
-/// Used for UNION, JOIN, and other set operations on tuples.
-pub trait TransformNode {
-    /// Process inputs and return the tuple delta.
-    fn process(&mut self, inputs: &[&AHashSet<Tuple>]) -> TupleDelta;
-
-    /// Get current set of tuples in this node's output.
-    fn current_tuples(&self) -> &AHashSet<Tuple>;
-
-    /// Mark this node as dirty (needs reprocessing).
-    fn mark_dirty(&mut self);
-
-    /// Check if this node needs reprocessing.
-    fn is_dirty(&self) -> bool;
-}
-
-/// Row-level nodes that operate on TupleDeltas (after materialization).
-/// These have full row data and can filter, sort, and project.
-pub trait RowNode {
-    /// Get the output row descriptor for this node.
-    fn output_descriptor(&self) -> &RowDescriptor;
-
-    /// Process input tuple delta and return output tuple delta.
-    fn process(&mut self, input: TupleDelta) -> TupleDelta;
-
-    /// Get current result set as tuples.
-    fn current_tuples(&self) -> &AHashSet<Tuple>;
-
-    /// Mark this node as dirty.
-    fn mark_dirty(&mut self);
-
-    /// Check if this node needs reprocessing.
-    fn is_dirty(&self) -> bool;
-}
-
 pub use crate::query_manager::index::ScanCondition;
 pub use alias::AliasNode;
 pub use array_subquery::ArraySubqueryNode;
 pub use exists_output::ExistsOutputNode;
 pub use filter::FilterNode;
 pub use index_scan::IndexScanNode;
-pub use indexed_query::IndexedQueryNode;
 pub use join::JoinNode;
 pub use limit_offset::LimitOffsetNode;
 pub use magic_columns::MagicColumnsNode;

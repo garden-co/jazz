@@ -6,7 +6,7 @@ use crate::query_manager::types::{
     ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
-use super::{SourceContext, SourceNode};
+use super::SourceContext;
 
 /// Source node that scans an index via Storage.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
@@ -67,8 +67,8 @@ impl IndexScanNode {
     }
 }
 
-impl SourceNode for IndexScanNode {
-    fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
+impl IndexScanNode {
+    pub(crate) fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
         let new_ids: AHashSet<ObjectId> = match &self.condition {
             ScanCondition::All => ctx
                 .storage
@@ -144,15 +144,15 @@ impl SourceNode for IndexScanNode {
         }
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

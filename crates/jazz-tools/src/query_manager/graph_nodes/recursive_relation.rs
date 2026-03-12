@@ -17,7 +17,6 @@ use crate::query_manager::types::{
 };
 use crate::storage::Storage;
 
-use super::RowNode;
 use super::subgraph::SubgraphTemplate;
 
 /// Source of the value used to correlate recursive steps.
@@ -36,6 +35,52 @@ pub struct RecursiveHop {
     pub table: TableName,
     /// Column index on the step row containing the target row id.
     pub step_column_index: usize,
+}
+
+/// Planner-produced specification for a recursive fixpoint operator.
+#[derive(Debug, Clone)]
+pub struct RecursiveFixpointPlan {
+    input_descriptor: TupleDescriptor,
+    output_descriptor: RowDescriptor,
+    step_template: SubgraphTemplate,
+    schema: Schema,
+    correlation_source: CorrelationSource,
+    hop: Option<RecursiveHop>,
+    max_depth: usize,
+    step_table: TableName,
+}
+
+impl RecursiveFixpointPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        input_descriptor: TupleDescriptor,
+        output_descriptor: RowDescriptor,
+        step_template: SubgraphTemplate,
+        schema: Schema,
+        correlation_source: CorrelationSource,
+        hop: Option<RecursiveHop>,
+        max_depth: usize,
+        step_table: TableName,
+    ) -> Self {
+        Self {
+            input_descriptor,
+            output_descriptor,
+            step_template,
+            schema,
+            correlation_source,
+            hop,
+            max_depth,
+            step_table,
+        }
+    }
+
+    pub fn output_descriptor(&self) -> &RowDescriptor {
+        &self.output_descriptor
+    }
+
+    pub fn step_table(&self) -> TableName {
+        self.step_table
+    }
 }
 
 /// Node that evaluates recursive relations using bounded unrolling.
@@ -65,16 +110,18 @@ pub struct RecursiveRelationNode {
 }
 
 impl RecursiveRelationNode {
-    /// Create a new recursive relation node.
-    pub fn new(
-        input_descriptor: TupleDescriptor,
-        output_descriptor: RowDescriptor,
-        step_template: SubgraphTemplate,
-        correlation_source: CorrelationSource,
-        hop: Option<RecursiveHop>,
-        max_depth: usize,
-        schema: Schema,
-    ) -> Self {
+    /// Create a new recursive relation executor from a planner-produced fixpoint plan.
+    pub fn new(plan: RecursiveFixpointPlan) -> Self {
+        let RecursiveFixpointPlan {
+            input_descriptor,
+            output_descriptor,
+            step_template,
+            schema,
+            correlation_source,
+            hop,
+            max_depth,
+            step_table: _,
+        } = plan;
         Self {
             input_descriptor,
             output_descriptor,
@@ -539,29 +586,29 @@ impl RecursiveRelationNode {
         let normalized_content = encode_row(&self.output_descriptor, &values).ok()?;
         Some((step_row.id, normalized_content, step_row.commit_id))
     }
-}
 
-impl RowNode for RecursiveRelationNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
+    #[cfg(test)]
+    pub(crate) fn output_descriptor(&self) -> &RowDescriptor {
         &self.output_descriptor
     }
 
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // Without context we can't settle recursive step subgraphs.
-        // Keep seed bookkeeping and defer real evaluation to process_with_context.
+    #[cfg(test)]
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        // Tests use this shim to verify that seed deltas alone do not produce
+        // output until the fixpoint graph is evaluated with storage context.
         self.apply_seed_delta(input);
         TupleDelta::default()
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }
@@ -655,16 +702,18 @@ mod tests {
             .select(&["parent_team"])
             .build(&schema)
             .unwrap();
-
-        let node = RecursiveRelationNode::new(
+        let plan = RecursiveFixpointPlan::new(
             input_desc,
             output_desc.clone(),
             step,
+            schema,
             CorrelationSource::Column(0),
             None,
             10,
-            schema,
+            TableName::new("team_edges"),
         );
+
+        let node = RecursiveRelationNode::new(plan);
         assert_eq!(node.output_descriptor(), &output_desc);
         assert_eq!(node.max_depth, 10);
     }
@@ -684,16 +733,18 @@ mod tests {
             .select(&["parent_team"])
             .build(&schema)
             .unwrap();
-
-        let mut node = RecursiveRelationNode::new(
+        let plan = RecursiveFixpointPlan::new(
             input_desc,
             output_desc,
             step,
+            schema.clone(),
             CorrelationSource::Column(0),
             None,
             10,
-            schema.clone(),
+            TableName::new("team_edges"),
         );
+
+        let mut node = RecursiveRelationNode::new(plan);
 
         let seed_desc = &schema.get(&TableName::new("teams")).unwrap().columns;
         let seed = encode_row(seed_desc, &[Value::Integer(1)]).unwrap();

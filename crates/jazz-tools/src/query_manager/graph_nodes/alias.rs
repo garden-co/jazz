@@ -4,8 +4,6 @@ use crate::query_manager::types::{
     CombinedRowDescriptor, RowDescriptor, Tuple, TupleDelta, TupleDescriptor,
 };
 
-use super::RowNode;
-
 /// Alias node for table aliasing in joins.
 ///
 /// This node transforms the table namespace without modifying row data.
@@ -20,8 +18,6 @@ pub struct AliasNode {
     original_table: String,
     /// Alias name for the table.
     alias: String,
-    /// Original row descriptor (column definitions).
-    row_descriptor: RowDescriptor,
     /// Output tuple descriptor with alias applied.
     output_tuple_descriptor: TupleDescriptor,
     /// Combined descriptor with alias applied.
@@ -42,7 +38,6 @@ impl AliasNode {
         Self {
             original_table,
             alias,
-            row_descriptor,
             output_tuple_descriptor,
             combined_descriptor,
             current_tuples: AHashSet::new(),
@@ -70,7 +65,6 @@ impl AliasNode {
         Self {
             original_table,
             alias,
-            row_descriptor,
             output_tuple_descriptor,
             combined_descriptor,
             current_tuples: AHashSet::new(),
@@ -97,14 +91,8 @@ impl AliasNode {
     pub fn combined_descriptor(&self) -> &CombinedRowDescriptor {
         &self.combined_descriptor
     }
-}
 
-impl RowNode for AliasNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.row_descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         // Pure pass-through - alias only affects namespace, not data
         for tuple in &input.removed {
             self.current_tuples.remove(tuple);
@@ -123,15 +111,15 @@ impl RowNode for AliasNode {
         input
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

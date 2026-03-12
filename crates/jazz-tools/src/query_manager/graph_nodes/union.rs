@@ -2,8 +2,6 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::query_manager::types::{Tuple, TupleDelta, TupleDescriptor};
 
-use super::TransformNode;
-
 /// Union node for OR conditions.
 /// Pure transform node that merges tuple sets from multiple inputs.
 #[derive(Debug)]
@@ -46,10 +44,10 @@ impl Default for UnionNode {
     }
 }
 
-impl TransformNode for UnionNode {
+impl UnionNode {
     /// Compute the union of multiple input tuple sets.
     /// For union: a tuple is present if it's in ANY input.
-    fn process(&mut self, inputs: &[&AHashSet<Tuple>]) -> TupleDelta {
+    pub(crate) fn process(&mut self, inputs: &[&AHashSet<Tuple>]) -> TupleDelta {
         // Compute new union of tuples, merging provenance for equal tuple IDs.
         let mut merged_by_ids = AHashMap::<Vec<_>, Tuple>::new();
         for tuples in inputs {
@@ -95,15 +93,15 @@ impl TransformNode for UnionNode {
         }
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

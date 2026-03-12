@@ -8,8 +8,6 @@ use crate::query_manager::types::{
     TupleElement, Value,
 };
 
-use super::RowNode;
-
 #[derive(Debug, Clone)]
 enum ProjectionSource {
     Column { global_index: usize },
@@ -209,30 +207,12 @@ impl ProjectNode {
             .with_provenance(tuple.provenance().clone()),
         )
     }
-}
 
-fn resolve_row_id_element(
-    input_tuple_descriptor: &TupleDescriptor,
-    scope: Option<&str>,
-) -> Option<usize> {
-    if let Some(scope) = scope {
-        for index in 0..input_tuple_descriptor.element_count() {
-            if input_tuple_descriptor.element(index)?.table == scope {
-                return Some(index);
-            }
-        }
-        return None;
-    }
-
-    (input_tuple_descriptor.element_count() == 1).then_some(0)
-}
-
-impl RowNode for ProjectNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
+    pub(crate) fn output_descriptor(&self) -> &RowDescriptor {
         &self.output_descriptor
     }
 
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
 
         for tuple in input.removed {
@@ -264,17 +244,33 @@ impl RowNode for ProjectNode {
         result
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
+}
+
+fn resolve_row_id_element(
+    input_tuple_descriptor: &TupleDescriptor,
+    scope: Option<&str>,
+) -> Option<usize> {
+    if let Some(scope) = scope {
+        for index in 0..input_tuple_descriptor.element_count() {
+            if input_tuple_descriptor.element(index)?.table == scope {
+                return Some(index);
+            }
+        }
+        return None;
+    }
+
+    (input_tuple_descriptor.element_count() == 1).then_some(0)
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use crate::query_manager::types::{
     Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
 };
 
-use super::{RowNode, tuple_delta::compute_tuple_delta};
+use super::tuple_delta::compute_tuple_delta;
 
 /// Output mode for query results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +30,7 @@ pub struct OutputNode {
     /// Output tuple descriptor (always fully materialized).
     output_tuple_descriptor: TupleDescriptor,
     mode: OutputMode,
-    /// Current result tuples (for RowNode trait).
+    /// Current result tuples for set-based membership checks.
     current_tuples: AHashSet<Tuple>,
     /// Ordered tuples for deterministic output (preserves sort order).
     ordered_tuples: Vec<Tuple>,
@@ -155,12 +155,8 @@ pub struct DecodedDelta {
     pub updated: Vec<(crate::object::ObjectId, Vec<Value>, Vec<Value>)>,
 }
 
-impl RowNode for OutputNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+impl OutputNode {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         // Apply changes to current_tuples and ordered_tuples
         for tuple in &input.removed {
             self.current_tuples.remove(tuple);
@@ -199,15 +195,15 @@ impl RowNode for OutputNode {
         input
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

@@ -16,7 +16,6 @@ use crate::query_manager::types::{
 
 use crate::storage::Storage;
 
-use super::RowNode;
 use super::subgraph::SubgraphTemplate;
 
 /// Node that evaluates a correlated subquery for each outer row,
@@ -443,67 +442,20 @@ impl ArraySubqueryNode {
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_tuple_descriptor
     }
-}
 
-impl RowNode for ArraySubqueryNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
+    pub(crate) fn output_descriptor(&self) -> &RowDescriptor {
         &self.output_descriptor
     }
 
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // This is a simplified process that doesn't have access to io/om.
-        // Real processing should use process_with_context.
-        // For now, just pass through with empty arrays.
-        let mut result = TupleDelta::new();
-
-        for tuple in input.removed {
-            if let Some(outer_id) = tuple.first_id() {
-                self.instances.remove(&outer_id);
-            }
-            if let Some(output) =
-                self.build_output_tuple(&tuple, &Value::Array(vec![]), &TupleProvenance::default())
-            {
-                self.current_tuples.remove(&output);
-                result.removed.push(output);
-            }
-        }
-
-        for tuple in input.added {
-            if let (Some(outer_id), Some(correlation_value)) =
-                (tuple.first_id(), self.extract_correlation_value(&tuple))
-            {
-                // Without context, we can't evaluate - store empty array
-                self.instances.insert(
-                    outer_id,
-                    ArrayInstanceState {
-                        outer_tuple: tuple.clone(),
-                        correlation_value,
-                        array_result: Value::Array(vec![]),
-                        provenance: TupleProvenance::default(),
-                    },
-                );
-            }
-            if let Some(output) =
-                self.build_output_tuple(&tuple, &Value::Array(vec![]), &TupleProvenance::default())
-            {
-                self.current_tuples.insert(output.clone());
-                result.added.push(output);
-            }
-        }
-
-        self.dirty = false;
-        result
-    }
-
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

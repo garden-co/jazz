@@ -3,8 +3,6 @@ use ahash::{AHashMap, AHashSet};
 use crate::object::ObjectId;
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta};
 
-use super::RowNode;
-
 /// Selects a single tuple element from joined tuples.
 ///
 /// This is used by hop-style query lowering to project join output to the
@@ -56,14 +54,12 @@ impl SelectElementNode {
             _ => false,
         }
     }
-}
 
-impl RowNode for SelectElementNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
+    pub(crate) fn output_descriptor(&self) -> &RowDescriptor {
         &self.output_descriptor
     }
 
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
 
         let mut removals = input.removed;
@@ -143,15 +139,15 @@ impl RowNode for SelectElementNode {
         result
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

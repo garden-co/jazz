@@ -5,8 +5,6 @@ use std::cmp::Ordering;
 use crate::query_manager::encoding::compare_column;
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
 
-use super::RowNode;
-
 /// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SortDirection {
@@ -125,14 +123,8 @@ impl SortNode {
     pub fn sorted_tuples(&self) -> &[Tuple] {
         &self.sorted_tuples
     }
-}
 
-impl RowNode for SortNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         // Track which tuple IDs are added/removed
         let mut added_ids: AHashSet<_> = input.added.iter().map(|t| t.ids()).collect();
         let mut removed_ids: AHashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
@@ -196,15 +188,15 @@ impl RowNode for SortNode {
         result
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }

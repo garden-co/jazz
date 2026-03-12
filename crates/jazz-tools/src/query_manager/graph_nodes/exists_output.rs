@@ -7,19 +7,15 @@ use ahash::AHashSet;
 
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta};
 
-use super::RowNode;
-
 /// A terminal node that returns a boolean: does at least one row exist?
 ///
 /// Used for policy evaluation graphs where we need to know if a condition
 /// matches any rows, not the rows themselves.
 #[derive(Debug)]
 pub struct ExistsOutputNode {
-    /// The input row descriptor (passed through unchanged).
-    descriptor: RowDescriptor,
     /// Count of rows currently in the result set.
     count: usize,
-    /// Current tuples (for RowNode trait compliance).
+    /// Current tuples for membership tracking.
     current_tuples: AHashSet<Tuple>,
     /// Whether this node needs reprocessing.
     dirty: bool,
@@ -27,9 +23,8 @@ pub struct ExistsOutputNode {
 
 impl ExistsOutputNode {
     /// Create a new ExistsOutputNode.
-    pub fn new(descriptor: RowDescriptor) -> Self {
+    pub fn new(_descriptor: RowDescriptor) -> Self {
         Self {
-            descriptor,
             count: 0,
             current_tuples: AHashSet::new(),
             dirty: true,
@@ -45,14 +40,8 @@ impl ExistsOutputNode {
     pub fn count(&self) -> usize {
         self.count
     }
-}
 
-impl RowNode for ExistsOutputNode {
-    fn output_descriptor(&self) -> &RowDescriptor {
-        &self.descriptor
-    }
-
-    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+    pub(crate) fn process(&mut self, input: TupleDelta) -> TupleDelta {
         // Update count based on added/removed tuples
         self.count += input.added.len();
         self.count = self.count.saturating_sub(input.removed.len());
@@ -76,15 +65,15 @@ impl RowNode for ExistsOutputNode {
         input
     }
 
-    fn current_tuples(&self) -> &AHashSet<Tuple> {
+    pub(crate) fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
-    fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 }
