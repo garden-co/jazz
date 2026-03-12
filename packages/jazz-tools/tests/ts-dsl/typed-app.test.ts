@@ -143,6 +143,30 @@ describe("typed app prototype", () => {
 
       // @ts-expect-error invalid reverse include on wrong table
       app.users.include({ todosViaProject: true });
+
+      const invalidScalarRefSchema = {
+        users: {
+          name: col.string(),
+        },
+        todos: {
+          owner: col.ref("accounts"),
+        },
+      };
+
+      // @ts-expect-error invalid ref target table name
+      defineApp(invalidScalarRefSchema);
+
+      const invalidArrayRefSchema = {
+        users: {
+          name: col.string(),
+        },
+        groups: {
+          members: col.array(col.ref("accounts")),
+        },
+      };
+
+      // @ts-expect-error invalid ref target table name inside array ref
+      defineApp(invalidArrayRefSchema);
     }
   });
 });

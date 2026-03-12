@@ -27,6 +27,43 @@ export interface DefinedSchema<TSchema extends SchemaDefinition = SchemaDefiniti
 }
 
 type SchemaLike = SchemaDefinition | DefinedSchema<any>;
+type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
+  [TTable in Extract<keyof TSchema, string>]: {
+    [TColumn in Extract<
+      keyof TSchema[TTable],
+      string
+    >]: TSchema[TTable][TColumn] extends infer TBuilder extends AnyTypedColumnBuilder
+      ? ColumnBuilderSqlType<TBuilder> extends
+          | "UUID"
+          | {
+              kind: "ARRAY";
+              element: "UUID";
+            }
+        ? ColumnBuilderReferences<TBuilder> extends infer TRef
+          ? TRef extends string
+            ? TRef extends Extract<keyof TSchema, string>
+              ? never
+              : {
+                  table: TTable;
+                  column: TColumn;
+                  ref: TRef;
+                }
+            : never
+          : never
+        : never
+      : never;
+  }[Extract<keyof TSchema[TTable], string>];
+}[Extract<keyof TSchema, string>];
+
+type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
+  InvalidRefTargetEntries<TSchema>,
+] extends [never]
+  ? unknown
+  : {
+      readonly __schemaRefValidationError__: "Schema refs must point at declared table names";
+      readonly __invalidRefTargets__: InvalidRefTargetEntries<TSchema>;
+    };
+
 type NormalizedSchema<TSchema extends SchemaLike> =
   TSchema extends DefinedSchema<infer TDefinition>
     ? CompactSchema<TDefinition>
@@ -855,7 +892,7 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
 }
 
 export function defineSchema<const TSchema extends SchemaDefinition>(
-  definition: TSchema,
+  definition: TSchema & ValidateSchemaRefs<TSchema>,
 ): DefinedSchema<TSchema> {
   return definition as unknown as DefinedSchema<TSchema>;
 }
@@ -864,7 +901,7 @@ export function defineApp<const TSchema extends DefinedSchema<any>>(
   definition: TSchema,
 ): TypedApp<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema,
+  definition: TSchema & ValidateSchemaRefs<TSchema>,
 ): TypedApp<DefinedSchema<TSchema>>;
 export function defineApp(
   definition: SchemaDefinition | DefinedSchema<any>,
