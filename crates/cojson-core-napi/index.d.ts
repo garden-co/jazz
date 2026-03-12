@@ -47,6 +47,8 @@ export declare class SessionMap {
   getKnownState(): KnownState
   /** Get the known state with streaming as a native JavaScript object */
   getKnownStateWithStreaming(): KnownState | null
+  /** Check whether the CoValue still has pending streaming content. */
+  isStreaming(): boolean
   /** Set streaming known state */
   setStreamingKnownState(streamingJson: string): void
   /** Mark this CoValue as deleted */

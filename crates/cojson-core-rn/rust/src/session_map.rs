@@ -272,6 +272,15 @@ impl SessionMap {
             .map(|ks| ks.into()))
     }
 
+    /// Check whether the CoValue still has pending streaming content.
+    pub fn is_streaming(&self) -> Result<bool, SessionMapError> {
+        let internal = self
+            .internal
+            .lock()
+            .map_err(|_| SessionMapError::LockError)?;
+        Ok(internal.is_streaming())
+    }
+
     /// Set streaming known state
     pub fn set_streaming_known_state(&self, streaming_json: String) -> Result<(), SessionMapError> {
         let mut internal = self

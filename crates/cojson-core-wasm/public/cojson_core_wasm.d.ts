@@ -221,6 +221,10 @@ export class SessionMap {
    */
   isDeleted(): boolean;
   /**
+   * Check whether the CoValue still has pending streaming content.
+   */
+  isStreaming(): boolean;
+  /**
    * Get the known state as a native JavaScript object
    */
   getKnownState(): any;
@@ -316,6 +320,7 @@ export interface InitOutput {
   readonly sessionmap_getTransaction: (a: number, b: number, c: number, d: number) => [number, number];
   readonly sessionmap_getTransactionCount: (a: number, b: number, c: number) => number;
   readonly sessionmap_isDeleted: (a: number) => number;
+  readonly sessionmap_isStreaming: (a: number) => number;
   readonly sessionmap_makeNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number, number, number];
   readonly sessionmap_makeNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
   readonly sessionmap_markAsDeleted: (a: number) => void;

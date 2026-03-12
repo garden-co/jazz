@@ -1933,6 +1933,10 @@ export interface SessionMapInterface {
    */
   getKnownStateWithStreaming() /*throws*/ : KnownState | undefined;
   /**
+   * Check whether the CoValue still has pending streaming content.
+   */
+  isStreaming() /*throws*/ : boolean;
+  /**
    * Get last signature for a session (returns None if session not found)
    */
   getLastSignature(sessionId: string) /*throws*/ : string | undefined;
@@ -2184,6 +2188,26 @@ export class SessionMap
         ),
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_known_state_with_streaming(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Check whether the CoValue still has pending streaming content.
+   */
+  public isStreaming(): boolean /*throws*/ {
+    return FfiConverterBool.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_streaming(
             uniffiTypeSessionMapObjectFactory.clonePointer(this),
             callStatus
           );

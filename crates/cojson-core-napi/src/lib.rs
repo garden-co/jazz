@@ -1,5 +1,4 @@
 use cojson_core::core::{CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl};
-use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -261,6 +260,12 @@ impl SessionMap {
       .internal
       .get_known_state_with_streaming()
       .map(|ks| ks.clone().into())
+  }
+
+  /// Check whether the CoValue still has pending streaming content.
+  #[napi]
+  pub fn is_streaming(&self) -> bool {
+    self.internal.is_streaming()
   }
 
   /// Set streaming known state

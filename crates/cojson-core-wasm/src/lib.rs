@@ -251,6 +251,12 @@ impl SessionMap {
             .unwrap_or_else(JsValue::undefined)
     }
 
+    /// Check whether the CoValue still has pending streaming content.
+    #[wasm_bindgen(js_name = isStreaming)]
+    pub fn is_streaming(&self) -> bool {
+        self.internal.is_streaming()
+    }
+
     /// Set streaming known state
     #[wasm_bindgen(js_name = setStreamingKnownState)]
     pub fn set_streaming_known_state(

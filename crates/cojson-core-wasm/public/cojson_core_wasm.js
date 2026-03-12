@@ -947,6 +947,14 @@ export class SessionMap {
         return ret !== 0;
     }
     /**
+     * Check whether the CoValue still has pending streaming content.
+     * @returns {boolean}
+     */
+    isStreaming() {
+        const ret = wasm.sessionmap_isStreaming(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * Get the known state as a native JavaScript object
      * @returns {any}
      */
