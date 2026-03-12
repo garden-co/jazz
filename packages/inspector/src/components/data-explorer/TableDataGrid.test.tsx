@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
-const mockSubscribeAll = vi.fn();
+const mockUseAll = vi.fn();
 const mockUpdateDurable = vi.fn();
 const mockInsertDurable = vi.fn();
 const mockDeleteDurable = vi.fn();
@@ -21,8 +21,8 @@ const mockWasmSchema = {
 };
 
 vi.mock("jazz-tools/react", () => ({
+  useAll: (...args: unknown[]) => mockUseAll(...args),
   useDb: () => ({
-    subscribeAll: (...args: unknown[]) => mockSubscribeAll(...args),
     updateDurable: (...args: unknown[]) => mockUpdateDurable(...args),
     insertDurable: (...args: unknown[]) => mockInsertDurable(...args),
     deleteDurable: (...args: unknown[]) => mockDeleteDurable(...args),
@@ -76,10 +76,8 @@ describe("TableDataGrid", () => {
     mockUpdateDurable.mockResolvedValue(undefined);
     mockInsertDurable.mockResolvedValue({ id: "new-row" });
     mockDeleteDurable.mockResolvedValue(undefined);
-    mockSubscribeAll.mockImplementation((_, callback) => {
-      callback({ all: currentRows, delta: [] });
-      return vi.fn();
-    });
+    mockUseAll.mockReset();
+    mockUseAll.mockImplementation(() => currentRows);
   });
 
   it("renders schema-derived columns and reactive rows", () => {
@@ -100,20 +98,20 @@ describe("TableDataGrid", () => {
   it("updates query sorting when a sortable column header is clicked", () => {
     render(<TableDataGrid />);
 
-    const firstQuery = mockSubscribeAll.mock.calls[0]?.[0] as { _build: () => string };
+    const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
       orderBy: [["id", "asc"]],
-      limit: 11,
+      limit: 10,
       offset: 0,
     });
 
     const titleHeader = screen.getByRole("columnheader", { name: "title" });
     fireEvent.click(titleHeader);
 
-    const sortedQuery = mockSubscribeAll.mock.calls.at(-1)?.[0] as { _build: () => string };
+    const sortedQuery = mockUseAll.mock.calls.at(-1)?.[0] as { _build: () => string };
     expect(JSON.parse(sortedQuery._build())).toMatchObject({
       orderBy: [["title", "asc"]],
-      limit: 11,
+      limit: 10,
       offset: 0,
     });
   });
@@ -121,9 +119,8 @@ describe("TableDataGrid", () => {
   it("subscribes with local-only propagation in extension mode", () => {
     render(<TableDataGrid />);
 
-    expect(mockSubscribeAll).toHaveBeenCalledWith(
+    expect(mockUseAll).toHaveBeenCalledWith(
       expect.any(Object),
-      expect.any(Function),
       expect.objectContaining({
         propagation: "local-only",
         visibility: "hidden_from_live_query_list",
@@ -140,11 +137,11 @@ describe("TableDataGrid", () => {
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "alpha" } });
     fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
 
-    const filteredQuery = mockSubscribeAll.mock.calls.at(-1)?.[0] as { _build: () => string };
+    const filteredQuery = mockUseAll.mock.calls.at(-1)?.[0] as { _build: () => string };
     expect(JSON.parse(filteredQuery._build())).toMatchObject({
       conditions: [{ column: "title", op: "contains", value: "alpha" }],
       orderBy: [["id", "asc"]],
-      limit: 11,
+      limit: 10,
       offset: 0,
     });
   });

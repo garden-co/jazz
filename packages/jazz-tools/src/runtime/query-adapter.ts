@@ -220,6 +220,7 @@ function conditionToArraySubqueryFilter(
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const literalValue = toWasmValue(cond.value, valueTypeForCondition);
+  const isNullValue = cond.value === undefined ? true : cond.value;
 
   switch (cond.op) {
     case "eq":
@@ -235,7 +236,10 @@ function conditionToArraySubqueryFilter(
     case "lte":
       return { Le: { column, value: literalValue } };
     case "isNull":
-      return { IsNull: { column } };
+      if (typeof isNullValue !== "boolean") {
+        throw new Error('"isNull" operator requires a boolean value.');
+      }
+      return isNullValue ? { IsNull: { column } } : { IsNotNull: { column } };
     case "contains":
       return { Contains: { column, value: literalValue } };
     default:
@@ -337,6 +341,7 @@ function conditionToRelPredicate(
       : {
           Literal: toWasmValue(cond.value, valueTypeForCondition),
         };
+  const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
     throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
   }
@@ -390,7 +395,10 @@ function conditionToRelPredicate(
         },
       };
     case "isNull":
-      return { IsNull: { column: columnRef } };
+      if (typeof isNullValue !== "boolean") {
+        throw new Error('"isNull" operator requires a boolean value.');
+      }
+      return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
     case "contains":
       return { Contains: { left: columnRef, right: rightLiteral } };
     case "in":

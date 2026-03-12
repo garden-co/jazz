@@ -103,6 +103,31 @@ describe("TableFilterBuilder", () => {
     expect(onClausesChange).not.toHaveBeenCalled();
   });
 
+  it("parses isNull=false as a boolean false value", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "assignee_id" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "isNull" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "false" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "assignee_id",
+      operator: "isNull",
+      value: false,
+    });
+  });
+
   it("removes an existing clause", () => {
     const onClausesChange = vi.fn();
     const clauses: TableFilterClause[] = [

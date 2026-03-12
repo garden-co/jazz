@@ -47,6 +47,9 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
     }
     case "Integer":
     case "BigInt": {
+      if (trimmed.length === 0) {
+        throw new Error("Value is required.");
+      }
       const parsed = Number(trimmed);
       if (!Number.isInteger(parsed)) {
         throw new Error("Value must be an integer.");
@@ -54,6 +57,9 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
       return parsed;
     }
     case "Double": {
+      if (trimmed.length === 0) {
+        throw new Error("Value is required.");
+      }
       const parsed = Number(trimmed);
       if (!Number.isFinite(parsed)) {
         throw new Error("Value must be a finite number.");

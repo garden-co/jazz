@@ -68,7 +68,7 @@ export function TableDataGrid() {
   const sortColumn = activeSort.id;
   const sortDirection = activeSort.desc ? "desc" : "asc";
   const queryOffset = pageIndex * pageSize;
-  const queryLimit = pageSize;
+  const queryLimit = pageSize + 1;
   const queryBuilder = useMemo(() => {
     let builder = new GenericQueryBuilder(table, schema);
     for (const filter of filters) {
