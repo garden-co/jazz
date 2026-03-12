@@ -122,14 +122,11 @@ if (command === "mcp") {
   if (command === "build") {
     const schemaDirArg = parseSchemaDir(args.slice(1));
     const schemaDir = resolve(process.cwd(), schemaDirArg);
-    const currentSqlPath = join(schemaDir, "current.sql");
     const currentTsPath = join(schemaDir, "current.ts");
     const tsCliPath = join(here, "..", "dist", "cli.js");
 
-    if (!existsSync(currentSqlPath) && existsSync(currentTsPath) && existsSync(tsCliPath)) {
-      console.log(
-        `Detected ${schemaDirArg}/current.ts without current.sql. Running TypeScript schema build bootstrap.`,
-      );
+    if (existsSync(currentTsPath) && existsSync(tsCliPath)) {
+      console.log(`Detected ${schemaDirArg}/current.ts. Running TypeScript schema build.`);
       const tsBuildResult = spawnSync(
         process.execPath,
         [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],

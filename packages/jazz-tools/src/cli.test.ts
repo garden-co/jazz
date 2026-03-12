@@ -8,6 +8,9 @@ import { build } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
 const permissionsDslPath = fileURLToPath(new URL("./permissions/index.ts", import.meta.url));
+// Bin integration tests run in a subprocess that loads dist/cli.js, so current.ts must import
+// from the compiled dist to share the same dsl module instance (and thus _collectedSchema state).
+const distDslPath = fileURLToPath(new URL("../dist/dsl.js", import.meta.url));
 
 const tempRoots: string[] = [];
 
@@ -110,9 +113,55 @@ export default {
 `;
 }
 
+// Bin integration variants — import from dist/dsl.js to share the module instance with dist/cli.js.
+function binCurrentSchema(): string {
+  return `
+import { table, col } from ${JSON.stringify(distDslPath)};
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  owner_id: col.string(),
+});
+`;
+}
+
+function binSchemaWithMessagesAndCanvases(): string {
+  return `
+import { table, col } from ${JSON.stringify(distDslPath)};
+
+table("messages", {
+  content: col.string(),
+  isPublic: col.boolean(),
+});
+
+table("canvases", {
+  name: col.string(),
+  isPublic: col.boolean(),
+});
+`;
+}
+
+function binMigrationDropIsPublicFromBothTables(): string {
+  return `
+import { migrate, col } from ${JSON.stringify(distDslPath)};
+
+migrate("messages", {
+  isPublic: col.drop().boolean({ backwardsDefault: false }),
+});
+
+migrate("canvases", {
+  isPublic: col.drop().boolean({ backwardsDefault: false }),
+});
+`;
+}
+
 function currentSchemaWithComments(): string {
   return `
-import { table, col } from ${JSON.stringify(dslPath)};
+import { table, col } from ${JSON.stringify(distDslPath)};
 
 table("projects", {
   name: col.string(),
@@ -298,7 +347,7 @@ describe("bin integration", () => {
 
   it("generates current.sql on first build (no current.sql)", async () => {
     const { schemaDir } = await createWorkspace();
-    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
 
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
       stdio: "inherit",
@@ -309,7 +358,7 @@ describe("bin integration", () => {
 
   it("generates app.ts on first build (no current.sql)", async () => {
     const { schemaDir } = await createWorkspace();
-    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
 
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
       stdio: "inherit",
@@ -322,7 +371,7 @@ describe("bin integration", () => {
     // Regression: bin skips the TS CLI step when current.sql is present,
     // so neither file is updated on subsequent builds.
     const { schemaDir } = await createWorkspace();
-    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
     await writeFile(join(schemaDir, "current.sql"), "-- stale");
 
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
@@ -338,7 +387,7 @@ describe("bin integration", () => {
 
   it("updates current.sql when current.ts changes after initial build", async () => {
     const { schemaDir } = await createWorkspace();
-    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
       stdio: "inherit",
     });
@@ -354,7 +403,7 @@ describe("bin integration", () => {
 
   it("updates app.ts when current.ts changes after initial build", async () => {
     const { schemaDir } = await createWorkspace();
-    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
       stdio: "inherit",
     });
@@ -370,14 +419,14 @@ describe("bin integration", () => {
 
   it("generates migration SQL from stub on rebuild when current.sql already exists", async () => {
     const { schemaDir } = await createWorkspace();
-    await writeFile(join(schemaDir, "current.ts"), schemaWithMessagesAndCanvases());
+    await writeFile(join(schemaDir, "current.ts"), binSchemaWithMessagesAndCanvases());
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
       stdio: "inherit",
     });
 
     await writeFile(
       join(schemaDir, "migration_v1_v2_aaaaaaaaaaaa_bbbbbbbbbbbb.ts"),
-      migrationDropIsPublicFromBothTables(),
+      binMigrationDropIsPublicFromBothTables(),
     );
     spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
       stdio: "inherit",
